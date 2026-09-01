@@ -192,14 +192,20 @@ class BinanceFuturesBroker:
         decimals = max(0, -int(exp) if exp < 0 else 0)
         return f"{snapped:.{decimals}f}"
 
-    def _format_price(self, symbol: str, price: float) -> str:
+    def _tick_size(self, symbol: str) -> float:
         filters = self._symbol_filters.get(symbol, {})
         tick_str = str(filters.get("PRICE_FILTER", {}).get("tickSize", "0.01"))
         try:
-            tick = Decimal(tick_str)
+            tick = float(Decimal(tick_str))
             if tick <= 0:
-                tick = Decimal("0.01")
+                tick = 0.01
         except Exception:
+            tick = 0.01
+        return tick
+
+    def _format_price(self, symbol: str, price: float) -> str:
+        tick = Decimal(str(self._tick_size(symbol)))
+        if tick <= 0:
             tick = Decimal("0.01")
         snapped = (Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_DOWN) * tick
         exp = tick.normalize().as_tuple().exponent
@@ -368,6 +374,22 @@ class BinanceFuturesBroker:
                     acct = fut_acct.result()
                     pos = fut_pos.result()
                 ledger = self._load_ledger()
+                # 一次性拉取全部未触发 Algo 单，按 symbol 归集当前真实止损/止盈价，
+                # 供 execution_feedback 回传给 LLM。之前这里硬编码 None，导致模型
+                # 每轮都「看不到」已有止损，于是每轮都用当前价重新算一个 SL/TP 塞进
+                # adjust intent，价格一跳就微调一次，最终表现为反复重设相同止损。
+                algo_by_symbol: dict[str, dict[str, float]] = {}
+                try:
+                    for algo in self._open_algos(None):
+                        sym = str(algo.get("symbol") or "")
+                        otype = str(algo.get("orderType") or "")
+                        if sym and otype in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
+                            try:
+                                algo_by_symbol.setdefault(sym, {})[otype] = float(algo.get("triggerPrice") or 0.0)
+                            except (TypeError, ValueError):
+                                pass
+                except Exception:
+                    algo_by_symbol = {}
                 return {
                     "cash": float(acct.get("availableBalance") or 0.0),
                     "initial_equity": float(acct.get("totalMarginBalance") or acct.get("totalWalletBalance") or 0.0),
@@ -385,8 +407,8 @@ class BinanceFuturesBroker:
                             "upnl": float(p.get("unRealizedProfit") or 0),
                             "leverage": int(float(p.get("leverage") or 1)),
                             "margin": float(p.get("isolatedMargin") or p.get("isolatedWallet") or 0.0),
-                            "stop_loss": None,
-                            "take_profit": None,
+                            "stop_loss": algo_by_symbol.get(p["symbol"], {}).get("STOP_MARKET"),
+                            "take_profit": algo_by_symbol.get(p["symbol"], {}).get("TAKE_PROFIT_MARKET"),
                             "source": str(ledger.get("positions", {}).get(p["symbol"], {}).get("source", "ai") or "ai"),
                             "strategy_id": ledger.get("positions", {}).get(p["symbol"], {}).get("strategy_id"),
                             "ticket_id": ledger.get("positions", {}).get(p["symbol"], {}).get("ticket_id"),
@@ -845,13 +867,23 @@ class BinanceFuturesBroker:
         if tp is None:
             tp = old_prices.get("TAKE_PROFIT_MARKET")
 
+        # 价格/数量比较用容差而非精确等值：交易所返回的 triggerPrice 与本地 round(8)
+        # 精度可能不同，qty 浮点尾数也会漂移。若用 1e-12 精确等值，价格每跳一个 tick
+        # 或数量尾数变化就误判「不一致」，触发撤旧挂新，表现为反复重设相同止损止盈。
+        tick = self._tick_size(symbol)
+        price_tol = max(tick * 0.5, 1e-8)
+        qty_eps = max(self._min_qty(symbol), Decimal("1e-8"))
+        qty_f = float(qty)
+
         def _matches(otype: str, target: float | None) -> int:
             n = 0
             for a in existing:
                 if a.get("orderType") != otype:
                     continue
                 try:
-                    if float(a.get("quantity") or 0) == float(qty) and abs(float(a.get("triggerPrice") or 0) - float(target)) < 1e-12:
+                    qty_ok = abs(float(a.get("quantity") or 0) - qty_f) <= float(qty_eps)
+                    price_ok = abs(float(a.get("triggerPrice") or 0) - float(target)) <= price_tol
+                    if qty_ok and price_ok:
                         n += 1
                 except (TypeError, ValueError):
                     continue

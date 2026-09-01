@@ -333,6 +333,8 @@ intents 仅在 decision != no_trade 时填写。每个 intent 字段：
 6. 不要轻易 no_trade：每轮都要主动查询并寻找机会，只有当数据缺失、风险额度不允许、或检查后确实没有任何可尝试机会时，才可以 no_trade。
 7. 强信心档：如果你对某个机会有强烈信心（confidence >= 0.75），可以使用更高杠杆和更高仓位（参考 risk_envelope 里的 strong_max_*），但必须同时设置止损 stop_loss；没有设置止损时只能按常规限制执行。
 8. 新开仓必须同时设置初始止损 stop_loss 和初始止盈 take_profit，且方向正确：LONG 需 stop_loss<入场价<take_profit，SHORT 需 take_profit<入场价<stop_loss。缺止盈或止损的单会被风控直接拒绝。
+8.1 止盈止损必须基于明确的技术分析理论给出，禁止拍脑袋填数字。可选依据（任选其一并在 reasoning 里写明）：ATR 波动止损（如 1.5~2 倍 ATR）、前高/前低结构位、关键支撑/阻力位、斐波那契回撤位、移动平均线、布林带上下轨、成交密集区/流动性区间。reasoning 必须写清「用什么理论 + 为什么这个价位」。
+8.2 已有持仓的止损止盈不要无意义微调：只有当价格突破了某个关键技术位、趋势结构发生实质变化、或持仓盈亏/时间因素需要收紧保护时，才允许用 adjust 调整 SL/TP。单纯因为「价格动了一点」就去重设一个几乎相同的止损，属于无效操作，禁止这样做。若你认为当前止损仍然有效，position_reviews 应给 hold，不要发 adjust intent。
 9. 你可以下限价单：order_type=LIMIT 时必须同时给出 limit_price 和 limit_expires_at（ISO8601 UTC），例如 2025-08-31T12:00:00Z；否则会被拒绝。
 10. 所有你产出的订单 order_source 一律填 "ai"，margin_mode 默认填 "ISOLATED"。单笔最大风险不超过会话权益的 2%，超过时风控会自动缩减数量。
 11. 如果 portfolio 中某 symbol 已经存在 source=strategy 的仓位，本轮不要对该 symbol 开新仓，避免与策略通道冲突。
@@ -383,6 +385,8 @@ def build_user_prompt(market: MarketBrief, macro: MacroBrief, onchain: OnchainBr
                    "execution_feedback 是上一轮每个 intent 的最终命运和当前持仓；"
                    "你必须对仍然存活的上一轮 thesis 明确表态：继续持有 / 减仓 / 平仓 / 调整止损止盈。"
                    "如果 thesis 已被行情否定且你无法给出新的持有理由，就应主动平仓。"
+                   "当前持仓的 stop_loss / take_profit 就是交易所里真实挂着的止损止盈价："
+                   "除非有明确技术依据（突破关键位、ATR 变化、趋势结构反转等）需要移动，否则不要重复提交几乎相同的 adjust。"
                    "每轮都要主动寻找新机会。当前为模拟盘交易。"
                    f"查询预算每轮 {query_budget} 次：先用 query_symbol_cards 宽扫候选，"
                    "再对筛出的 2~3 只调 query_symbol_detail 深挖，不要逐只 detail。")
