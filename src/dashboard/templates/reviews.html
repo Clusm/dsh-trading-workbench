@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}复盘{% endblock %}
+{% block content %}
+<h1>每日复盘</h1>
+{% if cards %}
+<div class="date-tabs" id="date-tabs">
+  {% for c in cards %}
+  <button class="date-tab {{ 'active' if loop.first else '' }}" data-target="review-{{ loop.index0 }}" onclick="selectReview('review-{{ loop.index0 }}', this)">{{ c.row.review_date }}</button>
+  {% endfor %}
+</div>
+
+{% for c in cards %}
+<div id="review-{{ loop.index0 }}" class="review-panel" style="{{ '' if loop.first else 'display:none' }}">
+  <div class="card">
+    <div class="row" style="justify-content:space-between; align-items:center">
+      <h3 style="margin:0">{{ c.row.review_date }}</h3>
+      <span class="badge ok">{{ c.row.summary }}</span>
+    </div>
+    {% if c.exists %}
+      {% for s in c.sections %}
+      <details class="review-section" open>
+        <summary>{{ s.title }}</summary>
+        <div class="review-body">{{ s.html|safe }}</div>
+      </details>
+      {% endfor %}
+    {% else %}
+      <div class="muted">报告文件不存在：{{ c.row.report_path }}</div>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="card"><div class="empty">暂无复盘报告，运行 scripts/run_review.py 生成</div></div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+function selectReview(id, btn){
+  document.querySelectorAll('.review-panel').forEach(el=>{ el.style.display='none'; });
+  document.querySelectorAll('.date-tab').forEach(el=>{ el.classList.remove('active'); });
+  document.getElementById(id).style.display='block';
+  btn.classList.add('active');
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+</script>
+{% endblock %}

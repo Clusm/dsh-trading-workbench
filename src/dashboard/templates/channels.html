@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}双通道{% endblock %}
+{% block content %}
+<div class="row" style="justify-content:space-between; margin-bottom:14px">
+  <div>
+    <h1 style="margin:0 0 4px">策略通道 / AI 自决策通道</h1>
+    <div class="muted">UTC 日切 · 每日按总权益 6:4 重算 · AI 当日 -30% 熔断</div>
+  </div>
+</div>
+
+{% set st = latest.channel_state.get('strategy', {}) %}
+{% set ai = latest.channel_state.get('ai', {}) %}
+{% set st_ds = st.get('daily_stats', {}) %}
+{% set ai_ds = ai.get('daily_stats', {}) %}
+{% set st_wr = (st_ds.get('win_rate', 0) or 0) * 100 %}
+{% set ai_wr = (ai_ds.get('win_rate', 0) or 0) * 100 %}
+{% set st_mu = st.get('margin_used', 0) or 0 %}
+{% set st_mc = st.get('margin_cap', 0) or 0 %}
+{% set ai_mu = ai.get('margin_used', 0) or 0 %}
+{% set ai_mc = ai.get('margin_cap', 0) or 0 %}
+{% set st_mp = (st_mu / st_mc * 100) if st_mc > 0 else 0 %}
+{% set ai_mp = (ai_mu / ai_mc * 100) if ai_mc > 0 else 0 %}
+
+<div class="grid cols-2">
+  <div class="card">
+    <h3>策略通道 <span class="badge {{ 'ok' if st.get('allow_new', True) else 'warn' }}">{{ '可开仓' if st.get('allow_new', True) else '暂停开仓' }}</span></h3>
+    <div class="donut-wrap" style="margin-bottom:12px">
+      <svg class="donut" viewBox="0 0 36 36" aria-label="胜率 {{ '%.0f'|format(st_wr) }}%">
+        <circle class="donut-bg" cx="18" cy="18" r="15.9155"></circle>
+        <circle class="donut-val" cx="18" cy="18" r="15.9155" stroke="{{ '#3fb950' if st_wr >= 50 else '#d29922' }}" stroke-dasharray="{{ '%.1f'|format(st_wr) }} {{ '%.1f'|format(100 - st_wr) }}"></circle>
+        <text x="18" y="20.5" text-anchor="middle" fill="var(--text)" font-size="8" font-weight="700" font-family="ui-monospace,Consolas,monospace">{{ '%.0f'|format(st_wr) }}%</text>
+      </svg>
+      <div style="font-size:12.5px">
+        <div class="muted">今日胜率 · {{ st_ds.get('closed_trades', 0) }} 笔平仓</div>
+        <div style="margin-top:4px">权益 <strong class="num" style="font-family:var(--num-font)">{{ "%.2f"|format(st.get('equity',0)) }} U</strong></div>
+        <div class="{{ 'pos' if st.get('day_pnl',0)>=0 else 'neg' }}" style="margin-top:2px">{{ "%+.2f"|format(st.get('day_pnl',0)) }} U / {{ "%+.2f%%"|format(st.get('day_return',0)*100) }}</div>
+      </div>
+    </div>
+    <table>
+      <tr><th style="width:110px">保证金</th><td>
+        <div class="row" style="justify-content:space-between; gap:6px">
+          <span class="num">{{ "%.2f"|format(st_mu) }} / {{ "%.2f"|format(st_mc) }} U</span>
+          <span class="muted" style="font-size:11.5px">{{ "%.0f%%"|format(st_mp) }}</span>
+        </div>
+        <div class="pbar {{ 'danger' if st_mp >= 85 else ('warn' if st_mp >= 60 else '') }}"><i style="width:{{ '%.1f'|format(st_mp) }}%"></i></div>
+      </td></tr>
+      <tr><th>已实现盈亏</th><td class="num {{ 'pos' if st_ds.get('realized_pnl',0)>=0 else 'neg' }}">{{ "%+.2f"|format(st_ds.get('realized_pnl',0)) }} U</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h3>AI 自决策通道
+      <span class="badge {{ 'err' if ai.get('halted') else ('ok' if ai.get('allow_new', True) else 'warn') }}">{{ '已熔断' if ai.get('halted') else ('可开仓' if ai.get('allow_new', True) else '暂停开仓') }}</span>
+    </h3>
+    <div class="donut-wrap" style="margin-bottom:12px">
+      <svg class="donut" viewBox="0 0 36 36" aria-label="胜率 {{ '%.0f'|format(ai_wr) }}%">
+        <circle class="donut-bg" cx="18" cy="18" r="15.9155"></circle>
+        <circle class="donut-val" cx="18" cy="18" r="15.9155" stroke="{{ '#3fb950' if ai_wr >= 50 else '#d29922' }}" stroke-dasharray="{{ '%.1f'|format(ai_wr) }} {{ '%.1f'|format(100 - ai_wr) }}"></circle>
+        <text x="18" y="20.5" text-anchor="middle" fill="var(--text)" font-size="8" font-weight="700" font-family="ui-monospace,Consolas,monospace">{{ '%.0f'|format(ai_wr) }}%</text>
+      </svg>
+      <div style="font-size:12.5px">
+        <div class="muted">今日胜率 · {{ ai_ds.get('wins', 0) }}W / {{ ai_ds.get('losses', 0) }}L</div>
+        <div style="margin-top:4px">权益 <strong style="font-family:var(--num-font)">{{ "%.2f"|format(ai.get('equity',0)) }} U</strong></div>
+        <div class="{{ 'pos' if ai.get('day_pnl',0)>=0 else 'neg' }}" style="margin-top:2px">{{ "%+.2f"|format(ai.get('day_pnl',0)) }} U / {{ "%+.2f%%"|format(ai.get('day_return',0)*100) }}</div>
+      </div>
+    </div>
+    <table>
+      <tr><th style="width:110px">保证金</th><td>
+        <div class="row" style="justify-content:space-between; gap:6px">
+          <span class="num">{{ "%.2f"|format(ai_mu) }} / {{ "%.2f"|format(ai_mc) }} U</span>
+          <span class="muted" style="font-size:11.5px">{{ "%.0f%%"|format(ai_mp) }}</span>
+        </div>
+        <div class="pbar {{ 'danger' if ai_mp >= 85 else ('warn' if ai_mp >= 60 else '') }}"><i style="width:{{ '%.1f'|format(ai_mp) }}%"></i></div>
+      </td></tr>
+      <tr><th>今日已实现</th><td class="num {{ 'pos' if ai_ds.get('realized_pnl',0)>=0 else 'neg' }}">{{ "%+.2f"|format(ai_ds.get('realized_pnl',0)) }} U <span class="muted" style="font-weight:400">· 手续费 {{ "%.2f"|format(ai_ds.get('fees',0)) }} U</span></td></tr>
+    </table>
+  </div>
+</div>
+
+<h2 style="margin-top:22px">最近策略信号</h2>
+<div class="card">
+{% if signals %}
+<div class="row" style="justify-content:flex-end; margin-bottom:8px"><button class="secondary btn-export" onclick="exportTableCSV(this,'signals.csv')">导出 CSV</button></div>
+<div class="table-wrap">
+<table><thead><tr><th data-sort="str">时间</th><th data-sort="str">策略</th><th data-sort="str">币种</th><th>周期</th><th>方向</th><th class="num" data-sort="num">信号价</th><th>状态</th></tr></thead>
+<tbody>
+{% for s in signals %}
+<tr><td class="muted" style="white-space:nowrap">{{ s.signal_time[:19].replace('T',' ') }}</td><td>{{ s.strategy_id }}</td><td><strong>{{ s.symbol }}</strong></td><td>{{ s.timeframe }}</td><td><span class="badge {{ 'long' if s.side=='LONG' else 'short' }}">{{ '做多' if s.side=='LONG' else '做空' }}</span></td><td class="num">{{ s.signal_price }}</td><td>{{ s.status }}</td></tr>
+{% endfor %}</tbody></table>
+</div>
+{% else %}<div class="empty">暂无信号</div>{% endif %}
+</div>
+
+<h2 style="margin-top:22px">最近 Signal Ticket</h2>
+<div class="card">
+{% if tickets %}
+<div class="row" style="justify-content:flex-end; margin-bottom:8px"><button class="secondary btn-export" onclick="exportTableCSV(this,'tickets.csv')">导出 CSV</button></div>
+<div class="table-wrap">
+<table><thead><tr><th>Ticket</th><th data-sort="str">策略</th><th data-sort="str">币种</th><th>方向</th><th class="num">入场区</th><th data-sort="str">过期时间</th><th>状态</th></tr></thead>
+<tbody>
+{% for t in tickets %}
+<tr><td>{{ t.ticket_id }}</td><td>{{ t.strategy_id }}</td><td><strong>{{ t.symbol }}</strong></td><td>{{ '做多' if t.side=='LONG' else '做空' }}</td><td class="num">{{ "%.4f"|format(t.entry_zone_low or 0) }} ~ {{ "%.4f"|format(t.entry_zone_high or 0) }}</td><td class="muted" style="white-space:nowrap">{{ (t.expires_at or '')[:19].replace('T',' ') }}</td><td>{{ t.status }}</td></tr>
+{% endfor %}</tbody></table>
+</div>
+{% else %}<div class="empty">暂无 ticket</div>{% endif %}
+</div>
+{% endblock %}

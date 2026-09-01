@@ -1,0 +1,453 @@
+"""阶段 0 最小多 Agent 图：三个情报源 -> 策略库 -> 主Agent -> 风控。"""
+from __future__ import annotations
+
+from typing import Any, TypedDict
+
+from pathlib import Path
+import uuid
+
+from langgraph.graph import END, START, StateGraph
+
+from agents import macro, market, onchain, orchestrator, risk, strategy_library, strategy_trader, summarizer
+from agents import beliefs
+from agents.models import (
+    ChannelDecision, MacroBrief, MarketBrief, OnchainBrief, RiskVerdict,
+    StrategyRefs, TradeDecision,
+)
+from signal_engine import run_signal_scan
+from audit.database import AuditDatabase
+from audit.jsonl_logger import JsonlLogger
+from core.action_space import ActionSpace
+from core.agent_recorder import AgentRecorder
+from data.market_query import get_live_prices
+from llm.base import LLMClient
+
+
+class AgentState(TypedDict, total=False):
+    run_id: str
+    decision_id: str
+    market: MarketBrief
+    macro: MacroBrief
+    onchain: OnchainBrief
+    strategy: StrategyRefs
+    tickets: list[dict[str, Any]]
+    strategy_decision: ChannelDecision
+    ai_decision: ChannelDecision
+    decision: TradeDecision
+    risk_verdict: RiskVerdict
+    execution: list[dict[str, Any]]
+    execution_prices: dict[str, float]
+    conflicts: list[dict[str, Any]]
+    error: str
+    signal_error: str
+    strategy_error: str
+    ai_error: str
+
+
+def _match_block_reason(verdict: RiskVerdict, intent: Any) -> str | None:
+    """从风控 reasons 里挑出属于该 symbol 的拦截原因，让被拒 intent 不再是黑盒。"""
+    symbol = str(getattr(intent, "symbol", ""))
+    fallback: str | None = None
+    for r in verdict.reasons or []:
+        text = str(r)
+        if symbol and symbol not in text:
+            continue
+        if text.startswith("已跳过"):
+            return text
+        if fallback is None:
+            fallback = text
+    if fallback:
+        return fallback
+    if verdict.verdict == "rejected" and verdict.reasons:
+        return " | ".join(str(r) for r in verdict.reasons[:3])
+    return None
+
+
+def _log_intents(db: AuditDatabase, run_id: str | None, decision_id: str | None,
+                 decision: TradeDecision | None, verdict: RiskVerdict) -> None:
+    """逐条 intent 落库。这是 Outcome Tracker / invalidation 的归因地基——
+    intent 不落库，订单就无法连回当初的 thesis，复盘只能看赚亏。"""
+    if decision is None:
+        return
+    passed: list[tuple[str, str, str]] = []
+    if verdict is not None and verdict.verdict in ("approved", "reduced"):
+        passed = [(str(i.symbol), str(getattr(i, "action", "") or ""), str(i.side))
+                  for i in verdict.adjusted_intents]
+    for idx, intent in enumerate(decision.intents):
+        key = (str(intent.symbol), str(getattr(intent, "action", "") or ""), str(intent.side))
+        if key in passed:
+            passed.remove(key)
+            status, blocked = "approved", None
+        else:
+            status = "rejected"
+            blocked = _match_block_reason(verdict, intent) if verdict is not None else None
+        try:
+            db.log_trade_intent(
+                intent_id=f"{decision_id}-{idx}" if decision_id else str(uuid.uuid4()),
+                decision_id=decision_id, run_id=run_id, intent=intent,
+                status=status, blocked_reason=blocked,
+            )
+        except Exception as e:
+            db.log_risk_event(event_type="intent_log_error", severity="warn",
+                              details=f"{type(e).__name__}: {e}", action_taken="skip intent log")
+
+
+def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlLogger,
+                recorder: AgentRecorder, risk_config: dict[str, Any],
+                knowledge_dir: Any, market_top_n: int = 40, market_analyze_top: int = 10,
+                tavily_api_key: str | None = None, etherscan_api_key: str | None = None,
+                cache_dir: Any = None, enable_live_data: bool = True,
+                intel_cache: Any = None, intel_cache_ttl: float = 3600,
+                broker: Any = None, allow_new_positions: bool = True,
+                agent_llms: dict[str, tuple[LLMClient, str]] | None = None,
+                portfolio_state: dict[str, Any] | None = None,
+                available_cash: float | None = None,
+                quota_manager: Any = None,
+                signal_scanner_config: dict[str, Any] | None = None,
+                execution_feedback: dict[str, Any] | None = None,
+                query_budget: int = 8) -> Any:
+    def market_node(state: AgentState) -> dict[str, Any]:
+        pair = (agent_llms or {}).get("market_agent")
+
+        def refresh_market() -> MarketBrief:
+            brief = market.run_market_agent(top_n=market_top_n, analyze_top=market_analyze_top)
+            if pair is not None:
+                summary = summarizer.summarize(
+                    "market_agent", pair[0], pair[1],
+                    "你是加密市场情报员。只输出一个JSON对象："
+                    "{\"summary\":\"不超过150字中文总结市场状态、关键异动和风险\","
+                    "\"belief\":{\"trend\":\"up|down|range\",\"strength\":0到1,"
+                    "\"confidence\":0到1,\"invalidation\":\"什么条件会证明判断错误\"}}",
+                    brief.model_dump(), brief.summary, db, logger, state["run_id"])
+                brief.summary, brief.belief = beliefs.parse_belief(
+                    summary, brief.summary, beliefs.market_default(brief.regime))
+            recorder.record(agent_name="market_agent", model=pair[1] if pair else model,
+                            role="crypto_market_intel",
+                            input_summary=f"top_n={market_top_n}, analyze_top={market_analyze_top}",
+                            output=brief, run_id=state["run_id"])
+            return brief
+
+        if not enable_live_data:
+            brief: MarketBrief = MarketBrief(regime="mock", top_movers=["BTCUSDT"], summary="phase0 mock市场简报")
+            recorder.record(agent_name="market_agent", model=pair[1] if pair else model,
+                            role="crypto_market_intel",
+                            input_summary=f"top_n={market_top_n}, analyze_top={market_analyze_top}",
+                            output=brief, run_id=state["run_id"])
+        elif intel_cache is not None:
+            brief = intel_cache.get_or_refresh("market", refresh_market, ttl_seconds=intel_cache_ttl)
+        else:
+            brief = refresh_market()
+        return {"market": brief}
+
+    def macro_node(state: AgentState) -> dict[str, Any]:
+        pair = (agent_llms or {}).get("macro_agent")
+
+        def refresh_macro() -> MacroBrief:
+            brief = macro.run_macro_agent(tavily_api_key=tavily_api_key)
+            if pair is not None:
+                summary = summarizer.summarize(
+                    "macro_agent", pair[0], pair[1],
+                    "你是宏观情报员。只输出一个JSON对象："
+                    "{\"summary\":\"不超过150字中文总结美股、VIX、美债与美联储事件对加密市场的影响\","
+                    "\"belief\":{\"bias\":\"risk_on|risk_off|neutral\",\"confidence\":0到1,"
+                    "\"invalidation\":\"什么条件会证明判断错误\"}}",
+                    brief.model_dump(), brief.summary, db, logger, state["run_id"])
+                brief.summary, brief.belief = beliefs.parse_belief(
+                    summary, brief.summary, beliefs.macro_default(brief.market_bias))
+            recorder.record(agent_name="macro_agent", model=pair[1] if pair else model,
+                            role="macro_intel", input_summary="yahoo+tavily",
+                            output=brief, run_id=state["run_id"])
+            return brief
+
+        if not enable_live_data:
+            brief: MacroBrief = MacroBrief(summary="phase0 mock宏观简报")
+            recorder.record(agent_name="macro_agent", model=pair[1] if pair else model,
+                            role="macro_intel", input_summary="mock",
+                            output=brief, run_id=state["run_id"])
+        elif intel_cache is not None:
+            brief = intel_cache.get_or_refresh("macro", refresh_macro, ttl_seconds=intel_cache_ttl)
+        else:
+            brief = refresh_macro()
+        return {"macro": brief}
+
+    def onchain_node(state: AgentState) -> dict[str, Any]:
+        pair = (agent_llms or {}).get("onchain_agent")
+
+        def refresh_onchain() -> OnchainBrief:
+            brief = onchain.run_onchain_agent(etherscan_api_key=etherscan_api_key, cache_dir=cache_dir)
+            if pair is not None:
+                summary = summarizer.summarize(
+                    "onchain_agent", pair[0], pair[1],
+                    "你是Web3链上情报员。只输出一个JSON对象："
+                    "{\"summary\":\"不超过150字中文总结稳定币、TVL与趋势币种变化\","
+                    "\"belief\":{\"flow_bias\":\"risk_on|risk_off|neutral\",\"confidence\":0到1,"
+                    "\"invalidation\":\"什么条件会证明判断错误\"}}",
+                    brief.model_dump(), brief.summary, db, logger, state["run_id"])
+                brief.summary, brief.belief = beliefs.parse_belief(
+                    summary, brief.summary, beliefs.onchain_default())
+            recorder.record(agent_name="onchain_agent", model=pair[1] if pair else model,
+                            role="web3_intel", input_summary="defillama+coingecko+etherscan",
+                            output=brief, run_id=state["run_id"])
+            return brief
+
+        if not enable_live_data:
+            brief: OnchainBrief = OnchainBrief(summary="phase0 mock链上简报")
+            recorder.record(agent_name="onchain_agent", model=pair[1] if pair else model,
+                            role="web3_intel", input_summary="mock",
+                            output=brief, run_id=state["run_id"])
+        elif intel_cache is not None:
+            brief = intel_cache.get_or_refresh("onchain", refresh_onchain, ttl_seconds=intel_cache_ttl)
+        else:
+            brief = refresh_onchain()
+        return {"onchain": brief}
+
+    def strategy_node(state: AgentState) -> dict[str, Any]:
+        # 真正触发检测在前：signal_scanner 已经完成，strategy_agent 只展示实际触发的 ticket
+        refs = strategy_library.run_strategy_agent(
+            knowledge_dir=knowledge_dir,
+            market=state["market"],
+            macro=state["macro"],
+            onchain=state["onchain"],
+            tickets=state.get("tickets", []),
+        )
+        recorder.record(agent_name="strategy_agent", model=None, role="strategy_library",
+                        input_summary=f"tickets={len(state.get('tickets', []))} regime={state['market'].regime}",
+                        output=refs, run_id=state["run_id"])
+        return {"strategy": refs}
+
+    def signal_scanner_node(state: AgentState) -> dict[str, Any]:
+        cfg = signal_scanner_config or {}
+        tickets: list[dict[str, Any]] = []
+        signal_error = ""
+        try:
+            tickets = run_signal_scan(
+                knowledge_dir=knowledge_dir,
+                strategy_lab_src=str(cfg.get("strategy_lab_src", "")),
+                state_file=Path(cfg.get("signal_state_file", "data/signal_scanner_state.json")),
+                db=db,
+                kline_limit=int(cfg.get("kline_limit", 500)),
+                ticket_valid_bars=int(cfg.get("ticket_valid_bars", 2)),
+                scan_symbols=cfg.get("scan_pool"),
+                universal_cards=bool(cfg.get("universal_cards", False)),
+                max_scan_symbols_per_cycle=int(cfg.get("max_scan_symbols_per_cycle", 8)),
+            )
+        except Exception as e:
+            signal_error = f"{type(e).__name__}: {e}"
+            db.log_risk_event(event_type="signal_scanner_error", severity="warn",
+                              details=signal_error, action_taken="本轮策略通道无信号")
+        recorder.record(agent_name="signal_scanner", model=None, role="deterministic_signal_engine",
+                        input_summary="scan final strategy cards",
+                        output={"tickets": tickets, "error": signal_error},
+                        run_id=state["run_id"])
+        return {"tickets": tickets, "signal_error": signal_error}
+
+    def strategy_trader_node(state: AgentState) -> dict[str, Any]:
+        cfg = signal_scanner_config or {}
+        try:
+            decision = strategy_trader.run_strategy_trader(
+                tickets=state.get("tickets", []),
+                portfolio=portfolio_state if portfolio_state is not None else (broker.state if broker is not None else None),
+                prices=dict(state.get("market").last_prices) if state.get("market") else {},
+                min_notional=float(cfg.get("strategy_min_notional_usdt", 20.0) or 0.0),
+                max_notional=float(cfg.get("strategy_max_notional_usdt", 120.0) or 0.0),
+                max_leverage=int(cfg.get("strategy_max_leverage", 20) or 1),
+                risk_per_trade=float(cfg.get("strategy_risk_per_trade", 0.02) or 0.02),
+                channel_status=risk_config.get("channel_status") or {},
+                db=db,
+            )
+            strategy_error = ""
+        except Exception as e:
+            decision = ChannelDecision(
+                channel="strategy", decision="no_trade",
+                reasoning=f"策略交易AI异常，本轮策略通道不交易: {type(e).__name__}: {e}",
+            )
+            strategy_error = f"{type(e).__name__}: {e}"
+        recorder.record(agent_name="strategy_trader", model=None, role="strategy_execution",
+                        input_summary=f"tickets={len(state.get('tickets', []))}",
+                        output=decision, error=strategy_error or None,
+                        run_id=state["run_id"])
+        return {"strategy_decision": decision, "strategy_error": strategy_error}
+
+    def ai_trader_node(state: AgentState) -> dict[str, Any]:
+        try:
+            ai_portfolio = portfolio_state if portfolio_state is not None else (
+                broker.state if broker is not None else None)
+            # 双层可交易集合：核心主流 + 异动山寨。异动币被检测到后进入本轮可交易池。
+            anomaly_symbols = orchestrator.extract_anomaly_symbols(state["market"]) if state.get("market") else []
+            tradeable = list(orchestrator.AI_CORE_SYMBOLS)
+            for s in anomaly_symbols:
+                if s not in tradeable:
+                    tradeable.append(s)
+            # 同一份 ActionSpace 同时喂给：动态 schema 生成 + submit_decision 的 Validator 回环。
+            # risk_node 里的运行时闸门用同一谓词再复核一次。
+            action_space = ActionSpace.from_context(
+                risk_config=risk_config,
+                allow_new_positions=allow_new_positions,
+                portfolio=ai_portfolio if isinstance(ai_portfolio, dict) else None,
+                channel="ai",
+                tradeable_symbols=tradeable,
+            )
+            if not action_space.allow_new:
+                db.log_risk_event(event_type="action_space_no_open", severity="info",
+                                  details=action_space.allow_new_reason or "不允许新开仓",
+                                  action_taken="submit_decision schema 已剪掉 open")
+            raw = orchestrator.run_orchestrator(
+                llm=llm,
+                model=model,
+                recorder=recorder,
+                db=db,
+                logger=logger,
+                run_id=state["run_id"],
+                market=state["market"],
+                macro=state["macro"],
+                onchain=state["onchain"],
+                strategy=state["strategy"],
+                risk_envelope=risk_config,
+                portfolio=ai_portfolio,
+                trading_quota=quota_manager.status() if quota_manager is not None else None,
+                supported_symbols=tradeable,
+                execution_feedback=execution_feedback,
+                action_space=action_space,
+                prices=dict(state["market"].last_prices) if state.get("market") else {},
+                query_budget=query_budget,
+            )
+            decision = ChannelDecision(
+                channel="ai", decision=raw.decision, intents=raw.intents,
+                reasoning=raw.reasoning, strategy_refs=raw.strategy_refs,
+            )
+            ai_error = ""
+        except Exception as e:
+            decision = ChannelDecision(
+                channel="ai", decision="no_trade",
+                reasoning=f"AI自决策Agent异常，本轮AI通道不交易: {type(e).__name__}: {e}",
+            )
+            ai_error = f"{type(e).__name__}: {e}"
+        recorder.record(agent_name="ai_trader", model=model, role="discretionary_trader",
+                        input_summary=f"strategy_refs={state.get('strategy')}",
+                        output=decision, error=ai_error or None,
+                        run_id=state["run_id"])
+        return {"ai_decision": decision, "ai_error": ai_error}
+
+    def merge_node(state: AgentState) -> dict[str, Any]:
+        strategy_decision = state.get("strategy_decision") or ChannelDecision(
+            channel="strategy", decision="no_trade", reasoning="策略通道无决策")
+        ai_decision = state.get("ai_decision") or ChannelDecision(
+            channel="ai", decision="no_trade", reasoning="AI通道无决策")
+        intents = list(strategy_decision.intents)
+        # 幂等 clientOrderId：decision_id + intent index，重启/重试不会重复下单
+        decision_id = state.get("decision_id") or ""
+        base_cid = "mta-" + str(decision_id).replace("-", "")[:24] if decision_id else ""
+        for idx, intent in enumerate(intents):
+            if base_cid and not getattr(intent, "client_order_id", None):
+                intents[idx] = intent.model_copy(update={"client_order_id": f"{base_cid}-{idx}"})
+        protected = {it.symbol for it in intents}
+        conflicts: list[dict[str, Any]] = []
+        for intent in ai_decision.intents:
+            if intent.symbol in protected:
+                conflict = {"symbol": intent.symbol, "source": "ai",
+                            "reason": "AI单与策略单冲突，已丢弃AI单"}
+                conflicts.append(conflict)
+                db.log_decision_conflict(
+                    run_id=state.get("run_id"), decision_id=state.get("decision_id"),
+                    symbol=conflict["symbol"], source=conflict["source"],
+                    reason=conflict["reason"])
+                continue
+            if base_cid and not getattr(intent, "client_order_id", None):
+                intent = intent.model_copy(update={"client_order_id": f"{base_cid}-{len(intents)}"})
+            intents.append(intent)
+
+        if not intents:
+            merged = TradeDecision(
+                decision="no_trade", channel="merged",
+                reasoning=f"[策略] {strategy_decision.reasoning} | [AI] {ai_decision.reasoning}",
+                strategy_refs=list(dict.fromkeys(strategy_decision.strategy_refs + ai_decision.strategy_refs)),
+            )
+        else:
+            actions = {getattr(i, "action", "open") for i in intents}
+            if "open" in actions:
+                decision_type = "open"
+            elif "close" in actions or "reduce" in actions:
+                decision_type = "close"
+            else:
+                decision_type = "adjust"
+            merged = TradeDecision(
+                decision=decision_type, channel="merged", intents=intents,
+                reasoning=f"[策略] {strategy_decision.reasoning} | [AI] {ai_decision.reasoning}",
+                strategy_refs=list(dict.fromkeys(strategy_decision.strategy_refs + ai_decision.strategy_refs)),
+            )
+        return {"decision": merged, "conflicts": conflicts}
+
+    def risk_node(state: AgentState) -> dict[str, Any]:
+        decision = state.get("decision")
+        if decision is None:
+            decision = TradeDecision(decision="no_trade", reasoning="双通道未产出决策")
+        prices = dict(state.get("market").last_prices) if state.get("market") else {}
+        # 如果某个交易对不在市场快照里，实时补一个最新价，避免误拒
+        if decision is not None and decision.intents:
+            missing = [it.symbol for it in decision.intents if it.symbol not in prices]
+            if missing:
+                try:
+                    prices.update(get_live_prices(missing))
+                except Exception:
+                    pass
+        cash = available_cash if available_cash is not None else (
+            float(broker.state.get("cash", 0.0)) if broker is not None else None)
+        verdict = risk.evaluate_risk(decision, risk_config, db, recorder,
+                                        state["run_id"], state.get("decision_id"),
+                                        allow_new_positions, prices=prices,
+                                        available_cash=cash,
+                                        portfolio=portfolio_state if isinstance(portfolio_state, dict) else None)
+        _log_intents(db, state.get("run_id"), state.get("decision_id"), decision, verdict)
+        return {"risk_verdict": verdict, "execution_prices": prices}
+
+    def execution_node(state: AgentState) -> dict[str, Any]:
+        decision = state.get("decision")
+        verdict = state.get("risk_verdict")
+        receipts: list[dict[str, Any]] = []
+        # 即使本轮 no_trade 也调用 broker：纸面 broker 需要借此处理待成交限价单。
+        exec_decision = decision or TradeDecision(decision="no_trade", channel="merged")
+        exec_verdict = verdict or RiskVerdict(verdict="approved", reasons=[], adjusted_intents=[])
+        if broker is None:
+            db.log_risk_event(event_type="paper_missing", severity="warn",
+                              details="未配置纸面执行器", action_taken="skip")
+        elif exec_verdict.verdict in ("approved", "reduced"):
+            exec_prices = dict(state.get("execution_prices") or {})
+            if not exec_prices and state.get("market"):
+                exec_prices = dict(state["market"].last_prices or {})
+            try:
+                receipts = broker.execute(
+                    exec_decision, exec_verdict, exec_prices, risk_config, db
+                )
+            except Exception as e:
+                db.log_risk_event(event_type="paper_error", severity="error",
+                                  details=f"{type(e).__name__}: {e}", action_taken="skip")
+        recorder.record(agent_name="execution_agent", model=None, role="exchange_execution",
+                        input_summary=exec_decision.model_dump_json()[:300] if decision else "no decision",
+                        output={"receipts": receipts}, run_id=state["run_id"])
+        return {"execution": receipts}
+
+    g = StateGraph(AgentState)
+    g.add_node("market", market_node)
+    g.add_node("macro", macro_node)
+    g.add_node("onchain", onchain_node)
+    g.add_node("strategy", strategy_node)
+    g.add_node("signal_scanner", signal_scanner_node)
+    g.add_node("strategy_trader", strategy_trader_node)
+    g.add_node("ai_trader", ai_trader_node)
+    g.add_node("merge", merge_node)
+    g.add_node("risk", risk_node)
+    g.add_node("execution", execution_node)
+    g.add_edge(START, "market")
+    g.add_edge("market", "macro")
+    g.add_edge("macro", "onchain")
+    g.add_edge("onchain", "signal_scanner")
+    # 先做真实触发检测，再做策略匹配与双通道决策
+    g.add_edge("signal_scanner", "strategy")
+    g.add_edge("signal_scanner", "strategy_trader")
+    g.add_edge("strategy", "ai_trader")
+    g.add_edge("strategy_trader", "merge")
+    g.add_edge("ai_trader", "merge")
+    g.add_edge("merge", "risk")
+    g.add_edge("risk", "execution")
+    g.add_edge("execution", END)
+    return g.compile()

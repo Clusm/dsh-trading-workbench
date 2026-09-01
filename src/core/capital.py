@@ -1,0 +1,207 @@
+"""会话资金管理：固定 200U 起始；会话权益亏到阈值则平仓并从 200U 重启。"""
+from __future__ import annotations
+
+import json
+import os
+import time
+from pathlib import Path
+from typing import Any
+
+from audit.database import AuditDatabase
+
+
+class CapitalManager:
+    def __init__(self, state_file: Path, broker: Any, db: AuditDatabase,
+                 initial_equity: float = 200.0, bankruptcy_threshold: float = 1.0,
+                 reset_on_bankruptcy: bool = True, max_margin_usage: float = 0.80):
+        self.state_file = Path(state_file)
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.broker = broker
+        self.db = db
+        self.initial_equity = float(initial_equity)
+        self.threshold = float(bankruptcy_threshold)
+        self.reset_on_bankruptcy = bool(reset_on_bankruptcy)
+        self.max_margin_usage = float(max_margin_usage)
+        self.baseline = self._load_or_init_baseline()
+        self.last_reset: dict[str, Any] | None = None
+        self._last_exchange_equity: float | None = None
+        self._equity_stale = False
+
+    def _load_or_init_baseline(self) -> float:
+        if self.state_file.exists():
+            try:
+                data = json.loads(self.state_file.read_text(encoding="utf-8"))
+                if data.get("initial_equity") == self.initial_equity:
+                    mode = getattr(self.broker, "mode", "paper")
+                    baseline = float(data.get("baseline", 0.0))
+                    if mode == "paper":
+                        return 0.0
+                    if baseline > 0:
+                        return baseline
+                    # 非 paper 模式的 baseline 必须 >0；否则重新计算
+            except Exception:
+                pass
+        mode = getattr(self.broker, "mode", "paper")
+        exchange_eq = self._exchange_equity() if mode != "paper" else 0.0
+        if mode == "paper":
+            baseline = 0.0
+        elif exchange_eq <= 0:
+            # 接口不可用时的保守 fallback：baseline=初始权益，避免 session_equity 被算成真实余额
+            baseline = self.initial_equity
+        else:
+            baseline = exchange_eq - self.initial_equity
+            if baseline <= 0:
+                baseline = max(exchange_eq, self.initial_equity) - self.initial_equity
+        self._save(baseline)
+        return baseline
+
+    def _exchange_equity(self) -> float:
+        for _ in range(3):
+            try:
+                v = float(self.broker.equity())
+                if v and v > 0:
+                    self._last_exchange_equity = v
+                    self._equity_stale = False
+                    return v
+            except Exception:
+                pass
+            try:
+                state = getattr(self.broker, "state", {})
+                if isinstance(state, dict) and "error" not in state:
+                    v = float(state.get("initial_equity") or 0.0)
+                    if v and v > 0:
+                        self._last_exchange_equity = v
+                        self._equity_stale = False
+                        return v
+            except Exception:
+                pass
+            time.sleep(1.0)
+        # 接口暂时不可用时，返回最近一次有效权益，绝不能当成 0/爆仓
+        if self._last_exchange_equity and self._last_exchange_equity > 0:
+            self._equity_stale = True
+            return self._last_exchange_equity
+        self._equity_stale = True
+        return 0.0
+
+    def _save(self, baseline: float) -> None:
+        tmp = self.state_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps({
+            "initial_equity": self.initial_equity,
+            "baseline": baseline,
+        }, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.state_file)
+
+    def session_equity(self) -> float:
+        return round(self._exchange_equity() - self.baseline, 2)
+
+    def _total_margin(self) -> float:
+        try:
+            state = self.broker.state
+            if isinstance(state, dict):
+                total = 0.0
+                for p in state.get("positions", []):
+                    m = float(p.get("margin") or 0.0)
+                    if m <= 0:
+                        notional = abs(float(p.get("entry_price") or 0.0) * float(p.get("qty") or 0.0))
+                        m = notional / max(1, int(p.get("leverage") or 1))
+                    total += m
+                return total
+        except Exception:
+            pass
+        return 0.0
+
+    def sync(self, prices: dict[str, float] | None = None) -> dict[str, Any]:
+        exchange_eq = self._exchange_equity()
+        if getattr(self, "_equity_stale", False):
+            session_eq = round(exchange_eq - self.baseline, 2) if exchange_eq > 0 else self.session_equity()
+            self.db.log_risk_event(event_type="equity_unavailable", severity="warn",
+                                   details=f"币安账户权益接口暂时不可用，本轮跳过破产检查和保证金全平检查。最近有效权益={exchange_eq:.2f}",
+                                   action_taken="skip capital checks; block new opens")
+            return {"session_equity": session_eq, "reset": False,
+                    "equity_available": False, "stale": True}
+        session_eq = round(exchange_eq - self.baseline, 2)
+        # 硬规则：保证金不得超过会话权益上限
+        if session_eq > 0:
+            total_margin = self._total_margin()
+            limit = session_eq * self.max_margin_usage
+            if total_margin > limit:
+                try:
+                    self.broker.close_all(prices or {}, self.db)
+                except Exception as e:
+                    self.db.log_risk_event(event_type="margin_cap_close_error", severity="error",
+                                           details=f"{type(e).__name__}: {e}", action_taken="manual check")
+                self.db.log_risk_event(event_type="margin_cap_breach", severity="critical",
+                                       details=f"总保证金 {total_margin:.2f} > {limit:.2f}，已全平恢复资金约束",
+                                       action_taken="close_all")
+                session_eq = self.session_equity()
+        result = {"session_equity": session_eq, "reset": False, "equity_available": True}
+        if session_eq <= self.threshold and self.reset_on_bankruptcy:
+            try:
+                self.broker.close_all(prices or {}, self.db)
+            except Exception as e:
+                self.db.log_risk_event(event_type="capital_reset_close_error", severity="error",
+                                       details=f"{type(e).__name__}: {e}", action_taken="continue")
+            if getattr(self.broker, "mode", "paper") == "paper" and hasattr(self.broker, "reset_capital"):
+                self.broker.reset_capital(self.initial_equity)
+            new_baseline = 0.0 if getattr(self.broker, "mode", "paper") == "paper" else (self._exchange_equity() - self.initial_equity)
+            self.last_reset = {
+                "old_baseline": self.baseline,
+                "new_baseline": new_baseline,
+                "session_equity_after_reset": self.initial_equity,
+            }
+            self.baseline = new_baseline
+            self._save(new_baseline)
+            self.db.log_risk_event(event_type="capital_reset", severity="critical",
+                                   details=f"会话权益 {session_eq:.2f} <= {self.threshold}，"
+                                           f"平仓并从 {self.initial_equity:.0f}U 重启",
+                                   action_taken="close_all + reset baseline")
+            result = {"session_equity": self.initial_equity, "reset": True}
+        return result
+
+    def manual_reset(self, prices: dict[str, float] | None = None) -> dict[str, Any]:
+        """手动重置：平掉全部仓位，资金回到 initial_equity。仅测试模式可用。
+
+        实盘模式下资金是真实的，不存在"重置"——dashboard 端也不显示该按钮。
+        """
+        mode = getattr(self.broker, "mode", "paper")
+        if mode == "live":
+            self.db.log_risk_event(event_type="manual_reset_rejected", severity="warn",
+                                   details="实盘模式不允许手动重置资金",
+                                   action_taken="rejected")
+            return {"ok": False, "error": "实盘模式不允许重置资金"}
+        try:
+            self.broker.close_all(prices or {}, self.db)
+        except Exception as e:
+            self.db.log_risk_event(event_type="manual_reset_close_error", severity="error",
+                                   details=f"{type(e).__name__}: {e}", action_taken="continue")
+        if hasattr(self.broker, "reset_capital"):
+            self.broker.reset_capital(self.initial_equity)
+        # paper：baseline=0，session_equity 直接等于账本现金；
+        # demo/testnet：baseline=交易所余额-初始权益，使 session_equity 回到 initial_equity。
+        new_baseline = 0.0 if mode == "paper" else (self._exchange_equity() - self.initial_equity)
+        self.last_reset = {
+            "old_baseline": self.baseline,
+            "new_baseline": new_baseline,
+            "session_equity_after_reset": self.initial_equity,
+            "manual": True,
+        }
+        self.baseline = new_baseline
+        self._save(new_baseline)
+        self.db.log_risk_event(event_type="manual_capital_reset", severity="warn",
+                               details=f"手动重置：平掉全部仓位，资金回到 {self.initial_equity:.0f}U",
+                               action_taken="close_all + reset")
+        return {"ok": True, "session_equity": self.initial_equity}
+
+    def portfolio(self) -> dict[str, Any]:
+        state = {}
+        try:
+            state = dict(self.broker.state)
+        except Exception:
+            pass
+        return {
+            "cash": max(0.0, self.session_equity()),
+            "session_initial_equity": self.initial_equity,
+            "session_equity": self.session_equity(),
+            "positions": state.get("positions", []),
+            "exchange_mode": getattr(self.broker, "mode", "unknown"),
+        }

@@ -1,0 +1,550 @@
+{
+  "version": 2,
+  "note": "最终策略库（指标化，执行 agent 只读此文件）",
+  "cards": [
+    {
+      "id": "F_OLD_MACD_RSI_8H",
+      "name": "旧策略库 MACD+RSI（ETH 8h）",
+      "direction": "SHORT",
+      "timeframes": [
+        "8h"
+      ],
+      "symbols": [
+        "ETHUSDT"
+      ],
+      "regimes": [
+        "trend_down",
+        "volatile"
+      ],
+      "tags": [
+        "macd",
+        "rsi",
+        "adx",
+        "short"
+      ],
+      "entry": "ADX>=25 且 MACD 死叉且 RSI<60 做空。",
+      "stop_loss": "SL 7%",
+      "take_profit": "TP 9%",
+      "risk_notes": "ADX>=25 + MACD死叉 + RSI<60 做空；原8h版本稳定。",
+      "source": "strategy_lab_final",
+      "indicators": [
+        "macd",
+        "rsi",
+        "adx"
+      ],
+      "signal_fn": "old_macd_rsi",
+      "params": {},
+      "exits": {
+        "sl_pct": 0.07,
+        "tp_pct": 0.09,
+        "time_stop_hours": 96
+      },
+      "indicatorized": true,
+      "performance": {
+        "15bp": [
+          4,
+          5,
+          1.09,
+          -0.6
+        ],
+        "30bp": [
+          4,
+          5,
+          0.97,
+          -0.75
+        ],
+        "100bp": [
+          2,
+          5,
+          -0.2,
+          -1.45
+        ]
+      }
+    },
+    {
+      "id": "F_OLD_MACD_RSI_1H",
+      "name": "旧策略库 MACD+RSI（ETH 1h 优化）",
+      "direction": "SHORT",
+      "timeframes": [
+        "1h"
+      ],
+      "symbols": [
+        "ETHUSDT"
+      ],
+      "regimes": [
+        "trend_down",
+        "volatile"
+      ],
+      "tags": [
+        "macd",
+        "rsi",
+        "adx",
+        "short"
+      ],
+      "entry": "ADX>=25 且 MACD 死叉且 RSI<60 做空。",
+      "stop_loss": "SL 7%",
+      "take_profit": "TP 10%",
+      "risk_notes": "参数优化后 15/30bp 均 5/5，1h 版收益最高之一。",
+      "source": "strategy_lab_final",
+      "indicators": [
+        "macd",
+        "rsi",
+        "adx"
+      ],
+      "signal_fn": "old_macd_rsi",
+      "params": {
+        "adx_min": 25,
+        "rsi_max": 60
+      },
+      "exits": {
+        "sl_pct": 0.07,
+        "tp_pct": 0.1,
+        "time_stop_hours": 96
+      },
+      "indicatorized": true,
+      "performance": {
+        "15bp": [
+          5,
+          5,
+          3.49,
+          2.75
+        ],
+        "30bp": [
+          5,
+          5,
+          2.77,
+          1.83
+        ],
+        "100bp": [
+          0,
+          5,
+          -3.1,
+          -5.56
+        ]
+      }
+    },
+    {
+      "id": "F_OLD_MACD_RSI_2H",
+      "name": "旧策略库 MACD+RSI（ETH 2h 优化）",
+      "direction": "SHORT",
+      "timeframes": [
+        "2h"
+      ],
+      "symbols": [
+        "ETHUSDT"
+      ],
+      "regimes": [
+        "trend_down",
+        "volatile"
+      ],
+      "tags": [
+        "macd",
+        "rsi",
+        "adx",
+        "short"
+      ],
+      "entry": "ADX>=25 且 MACD 死叉且 RSI<60 做空。",
+      "stop_loss": "SL 7%",
+      "take_profit": "TP 15%",
+      "risk_notes": "2h 版为收益最强，15/30bp 全正。",
+      "source": "strategy_lab_final",
+      "indicators": [
+        "macd",
+        "rsi",
+        "adx"
+      ],
+      "signal_fn": "old_macd_rsi",
+      "params": {
+        "adx_min": 25,
+        "rsi_max": 60
+      },
+      "exits": {
+        "sl_pct": 0.07,
+        "tp_pct": 0.15,
+        "time_stop_hours": 48
+      },
+      "indicatorized": true,
+      "performance": {
+        "15bp": [
+          5,
+          5,
+          4.16,
+          1.69
+        ],
+        "30bp": [
+          5,
+          5,
+          2.53,
+          0.63
+        ],
+        "100bp": [
+          2,
+          5,
+          -0.55,
+          -2.35
+        ]
+      }
+    },
+    {
+      "id": "F_OLD_PO3_ANY_SIG_8H",
+      "name": "旧策略库 PO3_ANY_SIG（BTC 8h）",
+      "direction": "LONG_SHORT",
+      "timeframes": [
+        "8h"
+      ],
+      "symbols": [
+        "BTCUSDT"
+      ],
+      "regimes": [
+        "trend_up",
+        "trend_down",
+        "choppy"
+      ],
+      "tags": [
+        "po3",
+        "liquidity_sweep"
+      ],
+      "entry": "PO3 扫池 + 任意确认信号。",
+      "stop_loss": "SL 3%",
+      "take_profit": "TP 8%",
+      "risk_notes": "PO3 扫池 + 任意确认；15bp 极强，对滑点敏感。",
+      "source": "strategy_lab_final",
+      "indicators": [
+        "po3_sweep",
+        "any_sig"
+      ],
+      "signal_fn": "old_po3_any",
+      "params": {},
+      "exits": {
+        "sl_pct": 0.03,
+        "tp_pct": 0.08,
+        "time_stop_hours": 96
+      },
+      "indicatorized": true,
+      "performance": {
+        "15bp": [
+          5,
+          5,
+          0.98,
+          0.03
+        ],
+        "30bp": [
+          3,
+          5,
+          0.47,
+          -0.33
+        ],
+        "100bp": [
+          0,
+          5,
+          -1.56,
+          -2.18
+        ]
+      }
+    },
+    {
+      "id": "F_S03_4H",
+      "name": "Mayne 结构+OTE（ETH 4h）",
+      "direction": "LONG_SHORT",
+      "timeframes": [
+        "4h"
+      ],
+      "symbols": [
+        "ETHUSDT"
+      ],
+      "regimes": [
+        "trend_up",
+        "trend_down",
+        "choppy"
+      ],
+      "tags": [
+        "structure",
+        "OTE",
+        "FVG",
+        "swing"
+      ],
+      "entry": "BOS 后回撤至 0.618/0.705 区域，出现 OB/FVG 或反向 sweep 后入场。",
+      "stop_loss": "SL 5%",
+      "take_profit": "TP 10%",
+      "risk_notes": "结构+OTE，成本耐受最好，100bp 仍 4/5。",
+      "source": "strategy_lab_final",
+      "indicators": [
+        "swing_high_low",
+        "fib_0618_0705",
+        "fvg",
+        "sweep"
+      ],
+      "signal_fn": "s03_structure_ote",
+      "params": {},
+      "exits": {
+        "sl_pct": 0.05,
+        "tp_pct": 0.1,
+        "time_stop_hours": 48
+      },
+      "indicatorized": true,
+      "performance": {
+        "15bp": [
+          4,
+          5,
+          0.7,
+          -0.42
+        ],
+        "30bp": [
+          4,
+          5,
+          0.68,
+          -0.45
+        ],
+        "100bp": [
+          4,
+          5,
+          0.45,
+          -0.6
+        ]
+      }
+    },
+    {
+      "id": "F_S09_4H",
+      "name": "Flight 逆势刀锋（ETH 4h）",
+      "direction": "LONG",
+      "timeframes": [
+        "4h"
+      ],
+      "symbols": [
+        "ETHUSDT"
+      ],
+      "regimes": [
+        "trend_up",
+        "volatile"
+      ],
+      "tags": [
+        "counter_trend",
+        "volume_climax",
+        "rebound"
+      ],
+      "entry": "接近关键低点出现天量大阴线后，下一根反转K线入场。",
+      "stop_loss": "SL 6%",
+      "take_profit": "TP 12%",
+      "risk_notes": "天量大阴后反弹；稳定但收益低。",
+      "source": "strategy_lab_final",
+      "indicators": [
+        "range_position",
+        "volume_spike",
+        "large_bearish_candle",
+        "prior_low"
+      ],
+      "signal_fn": "s09_climax_rebound_long_v2",
+      "params": {},
+      "exits": {
+        "sl_pct": 0.06,
+        "tp_pct": 0.12,
+        "time_stop_hours": 32
+      },
+      "indicatorized": true,
+      "performance": {
+        "15bp": [
+          4,
+          5,
+          0.25,
+          -0.9
+        ],
+        "30bp": [
+          4,
+          5,
+          0.17,
+          -0.97
+        ],
+        "100bp": [
+          2,
+          5,
+          -0.19,
+          -1.32
+        ]
+      }
+    },
+    {
+      "id": "F_S07_2H",
+      "name": "供需三指标策略（ETH 2h 优化）",
+      "direction": "LONG_SHORT",
+      "timeframes": [
+        "2h"
+      ],
+      "symbols": [
+        "ETHUSDT"
+      ],
+      "regimes": [
+        "trend_up",
+        "trend_down",
+        "choppy"
+      ],
+      "tags": [
+        "supply_demand",
+        "range_filter",
+        "BOS"
+      ],
+      "entry": "价格进入近期需求/供给区，RangeFilter 同向，突破K线确认收盘入场。",
+      "stop_loss": "SL 3%",
+      "take_profit": "TP 8%",
+      "risk_notes": "最抗成本，15/30/100bp 全部 4/5 以上正收益。",
+      "source": "strategy_lab_final",
+      "indicators": [
+        "range_filter",
+        "donchian_20",
+        "candle_direction"
+      ],
+      "signal_fn": "s07_supply_demand_range_v3",
+      "params": {
+        "zone_lookback": 20,
+        "volume_ratio_min": 2.0
+      },
+      "exits": {
+        "sl_pct": 0.03,
+        "tp_pct": 0.08,
+        "time_stop_hours": 12
+      },
+      "indicatorized": true,
+      "performance": {
+        "15bp": [
+          5,
+          5,
+          1.46,
+          0.94
+        ],
+        "30bp": [
+          5,
+          5,
+          1.25,
+          0.55
+        ],
+        "100bp": [
+          4,
+          5,
+          0.7,
+          -0.02
+        ]
+      }
+    },
+    {
+      "id": "F_S08_1H",
+      "name": "Flight 量价+RSI背离（ETH 1h 优化）",
+      "direction": "LONG_SHORT",
+      "timeframes": [
+        "1h"
+      ],
+      "symbols": [
+        "ETHUSDT"
+      ],
+      "regimes": [
+        "trend_up",
+        "trend_down",
+        "choppy"
+      ],
+      "tags": [
+        "RSI",
+        "volume_divergence"
+      ],
+      "entry": "价格新高/新低但 RSI 与成交量未确认；跌破/升破趋势线或 MA20 时反向入场。",
+      "stop_loss": "SL 3%",
+      "take_profit": "TP 10%",
+      "risk_notes": "15bp 极强，30bp 仍正但窗口数下降。",
+      "source": "strategy_lab_final",
+      "indicators": [
+        "rsi_14",
+        "swing_high_low",
+        "volume_ratio",
+        "ma_20"
+      ],
+      "signal_fn": "s08_volume_rsi_divergence_v3",
+      "params": {
+        "divergence_lookback": 20,
+        "break_max_age": 6
+      },
+      "exits": {
+        "sl_pct": 0.03,
+        "tp_pct": 0.1,
+        "time_stop_hours": 48
+      },
+      "indicatorized": true,
+      "performance": {
+        "15bp": [
+          5,
+          5,
+          2.52,
+          0.19
+        ],
+        "30bp": [
+          3,
+          5,
+          1.86,
+          -0.51
+        ],
+        "100bp": [
+          0,
+          5,
+          -3.39,
+          -5.87
+        ]
+      }
+    },
+    {
+      "id": "F_OLD_KELTNER_2H",
+      "name": "旧策略库 Keltner 突破（ETH 2h 优化）",
+      "direction": "LONG_SHORT",
+      "timeframes": [
+        "2h"
+      ],
+      "symbols": [
+        "ETHUSDT"
+      ],
+      "regimes": [
+        "trend_up",
+        "trend_down",
+        "choppy"
+      ],
+      "tags": [
+        "keltner",
+        "mtf"
+      ],
+      "entry": "1H Keltner 突破 + 8H EMA50 趋势确认。",
+      "stop_loss": "SL 15%",
+      "take_profit": "TP 25%",
+      "risk_notes": "15bp 强，30bp 可用，100bp 不适合。",
+      "source": "strategy_lab_final",
+      "indicators": [
+        "keltner",
+        "ema_50"
+      ],
+      "signal_fn": "old_keltner_v3",
+      "params": {
+        "volume_ratio_min": 1.2,
+        "adx_min": 15
+      },
+      "exits": {
+        "sl_pct": 0.15,
+        "tp_pct": 0.25,
+        "time_stop_hours": 32
+      },
+      "indicatorized": true,
+      "performance": {
+        "15bp": [
+          5,
+          5,
+          2.61,
+          0.67
+        ],
+        "30bp": [
+          4,
+          5,
+          1.6,
+          -0.34
+        ],
+        "100bp": [
+          0,
+          5,
+          -3.88,
+          -5.97
+        ]
+      }
+    }
+  ]
+}

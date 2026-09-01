@@ -1,0 +1,38 @@
+{
+  "updated_at": 1788287714.0725765,
+  "count": 2,
+  "cases": [
+    {
+      "ts": "2026-08-31T14:42:28.903+00:00",
+      "symbol": "SOLUSDT",
+      "action": "close",
+      "side": "SHORT",
+      "qty": 1.09,
+      "entry_price": 102.65,
+      "exit_price": 103.33,
+      "hold_minutes": 81,
+      "leverage": null,
+      "net_pnl": -0.7863,
+      "commission": -0.0451,
+      "lessons": [
+        "亏损单持有过久，没有及时止损"
+      ]
+    },
+    {
+      "ts": "2026-08-31T14:42:23.562+00:00",
+      "symbol": "ZECUSDT",
+      "action": "close",
+      "side": "SHORT",
+      "qty": 0.12,
+      "entry_price": 824.57,
+      "exit_price": 832.39,
+      "hold_minutes": 75,
+      "leverage": null,
+      "net_pnl": -0.9784,
+      "commission": -0.04,
+      "lessons": [
+        "亏损单持有过久，没有及时止损"
+      ]
+    }
+  ]
+}

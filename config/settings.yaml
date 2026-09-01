@@ -1,0 +1,138 @@
+app_name: multi-agent-trader
+stage: phase3
+log_level: INFO
+
+paths:
+  data_dir: data
+  db_file: data/agent_trader.sqlite
+  artifacts_dir: data/artifacts
+  logs_dir: data/logs
+  reviews_dir: data/reviews
+  knowledge_dir: knowledge
+
+llm:
+  provider: opencode
+  api_key_env: OPENCODE_API_KEY
+  base_url_env: OPENCODE_BASE_URL
+  model_env: OPENCODE_MODEL
+  default_model: glm-5.3-flash
+  default_base_url: https://tokenrhythm.studio/v1
+  mock: false
+  temperature: 0.2
+  max_tokens: 2000
+  reasoning_effort: low
+  timeout_seconds: 600
+  # 瞬时错误（504/429/5xx/网络异常）重试次数与退避间隔
+  max_retries: 1
+  retry_backoff_seconds: 2.0
+
+execution:
+  default_mode: demo
+  mode_env: EXECUTION_MODE
+  base_url_map:
+    demo: https://demo-fapi.binance.com
+    testnet: https://testnet.binancefuture.com
+    live: https://fapi.binance.com
+  api_key_env_map:
+    demo: BINANCE_DEMO_API_KEY
+    testnet: BINANCE_TESTNET_API_KEY
+    live: BINANCE_LIVE_API_KEY
+  api_secret_env_map:
+    demo: BINANCE_DEMO_API_SECRET
+    testnet: BINANCE_TESTNET_API_SECRET
+    live: BINANCE_LIVE_API_SECRET
+
+capital:
+  # 测试模式（paper/demo/testnet）起始资金；实盘模式下仅作为会话权益的计量基准
+  initial_equity: 500
+  bankruptcy_threshold: 1.0
+  reset_on_bankruptcy: true
+  state_file: data/capital_state.json
+
+review:
+  # 每日自动复盘：UTC 指定时间后，慢循环检测到即自动生成昨日复盘报告
+  auto: true
+  time_utc: "00:05"
+  # 复盘报告是否调用 LLM 生成总结段
+  use_llm: true
+
+channels:
+  # 虚拟账本按总权益分配：策略 60% / AI 自决策 40%
+  strategy_weight: 0.6
+  ai_weight: 0.4
+  state_file: data/channel_state.json
+  # 每日重算与统计统一按 UTC 日切
+  rebalance_time_utc: "00:00"
+  daily_tz: UTC
+  # 通道保证金上限 = 通道权益 * channel_max_margin_usage
+  channel_max_margin_usage: 0.80
+  # AI 自决策通道当日亏损熔断线（按 UTC 日，相对当日初始权益）
+  ai_daily_loss_stop: 0.30
+  # AI 单杠杆由 AI 自己选择：常规档 20x 封顶；强信心档（confidence>=阈值且带止损）最高 25x
+  ai_max_leverage: 20
+  ai_strong_max_leverage: 25
+  # AI 决策单默认逐仓
+  ai_default_margin_mode: ISOLATED
+  # 所有新开仓必须同时设置初始止损与止盈
+  require_initial_sl_tp: true
+
+quotas:
+  enabled: true
+  hourly_short_target: 5
+  daily_hourly_target: 3
+
+signal_scanner:
+  # 策略研究环境路径：只做动态 import，不复制源码
+  strategy_lab_src: C:/Users/Tao/Desktop/ai-trader/strategy_lab/src
+  kline_limit: 300
+  # 信号触发后 ticket 的有效期（按 K 线根数）
+  ticket_valid_bars: 2
+  # 策略单不再固定名义金额/杠杆：在区间内按策略账本风险预算自适应
+  strategy_min_notional_usdt: 20
+  strategy_max_notional_usdt: 120
+  strategy_max_leverage: 20
+  strategy_risk_per_trade: 0.02
+  # 去重状态文件（记录已发射的 signal id，防止同一根 K 线重复触发）
+  signal_state_file: data/signal_scanner_state.json
+  # 是否把 final 策略卡应用到动态扫描池（核心+异动）
+  universal_cards: true
+  # 单轮最多扫描的 symbol 数，防止全量池+全策略卡一起扫导致循环卡死
+  max_scan_symbols_per_cycle: 2
+
+decision_cycle:
+  interval_minutes: 10
+  # 快循环：无 LLM，只处理挂单/保护单/台账对账（秒~十秒级）
+  fast_interval_seconds: 30
+  # AI 通道每轮行情查询预算（次）。orchestrator 占全系统 prompt token 的 95%，
+  # 查询结果在 messages 里逐轮累积只增不减，这是最主要的成本闸门。
+  query_budget: 8
+
+intel_cache:
+  ttl_seconds: 3600
+
+symbol_universe:
+  # 市场快照只做 regime 判断，不需要深扫 40 个币；AI 按需自己查询
+  top_n: 20
+  analyze_top: 10
+  quote_asset: USDT
+
+market_universe:
+  # 动态扫描池：默认每 5 分钟快速池，每 60 分钟全量池
+  core_symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+    - BNBUSDT
+    - XRPUSDT
+    - DOGEUSDT
+    - ADAUSDT
+    - LINKUSDT
+    - AVAXUSDT
+    - LTCUSDT
+  quick_core_top: 3
+  quick_anomaly_top: 2
+  full_top_n: 20
+  full_anomaly_n: 5
+  short_move_pct: 3.0
+  full_scan_interval_minutes: 60
+  state_file: data/market_universe_state.json

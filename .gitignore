@@ -1,0 +1,24 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/*.sqlite
+data/logs/
+data/artifacts/
+data/reviews/
+data/cache/
+
+# 数据库运行时产物（WAL/SHM/自动备份）
+data/*.sqlite-shm
+data/*.sqlite-wal
+data/*.sqlite.bak*
+
+# 运行时状态快照（高频变动，非源码）
+data/*_state.json
+data/paper_portfolio.json
+data/futures_source_ledger.json
+
+# 调试与日志产物
+data/_latest_prompt.txt
+data/diag_*.log
+data/web_console*.log
