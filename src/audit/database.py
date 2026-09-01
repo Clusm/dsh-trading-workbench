@@ -326,6 +326,8 @@ class AuditDatabase:
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         self.conn.execute("PRAGMA journal_mode=WAL")
+        # 跨进程访问（诊断脚本/DB浏览器）撞写锁时等待而不是立刻抛 database is locked
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(SCHEMA)
         self._migrate()
         self.conn.commit()

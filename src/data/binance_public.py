@@ -16,9 +16,15 @@ from data.rate_limit import backoff_seconds, cooldown_remaining, note_418, throt
 BASE_URL = "https://fapi.binance.com"
 CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "cache"
 
+# ticker 全量接口失败时的兜底采集列表。
+# 必须与 config/settings.yaml 的 market_universe.core_symbols 保持一致，
+# 顺序按 24h 成交额从高到低 —— 上层会 [:analyze_top] 截断，顺序错了会先砍掉活跃品种。
+# 尤其不能漏掉 ZECUSDT：它是实际持仓品种，兜底时被砍掉就等于决策看不到自己的仓位。
 FALLBACK_SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
-    "ADAUSDT", "LINKUSDT", "AVAXUSDT", "LTCUSDT",
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "ZECUSDT", "XRPUSDT", "ARBUSDT",
+    "UNIUSDT", "DOGEUSDT", "BNBUSDT", "NEARUSDT", "SUIUSDT", "FILUSDT",
+    "ADAUSDT", "LINKUSDT", "OPUSDT", "TRXUSDT", "AAVEUSDT", "AVAXUSDT",
+    "LTCUSDT", "DOTUSDT",
 ]
 
 STABLE_BASES = {"USDC", "TUSD", "BUSD", "FDUSD", "USDP", "DAI", "EUR", "AEUR"}
@@ -59,8 +65,21 @@ def get_all_24h_tickers(client: httpx.Client | None = None) -> list[dict[str, An
             c.close()
 
 
-def select_top_symbols(tickers: list[dict[str, Any]], top_n: int = 40) -> list[str]:
-    rows = []
+def select_top_symbols(tickers: list[dict[str, Any]], top_n: int = 40,
+                       core_symbols: list[str] | None = None) -> list[str]:
+    """选出候选标的，默认按 24h 成交额从高到低。
+
+    core_symbols 非空时**只在核心池内**按成交额排序选取。核心池是「会真正交易的品种」
+    白名单，用它兜住选品是为了杜绝美股/商品代币化合约（SOXLUSDT 半导体ETF、
+    XAGUSDT 白银、XAUUSDT 黄金、SKHYNIXUSDT、SNDKUSDT、SPCXUSDT 等）混入采集集合——
+    这些标的在美股时段成交额会冲进全市场前十，但与加密交易无关、历史订单一次都没有。
+    让它们进入采集会同时造成两件事：约 60% 的 prompt 字符被浪费，
+    以及 regime 判定被美股涨跌带偏（拿美股趋势当币圈趋势）。
+
+    标的正确性优先于覆盖率：核心池外的机会交给 Agent 用 query_symbol_detail 按需查询，
+    拿到的数据还比这里 1 小时缓存的快照更新鲜。
+    """
+    vol: dict[str, float] = {}
     for t in tickers:
         symbol = str(t.get("symbol", ""))
         if not symbol.endswith("USDT"):
@@ -69,11 +88,16 @@ def select_top_symbols(tickers: list[dict[str, Any]], top_n: int = 40) -> list[s
         if base in STABLE_BASES:
             continue
         try:
-            quote_volume = float(t.get("quoteVolume") or 0.0)
+            vol[symbol] = float(t.get("quoteVolume") or 0.0)
         except (TypeError, ValueError):
             continue
-        rows.append((quote_volume, symbol))
-    rows.sort(reverse=True)
+
+    if core_symbols:
+        # 核心池里已下线/拉不到行情的标的会被自然跳过
+        rows = sorted(((vol[s], s) for s in core_symbols if s in vol), reverse=True)
+        return [s for _, s in rows[:top_n]]
+
+    rows = sorted(((v, s) for s, v in vol.items()), reverse=True)
     return [s for _, s in rows[:top_n]]
 
 
@@ -246,7 +270,15 @@ def analyze_symbol(client: httpx.Client, symbol: str,
     }
 
 
-def build_market_brief(top_n: int = 40, analyze_top: int = 10) -> MarketBrief:
+def build_market_brief(top_n: int = 40, analyze_top: int = 10,
+                       core_symbols: list[str] | None = None,
+                       extra_symbols: list[str] | None = None) -> MarketBrief:
+    """生成市场简报。
+
+    core_symbols   核心池白名单，非空时只从池内选标的（详见 select_top_symbols 注释）。
+    extra_symbols  强制纳入采集的标的（通常是当前持仓）。持仓币种即便成交额排不进
+                   核心池前 analyze_top，也必须有指标，否则决策时看不到自己的仓位。
+    """
     errors: list[str] = []
     cache = SnapshotCache(CACHE_DIR)
     with httpx.Client(timeout=20.0) as client:
@@ -258,8 +290,16 @@ def build_market_brief(top_n: int = 40, analyze_top: int = 10) -> MarketBrief:
             cached = cache.load("market_tickers")
             tickers = list(cached.get("tickers", [])) if cached else []
         if tickers:
-            symbols = select_top_symbols(tickers, top_n=top_n)
-            ticker_map = {t["symbol"]: t for t in tickers if t.get("symbol") in symbols}
+            symbols = select_top_symbols(tickers, top_n=top_n, core_symbols=core_symbols)
+            wanted = set(symbols) | set(extra_symbols or ())
+            ticker_map = {t["symbol"]: t for t in tickers if t.get("symbol") in wanted}
+            if extra_symbols:
+                # 置顶，保证后面 [:analyze_top] 截断时持仓标的不会被切掉。
+                # 必须真正「前移」而不是只补进来：持仓标的通常本来就在核心池内，
+                # 只是成交额排名靠后会被截断，因此需要把它挪到列表最前面。
+                extra = [s for s in extra_symbols if s in ticker_map]
+                have = set(extra)
+                symbols = extra + [s for s in symbols if s not in have]
         else:
             symbols = FALLBACK_SYMBOLS[:analyze_top]
             ticker_map = {}

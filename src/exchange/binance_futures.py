@@ -61,6 +61,13 @@ class BinanceFuturesBroker:
         self._cache_lock = threading.RLock()
         self._account_cache: tuple[float, dict[str, Any]] = (0.0, {})
         self._positions_cache: tuple[float, list[dict[str, Any]]] = (0.0, [])
+        # 来源台账锁：dashboard 线程（紧急平仓/资金重置）与交易循环（挂单/平仓收口）
+        # 并发 load-modify-save 之前会互相覆盖丢更新。RLock 允许锁内重入调用
+        # _record/_remove 等辅助方法。所有 ledger 读→改→写必须全程持锁。
+        self._ledger_lock = threading.RLock()
+        # 保护单兜底比例：adopt 的无主仓位按标记价 ±比例补挂初始 SL/TP
+        self._FALLBACK_SL_PCT = 0.02
+        self._FALLBACK_TP_PCT = 0.04
 
     # ---------- 基础设施 ----------
     def _sign(self, params: dict[str, Any]) -> str:
@@ -120,18 +127,22 @@ class BinanceFuturesBroker:
             self.last_error = f"exchangeInfo: {type(e).__name__} {e}"
 
     def _load_ledger(self) -> dict[str, Any]:
-        if self.ledger_file.exists():
-            try:
-                data = json.loads(self.ledger_file.read_text(encoding="utf-8"))
-                data.setdefault("positions", {})
-                data.setdefault("pending_limits", [])
-                return data
-            except Exception:
-                pass
-        return {"positions": {}, "pending_limits": []}
+        with self._ledger_lock:
+            if self.ledger_file.exists():
+                try:
+                    data = json.loads(self.ledger_file.read_text(encoding="utf-8"))
+                    data.setdefault("positions", {})
+                    data.setdefault("pending_limits", [])
+                    return data
+                except Exception:
+                    pass
+            return {"positions": {}, "pending_limits": []}
 
     def _save_ledger(self, ledger: dict[str, Any]) -> None:
-        tmp = self.ledger_file.with_suffix(".tmp")
+        # tmp 文件名带 pid+线程 id：即使跨进程（诊断脚本）并发写也不会
+        # 互相踩同一个 .tmp 导致写坏文件；os.replace 保证读到的一定是完整 JSON。
+        tmp = self.ledger_file.with_name(
+            f"{self.ledger_file.stem}.tmp-{os.getpid()}-{threading.get_ident()}")
         tmp.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.ledger_file)
 
@@ -147,33 +158,40 @@ class BinanceFuturesBroker:
 
     def _record_ledger_position(self, symbol: str, source: str,
                                 strategy_id: str | None, ticket_id: str | None,
-                                margin_mode: str = "ISOLATED") -> dict[str, Any]:
-        """把交易所真实仓位快照写入来源台账。"""
-        exchange_pos = next((x for x in self.positions(force=True) if x["symbol"] == symbol), None)
-        qty = abs(float(exchange_pos.get("positionAmt") or 0)) if exchange_pos else 0.0
-        entry = float(exchange_pos.get("entryPrice") or 0.0) if exchange_pos else 0.0
-        ledger = self._load_ledger()
-        if qty <= 0:
-            ledger.get("positions", {}).pop(symbol, None)
-        else:
-            old = ledger.get("positions", {}).get(symbol) or {}
-            ledger.setdefault("positions", {})[symbol] = {
-                "symbol": symbol,
-                "source": source,
-                "strategy_id": strategy_id or old.get("strategy_id"),
-                "ticket_id": ticket_id or old.get("ticket_id"),
-                "qty": qty,
-                "entry_price": entry,
-                "margin_mode": margin_mode,
-                "updated_at": utc_now(),
-            }
-        self._save_ledger(ledger)
-        return ledger.get("positions", {}).get(symbol) or {}
+                                margin_mode: str = "ISOLATED",
+                                qty: float | None = None,
+                                entry: float | None = None) -> dict[str, Any]:
+        """把交易所真实仓位快照写入来源台账（纯本地写，全程持台账锁）。
+
+        qty/entry 由调用方提供（多数调用点手上已有仓位快照）。之前这里内部
+        调 positions(force=True)：锁内嵌套网络请求既放大延迟也制造锁序风险，
+        现在彻底移出，网络请求由调用方在进锁前完成。
+        """
+        with self._ledger_lock:
+            ledger = self._load_ledger()
+            positions = ledger.setdefault("positions", {})
+            old = positions.get(symbol) or {}
+            if qty is not None and qty <= 0:
+                positions.pop(symbol, None)
+            else:
+                positions[symbol] = {
+                    "symbol": symbol,
+                    "source": source,
+                    "strategy_id": strategy_id or old.get("strategy_id"),
+                    "ticket_id": ticket_id or old.get("ticket_id"),
+                    "qty": float(qty if qty is not None else (old.get("qty") or 0.0)),
+                    "entry_price": float(entry if entry is not None else (old.get("entry_price") or 0.0)),
+                    "margin_mode": margin_mode,
+                    "updated_at": utc_now(),
+                }
+            self._save_ledger(ledger)
+            return dict(positions.get(symbol) or {})
 
     def _remove_ledger_position(self, symbol: str) -> None:
-        ledger = self._load_ledger()
-        ledger.get("positions", {}).pop(symbol, None)
-        self._save_ledger(ledger)
+        with self._ledger_lock:
+            ledger = self._load_ledger()
+            ledger.get("positions", {}).pop(symbol, None)
+            self._save_ledger(ledger)
 
     def _format_qty(self, symbol: str, qty: float) -> str:
         filters = self._symbol_filters.get(symbol, {})
@@ -504,12 +522,15 @@ class BinanceFuturesBroker:
 
     def _sync_pending_limits(self) -> list[dict[str, Any]]:
         receipts: list[dict[str, Any]] = []
-        ledger = self._load_ledger()
-        pending = list(ledger.get("pending_limits", []))
+        # 先在锁内取快照，随后网络对账不持锁（避免阻塞其他台账读写），
+        # 最后在锁内用「全新加载」的台账应用结果：并发新增的挂单不会被旧快照覆盖。
+        with self._ledger_lock:
+            pending = list(self._load_ledger().get("pending_limits", []))
         if not pending:
             return receipts
         now_ts = _parse_iso(utc_now())
-        keep: list[dict[str, Any]] = []
+        remove_cids: set[str] = set()
+        qty_updates: dict[str, float] = {}
         for order in pending:
             symbol = str(order.get("symbol") or "")
             cid = str(order.get("client_order_id") or "")
@@ -519,12 +540,8 @@ class BinanceFuturesBroker:
                     data = self._signed("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": exchange_id})
                 else:
                     data = self._signed("GET", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": cid})
-            except Exception as e:
-                msg = str(e)
-                if "-2013" in msg or "Order does not exist" in msg:
-                    keep.append(order)
-                else:
-                    keep.append(order)
+            except Exception:
+                # 查询失败（含 -2013）：本轮跳过，留在台账里下轮继续
                 continue
 
             status = str(data.get("status") or "")
@@ -534,18 +551,19 @@ class BinanceFuturesBroker:
 
             if executed_qty > 0:
                 # 部分或全部成交：先把真实仓位记入来源台账并补保护
+                ex_pos = next((x for x in self.positions() if x["symbol"] == symbol), None)
                 self._record_ledger_position(
                     symbol,
                     str(order.get("source", "ai") or "ai"),
                     order.get("strategy_id"),
                     order.get("ticket_id"),
                     str(order.get("margin_mode", "ISOLATED") or "ISOLATED"),
+                    qty=abs(float((ex_pos or {}).get("positionAmt") or 0.0)),
+                    entry=float((ex_pos or {}).get("entryPrice") or 0.0),
                 )
                 if order.get("ticket_id") and self.db:
                     self.db.update_signal_ticket(ticket_id=str(order["ticket_id"]), status="filled")
                 self._ensure_protection_from_order(order)
-                remaining = max(0.0, original_qty - executed_qty)
-                order["qty"] = remaining
                 receipts.append({"order_id": cid, "action": "limit_partial_or_filled",
                                  "symbol": symbol, "qty": executed_qty, "price": avg_price,
                                  "source": order.get("source", "ai")})
@@ -556,6 +574,7 @@ class BinanceFuturesBroker:
                     self.db.update_order(client_order_id=cid, status=status, price=avg_price or None)
                 if status == "FILLED" and order.get("ticket_id") and self.db:
                     self.db.update_signal_ticket(ticket_id=str(order["ticket_id"]), status="filled")
+                remove_cids.add(cid)
                 continue
 
             # 尚未结束：检查 AI 设置的过期时间，到期主动撤单
@@ -565,19 +584,29 @@ class BinanceFuturesBroker:
                     self._signed("DELETE", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": cid})
                 except Exception:
                     # 撤单失败必须留在台账里，下一轮继续处理；否则可能成交后无 SL/TP
-                    keep.append(order)
                     continue
                 if self.db:
                     self.db.update_order(client_order_id=cid, status="CANCELED")
                 receipts.append({"order_id": cid, "action": "cancel_expired_limit",
                                  "symbol": symbol, "source": order.get("source", "ai")})
+                remove_cids.add(cid)
                 continue
 
-            order["qty"] = max(0.0, original_qty - executed_qty)
-            if order["qty"] > 0:
-                keep.append(order)
-        ledger["pending_limits"] = keep
-        self._save_ledger(ledger)
+            qty_updates[cid] = max(0.0, original_qty - executed_qty)
+
+        with self._ledger_lock:
+            ledger = self._load_ledger()
+            kept = []
+            for o in ledger.get("pending_limits", []):
+                ocid = str(o.get("client_order_id") or "")
+                if ocid in remove_cids:
+                    continue
+                if ocid in qty_updates:
+                    o["qty"] = qty_updates[ocid]
+                if float(o.get("qty") or 0.0) > 0:
+                    kept.append(o)
+            ledger["pending_limits"] = kept
+            self._save_ledger(ledger)
         return receipts
 
     def _open(self, intent: Any) -> dict[str, Any] | None:
@@ -668,7 +697,30 @@ class BinanceFuturesBroker:
                     raise ValueError(f"{symbol} LIMIT 单缺少有效 limit_price")
                 order_params["price"] = self._format_price(symbol, limit_price)
                 order_params["timeInForce"] = "GTC"
-            data = self._signed("POST", "/fapi/v1/order", order_params)
+            try:
+                data = self._signed("POST", "/fapi/v1/order", order_params)
+            except Exception as e:
+                # 超时/连接中断 ≠ 下单失败：交易所可能已受理。按 clientOrderId
+                # 对账一次；查到则继续正常流程（记账+保护），查不到才向上抛。
+                reconciled = None
+                try:
+                    reconciled = self._signed("GET", "/fapi/v1/order",
+                                              {"symbol": symbol, "origClientOrderId": cid}, attempts=2)
+                except Exception:
+                    reconciled = None
+                if not isinstance(reconciled, dict) or not reconciled.get("orderId"):
+                    if self.db:
+                        self.db.log_risk_event(
+                            event_type="futures_order_submit_lost", severity="critical",
+                            details=f"{symbol}: 下单请求异常且按 clientOrderId 对账无果，放弃本分片: {type(e).__name__} {e}",
+                            action_taken="manual attention required")
+                    raise
+                data = reconciled
+                if self.db:
+                    self.db.log_risk_event(
+                        event_type="futures_order_submit_reconciled", severity="warn",
+                        details=f"{symbol}: 下单请求异常但按 clientOrderId 对账成功（orderId={data.get('orderId')}），继续记账与保护",
+                        action_taken="reconciled")
             if intent.order_type == "MARKET":
                 data = self._wait_fill(symbol, data.get("orderId")) or data
             chunk_confirmed = self._fill_confirmed(data)
@@ -710,31 +762,34 @@ class BinanceFuturesBroker:
                 getattr(intent, "strategy_id", None),
                 getattr(intent, "ticket_id", None),
                 str(getattr(intent, "margin_mode", "ISOLATED") or "ISOLATED"),
+                qty=float(total_qty),
+                entry=price if price > 0 else None,
             )
             if self.db and getattr(intent, "ticket_id", None):
                 self.db.update_signal_ticket(ticket_id=str(intent.ticket_id), status="filled")
         else:
             # LIMIT：挂到交易所后进入本地 pending 台账，由 _sync_pending_limits 监控成交/过期。
-            ledger = self._load_ledger()
-            ledger.setdefault("pending_limits", []).append({
-                "client_order_id": first_cid,
-                "exchange_order_id": str(first_exchange_id or ""),
-                "symbol": symbol,
-                "side": intent.side,
-                "qty": float(total_qty),
-                "limit_price": float(getattr(intent, "limit_price", 0.0) or 0.0),
-                "leverage": int(intent.leverage),
-                "stop_loss": intent.stop_loss,
-                "take_profit": intent.take_profit,
-                "source": order_source,
-                "strategy_id": getattr(intent, "strategy_id", None),
-                "ticket_id": getattr(intent, "ticket_id", None),
-                "margin_mode": str(getattr(intent, "margin_mode", "ISOLATED") or "ISOLATED"),
-                "trade_level": getattr(intent, "trade_level", "short"),
-                "expires_at": getattr(intent, "limit_expires_at", None),
-                "created_at": utc_now(),
-            })
-            self._save_ledger(ledger)
+            with self._ledger_lock:
+                ledger = self._load_ledger()
+                ledger.setdefault("pending_limits", []).append({
+                    "client_order_id": first_cid,
+                    "exchange_order_id": str(first_exchange_id or ""),
+                    "symbol": symbol,
+                    "side": intent.side,
+                    "qty": float(total_qty),
+                    "limit_price": float(getattr(intent, "limit_price", 0.0) or 0.0),
+                    "leverage": int(intent.leverage),
+                    "stop_loss": intent.stop_loss,
+                    "take_profit": intent.take_profit,
+                    "source": order_source,
+                    "strategy_id": getattr(intent, "strategy_id", None),
+                    "ticket_id": getattr(intent, "ticket_id", None),
+                    "margin_mode": str(getattr(intent, "margin_mode", "ISOLATED") or "ISOLATED"),
+                    "trade_level": getattr(intent, "trade_level", "short"),
+                    "expires_at": getattr(intent, "limit_expires_at", None),
+                    "created_at": utc_now(),
+                })
+                self._save_ledger(ledger)
         protection_ok = self._place_protection(symbol, intent)
         if not protection_ok and intent.order_type == "MARKET"                 and (getattr(intent, "stop_loss", None) or getattr(intent, "take_profit", None)):
             # 硬规则：初始止盈/止损必须挂上，否则立即平掉刚开的仓位。
@@ -867,6 +922,25 @@ class BinanceFuturesBroker:
         if tp is None:
             tp = old_prices.get("TAKE_PROFIT_MARKET")
 
+        # 兕底保护（P0-2）：adopt 的无主仓位（下单响应丢失/交易所手动开仓）没有任何
+        # SL/TP 记录时，绝不允许裸仓静默存活。按标记价 ±固定比例兕底挂初始保护，
+        # 并发 critical 告警。之后 LLM 仍可通过 adjust 单把 SL/TP 调到合理水平。
+        if sl is None or tp is None:
+            mark = float(pos.get("markPrice") or pos.get("entryPrice") or 0.0)
+            if mark > 0:
+                if sl is None:
+                    sl = round(mark * (1 - self._FALLBACK_SL_PCT), 8) if close_side == "SELL" \
+                        else round(mark * (1 + self._FALLBACK_SL_PCT), 8)
+                if tp is None:
+                    tp = round(mark * (1 + self._FALLBACK_TP_PCT), 8) if close_side == "SELL" \
+                        else round(mark * (1 - self._FALLBACK_TP_PCT), 8)
+                if self.db:
+                    self.db.log_risk_event(
+                        event_type="futures_protection_fallback", severity="critical",
+                        details=f"{symbol}: 仓位无 SL/TP 记录，已按标记价兕底挂保护 "
+                                f"(SL={sl}, TP={tp})，来源可能为外部开仓或下单响应丢失",
+                        action_taken="fallback_protection")
+
         # 价格/数量比较用容差而非精确等值：交易所返回的 triggerPrice 与本地 round(8)
         # 精度可能不同，qty 浮点尾数也会漂移。若用 1e-12 精确等值，价格每跳一个 tick
         # 或数量尾数变化就误判「不一致」，触发撤旧挂新，表现为反复重设相同止损止盈。
@@ -979,15 +1053,19 @@ class BinanceFuturesBroker:
             chunk_confirmed = self._fill_confirmed(data)
             close_unconfirmed = close_unconfirmed or not chunk_confirmed
             close_price = float(data.get("avgPrice") or data.get("price") or 0.0)
-            if pos_side == "LONG":
-                pnl = chunk * (close_price - entry)
-            else:
-                pnl = chunk * (entry - close_price)
             exact_pnl, commission = self._order_trade_fee(symbol, data.get("orderId"))
             if exact_pnl is not None:
                 pnl = exact_pnl
+            elif chunk_confirmed and close_price > 0:
+                # 用成交均价估算：仅当订单确认成交且价格有效时才可信
+                pnl = chunk * (close_price - entry) if pos_side == "LONG" else chunk * (entry - close_price)
+            else:
+                # 响应丢失/未确认：估算值会污染复盘与熔断（曾造成假 -18000U 写库，
+                # 误触发 AI -30% 熔断）。置 None 标记待对账，由下一轮收口或人工处理。
+                pnl = None
             fee = commission if commission is not None else 0.0
-            total_pnl += pnl
+            if pnl is not None:
+                total_pnl += pnl
             total_filled += chunk
             order_count += 1
             if first_cid is None:
@@ -996,7 +1074,8 @@ class BinanceFuturesBroker:
             raw.update({"mode": self.environment, "action": "close",
                         "trade_level": getattr(intent, "trade_level", "short"),
                         "margin": self._position_margin(symbol), "pnl": pnl,
-                        "commission": fee, "net_pnl": pnl + fee,
+                        "commission": fee,
+                        "net_pnl": (pnl + fee) if pnl is not None else None,
                         "fill_confirmed": chunk_confirmed,
                         "order_source": source,
                         "strategy_id": ledger_meta.get("strategy_id"),
@@ -1028,6 +1107,8 @@ class BinanceFuturesBroker:
                 ledger_meta.get("strategy_id"),
                 ledger_meta.get("ticket_id"),
                 str(ledger_meta.get("margin_mode", "ISOLATED") or "ISOLATED"),
+                qty=remaining_qty,
+                entry=float(remaining_pos.get("entryPrice") or 0.0),
             )
         self._resync_protection(symbol, intent=intent)
         return {"order_id": first_cid, "action": "close", "symbol": symbol,
@@ -1090,21 +1171,25 @@ class BinanceFuturesBroker:
                     chunk_confirmed = self._fill_confirmed(data)
                     close_all_unconfirmed = close_all_unconfirmed or not chunk_confirmed
                     close_price = float(data.get("avgPrice") or data.get("price") or 0.0)
-                    if float(pos.get("positionAmt") or 0) > 0:
-                        pnl = chunk * (close_price - entry)
-                    else:
-                        pnl = chunk * (entry - close_price)
                     exact_pnl, commission = self._order_trade_fee(symbol, data.get("orderId"))
                     if exact_pnl is not None:
                         pnl = exact_pnl
+                    elif chunk_confirmed and close_price > 0:
+                        pnl = chunk * (close_price - entry) if float(pos.get("positionAmt") or 0) > 0 \
+                            else chunk * (entry - close_price)
+                    else:
+                        # 紧急平仓响应丢失时同样不写估算 pnl（同 _close_or_reduce）
+                        pnl = None
                     fee = commission if commission is not None else 0.0
-                    total_pnl += pnl
+                    if pnl is not None:
+                        total_pnl += pnl
                     order_count += 1
                     if first_cid is None:
                         first_cid = cid
                     raw = dict(data or {})
                     raw.update({"mode": self.environment, "action": "close_all", "margin": 0.0,
-                                "pnl": pnl, "commission": fee, "net_pnl": pnl + fee,
+                                "pnl": pnl, "commission": fee,
+                                "net_pnl": (pnl + fee) if pnl is not None else None,
                                 "fill_confirmed": chunk_confirmed,
                                 "chunk_index": order_count, "chunk_total": len(chunks)})
                     self._log_order(symbol=symbol, side="CLOSE", order_type="MARKET", qty=float(qty),
@@ -1126,12 +1211,16 @@ class BinanceFuturesBroker:
                                            details=f"{symbol}: {type(e).__name__} {e}",
                                            action_taken="manual attention required")
         self._invalidate_cache()
-        # 只清掉确实平掉的 symbol；失败/未完成的仓位保留台账，下一轮继续追
-        for symbol in closed_symbols:
-            ledger.get("positions", {}).pop(symbol, None)
-        ledger["pending_limits"] = [o for o in ledger.get("pending_limits", [])
-                                    if str(o.get("symbol")) not in closed_symbols]
-        self._save_ledger(ledger)
+        # 只清掉确实平掉的 symbol；失败/未完成的仓位保留台账，下一轮继续追。
+        # 必须用全新加载的台账做删改（不能沿用方法开头那份旧快照），
+        # 否则平仓期间快循环新挂的 LIMIT 会被旧快照覆盖丢失。
+        with self._ledger_lock:
+            ledger = self._load_ledger()
+            for symbol in closed_symbols:
+                ledger.get("positions", {}).pop(symbol, None)
+            ledger["pending_limits"] = [o for o in ledger.get("pending_limits", [])
+                                        if str(o.get("symbol")) not in closed_symbols]
+            self._save_ledger(ledger)
         return receipts
 
     def close_source(self, source: str, prices: dict[str, float],
@@ -1186,21 +1275,24 @@ class BinanceFuturesBroker:
             for p in pos:
                 if p["symbol"] not in ledger.get("positions", {}):
                     self._record_ledger_position(
-                        p["symbol"], "ai", None, None, "ISOLATED")
+                        p["symbol"], "ai", None, None, "ISOLATED",
+                        qty=abs(float(p.get("positionAmt") or 0.0)),
+                        entry=float(p.get("entryPrice") or 0.0))
                     if self.db:
                         self.db.log_risk_event(
                             event_type="futures_ledger_adopt_legacy", severity="warn",
                             details=f"{p['symbol']} 交易所已有仓位但来源台账缺失，已归为 ai legacy",
                             action_taken="ledger_adopt_ai")
-            # 重新加载台账，避免上面的逐 symbol 保存被旧快照覆盖
-            ledger = self._load_ledger()
-            # 台账里有、交易所已经没有了：说明仓位已在系统视野之外被平掉
-            closed_symbols = []
-            for symbol in list(ledger.get("positions", {}).keys()):
-                if symbol not in exchange_symbols:
-                    ledger.get("positions", {}).pop(symbol, None)
-                    closed_symbols.append(symbol)
-            self._save_ledger(ledger)
+            # 重新加载台账，避免上面的逐 symbol 保存被旧快照覆盖；删改全程持锁
+            with self._ledger_lock:
+                ledger = self._load_ledger()
+                # 台账里有、交易所已经没有了：说明仓位已在系统视野之外被平掉
+                closed_symbols = []
+                for symbol in list(ledger.get("positions", {}).keys()):
+                    if symbol not in exchange_symbols:
+                        ledger.get("positions", {}).pop(symbol, None)
+                        closed_symbols.append(symbol)
+                self._save_ledger(ledger)
             if closed_symbols:
                 self._reconcile_external_closes(closed_symbols)
             if self.db:

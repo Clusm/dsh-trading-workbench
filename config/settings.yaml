@@ -21,7 +21,7 @@ llm:
   temperature: 0.2
   max_tokens: 2000
   reasoning_effort: low
-  timeout_seconds: 600
+  timeout_seconds: 180
   # 瞬时错误（504/429/5xx/网络异常）重试次数与退避间隔
   max_retries: 1
   retry_backoff_seconds: 2.0
@@ -82,8 +82,8 @@ quotas:
   daily_hourly_target: 3
 
 signal_scanner:
-  # 策略研究环境路径：只做动态 import，不复制源码
-  strategy_lab_src: C:/Users/Tao/Desktop/ai-trader/strategy_lab/src
+  # 策略研究环境路径：只做动态 import，不复制源码；为空或路径不存在时策略通道自动降级
+  strategy_lab_src: ""
   kline_limit: 300
   # 信号触发后 ticket 的有效期（按 K 线根数）
   ticket_valid_bars: 2
@@ -118,17 +118,39 @@ symbol_universe:
 
 market_universe:
   # 动态扫描池：默认每 5 分钟快速池，每 60 分钟全量池
+  #
+  # core_symbols 是「我们会真正交易的品种」白名单，同时用作市场情报的采集源。
+  # 必须逐个校验存在于币安 USDT 永续（/fapi/v1/exchangeInfo，status=TRADING）。
+  #
+  # 选品依据：按 24h 成交额从高到低取前 20（2026-09-02 快照）。
+  # 用白名单而非「全市场按成交额 top N」的原因：币安上的美股/商品代币化合约
+  # （SOXLUSDT 半导体ETF、XAGUSDT 白银、XAUUSDT 黄金、SKHYNIXUSDT、SNDKUSDT、SPCXUSDT 等）
+  # 在美股时段成交额会冲进前十，但它们与加密交易无关、历史订单一次都没有。
+  # 盲选会让约 60% 的采集预算和 prompt 字符浪费在永不交易的标的上，
+  # 还会把 regime 判定带偏（用美股涨跌判断币圈趋势）。
+  #
+  # ZECUSDT 此前漏配，但它 24h 成交额 12.44 亿排第 4、历史成交 23 单，本次补入。
   core_symbols:
     - BTCUSDT
     - ETHUSDT
     - SOLUSDT
-    - BNBUSDT
+    - ZECUSDT
     - XRPUSDT
+    - ARBUSDT
+    - UNIUSDT
     - DOGEUSDT
+    - BNBUSDT
+    - NEARUSDT
+    - SUIUSDT
+    - FILUSDT
     - ADAUSDT
     - LINKUSDT
+    - OPUSDT
+    - TRXUSDT
+    - AAVEUSDT
     - AVAXUSDT
     - LTCUSDT
+    - DOTUSDT
   quick_core_top: 3
   quick_anomaly_top: 2
   full_top_n: 20

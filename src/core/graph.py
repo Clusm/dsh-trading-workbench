@@ -95,10 +95,12 @@ def _log_intents(db: AuditDatabase, run_id: str | None, decision_id: str | None,
 def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlLogger,
                 recorder: AgentRecorder, risk_config: dict[str, Any],
                 knowledge_dir: Any, market_top_n: int = 40, market_analyze_top: int = 10,
+                market_core_symbols: list[str] | None = None,
                 tavily_api_key: str | None = None, etherscan_api_key: str | None = None,
                 cache_dir: Any = None, enable_live_data: bool = True,
                 intel_cache: Any = None, intel_cache_ttl: float = 3600,
                 broker: Any = None, allow_new_positions: bool = True,
+                control: Any = None,
                 agent_llms: dict[str, tuple[LLMClient, str]] | None = None,
                 portfolio_state: dict[str, Any] | None = None,
                 available_cash: float | None = None,
@@ -109,8 +111,23 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
     def market_node(state: AgentState) -> dict[str, Any]:
         pair = (agent_llms or {}).get("market_agent")
 
+        def held_symbols() -> list[str]:
+            """当前持仓标的，强制纳入采集，避免决策时看不到自己的仓位。
+
+            取不到就返回空列表，不能因为读持仓失败拖垮整个情报采集。
+            """
+            if broker is None:
+                return []
+            try:
+                return sorted({str(p.get("symbol")) for p in broker.positions()
+                               if p.get("symbol")})
+            except Exception:
+                return []
+
         def refresh_market() -> MarketBrief:
-            brief = market.run_market_agent(top_n=market_top_n, analyze_top=market_analyze_top)
+            brief = market.run_market_agent(top_n=market_top_n, analyze_top=market_analyze_top,
+                                            core_symbols=market_core_symbols,
+                                            extra_symbols=held_symbols())
             if pair is not None:
                 summary = summarizer.summarize(
                     "market_agent", pair[0], pair[1],
@@ -315,6 +332,16 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 channel="ai", decision=raw.decision, intents=raw.intents,
                 reasoning=raw.reasoning, strategy_refs=raw.strategy_refs,
             )
+            # AI 通道产出的 intent 必须归 ai 通道：LLM 自报 order_source="strategy"
+            # 可以绕过 AI 熔断（-30%）与 AI 杠杆上限。以通道归属为准强制改写，
+            # 不信任模型自报字段（risk 节点会再做一次一致性复核）。
+            rewritten = 0
+            for idx, it in enumerate(decision.intents):
+                if str(getattr(it, "order_source", "ai") or "ai") != "ai":
+                    decision.intents[idx] = it.model_copy(update={"order_source": "ai"})
+                    rewritten += 1
+            if rewritten:
+                decision.reasoning = (decision.reasoning or "") + f" [系统修正: {rewritten} 笔 intent 的 order_source 被强制改写为 ai]"
             ai_error = ""
         except Exception as e:
             decision = ChannelDecision(
@@ -411,6 +438,34 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
             db.log_risk_event(event_type="paper_missing", severity="warn",
                               details="未配置纸面执行器", action_taken="skip")
         elif exec_verdict.verdict in ("approved", "reduced"):
+            # 决策周期可能长达数分钟，期间用户可能已触发 emergency/pause。
+            # 执行前重读控制状态：非 normal 时丢弃所有 open intent（平仓/减仓仍放行），
+            # 避免「决策时允许、执行时已被禁止」的在途开仓。
+            cur_control = control.state if control is not None else "normal"
+            if cur_control != "normal" and exec_decision.decision != "no_trade":
+                def _drop_opens(intents: list[Any]) -> tuple[list[Any], int]:
+                    kept: list[Any] = []
+                    dropped = 0
+                    for it in intents:
+                        action = str(getattr(it, "action", "") or exec_decision.decision or "")
+                        if action == "open":
+                            dropped += 1
+                        else:
+                            kept.append(it)
+                    return kept, dropped
+                new_adj, dropped_adj = _drop_opens(list(exec_verdict.adjusted_intents))
+                new_intents, dropped_raw = _drop_opens(list(exec_decision.intents))
+                dropped = dropped_adj + dropped_raw
+                if dropped:
+                    exec_verdict = exec_verdict.model_copy(update={
+                        "adjusted_intents": new_adj,
+                        "reasons": list(exec_verdict.reasons) + [
+                            f"控制状态={cur_control}，执行前拦截 {dropped} 笔开仓 intent"],
+                    })
+                    exec_decision = exec_decision.model_copy(update={"intents": new_intents})
+                    db.log_risk_event(event_type="control_block_open", severity="warn",
+                                      details=f"控制状态为 {cur_control}，执行前丢弃 {dropped} 笔开仓 intent",
+                                      action_taken="skip open intents")
             exec_prices = dict(state.get("execution_prices") or {})
             if not exec_prices and state.get("market"):
                 exec_prices = dict(state["market"].last_prices or {})

@@ -442,7 +442,7 @@ async function switchMode(){
     '切换执行模式',
     `确认切换到「${MODE_CN[mode] || mode}」？保存后需要重启服务才会生效。` +
     (isLive ? '<br><br><strong style="color:var(--red)">实盘模式将使用真实资金下单，风险自负，请再次确认！</strong>' : ''),
-    isLive ? {danger:true, okText:'确认切换实盘', html:true} : {okText:'确认切换', html:true});
+    isLive ? {danger:true, okText:'确认切换实盘', html:true, requireText:'实盘'} : {okText:'确认切换', html:true});
   if (!ok) return;
   try{
     const d = await apiFetch('/api/mode', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode})});
@@ -471,10 +471,12 @@ async function resetCapital(){
   }
 }
 async function setControl(state){
-  const ok = await confirmModal('切换运行状态', `确认将运行状态切换为「${CONTROL_CN[state] || state}」？`);
+  const ok = await confirmModal('切换运行状滩', `确认将运行状态切换为「${CONTROL_CN[state] || state}」？`);
   if (!ok) return;
   try{
-    const d = await apiFetch('/api/control', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({state})});
+    // emergency 必须携带 confirm 二次确认参数，服务端会拒绝缺失请求
+    const body = state === 'emergency' ? {state, confirm: 'emergency'} : {state};
+    const d = await apiFetch('/api/control', {method:'POST', body:JSON.stringify(body)});
     if (d.ok){ toast('已切换为「' + (CONTROL_CN[state] || state) + '」', 'ok'); setTimeout(() => location.reload(), 700); }
     else toast('切换失败：' + JSON.stringify(d), 'err');
   }catch(e){ toast('请求失败：' + e, 'err'); }
@@ -535,7 +537,8 @@ loadCurve();
 refresh();
 loadPxOnly();
 smartInterval(refresh, 15000);
-smartInterval(loadPxOnly, 1000);
+/* 价格轮询 3s：行情 WebSocket 推送可用时缓存始终新鲜，降级时也不会高频打公开行情 */
+smartInterval(loadPxOnly, 3000);
 smartInterval(loadOrders, 15000);
 </script>
 {% endblock %}

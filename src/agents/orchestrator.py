@@ -77,10 +77,25 @@ def _slim_risk_envelope(risk_envelope: dict[str, Any] | None) -> dict[str, Any]:
     return {k: v for k, v in (risk_envelope or {}).items() if k in keep}
 
 
-def _slim_market(market: MarketBrief) -> dict[str, Any]:
+# 非持仓标的只保留这几个字段作为「候选索引行」，够用来判断值不值得深挖。
+# 完整 25 字段留给持仓标的和按需查询。
+_INDEX_FIELDS = (
+    "symbol", "last_price", "pct_24h",
+    "trend_15m", "trend_1h", "funding_rate", "oi_usd",
+)
+
+
+def _slim_market(market: MarketBrief, held_symbols: set[str] | None = None) -> dict[str, Any]:
     """市场简报瘦身：errors 不进提示词（只进日志），metrics 剔除 null 字段。
 
     数据过期时压缩成一句可读提示，而不是把 HTTP 418 限流错误原样塞给模型。
+
+    held_symbols 传入当前持仓标的集合时开启分层传递：
+      - 持仓标的保留完整指标 —— 决策自己的仓位必须有全部数据，缺一项就可能误判止损位；
+      - 其余标的压成一行索引（symbol/最新价/24h涨跌/趋势/资金费率/OI），
+        只用于筛选候选，需要细节时让 Agent 调 query_symbol_detail 现查。
+    这样既落实 config 里「AI 按需自己查询」的设计意图，也避免拿 1 小时前的
+    缓存快照挤占实时查询的上下文预算。held_symbols 为 None 时保持全量（兼容旧调用）。
     """
     dump = market.model_dump()
     errors = dump.get("errors") or []
@@ -91,15 +106,63 @@ def _slim_market(market: MarketBrief) -> dict[str, Any]:
                               else f"部分行情数据获取失败（{len(errors)} 项），以可用数据为准")
     dump.pop("errors", None)
     metrics = dump.get("metrics") or []
-    if isinstance(metrics, list):
-        dump["metrics"] = [{k: v for k, v in m.items() if v is not None}
-                           for m in metrics if isinstance(m, dict)]
+    if not isinstance(metrics, list):
+        return dump
+    clean = [{k: v for k, v in m.items() if v is not None}
+             for m in metrics if isinstance(m, dict)]
+    if held_symbols is None:
+        dump["metrics"] = clean
+        return dump
+    held = set(held_symbols)
+    dump["metrics"] = [
+        m if m.get("symbol") in held
+        else {k: m[k] for k in _INDEX_FIELDS if k in m}
+        for m in clean
+    ]
+    if any(m.get("symbol") not in held for m in clean):
+        dump["metrics_note"] = (
+            "非持仓标的只给了索引行（用于筛选候选）。"
+            "需要完整指标或K线时调 query_symbol_detail，拿到的是实时数据，比这里的快照更新鲜。")
     return dump
 
 
+def _slim_onchain(onchain: OnchainBrief) -> dict[str, Any]:
+    """链上简报瘦身：与 market/macro 保持一致，errors 不进提示词。
+
+    此前三份简报里只有 onchain 直接 model_dump()，HTTP 错误原文会原样进提示词，
+    既浪费 token 又可能让模型误读成市场信号。这里统一压成一句降级提示。
+    """
+    dump = onchain.model_dump()
+    errors = dump.get("errors") or []
+    if errors:
+        dump["data_note"] = f"链上数据获取失败（{len(errors)} 项），以可用数据为准"
+    dump.pop("errors", None)
+    return dump
+
+
+def _held_symbols(portfolio: dict[str, Any] | None,
+                  execution_feedback: dict[str, Any] | None = None) -> set[str]:
+    """从持仓与执行反馈里收集当前持有/挂单的标的，用于分层传递时保留完整指标。"""
+    out: set[str] = set()
+    for src in (portfolio, execution_feedback):
+        if not isinstance(src, dict):
+            continue
+        for p in (src.get("positions") or []):
+            if isinstance(p, dict) and p.get("symbol"):
+                out.add(str(p["symbol"]))
+    return out
+
+
 def _slim_macro(macro: MacroBrief) -> dict[str, Any]:
-    """宏观简报瘦身：risk_events_24h 过滤纯搜索标题，只保留可行动事件。"""
+    """宏观简报瘦身：risk_events_24h 过滤纯搜索标题，只保留可行动事件。
+
+    errors 同样不进提示词，与 market / onchain 保持一致。
+    """
     dump = macro.model_dump()
+    errors = dump.get("errors") or []
+    if errors:
+        dump["data_note"] = f"宏观数据获取失败（{len(errors)} 项），以可用数据为准"
+    dump.pop("errors", None)
     events = dump.get("risk_events_24h") or []
     if isinstance(events, list):
         # 保留含关键经济词/日期的条目，过滤纯网站标题
@@ -402,9 +465,9 @@ def build_user_prompt(market: MarketBrief, macro: MacroBrief, onchain: OnchainBr
             "allow_new_reason": action_space.allow_new_reason if action_space else None,
             "summary": action_space.summary() if action_space else None,
         },
-        "market_brief": _slim_market(market),
+        "market_brief": _slim_market(market, _held_symbols(portfolio, execution_feedback)),
         "macro_brief": _slim_macro(macro),
-        "onchain_brief": onchain.model_dump(),
+        "onchain_brief": _slim_onchain(onchain),
         "strategy_refs": strategy.model_dump(),
         "portfolio": portfolio or {"cash": 0, "positions": []},
         "trading_quota": trading_quota or {"short_done_today": 0, "hourly_done_today": 0, "enabled": False, "policy": "no_cap_active_search"},

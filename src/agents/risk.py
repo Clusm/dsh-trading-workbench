@@ -66,6 +66,35 @@ def evaluate_risk(decision: TradeDecision, risk_config: dict[str, Any],
                 continue
 
             if action == "adjust":
+                # adjust 不是“免检通道”：SL/TP 方向错（如 LONG 的止损高于现价）
+                # 会挂出立即触发的 STOP，先撤旧保护再挂错单，市价平掉仓位。
+                # 必须与 open 同样的方向谓词校验，以 mark/最新价为参照。
+                price = prices.get(intent.symbol)
+                if not price:
+                    failures.append(f"{intent.symbol} 缺少最新价格，无法校验 adjust")
+                    continue
+                has_sl = intent.stop_loss is not None and float(intent.stop_loss) > 0
+                has_tp = intent.take_profit is not None and float(intent.take_profit) > 0
+                if not has_sl and not has_tp:
+                    failures.append(f"{intent.symbol} adjust 单必须至少提供 SL/TP 之一")
+                    continue
+                sl_v = float(intent.stop_loss) if has_sl else None
+                tp_v = float(intent.take_profit) if has_tp else None
+                if intent.side == "LONG":
+                    # LONG: 止损在现价下方、止盈在上方；提供哪个校验哪个
+                    if sl_v is not None and sl_v >= float(price):
+                        failures.append(f"{intent.symbol} LONG adjust 止损 {sl_v} 必须低于现价 {price}")
+                        continue
+                    if tp_v is not None and tp_v <= float(price):
+                        failures.append(f"{intent.symbol} LONG adjust 止盈 {tp_v} 必须高于现价 {price}")
+                        continue
+                else:
+                    if sl_v is not None and sl_v <= float(price):
+                        failures.append(f"{intent.symbol} SHORT adjust 止损 {sl_v} 必须高于现价 {price}")
+                        continue
+                    if tp_v is not None and tp_v >= float(price):
+                        failures.append(f"{intent.symbol} SHORT adjust 止盈 {tp_v} 必须低于现价 {price}")
+                        continue
                 reasons.append(f"{intent.symbol} 通过(调整单)：stop_loss={intent.stop_loss}, take_profit={intent.take_profit}")
                 adjusted.append(intent)
                 continue
@@ -112,6 +141,12 @@ def evaluate_risk(decision: TradeDecision, risk_config: dict[str, Any],
                 continue
 
             order_source = str(getattr(intent, "order_source", "ai") or "ai")
+            # 通道一致性复核（防绕过）：ai_trader_node 已强制改写，这里再按
+            # 决策通道兜底复核一次。schema 允许模型自报 order_source，
+            # 若直接走 strategy_trader/merge 之外的路徟拼装 decision，仍可能报 strategy。
+            if str(getattr(decision, "channel", "merged") or "merged") == "ai" and order_source != "ai":
+                failures.append(f"{intent.symbol} AI 通道决策不允许自报 order_source={order_source}，已拒绝")
+                continue
             ch = channel_status.get(order_source)
             if isinstance(ch, dict) and not ch.get("allow_new", True):
                 halt_note = "；AI通道已当日熔断" if ch.get("halted") else ""

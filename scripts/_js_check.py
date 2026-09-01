@@ -141,8 +141,8 @@ realSetTimeout(() => {
 """
 
 
-def check(path: str, reversed_order: bool = False) -> int:
-    url = "http://127.0.0.1:8000" + path
+def check(path: str, reversed_order: bool = False, port: int = 8000) -> int:
+    url = f"http://127.0.0.1:{port}" + path
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     html = opener.open(url, timeout=25).read().decode("utf-8", "ignore")
     scripts = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
@@ -170,13 +170,19 @@ def check(path: str, reversed_order: bool = False) -> int:
 
 
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if a != "--reversed"]
-    bad = "--reversed" in sys.argv
+    raw = sys.argv[1:]
+    bad = "--reversed" in raw
+    _port = 8000
+    if "--port" in raw:
+        i = raw.index("--port")
+        _port = int(raw[i + 1])
+        raw = raw[:i] + raw[i + 2:]
+    args = [a for a in raw if a != "--reversed"]
     # 顺序与 base.html 导航一致；/trades 已改名 /orders，不再单独检查
     paths = args or ["/", "/decisions", "/orders", "/events", "/reviews", "/agents", "/channels"]
     code = 0
     for p in paths:
-        hit = check(p, reversed_order=bad)
+        hit = check(p, reversed_order=bad, port=_port)
         print()
         # 反向验证时期望报错：没报错说明这个检查工具本身失效了
         code |= (0 if bad else hit)

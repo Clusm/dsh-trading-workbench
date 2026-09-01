@@ -117,7 +117,32 @@ class TradingService:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._cycle_lock = threading.Lock()
+        # 保护单/挂单对账的独立轻量锁：与慢循环的 _cycle_lock 分开，
+        # 避免 LLM 长决策（最长 600s）期间 SL/TP 补挂与限价单到期撤单全部停摆。
+        self._protection_lock = threading.Lock()
         self._run_thread: threading.Thread | None = None
+        self._purge_old_logs()
+
+    def _purge_old_logs(self, keep_days: int = 7) -> None:
+        """启动时清理超过 keep_days 的按日 JSONL 日志目录（data/logs/YYYY-MM-DD/）。"""
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).strftime("%Y-%m-%d")
+            logs_root = Path(self.settings.logs_dir)
+            if not logs_root.exists():
+                return
+            for d in logs_root.iterdir():
+                if d.is_dir() and d.name[:10] < cutoff and len(d.name) >= 10 and d.name[:10].replace("-", "").isdigit():
+                    for f in d.iterdir():
+                        try:
+                            f.unlink()
+                        except Exception:
+                            pass
+                    try:
+                        d.rmdir()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def _signal_scanner_config(self) -> dict[str, Any]:
         cfg = dict(self.settings.raw_settings.get("signal_scanner", {}) or {})
@@ -172,9 +197,13 @@ class TradingService:
             pass
 
     def run_fast_once(self) -> dict[str, Any]:
-        """快循环：无 LLM。只处理挂单、保护单、来源台账对账。"""
-        if not self._cycle_lock.acquire(blocking=False):
-            return {"skipped": True, "reason": "slow_or_fast_cycle_running"}
+        """快循环：无 LLM。只处理挂单、保护单、来源台账对账。
+
+        保护单/挂单对账用独立轻量锁 _protection_lock，与慢循环的 _cycle_lock
+        分离：LLM 决策（最长 600s）期间，SL/TP 补挂与限价单到期撤单照常运行。
+        """
+        if not self._protection_lock.acquire(blocking=False):
+            return {"skipped": True, "reason": "protection_sync_running"}
         try:
             state = self.broker.state if isinstance(self.broker.state, dict) else {}
             symbols = [str(p.get("symbol")) for p in state.get("positions", [])]
@@ -200,7 +229,7 @@ class TradingService:
             self._refresh_latest_channels(state, prices)
             return {"ts": time.time(), "receipts": receipts, "prices": prices}
         finally:
-            self._cycle_lock.release()
+            self._protection_lock.release()
 
     def _build_feedback(self, state: dict[str, Any], decision: Any,
                         channel_status: dict[str, Any],
@@ -258,6 +287,9 @@ class TradingService:
             knowledge_dir=self.settings.knowledge_dir,
             market_top_n=int(self.settings.raw_settings.get("symbol_universe", {}).get("top_n", 40)),
             market_analyze_top=int(self.settings.raw_settings.get("symbol_universe", {}).get("analyze_top", 10)),
+            # 核心池白名单：市场情报只从这里选标的，杜绝美股/商品代币化合约混入
+            market_core_symbols=(list(self.settings.raw_settings.get("market_universe", {}).get("core_symbols") or [])
+                                 or None),
             tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip() or None,
             etherscan_api_key=os.getenv("ETHERSCAN_API_KEY", "").strip() or None,
             cache_dir=self.settings.project_root / "data/cache",
@@ -272,6 +304,7 @@ class TradingService:
             quota_manager=self.quota,
             signal_scanner_config=self._signal_scanner_config(),
             execution_feedback=previous_feedback,
+            control=self.control,
             query_budget=int((self.settings.raw_settings.get("decision_cycle", {})
                               or {}).get("query_budget", 8)),
         )
@@ -327,7 +360,14 @@ class TradingService:
                 market = self._latest.get("market")
                 if market is not None:
                     prices = dict(market.last_prices)
-            receipts = self.broker.close_all(prices, self.db)
+            # 循环重试直到无持仓或达到上限：平仓耗时数秒期间新平仓单可能
+            # 未全部成交，只平一轮快照会留下残余仓位继续暴露风险。
+            max_rounds = 5
+            for _ in range(max_rounds):
+                receipts = self.broker.close_all(prices, self.db)
+                state = self.broker.state if isinstance(self.broker.state, dict) else {}
+                if not [p for p in (state.get("positions") or []) if abs(float(p.get("qty") or 0)) > 0]:
+                    break
             self.db.log_risk_event(event_type="manual_emergency_close", severity="critical",
                                    details=f"人工触发紧急平仓，平仓单数={len(receipts)}",
                                    action_taken="close_all")

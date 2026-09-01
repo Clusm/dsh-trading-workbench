@@ -439,12 +439,21 @@
   }
 
   /* ===== 离线检测 fetch 封装 ===== */
+  /* 写操作 CSRF token：服务端启动时生成并注入页面；apiFetch 对非 GET 请求
+     自动携带，配合服务端 Content-Type 校验拦截本地 no-cors CSRF。 */
+  window.__CONSOLE_TOKEN__ = window.__CONSOLE_TOKEN__ || "{{ console_token | default('') }}";
   let _failCount = 0;
   function _offline(on){
     const b = document.getElementById('offline-banner');
     if (b) b.classList.toggle('show', on);
   }
   async function apiFetch(url, opts){
+    opts = opts || {};
+    const method = (opts.method || 'GET').toUpperCase();
+    if (method !== 'GET' && window.__CONSOLE_TOKEN__){
+      opts.headers = Object.assign({}, opts.headers || {}, {'X-Console-Token': window.__CONSOLE_TOKEN__});
+      if (!opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
+    }
     try{
       const r = await fetch(url, opts);
       if (!r.ok) throw new Error('HTTP ' + r.status);

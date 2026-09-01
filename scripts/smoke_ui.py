@@ -138,7 +138,11 @@ os.environ["EXECUTION_MODE"] = "paper"
 settings = load_settings(ROOT)
 real_svc = TradingService(settings)
 from dashboard.app import create_app  # noqa: E402
-client = TestClient(create_app(real_svc))
+app = create_app(real_svc)
+client = TestClient(app)
+# 写接口帶上服务端下发的 console token（CSRF 防护，P0-3）
+token = str(getattr(app.state, "console_token", ""))
+token_headers = {"X-Console-Token": token, "Content-Type": "application/json"}
 r_home = client.get("/")
 check("首页 200", r_home.status_code == 200)
 check("首页含模式切换器", "mode-select" in r_home.text)
@@ -156,7 +160,13 @@ r_filter = client.get("/events?severity=warn")
 check("级别过滤生效", r_filter.status_code == 200 and "手动重置资金" in r_filter.text)
 r_api = client.get("/api/mode")
 check("/api/mode 返回当前模式", r_api.json().get("current") == "paper", r_api.text[:120])
-r_reset = client.post("/api/capital/reset")
+r_noauth = client.post("/api/capital/reset", headers={"Content-Type": "application/json"})
+check("写接口无 token 被拒(403)", r_noauth.status_code == 403, f"got {r_noauth.status_code}")
+r_csrf = client.post("/api/capital/reset", headers={"X-Console-Token": token, "Content-Type": "text/plain"})
+check("text/plain CSRF 被拒(415)", r_csrf.status_code == 415, f"got {r_csrf.status_code}")
+r_ctrl = client.post("/api/control", json={"state": "emergency"}, headers=token_headers)
+check("emergency 无 confirm 被拒(400)", r_ctrl.status_code == 400, r_ctrl.text[:120])
+r_reset = client.post("/api/capital/reset", headers=token_headers)
 check("重置接口 paper 可用", r_reset.status_code == 200 and r_reset.json().get("ok"), r_reset.text[:150])
 real_svc.close()
 

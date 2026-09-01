@@ -5,9 +5,11 @@ import statistics
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 import httpx
+import yaml
 
 # 警告：不要在本模块再定义名为 `_get_json` 的函数（会遮蔽这里的导入，
 # 使 query_symbol_detail 100% 抛 TypeError）。共享连接版请叫 `_shared_get`。
@@ -33,6 +35,32 @@ def _cache_get(key: tuple) -> Any | None:
 def _cache_set(key: tuple, value: Any) -> None:
     with _TOOL_CACHE_LOCK:
         _TOOL_CACHE[key] = (time.time(), value)
+
+
+_SETTINGS_PATH = Path(__file__).resolve().parents[2] / "config" / "settings.yaml"
+_CORE_SYMBOLS: list[str] | None = None
+
+
+def _core_symbols() -> list[str]:
+    """读取核心池白名单（进程内缓存，避免每次查工具都读盘）。
+
+    核心池是「我们实际会交易的品种」白名单。`query_top_symbols` 的返回会被主 Agent
+    当作可交易标的的权威来源——orchestrator 提示词里明确写着「以 query_top_symbols /
+    实际下单结果为准」——所以绝不能把美股/商品代币化合约（SOXLUSDT 半导体ETF、
+    XAGUSDT 白银、XAUUSDT 黄金、SKHYNIXUSDT、SNDKUSDT、SPCXUSDT 等）混进返回列表。
+    它们在美股时段成交额会冲进全市场前十，但历史订单一次都没有，真下单就是事故。
+
+    读不到配置时返回空列表，此时调用方退回全市场扫描，行为与改动前一致（不更差）。
+    """
+    global _CORE_SYMBOLS
+    if _CORE_SYMBOLS is None:
+        try:
+            cfg = yaml.safe_load(_SETTINGS_PATH.read_text(encoding="utf-8")) or {}
+            _CORE_SYMBOLS = [str(s).strip().upper()
+                             for s in (cfg.get("market_universe", {}) or {}).get("core_symbols") or []]
+        except Exception:
+            _CORE_SYMBOLS = []
+    return _CORE_SYMBOLS
 
 
 def _fmt_symbol(symbol: str) -> str:
@@ -175,7 +203,8 @@ def query_top_symbols(top_n: int = 20) -> dict[str, Any]:
     if cached is not None:
         return cached
     tickers = get_all_24h_tickers()
-    symbols = select_top_symbols(tickers, top_n=top_n)
+    # 只在核心池内选：这份列表会被主 Agent 当作可交易标的的权威来源
+    symbols = select_top_symbols(tickers, top_n=top_n, core_symbols=_core_symbols() or None)
     rows = []
     for t in tickers:
         if t["symbol"] in symbols:
@@ -399,7 +428,9 @@ TOOL_SPECS = [
         "type": "function",
         "function": {
             "name": "query_top_symbols",
-            "description": "按24小时成交额查询当前最活跃的USDT永续合约列表。",
+            "description": "按24小时成交额查询当前最活跃的可交易 USDT 永续合约列表"
+                           "（限核心池白名单内，即我们实际会交易的品种；"
+                           "不含美股/商品代币化合约）。可用它确认标的能否交易。",
             "parameters": {
                 "type": "object",
                 "properties": {

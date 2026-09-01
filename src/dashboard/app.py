@@ -5,6 +5,7 @@ import asyncio
 import html
 import json
 import os
+import secrets
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from core.service import TradingService
@@ -298,6 +299,13 @@ def _event_type_cn(value: Any) -> str:
         "futures_protection_close_error": "保护单失败紧急平仓错误",
         "futures_limit_sync_error": "限价单台账同步错误",
         "futures_ledger_adopt_legacy": "旧仓位归入AI台账",
+        "futures_protection_fallback": "仓位兕底挂保护",
+        "futures_order_submit_lost": "下单请求丢失未对账",
+        "futures_order_submit_reconciled": "下单请求丢失已对账",
+        "futures_close_reconciled": "外部平仓已补记",
+        "futures_close_reconcile_error": "外部平仓补记失败",
+        "control_block_open": "控制状态拦截开仓",
+        "snapshot_rejected": "权益快照跳变已拦截",
         "futures_close_source_error": "分通道强平错误",
         "futures_unsupported_symbol": "不支持的交易对已拦截",
         "signal_fn_missing": "策略信号函数缺失",
@@ -904,6 +912,28 @@ def create_app(service: TradingService) -> FastAPI:
             task.cancel()
 
     app = FastAPI(title="Multi-Agent Trader Console", lifespan=lifespan)
+
+    # ---- 写操作防 CSRF（P0-3）----
+    # 控制台接口会真实平仓/重置资金/切模式，但本地 CSRF（恶意网页用
+    # fetch(mode:'no-cors', text/plain) 打 127.0.0.1）可以无凭据触发。
+    # 该模式下浏览器发不了自定义头，也无法携带 application/json Content-Type，
+    # 因此「随机 token 头 + 强制 JSON Content-Type」即可可靠拦截。
+    # token 启动时生成，注入到页面模板（同源脚本可读），并打印到控制台。
+    _write_token = secrets.token_urlsafe(24)
+
+    @app.middleware("http")
+    async def _csrf_guard(request: Request, call_next):
+        if request.method == "POST" and request.url.path.startswith("/api/"):
+            if (request.headers.get("x-console-token") or "") != _write_token:
+                return JSONResponse({"ok": False, "error": "missing or invalid console token"},
+                                    status_code=403)
+            if "application/json" not in (request.headers.get("content-type") or "").lower():
+                return JSONResponse({"ok": False, "error": "content-type must be application/json"},
+                                    status_code=415)
+        return await call_next(request)
+
+    print(f"console write token: {_write_token}")
+    app.state.console_token = _write_token
     threading.Thread(target=_warmup, args=(service,), daemon=True).start()
 
     @app.get("/", response_class=HTMLResponse)
@@ -953,6 +983,7 @@ def create_app(service: TradingService) -> FastAPI:
             "events": events,
             "decisions": decisions,
             "now_ts": time.time(),
+            "console_token": _write_token,
             "broker_mode": broker_mode,
             "mode_options": mode_options,
             "quota_total": quota_total,
@@ -971,6 +1002,7 @@ def create_app(service: TradingService) -> FastAPI:
             "latest": latest,
             "decisions": decisions,
             "now_ts": time.time(),
+            "console_token": _write_token,
         })
 
     @app.get("/agents", response_class=HTMLResponse)
@@ -1003,6 +1035,7 @@ def create_app(service: TradingService) -> FastAPI:
         return templates.TemplateResponse(request, "agents.html", {
             "latest": latest, "runs": runs, "llm_calls": llm_calls,
             "token_stats": token_stats,
+            "console_token": _write_token,
         })
 
     @app.get("/channels", response_class=HTMLResponse)
@@ -1014,6 +1047,7 @@ def create_app(service: TradingService) -> FastAPI:
             "latest": latest,
             "signals": signals,
             "tickets": tickets,
+            "console_token": _write_token,
         })
 
     @app.get("/orders", response_class=HTMLResponse)
@@ -1038,6 +1072,7 @@ def create_app(service: TradingService) -> FastAPI:
         return templates.TemplateResponse(request, "orders.html", {
             "orders": orders, "positions": positions,
             "snapshots": snapshots, "counts": counts,
+            "console_token": _write_token,
         })
 
     @app.get("/trades", response_class=HTMLResponse)
@@ -1060,7 +1095,7 @@ def create_app(service: TradingService) -> FastAPI:
                 })
             else:
                 cards.append({"row": r, "exists": False, "sections": []})
-        return templates.TemplateResponse(request, "reviews.html", {"cards": cards})
+        return templates.TemplateResponse(request, "reviews.html", {"cards": cards, "console_token": _write_token})
 
     # ---- /api/status：5 秒结果缓存 + 并发合并。
     # 账户快照通过 stale-while-revalidate 后台更新；前台状态读取只消费缓存，
@@ -1209,7 +1244,7 @@ def create_app(service: TradingService) -> FastAPI:
         }
 
     @app.get("/api/channels")
-    async def api_channels():
+    def api_channels():
         latest = _latest_or_empty(service)
         if latest.get("channel_state"):
             return latest["channel_state"]
@@ -1304,15 +1339,19 @@ def create_app(service: TradingService) -> FastAPI:
         return [dict(r) for r in service.db.fetch_all("SELECT review_date, report_path, summary FROM daily_reviews ORDER BY review_date DESC LIMIT 30")]
 
     @app.post("/api/control")
-    async def api_control(payload: dict[str, Any]):
+    def api_control(payload: dict[str, Any]):
         state = str(payload.get("state", ""))
+        # emergency 会立即市价平掉全部仓位：要求请求体带 confirm 二次确认参数
+        if state == "emergency" and str(payload.get("confirm") or "") != "emergency":
+            raise HTTPException(status_code=400,
+                                detail="emergency 需要二次确认：请求体必须包含 confirm='emergency'")
         result = service.set_control(state)
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("error"))
         return result
 
     @app.post("/api/cycle/run")
-    async def api_run_cycle():
+    def api_run_cycle():
         if service.cycle_running():
             # 不是错误：只是后台慢循环已经在跑，避免重复启动
             return {"ok": True, "started": False, "message": "决策循环正在运行中，本轮完成后自动刷新"}
@@ -1345,7 +1384,7 @@ def create_app(service: TradingService) -> FastAPI:
         }
 
     @app.post("/api/mode")
-    async def api_mode_set(payload: dict[str, Any]):
+    def api_mode_set(payload: dict[str, Any]):
         mode = str(payload.get("mode", ""))
         if mode not in SWITCHABLE_MODES:
             raise HTTPException(status_code=400, detail=f"未知模式：{mode}")
@@ -1370,7 +1409,7 @@ def create_app(service: TradingService) -> FastAPI:
     # ---- 手动重置资金（仅测试模式）----
 
     @app.post("/api/capital/reset")
-    async def api_capital_reset():
+    def api_capital_reset():
         mode = str(getattr(service.broker, "mode", "paper"))
         if mode == "live":
             raise HTTPException(status_code=403, detail="实盘模式不允许重置资金")
@@ -1419,6 +1458,7 @@ def create_app(service: TradingService) -> FastAPI:
             "events": rows, "total": total, "page": page, "pages": pages,
             "severity": severity, "q": q.strip(),
             "severity_counts": severity_counts,
+            "console_token": _write_token,
         })
 
     return app

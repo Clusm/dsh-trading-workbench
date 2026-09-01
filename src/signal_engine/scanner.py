@@ -126,9 +126,11 @@ class SignalScanner:
     def _load_strategy_lab(self) -> None:
         if self._registry is not None:
             return
+        if not str(self.strategy_lab_src or "").strip() or not self.strategy_lab_src.exists():
+            # 未配置 strategy_lab（换机/路径不存在）：策略通道降级为无信号，
+            # 不再因硬编码绝对路径不存在而反复抛异常拖慢每轮决策。
+            raise RuntimeError("strategy_lab 未配置或路径不存在，策略信号扫描跳过")
         src = str(self.strategy_lab_src.resolve())
-        if not self.strategy_lab_src.exists():
-            raise RuntimeError(f"strategy_lab src 不存在: {src}")
         if src not in sys.path:
             sys.path.insert(0, src)
         # 注意：本目录下的模块名不要叫 signals/features，避免遮蔽 strategy_lab。
