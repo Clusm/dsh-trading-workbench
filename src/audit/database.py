@@ -553,6 +553,19 @@ class AuditDatabase:
             (status, price, utc_now(), client_order_id),
         )
 
+    def cancel_order_by_exchange_id(self, *, exchange_order_id: str,
+                                    status: str = "CANCELED") -> None:
+        """按交易所订单号（algoId/orderId）把保护单标记为已撤/已失效。
+
+        保护单走 Algo Order API，挂单时 exchange_order_id 存的是 algoId，
+        撤单/触发时只有 algoId 可用来定位本地流水。此方法让撤单动作在流水表
+        里留下真实生命周期（NEW -> CANCELED），而不是留下一条永远 NEW 的幽灵单。
+        """
+        self._insert(
+            "UPDATE orders SET status=?, updated_at=? WHERE exchange_order_id=? AND status='NEW'",
+            (status, utc_now(), exchange_order_id),
+        )
+
     @staticmethod
     def _clean_price(value: float | None) -> float | None:
         """去掉浮点尾巴（102.10000000000001 -> 102.1），保留 8 位有效数字不损失真实精度。"""
@@ -582,6 +595,47 @@ class AuditDatabase:
              source, strategy_id, ticket_id, margin_mode,
              status, utc_now(), json.dumps({"symbol": symbol, "side": side, "qty": qty}, ensure_ascii=False)),
         )
+
+    def close_open_position(self, *, symbol: str, side: str,
+                            realized_pnl: float | None = None,
+                            note: str = "") -> int:
+        """精确收口单个 (symbol, side) 的所有 OPEN 流水行为 CLOSED。
+
+        与 close_open_positions（全局）不同，本方法只作用于指定交易对的指定方向，
+        供 sync_positions 在仓位变化时收口旧快照，避免误关其他仓位。
+
+        同样只改状态、不删行，审计链完整。
+        """
+        now = utc_now()
+        rows = self.fetch_all(
+            "SELECT id, raw_json FROM positions WHERE symbol=? AND side=? AND status='OPEN'",
+            (symbol, side))
+        if not rows:
+            return 0
+        with self.lock:
+            for r in rows:
+                pid = int(r["id"])
+                raw = r["raw_json"]
+                if note:
+                    try:
+                        data = json.loads(raw) if raw else {}
+                    except (TypeError, ValueError):
+                        data = {}
+                    if not isinstance(data, dict):
+                        data = {"_prev": data}
+                    data["_close_note"] = note
+                    raw = json.dumps(data, ensure_ascii=False)
+                if realized_pnl is None:
+                    self.conn.execute(
+                        "UPDATE positions SET status='CLOSED', closed_at=?, raw_json=? WHERE id=?",
+                        (now, raw, pid))
+                else:
+                    self.conn.execute(
+                        "UPDATE positions SET status='CLOSED', closed_at=?, realized_pnl=?, "
+                        "raw_json=? WHERE id=?",
+                        (now, float(realized_pnl), raw, pid))
+            self.conn.commit()
+        return len(rows)
 
     def close_open_positions(self, *, exclude_ids: Iterable[int] = (),
                              realized_pnl: float | None = None,

@@ -672,7 +672,11 @@ def _enrich_orders(rows, history_rows=None, exclude_protection: bool = False):
             raw = json.loads(d.get("raw_json") or "{}")
         except Exception:
             raw = {}
-        if exclude_protection and (raw.get("action") == "algo_protection" or str(d.get("side")) in ("STOP", "TAKE")):
+        # 保护单（移动止损/止盈）会随行情反复重设，每轮产生新的挂单记录。
+        # exclude_protection=True 时：真实交易全保留，保护单只保留「当前有效」的挂单
+        # （status 仍为 NEW、未被撤/未被触发），已失效的历史保护单不再刷屏。
+        is_protection = raw.get("action") == "algo_protection" or str(d.get("side")) in ("STOP", "TAKE")
+        if exclude_protection and is_protection and str(d.get("status") or "").upper() != "NEW":
             continue
         action = str(raw.get("action") or "")
         side = str(d.get("side") or "")
@@ -684,9 +688,14 @@ def _enrich_orders(rows, history_rows=None, exclude_protection: bool = False):
             display_side = "平仓"
         elif is_reduce_only:
             display_side = "平多" if side == "LONG" else "平空"
+        elif side == "STOP":
+            display_side = "止损"
+        elif side == "TAKE":
+            display_side = "止盈"
         else:
             display_side = "做多" if side == "LONG" else ("做空" if side == "SHORT" else side)
         d["display_side"] = display_side
+        d["is_protection"] = is_protection
         qty = float(d.get("qty") or 0.0)
         price = float(d.get("price") or 0.0)
         # 价格显示用 5 位有效数字，去掉浮点尾巴
@@ -911,7 +920,7 @@ def create_app(service: TradingService) -> FastAPI:
         realized_pnl = cap["realized_pnl"]
         all_order_rows = service.db.fetch_all("SELECT * FROM orders ORDER BY id ASC LIMIT 2000")
         recent_rows = service.db.fetch_all("SELECT * FROM orders ORDER BY id DESC LIMIT 300")
-        orders = _enrich_orders(recent_rows, all_order_rows, exclude_protection=True)[:20]
+        orders = _enrich_orders(recent_rows, all_order_rows, exclude_protection=True)[:30]
         events = service.db.fetch_all("SELECT * FROM risk_events ORDER BY id DESC LIMIT 15")
         decisions = service.db.fetch_all("SELECT * FROM trade_decisions ORDER BY id DESC LIMIT 8")
         # 交易统计统一计数：优先用新字段，旧缓存的 latest 里没有则现算
@@ -1181,7 +1190,7 @@ def create_app(service: TradingService) -> FastAPI:
         """
         all_rows = service.db.fetch_all("SELECT * FROM orders ORDER BY id ASC LIMIT 2000")
         recent = service.db.fetch_all("SELECT * FROM orders ORDER BY id DESC LIMIT 300")
-        orders = _enrich_orders(recent, all_rows, exclude_protection=True)[:20]
+        orders = _enrich_orders(recent, all_rows, exclude_protection=True)[:30]
         return {
             "orders": [{
                 "id": o.get("id"),
@@ -1189,6 +1198,7 @@ def create_app(service: TradingService) -> FastAPI:
                 "symbol": o.get("symbol"),
                 "display_side": o.get("display_side"),
                 "side": o.get("side"),
+                "is_protection": o.get("is_protection", False),
                 "notional": o.get("notional"),
                 "margin": o.get("margin"),
                 "price": o.get("price"),

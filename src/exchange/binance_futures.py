@@ -786,12 +786,20 @@ class BinanceFuturesBroker:
 
     def _cancel_symbol_algos(self, symbol: str) -> None:
         for algo in self._open_algos(symbol):
+            algo_id = str(algo.get("algoId") or "")
             try:
                 self._signed("DELETE", "/fapi/v1/algoOrder", {"algoId": algo.get("algoId")})
+                # 撤单成功：把本地流水里对应的保护单收口成 CANCELED，
+                # 避免「移动止损反复重设」在 orders 表堆积一堆永远 NEW 的幽灵单。
+                if self.db and algo_id:
+                    self.db.cancel_order_by_exchange_id(exchange_order_id=algo_id)
             except Exception as e:
                 msg = str(e)
                 # 已经触发/已不存在的旧单无需处理，也不算错误
                 if "-2011" in msg or "Unknown order" in msg:
+                    # 旧单已不在交易所（已触发或已被外部撤销），本地流水同样要收口。
+                    if self.db and algo_id:
+                        self.db.cancel_order_by_exchange_id(exchange_order_id=algo_id)
                     continue
                 if self.db:
                     self.db.log_risk_event(event_type="futures_adjust_error", severity="warn",
@@ -1175,10 +1183,18 @@ class BinanceFuturesBroker:
                 # 行 id 呈 251/253/255 与 252/254/256 交替递增，表被撑爆。
                 last_rows: dict[tuple[str, str], dict[str, Any]] = {}
                 for row in self.db.fetch_all(
-                    "SELECT symbol, side, qty, entry_price, leverage, source, status "
+                    "SELECT id, symbol, side, qty, entry_price, leverage, source, status "
                     "FROM positions WHERE id IN (SELECT MAX(id) FROM positions GROUP BY symbol, side)"
                 ):
                     last_rows[(str(row["symbol"]), str(row["side"]))] = dict(row)
+                # 本轮在交易所实际存在的 (symbol, side)，用于判断哪些旧 OPEN 行该收口
+                live_keys: set[tuple[str, str]] = set()
+                for p in pos:
+                    amt = float(p.get("positionAmt") or 0)
+                    if abs(amt) <= 1e-12:
+                        continue
+                    side = "LONG" if amt > 0 else "SHORT"
+                    live_keys.add((p["symbol"], side))
                 for p in pos:
                     amt = float(p.get("positionAmt") or 0)
                     meta = ledger.get("positions", {}).get(p["symbol"], {}) or {}
@@ -1195,6 +1211,11 @@ class BinanceFuturesBroker:
                             and int(prev.get("leverage") or 0) == leverage
                             and str(prev.get("source") or "ai") == source):
                         continue
+                    # 仓位状态/数量/价格发生变化：先精确收口该 (symbol, side) 的旧 OPEN 行，
+                    # 再插新的 OPEN 流水，避免「只 INSERT 不 CLOSE」堆积幽灵台账。
+                    if prev and str(prev.get("status")) == "OPEN":
+                        self.db.close_open_position(symbol=p["symbol"], side=side,
+                                                    note="仓位变化，收口旧快照")
                     self.db.log_position(
                         symbol=p["symbol"],
                         side=side,
@@ -1208,6 +1229,12 @@ class BinanceFuturesBroker:
                         ticket_id=meta.get("ticket_id"),
                         margin_mode=str(meta.get("margin_mode", "ISOLATED") or "ISOLATED"),
                     )
+                # 交易所里已经消失的 (symbol, side)：其 OPEN 行也应收口
+                for key, prev in last_rows.items():
+                    if key in live_keys or str(prev.get("status")) != "OPEN":
+                        continue
+                    self.db.close_open_position(symbol=key[0], side=key[1],
+                                                note="交易所已无此仓位，收口")
         except Exception as e:
             if self.db:
                 self.db.log_risk_event(event_type="futures_sync_error", severity="warn",
