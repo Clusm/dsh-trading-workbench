@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from core.service import TradingService
@@ -949,6 +949,21 @@ def create_app(service: TradingService) -> FastAPI:
             "quota_total": quota_total,
         })
 
+    @app.get("/decisions", response_class=HTMLResponse)
+    def decisions_page(request: Request):
+        """交易（决策中心）：把「情报 → 匹配 → 调度 → 拍板 → 执行」串成一条链。
+
+        数据全部来自 service.latest()，与 /api/status 同源，没有新增后端查询。
+        决策记录表承接原 /trades 页的历史决策，订单页不再重复展示。
+        """
+        latest = _latest_or_empty(service)
+        decisions = service.db.fetch_all("SELECT * FROM trade_decisions ORDER BY id DESC LIMIT 30")
+        return templates.TemplateResponse(request, "decisions.html", {
+            "latest": latest,
+            "decisions": decisions,
+            "now_ts": time.time(),
+        })
+
     @app.get("/agents", response_class=HTMLResponse)
     def agents_page(request: Request):
         latest = _latest_or_empty(service)
@@ -992,10 +1007,9 @@ def create_app(service: TradingService) -> FastAPI:
             "tickets": tickets,
         })
 
-    @app.get("/trades", response_class=HTMLResponse)
-    def trades_page(request: Request):
+    @app.get("/orders", response_class=HTMLResponse)
+    def orders_page(request: Request):
         db = service.db
-        decisions = db.fetch_all("SELECT * FROM trade_decisions ORDER BY id DESC LIMIT 30")
         all_order_rows = db.fetch_all("SELECT * FROM orders ORDER BY id ASC LIMIT 3000")
         orders = _enrich_orders(
             db.fetch_all("SELECT * FROM orders ORDER BY id DESC LIMIT 60"),
@@ -1012,10 +1026,15 @@ def create_app(service: TradingService) -> FastAPI:
             "positions": db.fetch_one("SELECT COUNT(*) c FROM positions")["c"],
             "snapshots": db.fetch_one("SELECT COUNT(*) c FROM portfolio_snapshots")["c"],
         }
-        return templates.TemplateResponse(request, "trades.html", {
-            "decisions": decisions, "orders": orders, "positions": positions,
+        return templates.TemplateResponse(request, "orders.html", {
+            "orders": orders, "positions": positions,
             "snapshots": snapshots, "counts": counts,
         })
+
+    @app.get("/trades", response_class=HTMLResponse)
+    def trades_legacy(request: Request):
+        """旧链接兼容：/trades 已更名为 /orders，保留 302 让外部书签不失效。"""
+        return RedirectResponse(url="/orders", status_code=302)
 
     @app.get("/reviews", response_class=HTMLResponse)
     def reviews_page(request: Request):
@@ -1070,9 +1089,14 @@ def create_app(service: TradingService) -> FastAPI:
             "strategy_decision": latest.get("strategy_decision").model_dump() if latest.get("strategy_decision") else None,
             "ai_decision": latest.get("ai_decision").model_dump() if latest.get("ai_decision") else None,
             "strategy_refs": latest["strategy"].model_dump() if latest["strategy"] else {"refs": []},
-            "market": {"summary": latest["market"].summary, "regime": latest["market"].regime} if latest["market"] else None,
-            "macro": {"summary": latest["macro"].summary, "bias": latest["macro"].market_bias} if latest["macro"] else None,
-            "onchain": {"summary": latest["onchain"].summary} if latest["onchain"] else None,
+            # generated_at 一并返回：交易页要靠它算「情报新鲜度」，
+            # 用户需要知道这份情报是刚跑出来的还是半小时前的。
+            "market": {"summary": latest["market"].summary, "regime": latest["market"].regime,
+                       "generated_at": latest["market"].generated_at} if latest["market"] else None,
+            "macro": {"summary": latest["macro"].summary, "bias": latest["macro"].market_bias,
+                      "generated_at": latest["macro"].generated_at} if latest["macro"] else None,
+            "onchain": {"summary": latest["onchain"].summary,
+                        "generated_at": latest["onchain"].generated_at} if latest["onchain"] else None,
             "intel_cache": latest.get("intel_cache"),
             "channel_state": latest.get("channel_state") or {},
             "cycle_age_seconds": round(time.time() - float(latest.get("ts") or time.time()), 1),
@@ -1093,6 +1117,28 @@ def create_app(service: TradingService) -> FastAPI:
             _status_cache["ts"] = time.monotonic()
             _status_cache["payload"] = payload
         return payload
+
+    @app.get("/api/badges")
+    def api_badges():
+        """导航角标：只要「当前仍需关注」的量，不做未读追踪（刷新即丢失且无法区分是谁看的）。
+
+        critical 事件限定 24 小时内，红点会随事件过期自然消失，不会永久挂着吓人的数字。
+        查询失败一律降级为 0，绝不因为角标这种增强提示影响页面主流程。
+        """
+        try:
+            row = service.db.fetch_one(
+                "SELECT COUNT(*) c FROM risk_events WHERE severity='critical' "
+                "AND datetime(created_at) >= datetime('now','-1 day')"
+            )
+            critical = int(row["c"]) if row else 0
+        except Exception:
+            critical = 0
+        try:
+            channel_state = _latest_or_empty(service).get("channel_state") or {}
+            ai_halted = bool((channel_state.get("ai") or {}).get("halted"))
+        except Exception:
+            ai_halted = False
+        return {"critical_events": critical, "ai_halted": ai_halted, "server_time": time.time()}
 
     # ---- 轻量价格接口：只给"当前仓位"表快轮询用。
     # 持仓数量/开仓价来自 8 秒缓存的 broker state（变化很少），

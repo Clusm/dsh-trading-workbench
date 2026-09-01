@@ -1,0 +1,317 @@
+{% extends "base.html" %}
+{% block title %}交易 · 决策中心{% endblock %}
+{% block content %}
+<style>
+  /* ===== 决策链 =====
+     把「情报 → 匹配 → 调度 → 拍板 → 执行」画成一条纵向流水线。
+     散卡片需要用户自己脑补因果关系，链式布局一眼能看清输入与结论。 */
+  .chain { padding:18px 20px 8px; }
+  .chain-step { position:relative; padding:0 0 20px 46px; }
+  .chain-step::before { content:''; position:absolute; left:16px; top:36px; bottom:2px;
+                        width:2px; background:var(--border); border-radius:2px; }
+  .chain-step:last-child::before { display:none; }
+  .chain-num { position:absolute; left:0; top:0; width:34px; height:34px; border-radius:50%;
+               display:flex; align-items:center; justify-content:center; font-size:14px;
+               font-weight:700; color:var(--accent2); background:var(--panel2);
+               border:1px solid var(--border-hi); }
+  .chain-step.is-empty .chain-num { color:var(--muted); border-color:var(--border); }
+  .chain-step.is-halt .chain-num { color:#fff; background:var(--red); border-color:var(--red); }
+  .chain-head { display:flex; align-items:center; gap:9px; flex-wrap:wrap; min-height:34px;
+                padding-top:6px; margin-bottom:9px; }
+  .chain-title { font-size:14.5px; font-weight:600; color:var(--text); letter-spacing:.2px; }
+  .chain-meta { margin-left:auto; font-size:11.5px; color:var(--muted); white-space:nowrap; }
+  .chain-note { font-size:12.5px; color:var(--text2); line-height:1.7; }
+  .chain-note.reasoning { max-height:220px; overflow:auto; }
+
+  /* 原始输出折叠：默认收起，避免一进来就被大段 JSON 淹没 */
+  .chain-raw { margin-top:9px; border:1px solid var(--border); border-radius:9px;
+               background:var(--panel2); overflow:hidden; }
+  .chain-raw > summary { cursor:pointer; padding:6px 12px; font-size:12px; color:var(--muted);
+                         list-style:none; transition:color .15s, background .15s; }
+  .chain-raw > summary::-webkit-details-marker { display:none; }
+  .chain-raw > summary::before { content:"▸ "; font-size:10px; }
+  .chain-raw[open] > summary::before { content:"▾ "; }
+  .chain-raw > summary:hover { color:var(--text); background:var(--tr-hover); }
+  .chain-raw pre { margin:0; border:0; border-radius:0; border-top:1px solid var(--border);
+                   max-height:320px; }
+  .raw-label { font-size:11.5px; color:var(--muted); margin:10px 12px 4px; }
+
+  /* 新一轮提示条：不自动 reload（会打断正在读的推理文本），交给用户点 */
+  .new-cycle-tip { display:flex; align-items:center; gap:12px; margin-bottom:12px;
+                   padding:9px 16px; border-radius:10px; font-size:13px;
+                   background:rgba(63,185,80,.1); border:1px solid rgba(63,185,80,.35);
+                   color:var(--green); animation:page-in .3s var(--ease); }
+  .new-cycle-tip[hidden] { display:none; }
+  .new-cycle-tip button { margin:0; padding:5px 12px; font-size:12.5px; }
+
+  .strategy-row td { vertical-align:top; }
+  .strategy-row .s-note { display:block; color:var(--muted); font-size:12px; margin-top:3px; }
+</style>
+
+<div class="row" style="justify-content:space-between; align-items:flex-start; margin-bottom:14px">
+  <div>
+    <h1 style="margin:0 0 6px">交易 <span class="muted" style="font-size:15px; font-weight:400">决策中心</span></h1>
+    <div class="muted" style="font-size:13px">回答「为什么开仓」——情报 → 策略匹配 → 调度 → 拍板 → 执行</div>
+  </div>
+  <div class="row" style="gap:10px; align-items:center">
+    <span class="muted" id="cycle-age" style="font-size:12.5px">
+      本轮周期 {{ (latest.ts|ago) if latest.ts else '—' }}
+    </span>
+    <button class="secondary" onclick="location.reload()">刷新</button>
+  </div>
+</div>
+
+<div class="new-cycle-tip" id="new-cycle-tip" hidden>
+  <span>检测到新一轮决策已完成，当前页面展示的仍是上一轮内容。</span>
+  <button onclick="location.reload()">刷新查看</button>
+</div>
+
+{% set refs = latest.strategy.refs if latest.strategy and latest.strategy.refs else [] %}
+{% set app_n = refs|selectattr('applicable')|list|length %}
+{% set halting = (latest.channel_state or {}).get('ai', {}).get('halted', false) %}
+
+<div class="card chain">
+
+  {# ---- 1. 最新情报 ---- #}
+  <div class="chain-step {{ 'is-empty' if not latest.market else '' }}" id="step-1">
+    <div class="chain-num">1</div>
+    <div class="chain-head">
+      <span class="chain-title">最新情报</span>
+      {% if latest.market %}<span class="badge muted">市场 {{ latest.market.regime|regime_cn }}</span>{% endif %}
+      {% if latest.macro %}<span class="badge muted">宏观 {{ latest.macro.market_bias|bias_cn }}</span>{% endif %}
+      <span class="chain-meta" id="intel-age">
+        {{ (latest.market.generated_at|ago) if latest.market else '等待首轮情报' }}
+      </span>
+    </div>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th style="width:92px">来源</th><th>摘要</th></tr></thead>
+      <tbody>
+        <tr><td class="muted">市场</td><td id="market-summary">{{ latest.market.summary if latest.market else '暂无数据' }}</td></tr>
+        <tr><td class="muted">宏观</td><td id="macro-summary">{{ latest.macro.summary if latest.macro else '暂无数据' }}</td></tr>
+        <tr><td class="muted">链上</td><td id="onchain-summary">{{ latest.onchain.summary if latest.onchain else '暂无数据' }}</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <details class="chain-raw">
+      <summary>查看三个情报 Agent 的原始输出</summary>
+      <div class="raw-label">market_agent</div>
+      <pre>{{ latest.market.model_dump_json(indent=2) if latest.market else '{}' }}</pre>
+      <div class="raw-label">macro_agent</div>
+      <pre>{{ latest.macro.model_dump_json(indent=2) if latest.macro else '{}' }}</pre>
+      <div class="raw-label">onchain_agent</div>
+      <pre>{{ latest.onchain.model_dump_json(indent=2) if latest.onchain else '{}' }}</pre>
+    </details>
+  </div>
+
+  {# ---- 2. 策略匹配 ---- #}
+  <div class="chain-step {{ 'is-empty' if not refs else '' }}" id="step-2">
+    <div class="chain-num">2</div>
+    <div class="chain-head">
+      <span class="chain-title">策略匹配</span>
+      <span class="chain-meta" id="strategy-meta">
+        {% if refs %}{{ app_n }} 个适用 / 共 {{ refs|length }}{% else %}等待首轮匹配{% endif %}
+      </span>
+    </div>
+    {% if refs %}
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th style="width:150px">策略</th><th>名称与判断依据</th></tr></thead>
+      <tbody id="strategy-body">
+      {% for r in refs %}
+        <tr class="strategy-row">
+          <td><span class="badge {{ 'ok' if r.applicable else 'muted' }}">{{ r.strategy_id }}</span></td>
+          <td><strong>{{ r.name }}</strong>
+            {% if r.note %}<span class="s-note">{{ r.note }}</span>{% endif %}
+            {% if r.detail %}<span class="s-note">{{ r.detail }}</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <div class="chain-note muted" id="strategy-body">暂无策略匹配结果</div>
+    {% endif %}
+    <details class="chain-raw">
+      <summary>查看策略匹配原始输出</summary>
+      <pre>{{ latest.strategy.model_dump_json(indent=2) if latest.strategy else '{}' }}</pre>
+    </details>
+  </div>
+
+  {# ---- 3. 策略调度者 ---- #}
+  <div class="chain-step {{ 'is-empty' if not latest.strategy_decision else '' }}" id="step-3">
+    <div class="chain-num">3</div>
+    <div class="chain-head">
+      <span class="chain-title">策略调度者</span>
+      {% if latest.strategy_decision %}
+        <span class="badge {{ 'ok' if latest.strategy_decision.decision != 'no_trade' else 'muted' }}">{{ latest.strategy_decision.decision|decision_cn }}</span>
+      {% endif %}
+      <span class="chain-meta" id="sd-age">
+        {{ (latest.strategy_decision.generated_at|ago) if latest.strategy_decision else '—' }}
+      </span>
+    </div>
+    <div class="chain-note reasoning" id="strategy-decision-reason">
+      {{ latest.strategy_decision.reasoning if latest.strategy_decision else '等待首轮策略调度' }}
+    </div>
+    <details class="chain-raw">
+      <summary>查看调度原始输出</summary>
+      <pre>{{ latest.strategy_decision.model_dump_json(indent=2) if latest.strategy_decision else '{}' }}</pre>
+    </details>
+  </div>
+
+  {# ---- 4. AI 决策者 ---- #}
+  <div class="chain-step {{ 'is-halt' if halting else ('is-empty' if not latest.ai_decision else '') }}" id="step-4">
+    <div class="chain-num">4</div>
+    <div class="chain-head">
+      <span class="chain-title">AI 决策者</span>
+      {% if latest.ai_decision %}
+        <span class="badge {{ 'ok' if latest.ai_decision.decision != 'no_trade' else 'muted' }}">{{ latest.ai_decision.decision|decision_cn }}</span>
+      {% endif %}
+      {% if halting %}<span class="badge err">已熔断</span>{% endif %}
+      <span class="chain-meta" id="ai-age">
+        {{ (latest.ai_decision.generated_at|ago) if latest.ai_decision else '—' }}
+      </span>
+    </div>
+    <div class="chain-note reasoning" id="ai-decision-reason">
+      {{ latest.ai_decision.reasoning if latest.ai_decision else '等待首轮 AI 决策' }}
+    </div>
+    <details class="chain-raw">
+      <summary>查看 AI 决策原始输出</summary>
+      <pre>{{ latest.ai_decision.model_dump_json(indent=2) if latest.ai_decision else '{}' }}</pre>
+    </details>
+  </div>
+
+  {# ---- 5. 执行结果 ---- #}
+  {% set dec = latest.decision if latest.decision else latest.decision_from_db %}
+  <div class="chain-step {{ 'is-empty' if not dec else '' }}" id="step-5">
+    <div class="chain-num">5</div>
+    <div class="chain-head">
+      <span class="chain-title">执行结果</span>
+      {% if dec %}<span class="badge {{ 'ok' if dec.decision != 'no_trade' else 'muted' }}" id="final-decision">{{ dec.decision|decision_cn }}</span>{% endif %}
+      {% if latest.risk_verdict %}
+        <span class="badge {{ 'ok' if latest.risk_verdict.verdict == 'approved' else ('err' if latest.risk_verdict.verdict == 'rejected' else 'warn') }}">
+          风控 {{ latest.risk_verdict.verdict }}
+        </span>
+      {% endif %}
+      {% if dec and dec.channel %}<span class="badge muted">{{ dec.channel }}</span>{% endif %}
+      <span class="chain-meta"><a href="/orders" class="button-link">订单与仓位流水 →</a></span>
+    </div>
+    {% if latest.decision and latest.decision.intents %}
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>交易对</th><th>方向</th><th>动作</th><th class="num">杠杆</th><th class="num">止损</th><th class="num">止盈</th><th class="num">信心</th><th>理由</th></tr></thead>
+      <tbody>
+      {% for it in latest.decision.intents %}
+      <tr>
+        <td><strong>{{ it.symbol }}</strong></td>
+        <td><span class="badge {{ 'long' if it.side == 'LONG' else 'short' }}">{{ it.side|side_cn }}</span></td>
+        <td class="muted">{{ it.action|decision_cn }}</td>
+        <td class="num">{{ it.leverage }}x</td>
+        <td class="num">{{ it.stop_loss if it.stop_loss else '-' }}</td>
+        <td class="num">{{ it.take_profit if it.take_profit else '-' }}</td>
+        <td class="num">{{ '%.0f%%'|format((it.confidence or 0) * 100) }}</td>
+        <td class="muted" style="font-size:12px">{{ it.reasoning }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <div class="chain-note muted">本轮无交易意图</div>
+    {% endif %}
+    <div class="chain-note reasoning" id="final-reason" style="margin-top:9px">
+      {{ dec.reasoning if dec else '等待首轮决策' }}
+    </div>
+    <details class="chain-raw">
+      <summary>查看最终决策与风控裁决原始输出</summary>
+      <div class="raw-label">decision</div>
+      <pre>{{ latest.decision.model_dump_json(indent=2) if latest.decision else '{}' }}</pre>
+      <div class="raw-label">risk_verdict</div>
+      <pre>{{ latest.risk_verdict.model_dump_json(indent=2) if latest.risk_verdict else '{}' }}</pre>
+    </details>
+  </div>
+
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h3>决策记录 <span class="muted" style="font-weight:400">最近 30 条</span>
+    <button class="secondary btn-export" onclick="exportTableCSV(this,'decisions.csv')">导出 CSV</button>
+  </h3>
+  {% if decisions %}
+  <div class="table-wrap">
+  <table><thead><tr><th data-sort="str">时间</th><th>决策</th><th>理由</th></tr></thead>
+  <tbody>
+  {% for d in decisions %}
+  <tr><td class="muted" style="white-space:nowrap">{{ d.created_at[:19].replace('T',' ') }}</td><td><span class="badge {{ 'ok' if d.decision!='no_trade' else 'muted' }}">{{ d.decision|decision_cn }}</span></td><td class="muted">{{ d.reasoning }}</td></tr>
+  {% endfor %}</tbody></table>
+  </div>
+  {% else %}<div class="empty">暂无决策记录</div>{% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* 页面内脚本必须放在 scripts 块：apiFetch / smartInterval / relTime 定义在 base.html
+   的公共脚本里，写在 content 块会先于它们执行，导致轮询静默不启动。 */
+
+/* 首屏由服务端渲染（能拿到完整的 model_dump_json 原始输出），
+   轮询只更新会随时间变化的文本部分；原始 JSON 需要整页刷新才能换，
+   所以检测到新一轮时用提示条让用户自己决定何时刷新。 */
+let LAST_AGE = {{ ((now_ts - latest.ts) if latest.ts else 0)|tojson }};
+
+function setText(id, txt){
+  const el = document.getElementById(id);
+  if (el && txt != null) el.textContent = txt;
+}
+
+async function refreshChain(){
+  try{
+    const d = await apiFetch('/api/status');
+    if (d.market){
+      setText('market-summary', d.market.summary);
+      setText('intel-age', '市场情报 ' + relTime(d.market.generated_at || ''));
+    }
+    if (d.macro) setText('macro-summary', d.macro.summary);
+    if (d.onchain) setText('onchain-summary', d.onchain.summary);
+    if (d.strategy_decision) setText('strategy-decision-reason', d.strategy_decision.reasoning || '—');
+    if (d.ai_decision) setText('ai-decision-reason', d.ai_decision.reasoning || '—');
+    if (d.decision){
+      setText('final-reason', d.decision.reasoning || '—');
+      const fd = document.getElementById('final-decision');
+      if (fd){
+        const map = {'no_trade':'不交易','open':'开仓','close':'平仓','reduce':'减仓','adjust':'调整'};
+        fd.textContent = map[d.decision.decision] || d.decision.decision;
+        fd.className = 'badge ' + (d.decision.decision !== 'no_trade' ? 'ok' : 'muted');
+      }
+    }
+    const refs = (d.strategy_refs && d.strategy_refs.refs) || [];
+    if (refs.length){
+      const appN = refs.filter(r => r.applicable).length;
+      setText('strategy-meta', appN + ' 个适用 / 共 ' + refs.length);
+      const body = document.getElementById('strategy-body');
+      if (body){
+        body.innerHTML = refs.map(r =>
+          '<tr class="strategy-row"><td><span class="badge ' + (r.applicable ? 'ok' : 'muted') + '">' + r.strategy_id + '</span></td>' +
+          '<td><strong>' + r.name + '</strong>' +
+          (r.note ? '<span class="s-note">' + r.note + '</span>' : '') +
+          (r.detail ? '<span class="s-note">' + r.detail + '</span>' : '') + '</td></tr>'
+        ).join('');
+      }
+    }
+    const age = Number(d.cycle_age_seconds || 0);
+    setText('cycle-age', '本轮周期 ' + age.toFixed(0) + 's 前');
+    // 周期年龄突然变小 => 新的一轮跑完了。只弹提示不自动刷新，避免打断正在读的推理文本。
+    if (age < LAST_AGE - 10){
+      const tip = document.getElementById('new-cycle-tip');
+      if (tip) tip.hidden = false;
+    }
+    LAST_AGE = age;
+    touchUpdated();
+  }catch(e){ console.error('[refreshChain]', e); }
+}
+
+/* 情报类内容每轮决策才变一次，30 秒轮询足够 */
+smartInterval(refreshChain, 30000);
+</script>
+{% endblock %}

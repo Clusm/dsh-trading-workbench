@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block title %}总览{% endblock %}
 {% block content %}
+{% set cs = latest.control_state or 'normal' %}
+{% set cs_text = {'normal':'正常','pause':'暂停开仓','close_only':'只允许平仓','emergency':'紧急模式'}.get(cs, cs) %}
 <div class="row" style="justify-content:space-between; margin-bottom:14px">
   <div>
     <h1 style="margin:0 0 6px">交易控制台</h1>
@@ -19,12 +21,21 @@
       <span class="muted" id="mode-hint" style="align-self:center"></span>
     </div>
   </div>
-  <div class="row">
-    <button onclick="setControl('normal')">恢复正常</button>
-    <button class="secondary" onclick="setControl('pause')">暂停开仓</button>
-    <button class="secondary" onclick="setControl('close_only')">只平仓</button>
-    <button class="danger" onclick="emergencyClose()">紧急平仓</button>
+  {# 控制按钮按「频率 × 危险度」分层：
+     - 立即运行一轮：高频且安全，作为唯一主按钮
+     - 暂停开仓 / 只允许平仓 / 恢复正常：低频状态切换，收进下拉，不再占三个位置
+     - 紧急平仓 / 重置资金：不可逆，挪到隔离线右侧单独一区 #}
+  <div class="row" style="gap:9px; align-items:center">
     <button id="run-cycle-btn" onclick="runCycle()">立即运行一轮</button>
+    <select id="control-select" onchange="onControlChange(this)" style="width:auto"
+            aria-label="运行状态" title="切换运行状态：暂停开仓 / 只允许平仓 / 恢复正常">
+      <option value="" disabled selected>运行状态：{{ cs_text }}</option>
+      <option value="normal" {{ 'disabled' if cs == 'normal' else '' }}>恢复正常</option>
+      <option value="pause" {{ 'disabled' if cs == 'pause' else '' }}>暂停开仓</option>
+      <option value="close_only" {{ 'disabled' if cs == 'close_only' else '' }}>只允许平仓</option>
+    </select>
+    <span class="danger-divider" aria-hidden="true"></span>
+    <button class="danger" onclick="emergencyClose()">紧急平仓</button>
     {% if broker_mode != 'live' %}
     <button class="secondary" id="reset-capital-btn" onclick="resetCapital()">重置资金</button>
     {% endif %}
@@ -66,42 +77,12 @@
   </div>
 </div>
 
-<div class="grid cols-2" style="margin-top:14px">
-  <div class="card">
-    <h3>最新情报 <span class="muted">市场 / 宏观 / 链上</span></h3>
-    <div class="table-wrap">
-    <table>
-      <thead><tr><th style="width:110px">来源</th><th>摘要</th></tr></thead>
-      <tbody>
-        <tr><td class="muted" style="white-space:nowrap">Market</td><td id="market-summary">{{ latest.market.summary if latest.market else '暂无数据' }}</td></tr>
-        <tr><td class="muted" style="white-space:nowrap">宏观情报</td><td id="macro-summary">{{ latest.macro.summary if latest.macro else '暂无数据' }}</td></tr>
-        <tr><td class="muted" style="white-space:nowrap">链上情报</td><td id="onchain-summary">{{ latest.onchain.summary if latest.onchain else '暂无数据' }}</td></tr>
-      </tbody>
-    </table>
-    </div>
-  </div>
-  <div class="card">
-    <h3>策略匹配</h3>
-    {% if latest.strategy and latest.strategy.refs %}
-      <div class="table-wrap">
-      <table>
-        <thead><tr><th style="width:130px">策略</th><th>名称</th></tr></thead>
-        <tbody id="strategy-chips">
-        {% for r in latest.strategy.refs %}
-          <tr><td><span class="badge {{ 'ok' if r.applicable else 'muted' }}">{{ r.strategy_id }}</span></td><td>{{ r.name }}</td></tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      </div>
-    {% else %}<div class="muted" id="strategy-chips">暂无</div>{% endif %}
-    <h3 style="margin-top:12px">策略调度者</h3>
-    <div class="muted" id="strategy-decision-reason">{{ latest.strategy_decision.reasoning if latest.strategy_decision else '等待首轮策略调度' }}</div>
-    <h3 style="margin-top:12px">AI决策者</h3>
-    <div class="muted" id="ai-decision-reason">{{ latest.ai_decision.reasoning if latest.ai_decision else '等待首轮AI决策' }}</div>
-  </div>
+{# 情报 / 策略匹配 / 调度推理已迁到 /decisions（交易页）。
+   总览只留"此刻"的状态：权益、持仓、敞口，保证一屏看完当前风险。 #}
+<div class="row" style="justify-content:space-between; align-items:baseline; margin-top:22px; gap:12px">
+  <h2 style="margin:0">当前仓位</h2>
+  <a href="/decisions" class="button-link">查看决策依据 →</a>
 </div>
-
-<h2 style="margin-top:22px">当前仓位</h2>
 <div class="card">
 <div class="exp-wrap" id="exposure" style="display:none">
   <div class="exp-labels"><span>多头敞口 <b class="pos no-arrow" id="exp-long-v"></b></span><span>空头敞口 <b class="neg no-arrow" id="exp-short-v"></b></span></div>
@@ -335,11 +316,6 @@ async function refresh(){
       document.getElementById('ch-ai-win').textContent = Number((ds.win_rate || 0) * 100).toFixed(0) + '%';
       document.getElementById('ch-ai-halt').textContent = ai.halted ? ' · 已熔断' : '';
     }
-    if (d.market) document.getElementById('market-summary').textContent = d.market.summary;
-    if (d.macro) document.getElementById('macro-summary').textContent = d.macro.summary;
-    if (d.onchain) document.getElementById('onchain-summary').textContent = d.onchain.summary;
-    if (d.strategy_decision) document.getElementById('strategy-decision-reason').textContent = d.strategy_decision.reasoning || '—';
-    if (d.ai_decision) document.getElementById('ai-decision-reason').textContent = d.ai_decision.reasoning || '—';
     touchUpdated();
   }catch(e){ console.error('[refresh]', e); } finally { _refreshBusy = false; }
 }
@@ -443,6 +419,14 @@ function renderExposure(rows){
 const CONTROL_CN = {'normal':'恢复正常','pause':'暂停开仓','close_only':'只允许平仓','emergency':'紧急模式'};
 const MODE_CN = {'demo':'币安模拟盘','paper':'本地纸面','testnet':'测试网','live':'实盘'};
 const CUR_MODE = {{ broker_mode|tojson }};
+
+/* 运行状态下拉：选完立刻复位到"运行状态：X"。
+   真正的当前状态由服务端渲染决定，取消或请求失败都不会在界面上留下错误显示。 */
+function onControlChange(sel){
+  const v = sel.value;
+  sel.selectedIndex = 0;
+  if (v) setControl(v);
+}
 function onModeChange(mode){
   const btn = document.getElementById('mode-apply');
   const hint = document.getElementById('mode-hint');
@@ -458,7 +442,7 @@ async function switchMode(){
     '切换执行模式',
     `确认切换到「${MODE_CN[mode] || mode}」？保存后需要重启服务才会生效。` +
     (isLive ? '<br><br><strong style="color:var(--red)">实盘模式将使用真实资金下单，风险自负，请再次确认！</strong>' : ''),
-    isLive ? {danger:true, okText:'确认切换实盘'} : {okText:'确认切换'});
+    isLive ? {danger:true, okText:'确认切换实盘', html:true} : {okText:'确认切换', html:true});
   if (!ok) return;
   try{
     const d = await apiFetch('/api/mode', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode})});
@@ -473,7 +457,7 @@ async function resetCapital(){
   const ok = await confirmModal(
     '重置资金',
     `将立即平掉<b>全部仓位</b>，并把资金重置回初始值。<br>该操作不可撤销，确认继续？`,
-    {danger:true, okText:'确认重置'});
+    {danger:true, okText:'确认重置', html:true, requireText:'重置'});
   if (!ok) return;
   const btn = document.getElementById('reset-capital-btn');
   if (btn){ btn.disabled = true; btn.textContent = '重置中…'; }
@@ -496,7 +480,13 @@ async function setControl(state){
   }catch(e){ toast('请求失败：' + e, 'err'); }
 }
 async function emergencyClose(){
-  const ok = await confirmModal('紧急平仓', '确定紧急平仓全部仓位？该操作会立即平掉所有持仓，不可撤销。', {danger:true, okText:'确认平仓'});
+  // 实盘下要求手输「平仓」二字：这个按钮一旦误触就是市价平掉全部真实持仓
+  const isLive = CUR_MODE === 'live';
+  const ok = await confirmModal(
+    '紧急平仓',
+    '确定紧急平仓全部仓位？该操作会立即市价平掉所有持仓，不可撤销。' +
+    (isLive ? '<br><br><strong style="color:var(--red)">当前为实盘模式，将使用真实资金成交。</strong>' : ''),
+    {danger:true, okText:'确认平仓', html:true, requireText: isLive ? '平仓' : null});
   if (!ok) return;
   setControl('emergency');
 }

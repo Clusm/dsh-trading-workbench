@@ -1,7 +1,11 @@
 {% extends "base.html" %}
-{% block title %}交易/订单{% endblock %}
+{% block title %}订单{% endblock %}
 {% block content %}
-<h1>交易与订单</h1>
+<h1 style="margin:0 0 4px">订单</h1>
+<div class="muted" style="font-size:13px; margin-bottom:14px">
+  已经做过什么 —— 成交明细、仓位流水与资金快照。决策依据见
+  <a href="/decisions" class="button-link" style="padding:0 2px">交易页</a>。
+</div>
 
 <div class="grid cols-4">
   <div class="card metric"><div class="label">决策总数</div><div class="value">{{ counts.decisions }}</div></div>
@@ -16,17 +20,8 @@
   <div id="dpnl-box"><div class="skeleton" style="height:150px"></div></div>
 </div>
 
-<div class="card" style="margin-top:16px"><h3>决策记录 <button class="secondary btn-export" onclick="exportTableCSV(this,'decisions.csv')">导出 CSV</button></h3>
-{% if decisions %}
-<div class="table-wrap">
-<table><thead><tr><th data-sort="str">时间</th><th>决策</th><th>理由</th></tr></thead>
-<tbody>
-{% for d in decisions %}
-<tr><td class="muted" style="white-space:nowrap">{{ d.created_at[:19].replace('T',' ') }}</td><td><span class="badge {{ 'ok' if d.decision!='no_trade' else 'muted' }}">{{ d.decision|decision_cn }}</span></td><td class="muted">{{ d.reasoning }}</td></tr>
-{% endfor %}</tbody></table>
-</div>
-{% else %}<div class="empty">暂无决策记录</div>{% endif %}
-</div>
+{# 决策记录已迁到 /decisions（交易页）：它属于「为什么这么做」，
+   和订单/流水这类「做过什么」混在一起会让两边都看不清。 #}
 
 <div class="grid cols-2" style="margin-top:16px">
   <div class="card"><h3>订单 <button class="secondary btn-export" onclick="exportTableCSV(this,'orders.csv')">导出 CSV</button></h3>

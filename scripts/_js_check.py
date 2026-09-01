@@ -172,7 +172,8 @@ def check(path: str, reversed_order: bool = False) -> int:
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if a != "--reversed"]
     bad = "--reversed" in sys.argv
-    paths = args or ["/", "/trades", "/agents", "/channels", "/events", "/reviews"]
+    # 顺序与 base.html 导航一致；/trades 已改名 /orders，不再单独检查
+    paths = args or ["/", "/decisions", "/orders", "/events", "/reviews", "/agents", "/channels"]
     code = 0
     for p in paths:
         hit = check(p, reversed_order=bad)

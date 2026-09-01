@@ -76,10 +76,18 @@
     nav { display:flex; gap:4px; flex:1; overflow-x:auto; scrollbar-width:none; }
     nav::-webkit-scrollbar { display:none; }
     nav a { color:var(--muted); text-decoration:none; padding:7px 13px; border-radius:8px;
-            font-size:14px; white-space:nowrap; transition:color .15s var(--ease), background .15s var(--ease); }
+            font-size:14px; white-space:nowrap; position:relative;
+            transition:color .15s var(--ease), background .15s var(--ease); }
     nav a:hover { color:var(--text); background:var(--panel2); }
     nav a.active { color:var(--accent2); background:var(--panel2); font-weight:600;
                    box-shadow:inset 0 0 0 1px var(--border); }
+    /* 导航角标：AI 熔断 / 未处理风险事件，不点进对应页面也能看见 */
+    .nav-badge { position:absolute; top:-3px; right:-3px; min-width:16px; height:16px; padding:0 4px;
+                 box-sizing:border-box; border-radius:999px; background:var(--red); color:#fff;
+                 font-size:10px; font-weight:700; line-height:16px; text-align:center;
+                 box-shadow:0 0 0 2px var(--bg); animation:badge-in .3s var(--ease); }
+    @keyframes badge-in { from { opacity:0; transform:scale(.5);} to { opacity:1; transform:none;} }
+    .nav-badge[hidden] { display:none; }
     button.theme-btn { background:var(--panel2); border:1px solid var(--border); color:var(--text2);
                        border-radius:8px; padding:5px 9px; margin:0; display:inline-flex; align-items:center;
                        box-shadow:none; font-weight:400; }
@@ -179,6 +187,8 @@
     button.running { animation:btn-pulse 1.4s ease-in-out infinite; }
     @keyframes btn-pulse { 0%,100%{ filter:brightness(1);} 50%{ filter:brightness(1.28);} }
     button.btn-export { padding:4px 11px; font-size:11.5px; margin:0; border-radius:7px; font-weight:400; }
+    /* 危险操作隔离线：把高频安全操作与不可逆操作在视觉上分开，降低误触概率 */
+    .danger-divider { flex:none; width:1px; height:22px; background:var(--border); margin:0 3px 7px; }
 
     /* ===== 徽标 ===== */
     .badge { display:inline-block; padding:2px 9px; border-radius:999px; font-size:11px; font-weight:600;
@@ -269,6 +279,10 @@
     .modal p { margin:0 0 18px; color:var(--muted); font-size:13.5px; line-height:1.65; }
     .modal .modal-actions { display:flex; justify-content:flex-end; gap:10px; }
     .modal .modal-actions button { margin:0; }
+    .modal-input { width:100%; box-sizing:border-box; margin-bottom:16px; background:var(--panel2);
+                   color:var(--text); border:1px solid var(--border); border-radius:var(--radius-s);
+                   padding:9px 11px; font-size:13.5px; font-family:inherit; }
+    .modal-input:focus { outline:none; border-color:var(--accent); }
 
     /* ===== Toast ===== */
     #toast-box { position:fixed; top:64px; right:18px; z-index:110; display:flex; flex-direction:column; gap:8px; }
@@ -320,12 +334,14 @@
   <header>
     <div class="brand">MTA <span>交易控制台</span></div>
     <nav aria-label="主导航">
+      {# 顺序按使用频率：现状 → 决策 → 执行 → 风险 → 复盘，运维视角（智能体/双通道）后置 #}
       <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">总览</a>
-      <a href="/agents" class="{{ 'active' if request.url.path == '/agents' else '' }}">智能体</a>
-      <a href="/trades" class="{{ 'active' if request.url.path == '/trades' else '' }}">交易/订单</a>
-      <a href="/channels" class="{{ 'active' if request.url.path == '/channels' else '' }}">双通道</a>
-      <a href="/events" class="{{ 'active' if request.url.path == '/events' else '' }}">风险事件</a>
+      <a href="/decisions" class="{{ 'active' if request.url.path == '/decisions' else '' }}" title="为什么这么做：情报 → 策略匹配 → 决策">交易</a>
+      <a href="/orders" class="{{ 'active' if request.url.path in ('/orders', '/trades') else '' }}">订单</a>
+      <a href="/events" data-badge="events" class="{{ 'active' if request.url.path == '/events' else '' }}">风险事件</a>
       <a href="/reviews" class="{{ 'active' if request.url.path == '/reviews' else '' }}">复盘</a>
+      <a href="/agents" class="{{ 'active' if request.url.path == '/agents' else '' }}">智能体</a>
+      <a href="/channels" data-badge="channels" class="{{ 'active' if request.url.path == '/channels' else '' }}">双通道</a>
     </nav>
     <span class="stream-badge" id="stream-badge">行情链路…</span>
     <span class="last-updated" id="last-updated"></span>
@@ -506,10 +522,15 @@
       mask.className = 'modal-mask';
       mask.setAttribute('role', 'dialog'); mask.setAttribute('aria-modal', 'true');
       mask.innerHTML = '<div class="modal"><h4></h4><p></p>' +
+        // requireText：实盘紧急平仓这类不可逆操作，要求手输关键词才能确认，
+        // 避免手滑一点就把所有仓位平掉。
+        (opts.requireText ? '<input class="modal-input" type="text" autocomplete="off">' : '') +
         '<div class="modal-actions"><button class="secondary" data-act="no">取消</button>' +
         '<button data-act="yes"></button></div></div>';
       mask.querySelector('h4').textContent = title;
-      mask.querySelector('p').textContent = text;
+      // opts.html 只用于页面内拼好的说明文案，不接收外部输入，避免 XSS
+      if (opts.html) mask.querySelector('p').innerHTML = text;
+      else mask.querySelector('p').textContent = text;
       const yes = mask.querySelector('[data-act=yes]');
       yes.textContent = opts.okText || '确认';
       if (opts.danger) yes.className = 'danger';
@@ -518,21 +539,53 @@
       mask.querySelector('[data-act=no]').onclick = () => done(false);
       yes.onclick = () => done(true);
       mask.onclick = e => { if (e.target === mask) done(false); };
+      let focusEl = yes;
+      if (opts.requireText){
+        const input = mask.querySelector('.modal-input');
+        input.placeholder = '请输入「' + opts.requireText + '」以确认';
+        const sync = () => { yes.disabled = input.value.trim() !== opts.requireText; };
+        input.addEventListener('input', sync);
+        input.addEventListener('keydown', e => { if (e.key === 'Enter' && !yes.disabled) done(true); });
+        sync();
+        focusEl = input;
+      }
       document.addEventListener('keydown', esc);
       document.body.appendChild(mask);
-      yes.focus();
+      focusEl.focus();
     });
   }
 
-  /* ===== 键盘快捷键：1-5 切页，R 刷新 ===== */
+  /* ===== 导航角标 =====
+     不做"已读/未读"追踪（刷新即丢失，且无法区分是谁看的），
+     改成"当前仍需关注的数量"：24 小时内的 critical 事件数、AI 通道是否熔断。
+     这样红点会随事件过期自然消失，不会永久挂着一个吓人的数字。 */
+  function setNavBadge(key, val){
+    const a = document.querySelector('nav a[data-badge="' + key + '"]');
+    if (!a) return;
+    let el = a.querySelector('.nav-badge');
+    if (!val){ if (el) el.hidden = true; return; }
+    if (!el){ el = document.createElement('span'); el.className = 'nav-badge'; a.appendChild(el); }
+    el.hidden = false;
+    el.textContent = val === true ? '!' : String(val);
+  }
+  async function updateNavBadges(){
+    try{
+      const d = await apiFetch('/api/badges');
+      setNavBadge('events', d.critical_events || 0);
+      setNavBadge('channels', d.ai_halted ? true : 0);
+    }catch(e){ /* 角标只是增强提示，失败时静默隐藏，不打扰主流程 */ }
+  }
+
+  /* ===== 键盘快捷键：数字键切页（自动跟随导航项数量），R 刷新 ===== */
   document.addEventListener('keydown', e => {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
     if (document.querySelector('.modal-mask')) return;
     const links = document.querySelectorAll('nav a');
-    if (e.key >= '1' && e.key <= '5'){
-      const a = links[Number(e.key) - 1];
+    const n = Number(e.key);
+    if (Number.isInteger(n) && n >= 1 && n <= links.length){
+      const a = links[n - 1];
       if (a) location.href = a.href;
     } else if (e.key === 'r' || e.key === 'R'){
       location.reload();
@@ -581,6 +634,9 @@
     }
   }
   bootStatus();
+  updateNavBadges();
+  /* 角标跟主状态分开轮询：60 秒足够，且失败时不会干扰页面其它数据刷新 */
+  smartInterval(updateNavBadges, 60000);
   </script>
   {# 页面脚本必须放在公共脚本之后：apiFetch / smartInterval / FMT / toast / setStreamBadge
      等都定义在上面那个块里。若页面脚本写在 content 块内，它会先于这里执行，
