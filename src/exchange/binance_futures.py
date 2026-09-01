@@ -1165,13 +1165,20 @@ class BinanceFuturesBroker:
                 self._reconcile_external_closes(closed_symbols)
             if self.db:
                 # 只在仓位真正变化（新开/加减仓/改杠杆/换来源）时才写流水，
-                # 避免每个慢循环都重复插入同样的 OPEN 行撑爆表格
-                last_rows: dict[str, dict[str, Any]] = {}
+                # 避免每个慢循环都重复插入同样的 OPEN 行撑爆表格。
+                #
+                # 注意 GROUP BY 必须带 side：本系统跑的是双向持仓（Hedge mode），
+                # 同一个 symbol 可以同时有多头和空头。若只按 symbol 取 MAX(id)，
+                # 子查询每个 symbol 只会返回一行（某一侧），而下面的判据又要求
+                # prev.side == side——于是 LONG/SHORT 交替时永远有一侧匹配不上，
+                # 每个慢循环都会为「匹配不上的那一侧」再插一条 OPEN，
+                # 行 id 呈 251/253/255 与 252/254/256 交替递增，表被撑爆。
+                last_rows: dict[tuple[str, str], dict[str, Any]] = {}
                 for row in self.db.fetch_all(
                     "SELECT symbol, side, qty, entry_price, leverage, source, status "
-                    "FROM positions WHERE id IN (SELECT MAX(id) FROM positions GROUP BY symbol)"
+                    "FROM positions WHERE id IN (SELECT MAX(id) FROM positions GROUP BY symbol, side)"
                 ):
-                    last_rows[str(row["symbol"])] = dict(row)
+                    last_rows[(str(row["symbol"]), str(row["side"]))] = dict(row)
                 for p in pos:
                     amt = float(p.get("positionAmt") or 0)
                     meta = ledger.get("positions", {}).get(p["symbol"], {}) or {}
@@ -1180,7 +1187,7 @@ class BinanceFuturesBroker:
                     qty = abs(amt)
                     leverage = int(float(p.get("leverage") or 1))
                     source = str(meta.get("source", "ai") or "ai")
-                    prev = last_rows.get(p["symbol"])
+                    prev = last_rows.get((p["symbol"], side))
                     if (prev and str(prev.get("status")) == "OPEN"
                             and str(prev.get("side")) == side
                             and abs(float(prev.get("qty") or 0) - qty) < 1e-12

@@ -7,7 +7,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 def utc_now() -> str:
@@ -582,6 +582,57 @@ class AuditDatabase:
              source, strategy_id, ticket_id, margin_mode,
              status, utc_now(), json.dumps({"symbol": symbol, "side": side, "qty": qty}, ensure_ascii=False)),
         )
+
+    def close_open_positions(self, *, exclude_ids: Iterable[int] = (),
+                             realized_pnl: float | None = None,
+                             note: str = "") -> int:
+        """批量把 positions 表里仍为 OPEN 的行置为 CLOSED（保留行本身，不删数据）。
+
+        为什么需要这个方法：
+        positions 是一张**流水表**而不是状态表——仓位每次变化就插一行，
+        但 log_position 只有 INSERT，全工程没有任何地方能把一行收口成 CLOSED。
+        正常路径下无所谓（去重判据命中就不插新行，旧行一直留着当历史），
+        可一旦去重判据失效（见 sync_positions 的 GROUP BY 缺陷），
+        这些 OPEN 行就再也没人关掉，永久滞留成幽灵台账。
+        这个方法是清理历史数据的补救入口：**只改状态、不删行**，审计链完整。
+
+        :param exclude_ids: 这些 id 保持 OPEN（通常是对账后确认在交易所还活着的仓位）
+        :param realized_pnl: 写入 realized_pnl；None 表示保持原值不动
+        :param note: 写进 raw_json 的 _close_note，记录这一行为什么被关掉
+        :return: 实际被关闭的行数
+        """
+        keep = {int(i) for i in exclude_ids}
+        now = utc_now()
+        rows = self.fetch_all("SELECT id, raw_json FROM positions WHERE status = 'OPEN'")
+        targets = [int(r["id"]) for r in rows if int(r["id"]) not in keep]
+        if not targets:
+            return 0
+        with self.lock:
+            for r in rows:
+                pid = int(r["id"])
+                if pid in keep:
+                    continue
+                raw = r["raw_json"]
+                if note:
+                    try:
+                        data = json.loads(raw) if raw else {}
+                    except (TypeError, ValueError):
+                        data = {}
+                    if not isinstance(data, dict):
+                        data = {"_prev": data}
+                    data["_close_note"] = note
+                    raw = json.dumps(data, ensure_ascii=False)
+                if realized_pnl is None:
+                    self.conn.execute(
+                        "UPDATE positions SET status='CLOSED', closed_at=?, raw_json=? WHERE id=?",
+                        (now, raw, pid))
+                else:
+                    self.conn.execute(
+                        "UPDATE positions SET status='CLOSED', closed_at=?, realized_pnl=?, "
+                        "raw_json=? WHERE id=?",
+                        (now, float(realized_pnl), raw, pid))
+            self.conn.commit()
+        return len(targets)
 
     def log_signal_event(self, *, signal_id: str, strategy_id: str, symbol: str,
                          timeframe: str, side: str, signal_time: str,
