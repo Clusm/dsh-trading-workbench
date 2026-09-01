@@ -112,12 +112,12 @@
 </table>
 </div>
 {% elif broker_error %}<div class="empty" style="color:var(--red)">持仓加载失败：{{ broker_error }}</div>
-{% else %}<div class="empty" id="positions-empty">暂无仓位</div>{% endif %}
+{% else %}<div class="empty" id="positions-empty">暂无仓位 <button class="secondary" style="margin:0 0 0 10px; padding:4px 12px; font-size:12px" onclick="runCycle()">立即运行一轮</button><span class="muted" style="margin-left:8px">产生首轮决策后建仓</span></div>{% endif %}
 </div>
 
 <div class="grid cols-2" style="margin-top:18px">
   <div class="card">
-    <h3>最近订单 <button class="secondary btn-export" onclick="exportTableCSV(this,'recent_orders.csv')">导出 CSV</button></h3>
+    <h3>最近订单 <a href="/orders" class="button-link" style="font-size:12px; margin-left:6px">查看全部 →</a> <button class="secondary btn-export" onclick="exportTableCSV(this,'recent_orders.csv')">导出 CSV</button></h3>
     {# 首屏仍由服务端渲染（保证一进来就有内容），之后由 loadOrders 整块替换自动刷新 #}
     <div id="orders-box">
     {% if orders %}
@@ -128,7 +128,7 @@
     <tr><td class="muted" style="white-space:nowrap">{{ o.created_at[:19].replace('T',' ') }}</td><td><strong>{{ o.symbol }}</strong></td><td>{{ o.display_side or (o.side|side_cn) }}</td><td class="num">{{ "%.2f"|format(o.notional) }} U</td><td class="num">{{ "%.2f"|format(o.margin) }} U</td><td class="num">{{ o.price or '-' }}</td><td class="num {{ 'pos' if o.pnl is not none and o.pnl >= 0 else ('neg' if o.pnl is not none else 'muted') }}">{{ o.pnl|signed if o.pnl is not none else ('持仓中' if o.status=='FILLED' else '-') }}</td><td><span class="badge {{ 'ok' if o.status=='FILLED' else 'muted' }}">{{ o.status|status_cn }}</span></td></tr>
     {% endfor %}</tbody></table>
     </div>
-    {% else %}<div class="empty">暂无订单</div>{% endif %}
+    {% else %}<div class="empty">暂无订单 <span class="muted">运行一轮后产生首笔订单</span></div>{% endif %}
     </div>
   </div>
   <div class="card">
@@ -354,7 +354,7 @@ async function loadOrders(){
   try{
     const d = await apiFetch('/api/orders');
     const rows = d.orders || [];
-    if (!rows.length){ box.innerHTML = '<div class="empty">暂无订单</div>'; return; }
+    if (!rows.length){ box.innerHTML = '<div class="empty">暂无订单 <span class="muted">运行一轮后产生首笔订单</span></div>'; return; }
     box.innerHTML = '<div class="table-wrap"><table><thead><tr>' +
       '<th data-sort="str">时间</th><th data-sort="str">交易对</th><th>方向</th>' +
       '<th class="num" data-sort="num">仓位</th><th class="num" data-sort="num">保证金</th>' +
@@ -382,7 +382,7 @@ function renderPositions(rows){
   const body = document.getElementById('positions-body');
   renderExposure(rows);
   if (!body) return;
-  if (!rows.length){ body.innerHTML = '<tr><td colspan="11" class="muted" style="text-align:center">暂无仓位</td></tr>'; return; }
+  if (!rows.length){ body.innerHTML = '<tr><td colspan="11" style="text-align:center"><span class="muted">暂无仓位</span> <button class="secondary" style="margin-left:10px; padding:3px 11px; font-size:12px" onclick="runCycle()">立即运行一轮</button></td></tr>'; return; }
   const sideMap = {'LONG':'做多','SHORT':'做空'};
   body.innerHTML = rows.map(p => {
     const c = p.upnl >= 0 ? 'pos' : 'neg';

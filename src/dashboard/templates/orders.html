@@ -23,14 +23,35 @@
 {# 决策记录已迁到 /decisions（交易页）：它属于「为什么这么做」，
    和订单/流水这类「做过什么」混在一起会让两边都看不清。 #}
 
-<div class="grid cols-2" style="margin-top:16px">
+{# 客户端筛选：数据已全量渲染，纯前端过滤，不走后端 #}
+{% set all_symbols = ((orders|map(attribute='symbol')|list + positions|map(attribute='symbol')|list)|unique|sort) %}
+<div class="row" style="gap:8px; margin-top:16px; flex-wrap:wrap; align-items:center">
+  <select id="f-symbol" onchange="applyOrderFilter()" style="margin:0">
+    <option value="">全部交易对</option>
+    {% for s in all_symbols %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+  </select>
+  <select id="f-side" onchange="applyOrderFilter()" style="margin:0">
+    <option value="">全部方向</option>
+    <option value="LONG">做多</option>
+    <option value="SHORT">做空</option>
+    <option value="__prot">保护单(止损/止盈)</option>
+  </select>
+  <select id="f-status" onchange="applyOrderFilter()" style="margin:0">
+    <option value="">全部状态</option>
+    <option value="FILLED">已成交</option>
+    <option value="NEW">待成交</option>
+  </select>
+  <span class="muted" id="f-count" style="font-size:12px"></span>
+</div>
+
+<div class="grid cols-2" style="margin-top:10px">
   <div class="card"><h3>订单 <button class="secondary btn-export" onclick="exportTableCSV(this,'orders.csv')">导出 CSV</button></h3>
   {% if orders %}
   <div class="table-wrap">
   <table><thead><tr><th data-sort="str">时间</th><th data-sort="str">交易对</th><th>方向</th><th class="num" data-sort="num">仓位</th><th class="num" data-sort="num">保证金</th><th class="num" data-sort="num">价格</th><th>状态</th></tr></thead>
-  <tbody>
+  <tbody id="orders-tbody">
   {% for o in orders %}
-  <tr><td class="muted" style="white-space:nowrap">{{ o.created_at[:19].replace('T',' ') }}</td><td><strong>{{ o.symbol }}</strong></td><td>{{ o.side|side_cn }}</td><td class="num">{{ "%.2f"|format(o.notional) }} U</td><td class="num">{{ "%.2f"|format(o.margin) }} U</td><td class="num">{{ o.price or '-' }}</td><td><span class="badge {{ 'ok' if o.status=='FILLED' else 'muted' }}">{{ o.status|status_cn }}</span></td></tr>
+  <tr data-symbol="{{ o.symbol }}" data-side="{{ o.side }}" data-status="{{ o.status }}"><td class="muted" style="white-space:nowrap">{{ o.created_at[:19].replace('T',' ') }}</td><td><strong>{{ o.symbol }}</strong></td><td>{{ o.side|side_cn }}</td><td class="num">{{ "%.2f"|format(o.notional) }} U</td><td class="num">{{ "%.2f"|format(o.margin) }} U</td><td class="num">{{ o.price or '-' }}</td><td><span class="badge {{ 'ok' if o.status=='FILLED' else 'muted' }}">{{ o.status|status_cn }}</span></td></tr>
   {% endfor %}</tbody></table>
   </div>
   {% else %}<div class="empty">暂无订单</div>{% endif %}
@@ -39,9 +60,9 @@
   {% if positions %}
   <div class="table-wrap">
   <table><thead><tr><th data-sort="str">时间</th><th data-sort="str">交易对</th><th>方向</th><th class="num" data-sort="num">数量</th><th class="num" data-sort="num">价格</th><th>状态</th></tr></thead>
-  <tbody>
+  <tbody id="positions-tbody">
   {% for p in positions %}
-  <tr><td class="muted" style="white-space:nowrap">{{ p.opened_at[:19].replace('T',' ') }}</td><td><strong>{{ p.symbol }}</strong></td><td>{{ p.side|side_cn }}</td><td class="num">{{ p.qty|round(6) }}</td><td class="num">{{ '%.5g'|format(p.entry_price or 0) }}</td><td><span class="badge {{ 'ok' if p.status in ('OPEN','CLOSED') else 'muted' }}">{{ p.status|status_cn }}</span></td></tr>
+  <tr data-symbol="{{ p.symbol }}" data-side="{{ p.side }}" data-status="{{ p.status }}"><td class="muted" style="white-space:nowrap">{{ p.opened_at[:19].replace('T',' ') }}</td><td><strong>{{ p.symbol }}</strong></td><td>{{ p.side|side_cn }}</td><td class="num">{{ p.qty|round(6) }}</td><td class="num">{{ '%.5g'|format(p.entry_price or 0) }}</td><td><span class="badge {{ 'ok' if p.status in ('OPEN','CLOSED') else 'muted' }}">{{ p.status|status_cn }}</span></td></tr>
   {% endfor %}</tbody></table>
   </div>
   {% else %}<div class="empty">暂无仓位流水</div>{% endif %}
@@ -62,6 +83,37 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+/* ===== 订单/流水筛选：纯客户端过滤，同时作用于两张表 ===== */
+function _rowMatch(tr, sym, side, st){
+  const s = tr.dataset;
+  if (sym && s.symbol !== sym) return false;
+  if (side){
+    if (side === '__prot'){ if (s.side !== 'STOP' && s.side !== 'TAKE') return false; }
+    else if (s.side !== side) return false;
+  }
+  if (st && s.status !== st) return false;
+  return true;
+}
+function applyOrderFilter(){
+  const sym = document.getElementById('f-symbol').value;
+  const side = document.getElementById('f-side').value;
+  const st = document.getElementById('f-status').value;
+  let shown = 0, total = 0;
+  for (const id of ['orders-tbody', 'positions-tbody']){
+    const tb = document.getElementById(id);
+    if (!tb) continue;
+    for (const tr of tb.rows){
+      total++;
+      const ok = _rowMatch(tr, sym, side, st);
+      tr.style.display = ok ? '' : 'none';
+      if (ok) shown++;
+    }
+  }
+  const c = document.getElementById('f-count');
+  if (c) c.textContent = (sym || side || st) ? '显示 ' + shown + ' / ' + total + ' 条' : '';
+}
+</script>
 <script>
 /* 每日盈亏柱状图：按天聚合快照权益差 */
 async function loadDailyPnl(){
