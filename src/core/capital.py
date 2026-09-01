@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -22,10 +23,17 @@ class CapitalManager:
         self.threshold = float(bankruptcy_threshold)
         self.reset_on_bankruptcy = bool(reset_on_bankruptcy)
         self.max_margin_usage = float(max_margin_usage)
-        self.baseline = self._load_or_init_baseline()
+        # baseline 读写锁必须先于 _load_or_init_baseline()：构造期间的兕底
+        # 路径会调用 _save() 落盘初始 baseline。用 RLock：重置路径在持锁状态下
+        # 更新 self.baseline 后再调 _save()（内部也加锁），同线程重入不能死锁。
+        self._save_lock = threading.RLock()
+        # 权益兜底属性必须先于 _load_or_init_baseline() 初始化：
+        # 非 paper 模式构造期间会调 _exchange_equity()，接口不可用走
+        # 兜底路径时读取 _last_exchange_equity，若此时还未定义会直接崩。
         self.last_reset: dict[str, Any] | None = None
         self._last_exchange_equity: float | None = None
         self._equity_stale = False
+        self.baseline = self._load_or_init_baseline()
 
     def _load_or_init_baseline(self) -> float:
         if self.state_file.exists():
@@ -84,12 +92,14 @@ class CapitalManager:
         return 0.0
 
     def _save(self, baseline: float) -> None:
-        tmp = self.state_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps({
-            "initial_equity": self.initial_equity,
-            "baseline": baseline,
-        }, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, self.state_file)
+        with self._save_lock:
+            tmp = self.state_file.with_name(
+                f"{self.state_file.stem}.tmp-{os.getpid()}-{threading.get_ident()}")
+            tmp.write_text(json.dumps({
+                "initial_equity": self.initial_equity,
+                "baseline": baseline,
+            }, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self.state_file)
 
     def session_equity(self) -> float:
         return round(self._exchange_equity() - self.baseline, 2)
@@ -149,8 +159,9 @@ class CapitalManager:
                 "new_baseline": new_baseline,
                 "session_equity_after_reset": self.initial_equity,
             }
-            self.baseline = new_baseline
-            self._save(new_baseline)
+            with self._save_lock:
+                self.baseline = new_baseline
+                self._save(new_baseline)
             self.db.log_risk_event(event_type="capital_reset", severity="critical",
                                    details=f"会话权益 {session_eq:.2f} <= {self.threshold}，"
                                            f"平仓并从 {self.initial_equity:.0f}U 重启",
@@ -185,8 +196,9 @@ class CapitalManager:
             "session_equity_after_reset": self.initial_equity,
             "manual": True,
         }
-        self.baseline = new_baseline
-        self._save(new_baseline)
+        with self._save_lock:
+            self.baseline = new_baseline
+            self._save(new_baseline)
         self.db.log_risk_event(event_type="manual_capital_reset", severity="warn",
                                details=f"手动重置：平掉全部仓位，资金回到 {self.initial_equity:.0f}U",
                                action_taken="close_all + reset")
