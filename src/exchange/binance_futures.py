@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from datetime import datetime, timezone
 from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
 from typing import Any
@@ -747,6 +748,16 @@ class BinanceFuturesBroker:
             chunk_confirmed = self._fill_confirmed(data)
             fill_unconfirmed = fill_unconfirmed or not chunk_confirmed
             price = float(data.get("avgPrice") or data.get("price") or 0.0)
+            # 开仓手续费：通道权益对账必需。通道侧 day_pnl 只累计平仓单的
+            # net_pnl（含平仓费），若开仓费不入账，渠道合计会比交易所钱包
+            # 差值多出全部开仓手续费（实测 0.254/500U ≈ 0.05%）。成交确认后
+            # 从成交流水取 commission 写入 open raw，由 channels 统计扣回。
+            open_commission = None
+            if chunk_confirmed:
+                try:
+                    _, open_commission = self._order_trade_fee(symbol, data.get("orderId"))
+                except Exception:
+                    open_commission = None
             margin = self._position_margin(symbol)
             total_margin = margin
             order_count += 1
@@ -762,6 +773,7 @@ class BinanceFuturesBroker:
                         "margin_mode": margin_mode,
                         "limit_price": getattr(intent, "limit_price", None),
                         "limit_expires_at": getattr(intent, "limit_expires_at", None),
+                        "commission": open_commission,
                         "fill_confirmed": chunk_confirmed,
                         "chunk_index": order_count, "chunk_total": len(chunks)})
             self._log_order(symbol=symbol, side=intent.side, order_type=intent.order_type,
@@ -1424,10 +1436,45 @@ class BinanceFuturesBroker:
                 except Exception:
                     pass
 
+    @staticmethod
+    def _parse_iso_ms(value: object) -> int | None:
+        """把 opened_at 之类的 ISO 串解析成毫秒时间戳；解析不了返回 None。
+
+        SQLite 里可能存 '2026-09-02T09:36:06.958+00:00'（带时区）、
+        也可能存 '2026-09-02 09:36:06'（datetime('now') 的空格格式），都要能吃下。
+        """
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            norm = text.replace("Z", "+00:00").replace(" ", "T", 1) if "T" not in text \
+                else text.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(norm)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+
     def _reconcile_one_close(self, symbol: str) -> None:
-        """补记单个 symbol 最近一笔未被记录的平仓成交。"""
+        """补记单个 symbol 最近一笔未被记录的平仓成交。
+
+        2026-09-02 修：原实现有两个错误假设，导致补记出来的数据是**错的**
+        （实测把 08-30 的陈年成交当成 09-02 的平仓，记成 3.0 @ 4.919、净亏手续费；
+         交易所真实成交是 10.0 @ 5.8830、realizedPnl=+3.575）：
+
+        1. 以为 `/fapi/v1/userTrades` 不传 startTime 时「按时间倒序、最新在前」。
+           实测恰好相反——它从**账户史上最早的成交**开始正序返回。于是 limit=20
+           取到的是最老的 20 笔，最近的平仓根本不在列表里；再加上 break 取第一个，
+           命中的就是历史深处第一笔方向相反的成交。
+        2. 以为一笔订单只会产生一笔成交。市价单常被拆成多笔
+           （实测同一 orderId 拆成 3+8+9 共 20 张），只取遍历到的第一笔必然漏量。
+
+        修法：显式传 startTime 卡时间窗 → 显式按 time 倒序 → 按 orderId 聚合成交
+        → 校验时间晚于开仓、数量能覆盖持仓量，任一不过就放弃（宁缺毋滥）。
+        """
         rows = self.db.fetch_all(
-            "SELECT id, side, qty, leverage FROM positions "
+            "SELECT id, side, qty, leverage, entry_price, opened_at FROM positions "
             "WHERE symbol=? AND status='OPEN' ORDER BY id DESC LIMIT 1", (symbol,))
         if not rows:
             return
@@ -1437,61 +1484,109 @@ class BinanceFuturesBroker:
             return
         # 平多要卖出、平空要买回，方向与原仓位相反
         want_side = "SELL" if open_side == "LONG" else "BUY"
+        open_qty = abs(float(prev.get("qty") or 0.0))
+        entry_price = float(prev.get("entry_price") or 0.0)
+        leverage = int(float(prev.get("leverage") or 1)) or 1
+        if open_qty <= 0:
+            return
+
+        # 时间窗下界：开仓时刻往前 10 分钟。不传 startTime 时接口会从最早成交开始
+        # 返回，最近的成交反而取不到，所以必须显式卡窗口。
+        opened_ms = self._parse_iso_ms(prev.get("opened_at"))
+        start_ms = (opened_ms if opened_ms is not None
+                    else int(time.time() * 1000) - 24 * 3600 * 1000) - 10 * 60 * 1000
 
         # attempts=1：demo 环境这个接口经代理很慢，重试两次能把慢循环拖到几十秒
         trades = self._signed("GET", "/fapi/v1/userTrades",
-                              {"symbol": symbol, "limit": 20}, attempts=1) or []
+                              {"symbol": symbol, "limit": 100,
+                               "startTime": start_ms}, attempts=1) or []
         if not isinstance(trades, list):
             return
 
-        hit = None
-        for t in trades:  # userTrades 默认按时间倒序，最新在前
+        # 按 orderId 聚合：同一笔平仓单常被拆成多笔成交，合并后才是真实数量与均价
+        groups: dict[str, dict[str, float]] = {}
+        for t in trades:
             if str(t.get("side") or "").upper() != want_side:
+                continue
+            t_ms = int(t.get("time") or 0)
+            if t_ms <= start_ms:  # 开仓之前的成交，与本次平仓无关
                 continue
             oid = str(t.get("orderId") or "")
             if not oid:
                 continue
-            # 去重：这笔成交已经记过（系统自己下的单）就不再补
+            # 去重：这笔成交已经记过（系统自己下的单）就整单跳过
             if self.db.fetch_all("SELECT id FROM orders WHERE exchange_order_id=? LIMIT 1", (oid,)):
                 continue
-            hit = t
-            break
-        if not hit:
+            q = abs(float(t.get("qty") or 0.0))
+            px = float(t.get("price") or 0.0)
+            g = groups.setdefault(oid, {"qty": 0.0, "notional": 0.0,
+                                        "realized": 0.0, "commission": 0.0,
+                                        "time": float(t_ms)})
+            g["qty"] += q
+            g["notional"] += q * px
+            g["realized"] += float(t.get("realizedPnl") or 0.0)
+            g["commission"] += abs(float(t.get("commission") or 0.0))
+            g["time"] = max(g["time"], float(t_ms))
+        if not groups:
             return
 
-        oid = str(hit.get("orderId") or "")
-        qty = abs(float(hit.get("qty") or 0.0))
-        price = float(hit.get("price") or 0.0)
-        realized = float(hit.get("realizedPnl") or 0.0)
-        commission = abs(float(hit.get("commission") or 0.0))
-        leverage = int(float(prev.get("leverage") or 1)) or 1
+        # 时间最新优先；数量/时间对不上的一律放弃，避免污染台账
+        for oid, g in sorted(groups.items(), key=lambda kv: kv[1]["time"], reverse=True):
+            qty = g["qty"]
+            if qty <= 0 or g["notional"] <= 0:
+                continue
+            price = g["notional"] / qty
+            realized = g["realized"]
+            commission = g["commission"]
 
-        self.db.log_order(
-            client_order_id=f"mta-sync-{symbol}-{oid}",
-            exchange_order_id=oid,
-            symbol=symbol,
-            # side 传原仓位方向，配合 raw.action='close'，
-            # _enrich_orders 会据此显示成"平多"/"平空"
-            side=open_side,
-            order_type="MARKET",
-            qty=qty,
-            price=price,
-            status="FILLED",
-            raw={
-                "action": "close",
-                "net_pnl": realized - commission,
-                "commission": -commission,
-                "margin": round(qty * price / leverage, 8),
-                "reconciled": True,
-                "note": "保护单触发或交易所手动平仓，由成交流水补记",
-            },
-            order_source="exchange_sync",
-            margin_mode="ISOLATED",
-        )
-        self.db.log_risk_event(
-            event_type="futures_close_reconciled", severity="info",
-            details=f"{symbol} {open_side} {qty} @ {price} 在交易所被平仓，已由成交流水补记",
-            action_taken="order_reconciled")
+            # 只挡「数量远超持仓」——那说明抓到的是别的单（历史陈账、他人的成交）。
+            # 不挡下界：交易所端的部分平仓是真实场景，少平几张也要如实补记。
+            if qty > open_qty * 1.05:
+                self.db.log_risk_event(
+                    event_type="futures_close_reconcile_mismatch", severity="warn",
+                    details=(f"{symbol} 补记数量 {qty:g} 远超持仓 {open_qty:g}，判定为抓错单，"
+                             f"放弃补记（宁缺毋滥，避免污染 order 台账）"),
+                    action_taken="skip")
+                continue
+            partial = qty < open_qty * 0.98
+
+            # 交易所对非平仓成交返回的 realizedPnl 恒为 0，此时按开仓价手算，
+            # 免得把一笔真实盈利记成「只亏了手续费」。
+            if abs(realized) < 1e-12 and entry_price > 0:
+                diff = (price - entry_price) if open_side == "LONG" else (entry_price - price)
+                realized = diff * qty
+
+            self.db.log_order(
+                client_order_id=f"mta-sync-{symbol}-{oid}",
+                exchange_order_id=oid,
+                symbol=symbol,
+                # side 传原仓位方向，配合 raw.action='close'，
+                # _enrich_orders 会据此显示成"平多"/"平空"
+                side=open_side,
+                order_type="MARKET",
+                qty=qty,
+                price=round(price, 8),
+                status="FILLED",
+                raw={
+                    "action": "close",
+                    "net_pnl": realized - commission,
+                    "commission": -commission,
+                    "margin": round(qty * price / leverage, 8),
+                    "reconciled": True,
+                    "fills": round(qty, 8),
+                    "partial": partial,
+                    "note": "保护单触发或交易所手动平仓，由成交流水补记",
+                },
+                order_source="exchange_sync",
+                margin_mode="ISOLATED",
+            )
+            self.db.log_risk_event(
+                event_type="futures_close_reconciled", severity="info",
+                details=(f"{symbol} {open_side} {qty:g} @ {price:.6f} 在交易所被平仓"
+                         f"{'（部分平仓）' if partial else ''}，"
+                         f"已由成交流水补记（已实现盈亏 {realized - commission:+.4f}）"),
+                action_taken="order_reconciled")
+            return
 
     def close(self) -> None:
         self._client.close()

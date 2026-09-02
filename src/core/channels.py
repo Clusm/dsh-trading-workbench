@@ -142,12 +142,18 @@ class ChannelManager:
         wins = 0
         losses = 0
         fees = 0.0
+        open_fees = 0.0
         for r in rows:
             try:
                 raw = json.loads(r["raw_json"] or "{}")
             except Exception:
                 raw = {}
             action = str(raw.get("action") or "")
+            # 开仓手续费：总侧钱包口径天然包含开仓费，通道侧也必须扣减，
+            # 否则渠道合计永远比总权益多出开仓手续费（口径缺口）。
+            if action == "open":
+                open_fees += float(raw.get("commission") or 0.0)
+                continue
             if action not in ("close", "close_all", "close_source"):
                 continue
             trade_pnl = float(raw.get("net_pnl", raw.get("pnl", 0.0)) or 0.0)
@@ -166,7 +172,7 @@ class ChannelManager:
             "wins": wins,
             "losses": losses,
             "win_rate": (wins / closed) if closed else 0.0,
-            "realized_pnl": round(pnl, 4),
+            "realized_pnl": round(pnl + open_fees, 4),
             "fees": round(fees, 4),
         }
 
