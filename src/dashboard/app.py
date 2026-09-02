@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import math
 import os
 import secrets
 import threading
@@ -194,6 +195,32 @@ def _pct(value: Any, digits: int = 2) -> str:
         return "n/a"
 
 
+def _price(value: Any) -> str:
+    """价格格式化：定点 8 位小数后去掉尾零，绝不丢精度、绝不出现科学计数法。
+
+    此前用 5 位有效数字（%.5g / toPrecision(5)），会把 BTC 这类大价位
+    （118234.5 -> 118230.0 / "1.1823e+5"）截掉小数，也会把 108.234 压成
+    108.23。价格量级跨度从 1e-8 到 1e5，必须按"保留足够小数位再删尾零"
+    处理，而不是按有效数字截断。
+    """
+    if value is None or value == "":
+        return "-"
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(f):
+        return "-"
+    if f == 0:
+        return "0"
+    if abs(f) < 1e-6:
+        # 极小价位（meme 币）：定点会直接显示成 0，退回有效数字表示
+        s = f"{f:.8g}"
+        return s
+    s = f"{f:.8f}".rstrip("0").rstrip(".")
+    return s or "0"
+
+
 def _ago(value: Any) -> str:
     try:
         if isinstance(value, str):
@@ -224,6 +251,7 @@ templates.env.filters["signed"] = _signed
 templates.env.filters["pct"] = _pct
 templates.env.filters["ago"] = _ago
 templates.env.filters["pnl_cls"] = _pnl_cls
+templates.env.filters["price"] = _price
 
 def _decision_cn(value: Any) -> str:
     return {
@@ -306,6 +334,7 @@ def _event_type_cn(value: Any) -> str:
         "futures_close_reconcile_error": "外部平仓补记失败",
         "control_block_open": "控制状态拦截开仓",
         "snapshot_rejected": "权益快照跳变已拦截",
+        "futures_close_reconcile_mismatch": "外部平仓补记数量不符",
         "futures_close_source_error": "分通道强平错误",
         "futures_unsupported_symbol": "不支持的交易对已拦截",
         "signal_fn_missing": "策略信号函数缺失",
@@ -532,6 +561,11 @@ def _capital_overview(service: TradingService, broker_state: dict[str, Any],
         pnl = round(session_eq - initial_eq, 2)
         realized = round(pnl - unrealized, 2)
     pnl_pct = (pnl / initial_eq * 100) if initial_eq else 0.0
+    # 基线严重失配检测：钱包余额与(baseline+起始资金)偏差超过 2 倍起始资金时，
+    # 几乎可以断定不是交易盈亏，而是外部事件（典型：币安测试网每月重置资金、
+    # 手动从 faucet 领取/转出）。此时"已实现收益"数字不可信，需要页面提示用户重置。
+    mismatch = bool(wallet > 0 and initial_eq > 0
+                    and abs(realized) > initial_eq * 2)
     return {
         "session_equity": session_eq,
         "initial_equity": initial_eq,
@@ -539,6 +573,7 @@ def _capital_overview(service: TradingService, broker_state: dict[str, Any],
         "pnl_pct": pnl_pct,
         "realized_pnl": realized,
         "unrealized_pnl": unrealized,
+        "baseline_mismatch": mismatch,
     }
 
 
@@ -573,26 +608,23 @@ def _enriched_positions(service: TradingService, latest: dict[str, Any],
         margin = float(p.get("margin") or 0.0)
         if margin <= 0:
             margin = notional / max(1, int(p.get("leverage") or 1))
-        # 价格显示用 5 位有效数字，去掉浮点尾巴（102.10000000000001 -> 102.1）
-        entry = float(f"{entry:.5g}")
-        if last:
-            last = float(f"{last:.5g}")
+        # 金额类保留原精度（仅收敛浮点长尾），价格类一律不再截断：
+        # 之前对 entry/last/SL/TP 用 %.5g（5 位有效数字）会让 BTC 这类大价位
+        # 从 118234.5 变成 118230.0，且截断发生在 upnl 计算之后，导致页面
+        # 展示的价格与对应的盈亏对不上账。展示层统一交给 |price / FMT.px 处理。
         if upnl:
-            upnl = float(f"{upnl:.6g}")
-            upnl_pct = float(f"{upnl_pct:.5g}")
+            upnl = float(f"{upnl:.6f}")
+            upnl_pct = float(f"{upnl_pct:.4f}")
         if notional:
-            notional = float(f"{notional:.6g}")
+            notional = float(f"{notional:.6f}")
         if margin:
-            margin = float(f"{margin:.6g}")
-        mark = p.get("mark_price")
-        if mark is not None:
-            p = {**p, "mark_price": float(f"{float(mark):.5g}")}
+            margin = float(f"{margin:.6f}")
         stop_loss = p.get("stop_loss")
         take_profit = p.get("take_profit")
         if stop_loss is not None:
-            stop_loss = float(f"{float(stop_loss):.5g}")
+            stop_loss = float(stop_loss)
         if take_profit is not None:
-            take_profit = float(f"{float(take_profit):.5g}")
+            take_profit = float(take_profit)
         if stop_loss is None or take_profit is None:
             # 一次性批量取保护单触发价（30s 缓存），替代旧的逐仓 _algo_prices 签名请求
             prot = _algo_prices_by_symbol(service).get(p["symbol"]) or {}
@@ -978,6 +1010,7 @@ def create_app(service: TradingService) -> FastAPI:
             "pnl": pnl,
             "pnl_pct": pnl_pct,
             "realized_pnl": realized_pnl,
+            "baseline_mismatch": cap.get("baseline_mismatch"),
             "broker_error": broker_error,
             "orders": orders,
             "events": events,
