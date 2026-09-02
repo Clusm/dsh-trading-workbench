@@ -5,7 +5,7 @@ import json
 import uuid
 
 from audit.database import AuditDatabase
-from core.action_space import ActionSpace
+from core.action_space import NEW_POSITION_ACTION, ActionSpace
 from core.agent_recorder import AgentRecorder
 
 from .models import RiskVerdict, TradeDecision
@@ -42,6 +42,31 @@ def evaluate_risk(decision: TradeDecision, risk_config: dict[str, Any],
         if len(decision.intents) > max_slots:
             return _reject(decision, run_id, db, recorder,
                            f"同时下单数 {len(decision.intents)} 超过 max_open_positions={max_slots}", decision_id)
+
+        # 总持仓数强制（结构性修复）：此前只约束单轮批次数量，不统计账户现有
+        # 持仓总数（含 strategy 通道），LLM 每轮开 1 仓即可无限累积，提示词里
+        # 的仓位上限纯属软约束。现在：现有总持仓 + 本批真正新增的 open（不含
+        # 对已持仓 symbol 的加仓）必须 ≤ max_open_positions。
+        # 语义：同批先平后开不抵扣——被上限卡住时先执行平仓，下一轮再开。
+        held_symbols: set[str] = set()
+        if isinstance(portfolio, dict):
+            for p in (portfolio.get("positions") or []):
+                if isinstance(p, dict) and p.get("symbol"):
+                    held_symbols.add(str(p["symbol"]).strip().upper())
+        new_open_symbols = {
+            str(getattr(it, "symbol", "") or "").strip().upper()
+            for it in decision.intents
+            if str(getattr(it, "action", None) or decision.decision) == NEW_POSITION_ACTION
+            and str(getattr(it, "symbol", "") or "").strip().upper() not in held_symbols
+        }
+        new_open_symbols.discard("")
+        if held_symbols and len(held_symbols) + len(new_open_symbols) > max_slots:
+            return _reject(
+                decision, run_id, db, recorder,
+                f"总持仓 {len(held_symbols)} 个 ({', '.join(sorted(held_symbols))}) + "
+                f"本批新开 {len(new_open_symbols)} 个 ({', '.join(sorted(new_open_symbols))}) "
+                f"超过 max_open_positions={max_slots}；先平仓或减仓，下一轮再开新仓",
+                decision_id)
 
         # 所有布尔谓词都来自 ActionSpace —— 与动态 schema、submit_decision 的 Validator
         # 回环共用同一份规则。改规则只改 core/action_space.py，三处同时生效。

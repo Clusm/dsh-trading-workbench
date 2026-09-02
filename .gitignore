@@ -22,3 +22,9 @@ data/futures_source_ledger.json
 data/_latest_prompt.txt
 data/diag_*.log
 data/web_console*.log
+
+# 复盘库运行时快照：代码只写不读（消费路径走 DB 查询），高频漂移污染 git status
+knowledge/review_lessons.json
+
+# 临时备份
+*.bak_*

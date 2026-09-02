@@ -65,6 +65,7 @@ def _make_broker():
     b.environment = "demo"
     b.ledger_file = ledger_path
     b._ledger_lock = threading.RLock()
+    b._resync_lock = threading.RLock()
     b._FALLBACK_SL_PCT = 0.02
     b._FALLBACK_TP_PCT = 0.04
     b._symbol_filters = {}

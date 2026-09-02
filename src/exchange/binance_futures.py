@@ -68,8 +68,28 @@ class BinanceFuturesBroker:
         # 保护单兜底比例：adopt 的无主仓位按标记价 ±比例补挂初始 SL/TP
         self._FALLBACK_SL_PCT = 0.02
         self._FALLBACK_TP_PCT = 0.04
+        # 保护单同步串行化：快循环 sync_protections（service 持 _protection_lock）
+        # 与慢循环执行节点开仓后的 _place_protection 双线程并发调用
+        # _resync_protection，会同时"撤旧挂新"产生瞬时重复挂单/多余 critical 告警。
+        # RLock 允许同线程重入（sync 循环内逐 symbol 调用），跨线程串行。
+        self._resync_lock = threading.RLock()
+        # 服务器时钟偏移（毫秒）：代理环境本机时钟漂移 >5s 时，固定 recvWindow
+        # 会让全部签名请求撞 -1021。启动时用 /fapi/v1/time 校准，之后每次签名
+        # 都加上偏移；校准失败（离线）时退回 0 并放宽 recvWindow 兼容小漂移。
+        self._time_offset_ms = 0
+        self._calibrate_time()
 
     # ---------- 基础设施 ----------
+    def _calibrate_time(self) -> None:
+        """用交易所服务器时间校准本机时钟偏移（P2 recvWindow）。失败静默，不影响启动。"""
+        try:
+            r = self._client.get(f"{self.base_url}/fapi/v1/time")
+            server_ms = int(r.json().get("serverTime") or 0)
+            if server_ms > 0:
+                self._time_offset_ms = server_ms - int(time.time() * 1000)
+        except Exception:
+            self._time_offset_ms = 0
+
     def _sign(self, params: dict[str, Any]) -> str:
         # 签名必须与最终发送的 query string 顺序/编码一致；这里按插入顺序签名
         qs = urllib.parse.urlencode(params)
@@ -83,8 +103,9 @@ class BinanceFuturesBroker:
         max_attempts = attempts if method == "GET" else 1
         last_err: Exception | None = None
         for i in range(max_attempts):
-            # 每次尝试重新生成 timestamp/signature，避免重试必撞 recvWindow
-            params["timestamp"] = int(time.time() * 1000)
+            # 每次尝试重新生成 timestamp/signature，避免重试必撞 recvWindow；
+            # timestamp 按启动时校准的服务器时钟偏移修正
+            params["timestamp"] = int(time.time() * 1000) + self._time_offset_ms
             params["recvWindow"] = 5000
             params["signature"] = self._sign(params)
             try:
@@ -897,6 +918,15 @@ class BinanceFuturesBroker:
     def _resync_protection(self, symbol: str, intent: Any = None,
                            stop_loss: float | None = None,
                            take_profit: float | None = None) -> bool:
+        """串行化包装：见 _resync_lock 注释。所有撤旧挂新路径必须经此进入。"""
+        with self._resync_lock:
+            return self._resync_protection_impl(symbol, intent=intent,
+                                                stop_loss=stop_loss,
+                                                take_profit=take_profit)
+
+    def _resync_protection_impl(self, symbol: str, intent: Any = None,
+                                stop_loss: float | None = None,
+                                take_profit: float | None = None) -> bool:
         """统一同步止损/止盈：只在数量或价格变化时重挂，避免每轮刷大量重复 Algo 单。"""
         existing = self._open_algos(symbol)
         old_prices = self._algo_prices(symbol)

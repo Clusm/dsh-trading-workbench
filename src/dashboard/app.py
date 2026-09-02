@@ -1102,7 +1102,7 @@ def create_app(service: TradingService) -> FastAPI:
     # 避免交易所网络抖动时多个页面轮询相互排队。----
     _STATUS_TTL = 5.0
     _status_lock = threading.Lock()
-    _status_cache: dict[str, Any] = {"ts": 0.0, "payload": None}
+    _status_cache: dict[str, Any] = {"ts": 0.0, "payload": None, "recomputing": False}
 
     def _compute_status() -> dict[str, Any]:
         latest = _latest_or_empty(service)
@@ -1156,7 +1156,23 @@ def create_app(service: TradingService) -> FastAPI:
             payload = _status_cache["payload"]
             if payload is not None and now - _status_cache["ts"] < _STATUS_TTL:
                 return payload
-        payload = _compute_status()
+            # 计算移出锁外（不阻塞其它读者），但用"临时占位"防击穿：
+            # 第一个到达的请求负责重算，锁间隙内到达的其它请求直接返回旧值。
+            if _status_cache["recomputing"]:
+                stale = _status_cache["payload"]
+                if stale is not None:
+                    return stale
+                # 冷启动且无旧值：极少数情况下才真正串行等待
+                payload = _compute_status()
+                _status_cache["ts"] = time.monotonic()
+                _status_cache["payload"] = payload
+                return payload
+            _status_cache["recomputing"] = True
+        try:
+            payload = _compute_status()
+        finally:
+            with _status_lock:
+                _status_cache["recomputing"] = False
         with _status_lock:
             _status_cache["ts"] = time.monotonic()
             _status_cache["payload"] = payload
