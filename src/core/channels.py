@@ -67,21 +67,25 @@ class ChannelManager:
 
     def _channel_day_start(self, channel: str,
                            session_equity: float | None = None) -> float:
-        # 会话权益可用时实时计算通道基准（demo/实盘通道本金 = 会话权益 × 权重），
-        # 避免同日陈旧的 day_start 残留导致通道资金不随会话权益变化。
-        if session_equity is not None and float(session_equity) > 0:
-            weight = self.strategy_weight if channel == "strategy" else self.ai_weight
-            return float(session_equity) * weight
+        # 通道基准必须是「当日开始时的本金」固定值：手动重置/每日重算时写入
+        # state，此后只读。绝不能用实时 session_equity 动态计算——那会把已
+        # 实现盈亏算进基准，day_pnl 又加一遍，渠道合计恒比总权益多出当日
+        # 盈亏（双计，实测 0.2397/500U）。
         stored = self.state.get(f"{channel}_day_start_equity")
-        if stored:
+        if stored and float(stored) > 0:
             return float(stored)
-        if session_equity is None:
+        # 无基准时才回退实时计算（服务首次启动/状态文件损坏），并回写固化
+        if session_equity is None or float(session_equity) <= 0:
             try:
                 session_equity = float(self.broker.equity({}) if hasattr(self.broker, "equity") else 0.0)
             except Exception:
                 session_equity = 0.0
         weight = self.strategy_weight if channel == "strategy" else self.ai_weight
-        return float(session_equity) * weight
+        value = float(session_equity or 0.0) * weight
+        if value > 0:
+            self.state[f"{channel}_day_start_equity"] = value
+            self._save()
+        return value
 
     def _channel_unrealized(self, channel: str) -> float:
         """Demo/实盘：按来源台账计算该通道持仓的未实现盈亏。"""
@@ -248,8 +252,8 @@ class ChannelManager:
             day_start = self._channel_day_start(channel, session_equity)
             if day_start <= 0:
                 day_start = eq
-            # 同步写回基准，保证通道资金随会话权益动态变化
-            self.state[f"{channel}_day_start_equity"] = day_start
+            # 基准只在重置/日切时写入（_channel_day_start 内部只回填缺失值），
+            # 此处不再覆盖，避免把实时盈亏渗进基准造成 day_pnl 双计
             margin = self._margin_used(channel)
             cap = eq * self.channel_max_margin_usage
             allow_new = margin <= cap
