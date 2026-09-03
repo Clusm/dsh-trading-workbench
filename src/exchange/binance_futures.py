@@ -54,6 +54,10 @@ class BinanceFuturesBroker:
         # 读请求采用较短超时，失败后由看板保留最近有效快照。
         self._client_timeout = httpx.Timeout(12.0, connect=5.0)
         self._client = httpx.Client(timeout=self._client_timeout)
+        # 客户端重建锁：dashboard 线程（紧急平仓/资金重置）与交易/同步循环
+        # 并发触发 10054/-1021/-1022 重建 client 时，若各自 close 共享句柄会
+        # 互相踩踏，报 "client has been closed"。RLock 串行化 close+重建。
+        self._client_lock = threading.RLock()
         self._symbol_filters: dict[str, dict[str, Any]] = {}
         self._load_exchange_info()
         self.last_error: str | None = None
@@ -132,11 +136,13 @@ class BinanceFuturesBroker:
                 # 10054/连接被重置时，旧 keep-alive 连接可能已失效，重建 client 再重试
                 msg = str(e)
                 if "10054" in msg or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
-                    try:
-                        self._client.close()
-                    except Exception:
-                        pass
-                    self._client = httpx.Client(timeout=self._client_timeout)
+                    # 串行化 client 重建，避免多线程并发 close 共享句柄互相踩踏
+                    with self._client_lock:
+                        try:
+                            self._client.close()
+                        except Exception:
+                            pass
+                        self._client = httpx.Client(timeout=self._client_timeout)
                 # -1021(时间戳超窗)/-1022(签名无效，多由时间戳过期引起)：
                 # 重校准服务器时间偏移后重试（仅 GET 会进入第二次循环；
                 # 实测校准偏移随时间漂移 5ms/小时，长期运行后会零星失败）
