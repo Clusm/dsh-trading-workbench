@@ -1474,7 +1474,7 @@ class BinanceFuturesBroker:
         → 校验时间晚于开仓、数量能覆盖持仓量，任一不过就放弃（宁缺毋滥）。
         """
         rows = self.db.fetch_all(
-            "SELECT id, side, qty, leverage, entry_price, opened_at FROM positions "
+            "SELECT id, side, qty, leverage, entry_price, opened_at, source FROM positions "
             "WHERE symbol=? AND status='OPEN' ORDER BY id DESC LIMIT 1", (symbol,))
         if not rows:
             return
@@ -1489,6 +1489,13 @@ class BinanceFuturesBroker:
         leverage = int(float(prev.get("leverage") or 1)) or 1
         if open_qty <= 0:
             return
+        # 归属：补记的平仓必须回到原开仓通道（strategy/ai），否则通道盈亏
+        # 统计漏掉这笔（实测 AI 仓被交易所侧平掉后，+20.24 净利不入任何
+        # 通道，渠道合计比总权益少同样金额）。exchange_sync 只作来源标记
+        # 写进 raw，供区分“通道自己平”与“同步补记”。
+        origin_source = str(prev.get("source") or "ai").strip().lower()
+        if origin_source not in ("strategy", "ai"):
+            origin_source = "ai"
 
         # 时间窗下界：开仓时刻往前 10 分钟。不传 startTime 时接口会从最早成交开始
         # 返回，最近的成交反而取不到，所以必须显式卡窗口。
@@ -1573,11 +1580,12 @@ class BinanceFuturesBroker:
                     "commission": -commission,
                     "margin": round(qty * price / leverage, 8),
                     "reconciled": True,
+                    "sync_source": "exchange_sync",
                     "fills": round(qty, 8),
                     "partial": partial,
                     "note": "保护单触发或交易所手动平仓，由成交流水补记",
                 },
-                order_source="exchange_sync",
+                order_source=origin_source,
                 margin_mode="ISOLATED",
             )
             self.db.log_risk_event(

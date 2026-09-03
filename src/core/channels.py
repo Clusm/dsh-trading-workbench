@@ -109,6 +109,17 @@ class ChannelManager:
         """该通道今日已实现盈亏（净额，含手续费）。"""
         return float(self.daily_trade_stats(channel).get("realized_pnl", 0.0))
 
+    def _channel_realized_equity(self, channel: str,
+                                 session_equity: float | None = None) -> float:
+        """仅含已实现盈亏的通道权益（不含未实现浮盈）。
+
+        专供 UTC 日切重分基准用：日切时若把未实现浮盈固化进新基准，
+        随后浮盈回吐/实际平价与浮盈不同，渠道权益与总权益就永远对不上
+        （实测虚增 10+）。基准只能用真实已落袋的钱重分。
+        """
+        return (self._channel_day_start(channel, session_equity)
+                + self._channel_pnl(channel))
+
     def _channel_equity(self, prices: dict[str, float], channel: str,
                         session_equity: float | None = None) -> float:
         if hasattr(self.broker, "equity"):
@@ -193,8 +204,11 @@ class ChannelManager:
         today = utc_today()
         if self.state.get("date") == today:
             return False
-        eq_s = self._channel_equity(prices, "strategy", session_equity)
-        eq_a = self._channel_equity(prices, "ai", session_equity)
+        # 日切重分只用已实现权益（基准+当日已实现），绝不含未实现浮盈：
+        # 浮盈没落袋就写进基准，随后回吐/实际平价与浮盈不同，渠道与总
+        # 权益永远对不上（实测虚增基准 10+，通道合计少总权益 8+）。
+        eq_s = self._channel_realized_equity("strategy", session_equity)
+        eq_a = self._channel_realized_equity("ai", session_equity)
         # 先把上一日统计落库（初始状态不落库）
         if self.state.get("date"):
             for channel, end_eq, start_eq in (
@@ -218,6 +232,7 @@ class ChannelManager:
         else:
             total = eq_s + eq_a
             if total <= 0 and session_equity and session_equity > 0:
+                # 纸面等无交易历史：用总权益（同样不含未实现——paper 无浮动概念）
                 total = float(session_equity)
             eq_s = total * self.strategy_weight
             eq_a = total * self.ai_weight
