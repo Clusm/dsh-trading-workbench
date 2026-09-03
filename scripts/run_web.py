@@ -22,6 +22,16 @@ if hasattr(sys.stdout, "reconfigure"):
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+# 必须在任何业务模块（进而任何 httpx 调用）之前设置网络出口。
+# 出口不通会导致持仓同步与行情集体超时，表现为 502 / 持仓加载失败。
+from core.net_env import apply_proxy_env  # noqa: E402
+
+_applied_proxy = apply_proxy_env()
+if _applied_proxy:
+    print(f"net: 出口={_applied_proxy.get('HTTP_PROXY')} no_proxy={_applied_proxy.get('NO_PROXY')}")
+else:
+    print("net: 未配置代理，沿用启动进程的环境变量")
+
 import uvicorn  # noqa: E402
 
 from core.config_loader import load_settings  # noqa: E402

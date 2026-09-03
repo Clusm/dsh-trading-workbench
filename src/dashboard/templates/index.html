@@ -43,6 +43,18 @@
   </div>
 </div>
 
+{% if baseline_mismatch %}
+<div class="card" id="baseline-mismatch-warn" style="border-left:3px solid #e6a23c; padding:10px 14px; margin-bottom:14px; display:flex; gap:10px; align-items:center">
+  <span style="font-size:16px">⚠️</span>
+  <div style="flex:1">
+    <b>资金基线严重失配</b>：当前钱包余额与启动基线偏差过大（不是交易盈亏造成的）。
+    常见原因：币安测试网每月重置资金、手动从 faucet 领取/转出资金。
+    下方"已实现收益"数字不可信。若要恢复准确统计，请点击右上角
+    <b>重置资金</b>（会平掉全部仓位并重新校准基线）。
+  </div>
+</div>
+{% endif %}
+
 <div class="grid cols-4">
   <div class="card metric"><div class="label">会话权益</div><div class="value" id="eq">{{ "%.2f"|format(session_eq) }}</div><div class="sub">起始 {{ "%.0f"|format(initial_eq) }} U</div><svg class="spark" id="spark-eq" width="86" height="26" aria-hidden="true"></svg></div>
   <div class="card metric"><div class="label">总盈亏</div><div class="value {{ 'pos' if pnl >= 0 else 'neg' }}" id="pnl">{{ "%+.2f"|format(pnl) }}</div><div class="sub" id="pnl-pct">{{ "%+.2f%%"|format(pnl_pct) }} · 已实现 {{ "%+.2f"|format(realized_pnl) }}</div><svg class="spark" id="spark-pnl" width="86" height="26" aria-hidden="true"></svg></div>
@@ -99,11 +111,11 @@
     <td><span class="badge {{ 'long' if p.side == 'LONG' else 'short' }}">{{ p.side|side_cn }}</span></td>
     <td class="num">{{ "%.2f"|format(p.notional) }} U</td>
     <td class="num">{{ "%.2f"|format(p.margin) }} U</td>
-    <td class="num">{{ '%.5g'|format(p.entry_price) }}</td>
-    <td class="num" id="px-{{ p.symbol }}">{{ '%.5g'|format(p.last_price) }}</td>
+    <td class="num">{{ p.entry_price|price }}</td>
+    <td class="num" id="px-{{ p.symbol }}">{{ p.last_price|price }}</td>
     <td class="num">{{ p.leverage }}x</td>
-    <td class="num">{{ p.stop_loss or '-' }}</td>
-    <td class="num">{{ p.take_profit or '-' }}</td>
+    <td class="num">{{ p.stop_loss|price }}</td>
+    <td class="num">{{ p.take_profit|price }}</td>
     <td class="num {{ 'pos' if p.upnl >= 0 else 'neg' }}">{{ "%+.2f"|format(p.upnl) }}</td>
     <td class="num {{ 'pos' if p.upnl >= 0 else 'neg' }}">{{ "%+.2f"|format(p.upnl_pct) }}%</td>
   </tr>

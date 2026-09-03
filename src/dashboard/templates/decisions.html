@@ -208,8 +208,8 @@
         <td><span class="badge {{ 'long' if it.side == 'LONG' else 'short' }}">{{ it.side|side_cn }}</span></td>
         <td class="muted">{{ it.action|decision_cn }}</td>
         <td class="num">{{ it.leverage }}x</td>
-        <td class="num">{{ it.stop_loss if it.stop_loss else '-' }}</td>
-        <td class="num">{{ it.take_profit if it.take_profit else '-' }}</td>
+        <td class="num">{{ it.stop_loss|price }}</td>
+        <td class="num">{{ it.take_profit|price }}</td>
         <td class="num">{{ '%.0f%%'|format((it.confidence or 0) * 100) }}</td>
         <td class="muted" style="font-size:12px">{{ it.reasoning }}</td>
       </tr>

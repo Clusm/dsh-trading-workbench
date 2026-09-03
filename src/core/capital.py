@@ -41,12 +41,15 @@ class CapitalManager:
                 data = json.loads(self.state_file.read_text(encoding="utf-8"))
                 if data.get("initial_equity") == self.initial_equity:
                     mode = getattr(self.broker, "mode", "paper")
-                    baseline = float(data.get("baseline", 0.0))
                     if mode == "paper":
                         return 0.0
-                    if baseline > 0:
-                        return baseline
-                    # 非 paper 模式的 baseline 必须 >0；否则重新计算
+                    # baseline >= 0 都是合法基线（0 = 会话起点交易所权益
+                    # 恰好等于起始资金，比如测试网重置后钱包就是 500、
+                    # 起始资金也是 500）。只有负值或键缺失才需要重算。
+                    if "baseline" in data:
+                        baseline = float(data["baseline"])
+                        if baseline >= 0:
+                            return baseline
             except Exception:
                 pass
         mode = getattr(self.broker, "mode", "paper")
@@ -54,11 +57,13 @@ class CapitalManager:
         if mode == "paper":
             baseline = 0.0
         elif exchange_eq <= 0:
-            # 接口不可用时的保守 fallback：baseline=初始权益，避免 session_equity 被算成真实余额
-            baseline = self.initial_equity
+            # 接口不可用且无缓存：不落盘猜测值（错误基线一旦固化，
+            # 接口恢复后 session_equity 会永久偏移），内存里临时用 0，
+            # 下次启动接口恢复时再正确固化。
+            return 0.0
         else:
             baseline = exchange_eq - self.initial_equity
-            if baseline <= 0:
+            if baseline < 0:
                 baseline = max(exchange_eq, self.initial_equity) - self.initial_equity
         self._save(baseline)
         return baseline
@@ -102,7 +107,14 @@ class CapitalManager:
             os.replace(tmp, self.state_file)
 
     def session_equity(self) -> float:
-        return round(self._exchange_equity() - self.baseline, 2)
+        eq = self._exchange_equity()
+        if eq <= 0:
+            # 接口完全不可用且无缓存时 _exchange_equity() 返回 0。
+            # 之前直接算 0 - baseline，会把 baseline 本身当负权益返回
+            # （如 -4493.59），喂给 LLM portfolio 和通道资金分配后
+            # 引发完全错误的连锁判断。未知时退回起始资金这个中性值。
+            return round(self.initial_equity, 2)
+        return round(eq - self.baseline, 2)
 
     def _total_margin(self) -> float:
         try:

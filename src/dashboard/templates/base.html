@@ -383,12 +383,21 @@
     sign(v, d){ return (Number(v || 0) >= 0 ? '+' : '') + FMT.num(v, d); },
     pct(v, d){ return (Number(v || 0) >= 0 ? '+' : '') + FMT.num(v, d === undefined ? 2 : d) + '%'; },
     int(v){ return Number(v || 0).toLocaleString('en-US'); },
-    /* 价格：最多 5 位有效数字，自动去掉浮点尾巴（102.10000001 -> 102.1） */
+    /* 价格：定点 8 位小数后去掉尾零，保留完整精度、永不出现科学计数法。
+
+       历史 bug：这里原先用 toPrecision(5) 且 replace 的第二个参数是空串，
+       意味着"把匹配到的整段删掉"而不是"只删尾零"。于是 6.48 -> "6.4800"
+       -> 匹配 ".4800" 被整段删除 -> 显示成 "6"，止盈止损的小数部分直接
+       消失。另外 toPrecision(5) 只有 5 位有效数字，BTC 这类大价位会退化成
+       科学计数法 "1.1823e+5"、108.234 会被压成 108.23。 */
     px(v){
       const n = Number(v);
       if (!isFinite(n) || n === 0) return '-';
-      const s = n.toPrecision(5).replace(/(\.[0-9]*[1-9])0+$/, '').replace(/\.$/, '');
-      return s;
+      if (Math.abs(n) < 1e-6) {
+        return n.toPrecision(8).replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.$/, '');
+      }
+      const s = n.toFixed(8).replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.$/, '');
+      return s || '0';
     }
   };
 

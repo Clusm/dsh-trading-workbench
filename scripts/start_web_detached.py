@@ -81,7 +81,11 @@ def main() -> int:
     log_path = log_dir / "web_console.log"
 
     python_exe = sys.executable
-    cmd = [python_exe, "-u", str(PROJECT_ROOT / "scripts" / "run_web.py"),
+    # 走 run_web_service.py 包装：它在进程内补齐代理环境并把 stdout/stderr
+    # 落盘到 data/web_console.log，比直接跑 run_web.py 更适合无人值守。
+    wrapper = PROJECT_ROOT / "scripts" / "run_web_service.py"
+    entry = wrapper if wrapper.exists() else (PROJECT_ROOT / "scripts" / "run_web.py")
+    cmd = [python_exe, "-u", str(entry),
            "--host", args.host, "--port", str(args.port)]
 
     env = build_env(None if args.no_proxy else args.proxy)

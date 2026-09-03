@@ -62,7 +62,7 @@
   <table><thead><tr><th data-sort="str">时间</th><th data-sort="str">交易对</th><th>方向</th><th class="num" data-sort="num">数量</th><th class="num" data-sort="num">价格</th><th>状态</th></tr></thead>
   <tbody id="positions-tbody">
   {% for p in positions %}
-  <tr data-symbol="{{ p.symbol }}" data-side="{{ p.side }}" data-status="{{ p.status }}"><td class="muted" style="white-space:nowrap">{{ p.opened_at[:19].replace('T',' ') }}</td><td><strong>{{ p.symbol }}</strong></td><td>{{ p.side|side_cn }}</td><td class="num">{{ p.qty|round(6) }}</td><td class="num">{{ '%.5g'|format(p.entry_price or 0) }}</td><td><span class="badge {{ 'ok' if p.status in ('OPEN','CLOSED') else 'muted' }}">{{ p.status|status_cn }}</span></td></tr>
+  <tr data-symbol="{{ p.symbol }}" data-side="{{ p.side }}" data-status="{{ p.status }}"><td class="muted" style="white-space:nowrap">{{ p.opened_at[:19].replace('T',' ') }}</td><td><strong>{{ p.symbol }}</strong></td><td>{{ p.side|side_cn }}</td><td class="num">{{ p.qty|round(6) }}</td><td class="num">{{ (p.entry_price or 0)|price }}</td><td><span class="badge {{ 'ok' if p.status in ('OPEN','CLOSED') else 'muted' }}">{{ p.status|status_cn }}</span></td></tr>
   {% endfor %}</tbody></table>
   </div>
   {% else %}<div class="empty">暂无仓位流水</div>{% endif %}

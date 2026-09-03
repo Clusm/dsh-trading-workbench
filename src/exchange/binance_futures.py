@@ -121,7 +121,10 @@ class BinanceFuturesBroker:
                 if r.status_code >= 500:
                     raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
                 data = r.json()
-                if isinstance(data, dict) and data.get("code") and data.get("code") != 200:
+                # demo 环境 DELETE algoOrder 成功时返回 code='200'（字符串）。
+                # 直接与 int 200 比较恒不等，把成功当失败抛错（实测每轮
+                # adjust 平仓保护单产生 10+ 次 futures_adjust_error 误报）。
+                if isinstance(data, dict) and data.get("code") and int(data["code"]) != 200:
                     raise RuntimeError(f"Binance {data.get('code')}: {data.get('msg')}")
                 return data
             except Exception as e:
@@ -134,6 +137,11 @@ class BinanceFuturesBroker:
                     except Exception:
                         pass
                     self._client = httpx.Client(timeout=self._client_timeout)
+                # -1021(时间戳超窗)/-1022(签名无效，多由时间戳过期引起)：
+                # 重校准服务器时间偏移后重试（仅 GET 会进入第二次循环；
+                # 实测校准偏移随时间漂移 5ms/小时，长期运行后会零星失败）
+                if "-1021" in msg or "-1022" in msg:
+                    self._calibrate_time()
                 if i < max_attempts - 1:
                     time.sleep(1.0)
         raise last_err if last_err else RuntimeError("request failed")
@@ -419,8 +427,9 @@ class BinanceFuturesBroker:
                 # 每轮都「看不到」已有止损，于是每轮都用当前价重新算一个 SL/TP 塞进
                 # adjust intent，价格一跳就微调一次，最终表现为反复重设相同止损。
                 algo_by_symbol: dict[str, dict[str, float]] = {}
-                try:
-                    for algo in self._open_algos(None):
+                _algos = self._open_algos(None)
+                if _algos is not None:
+                    for algo in _algos:
                         sym = str(algo.get("symbol") or "")
                         otype = str(algo.get("orderType") or "")
                         if sym and otype in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
@@ -428,8 +437,6 @@ class BinanceFuturesBroker:
                                 algo_by_symbol.setdefault(sym, {})[otype] = float(algo.get("triggerPrice") or 0.0)
                             except (TypeError, ValueError):
                                 pass
-                except Exception:
-                    algo_by_symbol = {}
                 return {
                     "cash": float(acct.get("availableBalance") or 0.0),
                     "initial_equity": float(acct.get("totalMarginBalance") or acct.get("totalWalletBalance") or 0.0),
@@ -885,17 +892,26 @@ class BinanceFuturesBroker:
                         raw={"mode": self.environment, "action": "algo_protection",
                              "algoType": "CONDITIONAL", "algoId": algo_id}, client_id=cid)
 
-    def _open_algos(self, symbol: str | None = None) -> list[dict[str, Any]]:
+    def _open_algos(self, symbol: str | None = None) -> list[dict[str, Any]] | None:
+        """查询未触发 Algo 单。接口失败时返回 None（区别于"确实无挂单"的 []）：
+
+        快循环 sync 把 None 当"查询失败跳过本轮"，绝不当作"无保护"去重挂——
+        实测 -1022 签名错误被吞成 [] 后，sync 误判仓位无保护，兕底重挂，
+        造成同一仓位 2 分钟内出现两套 SL/TP（critical futures_protection_fallback）。
+        """
         try:
             data = self._signed("GET", "/fapi/v1/openAlgoOrders", {})
         except Exception:
-            return []
+            return None
         if symbol is None:
             return data or []
         return [o for o in (data or []) if o.get("symbol") == symbol]
 
     def _cancel_symbol_algos(self, symbol: str) -> None:
-        for algo in self._open_algos(symbol):
+        algos = self._open_algos(symbol)
+        if not algos:
+            return  # None=查询失败（无从撤单）或 [] =确实无挂单
+        for algo in algos:
             algo_id = str(algo.get("algoId") or "")
             try:
                 self._signed("DELETE", "/fapi/v1/algoOrder", {"algoId": algo.get("algoId")})
@@ -916,9 +932,13 @@ class BinanceFuturesBroker:
                                            details=f"{symbol}: 取消Algo单失败 {type(e).__name__} {e}",
                                            action_taken="继续")
 
-    def _algo_prices(self, symbol: str) -> dict[str, float]:
+    def _algo_prices(self, symbol: str) -> dict[str, float] | None:
+        """当前交易所侧 SL/TP 价格。查询失败返回 None（区别于"无挂单"的 {}）。"""
+        algos = self._open_algos(symbol)
+        if algos is None:
+            return None
         prices: dict[str, float] = {}
-        for algo in self._open_algos(symbol):
+        for algo in algos:
             otype = str(algo.get("orderType") or "")
             if otype in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
                 try:
@@ -941,7 +961,21 @@ class BinanceFuturesBroker:
                                 take_profit: float | None = None) -> bool:
         """统一同步止损/止盈：只在数量或价格变化时重挂，避免每轮刷大量重复 Algo 单。"""
         existing = self._open_algos(symbol)
+        if existing is None:
+            # 交易所查询失败：无法确认当前保护单状态，绝不能当作"无保护"处理。
+            # 带明确 intent 的主动挂单路径除外（调用方明确要求挂新保护，即使
+            # 查询失败也应尝试撤旧挂新，由 -2011 等错误码兜底）。
+            if intent is None and stop_loss is None and take_profit is None:
+                if self.db:
+                    self.db.log_risk_event(
+                        event_type="futures_sync_error", severity="warn",
+                        details=f"{symbol}: 查询 Algo 单失败，本轮跳过保护同步（防误判重复挂单）",
+                        action_taken="skip resync")
+                return False
+            existing = []
         old_prices = self._algo_prices(symbol)
+        if old_prices is None:
+            old_prices = {}
 
         pos = next((p for p in self.positions() if p["symbol"] == symbol), None)
         if not pos or abs(float(pos.get("positionAmt") or 0)) <= 0:

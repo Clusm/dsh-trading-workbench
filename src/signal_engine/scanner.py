@@ -113,7 +113,10 @@ class SignalScanner:
                  universal_cards: bool = False,
                  max_scan_symbols_per_cycle: int = 8):
         self.knowledge_dir = Path(knowledge_dir)
-        self.strategy_lab_src = Path(strategy_lab_src)
+        # 保存原始字符串：Path('') 会规范化为 '.'，导致后续 exists() 恒 True、
+        # 空配置检测失效（实测每轮快循环重试 import signals → 16 次/轮误报）
+        self._strategy_lab_src_raw = str(strategy_lab_src or "").strip()
+        self.strategy_lab_src = Path(self._strategy_lab_src_raw)
         self.state_file = Path(state_file)
         self.db = db
         self.kline_limit = int(kline_limit)
@@ -126,7 +129,7 @@ class SignalScanner:
     def _load_strategy_lab(self) -> None:
         if self._registry is not None:
             return
-        if not str(self.strategy_lab_src or "").strip() or not self.strategy_lab_src.exists():
+        if not self._strategy_lab_src_raw or not self.strategy_lab_src.exists():
             # 未配置 strategy_lab（换机/路径不存在）：策略通道降级为无信号，
             # 不再因硬编码绝对路径不存在而反复抛异常拖慢每轮决策。
             raise RuntimeError("strategy_lab 未配置或路径不存在，策略信号扫描跳过")
