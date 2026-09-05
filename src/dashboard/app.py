@@ -1357,17 +1357,28 @@ def create_app(service: TradingService) -> FastAPI:
             if last_event_at is not None else None
         )
         cycle_ts = latest.get("ts")
+        account_risk = (latest.get("account_risk") or
+                        getattr(service, "_account_risk_status", {}) or {})
+        runtime = service.runtime_status() if hasattr(service, "runtime_status") else {}
+        now_epoch = time.time()
+        for field in ("last_fast_cycle_at", "last_slow_cycle_started_at", "last_slow_cycle_at"):
+            value = runtime.get(field)
+            runtime[field.replace("_at", "_age_seconds")] = (
+                round(max(0.0, now_epoch - float(value)), 3) if value else None
+            )
         return {
-            "ok": bool(safety.get("ready", False)) and not broker_state.get("error"),
+            "ok": (bool(safety.get("ready", False)) and
+                   not broker_state.get("error") and db_readable),
             "broker_mode": str(getattr(service.broker, "mode", "paper")),
             "control_state": service.control.state,
             "startup_safety": safety,
-            "account_risk": latest.get("account_risk") or {},
+            "account_risk": account_risk,
             "broker_error": broker_state.get("error"),
             "cycle_running": service.cycle_running(),
             "cycle_age_seconds": (round(max(0.0, time.time() - float(cycle_ts)), 3)
                                   if cycle_ts else None),
             "db_readable": db_readable,
+            "runtime": runtime,
             # M4观察期不把私有流纳入总健康判定；REST仍是账户真值源。
             "exchange_stream": user_stream_status,
             "server_time": time.time(),
@@ -1378,7 +1389,8 @@ def create_app(service: TradingService) -> FastAPI:
         """开仓就绪门：只呈现现有前置条件，不新增或改变任何风险阈值。"""
         latest = _latest_or_empty(service)
         safety = latest.get("startup_safety") or getattr(service, "_startup_safety", {})
-        account_risk = latest.get("account_risk") or {}
+        account_risk = (latest.get("account_risk") or
+                        getattr(service, "_account_risk_status", {}) or {})
         broker_state = _broker_state_cached(service)
         reasons: list[str] = []
         if broker_state.get("error"):

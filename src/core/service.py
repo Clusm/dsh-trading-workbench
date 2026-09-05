@@ -136,6 +136,12 @@ class TradingService:
         self._startup_safety: dict[str, Any] = {
             "ready": False, "reason": "尚未完成仓位/保护单核验", "checked_at": None,
         }
+        self._account_risk_status: dict[str, Any] = {}
+        self._last_fast_cycle_at: float | None = None
+        self._last_fast_cycle_error: str | None = None
+        self._last_slow_cycle_started_at: float | None = None
+        self._last_slow_cycle_at: float | None = None
+        self._last_slow_cycle_error: str | None = None
         self._purge_old_logs()
 
     def _purge_old_logs(self, keep_days: int = 7) -> None:
@@ -172,8 +178,18 @@ class TradingService:
     def run_once(self) -> dict[str, Any]:
         if not self._cycle_lock.acquire(blocking=False):
             return {"skipped": True, "reason": "cycle_running"}
+        with self._lock:
+            self._last_slow_cycle_started_at = time.time()
         try:
-            return self._run_once_inner()
+            result = self._run_once_inner()
+            with self._lock:
+                self._last_slow_cycle_at = time.time()
+                self._last_slow_cycle_error = None
+            return result
+        except Exception as exc:
+            with self._lock:
+                self._last_slow_cycle_error = type(exc).__name__
+            raise
         finally:
             self._cycle_lock.release()
 
@@ -247,8 +263,16 @@ class TradingService:
                                            action_taken="continue")
             # 快循环也刷新通道/会话权益快照，让页面数值接近实时（慢循环 10 分钟太长）
             self._refresh_latest_channels(state, prices)
-            return {"ts": time.time(), "receipts": receipts, "prices": prices,
-                    "account_risk": account_risk}
+            result = {"ts": time.time(), "receipts": receipts, "prices": prices,
+                      "account_risk": account_risk}
+            with self._lock:
+                self._last_fast_cycle_at = result["ts"]
+                self._last_fast_cycle_error = None
+            return result
+        except Exception as exc:
+            with self._lock:
+                self._last_fast_cycle_error = type(exc).__name__
+            raise
         finally:
             self._protection_lock.release()
 
@@ -282,6 +306,17 @@ class TradingService:
     def cycle_running(self) -> bool:
         with self._run_thread_lock:
             return bool(self._run_thread and self._run_thread.is_alive())
+
+    def runtime_status(self) -> dict[str, Any]:
+        """返回线程循环的脱敏运行状态，供健康接口读取。"""
+        with self._lock:
+            return {
+                "last_fast_cycle_at": self._last_fast_cycle_at,
+                "last_fast_cycle_error": self._last_fast_cycle_error,
+                "last_slow_cycle_started_at": self._last_slow_cycle_started_at,
+                "last_slow_cycle_at": self._last_slow_cycle_at,
+                "last_slow_cycle_error": self._last_slow_cycle_error,
+            }
 
     def _run_once_inner(self) -> dict[str, Any]:
         run_id = str(uuid.uuid4())
@@ -418,6 +453,8 @@ class TradingService:
             equity_available=equity_available,
             anchor_id=self.capital.anchor_id,
         )
+        with self._lock:
+            self._account_risk_status = dict(account_risk)
         if (account_risk.get("latched") and account_risk.get("enforced")
                 and self.control.state == "normal"):
             self.control.set_state("close_only")
