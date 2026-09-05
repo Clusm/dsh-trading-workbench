@@ -19,6 +19,7 @@ data/paper_portfolio.json
 data/futures_source_ledger.json
 
 # 调试与日志产物
+logs/
 data/_latest_prompt.txt
 data/diag_*.log
 data/web_console*.log
