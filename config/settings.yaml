@@ -41,6 +41,10 @@ order_mirror:
   enabled: true
   shadow_only: true
 
+exchange_safety_monitor:
+  enabled: true
+  observe_only: true
+
 llm:
   provider: opencode
   api_key_env: OPENCODE_API_KEY

@@ -141,7 +141,8 @@ class BinanceUserDataStream:
                         event, inserted = await asyncio.to_thread(
                             self.inbox.receive, payload, source="user_stream")
                         applied = event.event_type == "listenKeyExpired"
-                        if self.event_applier is not None and event.event_type != "listenKeyExpired":
+                        if (inserted and self.event_applier is not None and
+                                event.event_type != "listenKeyExpired"):
                             applied = bool(await asyncio.to_thread(self.event_applier, event))
                         if applied:
                             await asyncio.to_thread(

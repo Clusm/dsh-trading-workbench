@@ -107,6 +107,6 @@ check("状态统计可观测", status["status_counts"].get("FILLED") == 1 and
 
 versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
-check("数据库迁移版本1到4完整", versions == [1, 2, 3, 4])
+check("数据库迁移版本1到5完整", versions == [1, 2, 3, 4, 5])
 db.close()
 print("\n结果: 15 通过 / 0 失败")

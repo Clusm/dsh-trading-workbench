@@ -58,7 +58,7 @@ inbox.mark(event.event_key, "APPLIED")
 applied = db.fetch_one("SELECT status, processed_at FROM exchange_events WHERE event_key=?", (event.event_key,))
 check("事件可标记已应用", applied["status"] == "APPLIED" and bool(applied["processed_at"]))
 versions = [row["version"] for row in db.fetch_all("SELECT version FROM schema_migrations ORDER BY version")]
-check("数据库已记录迁移1到4", versions == [1, 2, 3, 4])
+check("数据库已记录迁移1到5", versions == [1, 2, 3, 4, 5])
 
 db.close()
 print("\n结果: 10 通过 / 0 失败")

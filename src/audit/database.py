@@ -524,6 +524,34 @@ class AuditDatabase:
 
         self._apply_migration(4, "order_shadow_mirror", apply_order_mirror)
 
+        def apply_exchange_safety_monitor() -> None:
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS account_config_mirror (
+                    environment TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    symbol TEXT,
+                    leverage INTEGER,
+                    multi_assets_mode INTEGER,
+                    event_time_ms INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    PRIMARY KEY(environment, scope)
+                )"""
+            )
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS exchange_safety_events (
+                    event_key TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    details TEXT NOT NULL,
+                    reconciled INTEGER NOT NULL DEFAULT 0,
+                    reconcile_error TEXT
+                )"""
+            )
+
+        self._apply_migration(5, "exchange_safety_monitor", apply_exchange_safety_monitor)
+
     def close(self) -> None:
         self.conn.close()
 

@@ -24,6 +24,7 @@ from data.price_stream import PriceStream
 from exchange.event_inbox import ExchangeEventInbox
 from exchange.account_mirror import AccountMirror
 from exchange.order_mirror import OrderMirror
+from exchange.safety_monitor import ExchangeSafetyMonitor
 from exchange.user_stream import BinanceUserDataStream
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -317,6 +318,7 @@ def _event_type_cn(value: Any) -> str:
         "capital_reset": "资金重启",
         "equity_unavailable": "账户权益不可用",
         "account_risk_stop": "账户级风险熔断",
+        "exchange_margin_call": "交易所保证金告警",
         "startup_safety_block": "启动安全核验拦截",
         "manual_emergency_close": "手动紧急平仓",
         "cycle_error": "决策循环错误",
@@ -1017,6 +1019,7 @@ def create_app(service: TradingService) -> FastAPI:
         user_task = None
         mirror = None
         order_mirror = None
+        safety_monitor = None
         mirror_task = None
         user_stream_runtime: dict[str, Any] = {
             "enabled": exchange_enabled,
@@ -1053,11 +1056,21 @@ def create_app(service: TradingService) -> FastAPI:
                     order_mirror = OrderMirror(
                         service.db, environment=environment, allowed_symbols=allowed)
                     order_mirror.replay_pending()
+                safety_cfg = service.settings.raw_settings.get(
+                    "exchange_safety_monitor", {}) or {}
+                if (bool(safety_cfg.get("enabled", True)) and
+                        bool(safety_cfg.get("observe_only", True))):
+                    safety_monitor = ExchangeSafetyMonitor(
+                        service.db, environment=environment,
+                        account_mirror=mirror, broker=broker)
+                    safety_monitor.replay_pending()
 
                 def apply_shadow_event(event):
                     applied = mirror.apply_event(event) if mirror is not None else False
                     if order_mirror is not None:
                         applied = order_mirror.apply_event(event) or applied
+                    if safety_monitor is not None:
+                        applied = safety_monitor.apply_event(event) or applied
                     return applied
 
                 user_stream = BinanceUserDataStream(
@@ -1094,6 +1107,7 @@ def create_app(service: TradingService) -> FastAPI:
         app.state.user_stream_runtime = user_stream_runtime
         app.state.account_mirror = mirror
         app.state.order_mirror = order_mirror
+        app.state.exchange_safety_monitor = safety_monitor
         try:
             yield
         finally:
@@ -1423,6 +1437,16 @@ def create_app(service: TradingService) -> FastAPI:
                 "enabled": True, "shadow_only": True, "state": "degraded",
                 "last_error": type(exc).__name__,
             }
+        safety_monitor = getattr(app.state, "exchange_safety_monitor", None)
+        try:
+            safety_status = (safety_monitor.status() if safety_monitor is not None else {
+                "enabled": False, "observe_only": True, "state": "disabled",
+            })
+        except Exception as exc:
+            safety_status = {
+                "enabled": True, "observe_only": True, "state": "degraded",
+                "last_error": type(exc).__name__,
+            }
         order_mirror = getattr(app.state, "order_mirror", None)
         order_cfg = service.settings.raw_settings.get("order_mirror", {}) or {}
         try:
@@ -1466,6 +1490,7 @@ def create_app(service: TradingService) -> FastAPI:
             "exchange_stream": user_stream_status,
             "account_mirror": mirror_status,
             "order_mirror": order_mirror_status,
+            "exchange_safety_monitor": safety_status,
             "server_time": time.time(),
         }
 
