@@ -59,11 +59,9 @@ class TradingService:
         self.recorder = AgentRecorder(self.db, self.logger, settings.artifacts_dir)
         self.broker = create_broker(settings, self.db)
         self.paper_broker = self.broker  # 兼容旧名称
-        if getattr(self.broker, "mode", "") in ("testnet", "demo") and hasattr(self.broker, "sync_positions"):
-            try:
-                self.broker.sync_positions()
-            except Exception:
-                pass
+        # 不在构造阶段同步仓位：外部平仓补记会回查多笔 userTrades，网络波动时
+        # 可阻塞数分钟，导致 Uvicorn 尚未监听、资金页面无法打开。后台慢循环会
+        # 在服务启动后立刻执行同一同步，既不丢对账也不阻塞控制台首屏。
         self.quota = TradeQuotaManager(self.db, settings.raw_settings.get("quotas", {}))
         intel_ttl = float(settings.raw_settings.get("intel_cache", {}).get("ttl_seconds", 3600))
         self.intel_cache = IntelCache(ttl_seconds=intel_ttl)
