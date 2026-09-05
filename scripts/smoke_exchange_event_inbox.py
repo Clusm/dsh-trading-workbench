@@ -44,6 +44,8 @@ expired, _ = inbox.receive({"e": "listenKeyExpired", "E": 2000, "listenKey": "se
 row = db.fetch_one("SELECT payload_json FROM exchange_events WHERE event_key=?", (expired.event_key,))
 payload = json.loads(row["payload_json"])
 check("listenKey未写入数据库", payload["listenKey"] == "<redacted>" and "secret-value" not in row["payload_json"])
+check("遗留过期控制帧可恢复终态", inbox.recover_transport_controls() == 1 and
+      db.fetch_one("SELECT status FROM exchange_events WHERE event_key=?", (expired.event_key,))["status"] == "APPLIED")
 
 print("\n[3] 未知事件可审计但不进入消费者")
 unknown, inserted_unknown = inbox.receive({"e": "NEW_FUTURE_EVENT", "E": 3000})
@@ -59,4 +61,4 @@ versions = [row["version"] for row in db.fetch_all("SELECT version FROM schema_m
 check("数据库已记录迁移1和2", versions == [1, 2])
 
 db.close()
-print("\n结果: 9 通过 / 0 失败")
+print("\n结果: 10 通过 / 0 失败")

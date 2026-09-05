@@ -132,8 +132,11 @@ class BinanceUserDataStream:
                 while True:
                     started = time.perf_counter()
                     try:
-                        _event, inserted = await asyncio.to_thread(
+                        event, inserted = await asyncio.to_thread(
                             self.inbox.receive, payload, source="user_stream")
+                        if event.event_type == "listenKeyExpired":
+                            await asyncio.to_thread(
+                                self.inbox.mark, event.event_key, "APPLIED")
                         self.last_db_write_latency_ms = round(
                             (time.perf_counter() - started) * 1000, 3)
                         self.last_persisted_at = time.time()

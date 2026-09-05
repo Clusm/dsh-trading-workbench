@@ -45,3 +45,14 @@ class ExchangeEventInbox:
                 (normalized, error, utc_now(), event_key),
             )
             self.db.conn.commit()
+
+    def recover_transport_controls(self) -> int:
+        """收口重启前已执行但未落终态的传输控制帧。"""
+        with self.db.lock:
+            cursor = self.db.conn.execute(
+                "UPDATE exchange_events SET status='APPLIED', processed_at=? "
+                "WHERE status='RECEIVED' AND event_type='listenKeyExpired'",
+                (utc_now(),),
+            )
+            self.db.conn.commit()
+            return max(0, int(cursor.rowcount))

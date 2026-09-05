@@ -69,16 +69,21 @@ check("状态不泄露API Key", "must-not-leak" not in str(status))
 
 print("\n[4] 单消费者把事件串行写入幂等收件箱")
 live._enqueue_payload({"e": "ACCOUNT_UPDATE", "E": 11, "T": 12, "a": {"P": []}})
+live._enqueue_payload({"e": "listenKeyExpired", "E": 13, "listenKey": "hidden"})
 live.stop()
 asyncio.run(live._consume_inbox())
 persisted = live.status()
-check("事件已持久化且队列清空", persisted["events_inserted"] == 1 and
+check("事件已持久化且队列清空", persisted["events_inserted"] == 2 and
       persisted["queue_depth"] == 0)
 check("记录DB写延迟", persisted["last_db_write_latency_ms"] is not None)
+control = db.fetch_one(
+    "SELECT status, payload_json FROM exchange_events WHERE event_type='listenKeyExpired'")
+check("过期控制帧已处理且listenKey脱敏", control["status"] == "APPLIED" and
+      "hidden" not in control["payload_json"])
 
 asyncio.run(live.close())
 asyncio.run(demo.close())
 asyncio.run(testnet.close())
 asyncio.run(bounded.close())
 db.close()
-print("\n结果: 12 通过 / 0 失败")
+print("\n结果: 13 通过 / 0 失败")

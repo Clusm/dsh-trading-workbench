@@ -1030,11 +1030,13 @@ def create_app(service: TradingService) -> FastAPI:
             if not api_key or not rest_base_url or environment not in {"demo", "testnet", "live"}:
                 user_stream_runtime.update(state="unavailable", reason="broker_not_supported")
             else:
+                inbox = ExchangeEventInbox(service.db)
+                inbox.recover_transport_controls()
                 user_stream = BinanceUserDataStream(
                     api_key=api_key,
                     rest_base_url=rest_base_url,
                     environment=environment,
-                    inbox=ExchangeEventInbox(service.db),
+                    inbox=inbox,
                     keepalive_minutes=float(exchange_cfg.get("keepalive_minutes", 30)),
                     planned_reconnect_hours=float(exchange_cfg.get("planned_reconnect_hours", 23)),
                     reconnect_seconds=float(exchange_cfg.get("reconnect_seconds", 5)),
@@ -1344,7 +1346,8 @@ def create_app(service: TradingService) -> FastAPI:
                               })))
         try:
             pending_row = service.db.fetch_one(
-                "SELECT COUNT(*) AS count FROM exchange_events WHERE status='RECEIVED'")
+                "SELECT COUNT(*) AS count FROM exchange_events "
+                "WHERE status='RECEIVED' AND event_type!='listenKeyExpired'")
             pending_events = int(pending_row["count"] if pending_row else 0)
             db_readable = True
         except Exception:
