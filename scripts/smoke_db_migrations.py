@@ -33,13 +33,13 @@ columns = {row["name"] for row in db.fetch_all("PRAGMA table_info(orders)")}
 versions = db.fetch_all("SELECT version, name FROM schema_migrations ORDER BY version")
 check("补齐order_source列", "order_source" in columns)
 check("补齐margin_mode列", "margin_mode" in columns)
-check("记录迁移版本1", len(versions) == 1 and versions[0]["version"] == 1)
+check("记录迁移版本1和2", [row["version"] for row in versions] == [1, 2])
 db.close()
 
 print("\n[2] 重启后迁移不重复")
 again = AuditDatabase(db_path)
 versions_again = again.fetch_all("SELECT version FROM schema_migrations")
-check("版本记录保持唯一", len(versions_again) == 1)
+check("版本记录保持唯一", [row["version"] for row in versions_again] == [1, 2])
 again.close()
 
 print("\n结果: 4 通过 / 0 失败")

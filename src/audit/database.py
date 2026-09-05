@@ -400,6 +400,37 @@ class AuditDatabase:
 
         self._apply_migration(1, "legacy_channel_and_audit_columns", apply_legacy_columns)
 
+        def apply_exchange_event_inbox() -> None:
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS exchange_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL UNIQUE,
+                    event_type TEXT NOT NULL,
+                    event_time_ms INTEGER,
+                    transaction_time_ms INTEGER,
+                    received_at TEXT NOT NULL,
+                    processed_at TEXT,
+                    source TEXT NOT NULL,
+                    symbol TEXT,
+                    client_order_id TEXT,
+                    exchange_order_id TEXT,
+                    trade_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'RECEIVED',
+                    payload_json TEXT NOT NULL,
+                    error TEXT
+                )"""
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_exchange_events_status_time "
+                "ON exchange_events(status, event_time_ms)"
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_exchange_events_order "
+                "ON exchange_events(client_order_id, exchange_order_id)"
+            )
+
+        self._apply_migration(2, "exchange_event_inbox", apply_exchange_event_inbox)
+
     def close(self) -> None:
         self.conn.close()
 
