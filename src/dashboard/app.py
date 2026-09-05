@@ -22,6 +22,7 @@ from core.service import TradingService
 from data.market_query import get_live_prices
 from data.price_stream import PriceStream
 from exchange.event_inbox import ExchangeEventInbox
+from exchange.account_mirror import AccountMirror
 from exchange.user_stream import BinanceUserDataStream
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -1013,6 +1014,8 @@ def create_app(service: TradingService) -> FastAPI:
         observe_only = bool(exchange_cfg.get("observe_only", True))
         user_stream = None
         user_task = None
+        mirror = None
+        mirror_task = None
         user_stream_runtime: dict[str, Any] = {
             "enabled": exchange_enabled,
             "observe_only": observe_only,
@@ -1032,6 +1035,16 @@ def create_app(service: TradingService) -> FastAPI:
             else:
                 inbox = ExchangeEventInbox(service.db)
                 inbox.recover_transport_controls()
+                mirror_cfg = service.settings.raw_settings.get("account_mirror", {}) or {}
+                mirror_enabled = bool(mirror_cfg.get("enabled", False))
+                mirror_shadow = bool(mirror_cfg.get("shadow_only", True))
+                if mirror_enabled and mirror_shadow:
+                    allowed = list(getattr(broker, "_symbol_filters", {}).keys()) or list(
+                        (service.settings.raw_settings.get("market_universe", {}) or {}).get(
+                            "core_symbols", []))
+                    mirror = AccountMirror(
+                        service.db, environment=environment, allowed_symbols=allowed)
+                    mirror.replay_pending()
                 user_stream = BinanceUserDataStream(
                     api_key=api_key,
                     rest_base_url=rest_base_url,
@@ -1041,12 +1054,29 @@ def create_app(service: TradingService) -> FastAPI:
                     planned_reconnect_hours=float(exchange_cfg.get("planned_reconnect_hours", 23)),
                     reconnect_seconds=float(exchange_cfg.get("reconnect_seconds", 5)),
                     queue_size=int(exchange_cfg.get("queue_size", 5000)),
+                    event_applier=mirror.apply_event if mirror is not None else None,
                     trust_env=bool(getattr(broker, "_trust_env", True)),
                 )
                 user_stream_runtime = user_stream.status()
                 user_task = asyncio.create_task(user_stream.serve())
+                if mirror is not None:
+                    reconcile_seconds = max(
+                        15.0, float(mirror_cfg.get("rest_reconcile_seconds", 60)))
+
+                    async def reconcile_loop():
+                        while True:
+                            try:
+                                await asyncio.to_thread(mirror.reconcile_broker, broker)
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                pass
+                            await asyncio.sleep(reconcile_seconds)
+
+                    mirror_task = asyncio.create_task(reconcile_loop())
         app.state.user_stream = user_stream
         app.state.user_stream_runtime = user_stream_runtime
+        app.state.account_mirror = mirror
         try:
             yield
         finally:
@@ -1055,6 +1085,9 @@ def create_app(service: TradingService) -> FastAPI:
             await asyncio.gather(task, return_exceptions=True)
             if user_stream is not None:
                 user_stream.stop()
+            if mirror_task is not None:
+                mirror_task.cancel()
+                await asyncio.gather(mirror_task, return_exceptions=True)
             if user_task is not None:
                 user_task.cancel()
                 await asyncio.gather(user_task, return_exceptions=True)
@@ -1359,6 +1392,20 @@ def create_app(service: TradingService) -> FastAPI:
             round(max(0.0, time.time() - float(last_event_at)), 3)
             if last_event_at is not None else None
         )
+        mirror = getattr(app.state, "account_mirror", None)
+        mirror_cfg = service.settings.raw_settings.get("account_mirror", {}) or {}
+        try:
+            mirror_status = (mirror.status() if mirror is not None else {
+                "enabled": bool(mirror_cfg.get("enabled", False)),
+                "shadow_only": bool(mirror_cfg.get("shadow_only", True)),
+                "state": ("blocked" if mirror_cfg.get("enabled") and
+                          not mirror_cfg.get("shadow_only", True) else "disabled"),
+            })
+        except Exception as exc:
+            mirror_status = {
+                "enabled": True, "shadow_only": True, "state": "degraded",
+                "last_error": type(exc).__name__,
+            }
         cycle_ts = latest.get("ts")
         account_risk = (latest.get("account_risk") or
                         getattr(service, "_account_risk_status", {}) or {})
@@ -1386,6 +1433,7 @@ def create_app(service: TradingService) -> FastAPI:
                                 if hasattr(service, "db_backup") else {"enabled": False}),
             # M4观察期不把私有流纳入总健康判定；REST仍是账户真值源。
             "exchange_stream": user_stream_status,
+            "account_mirror": mirror_status,
             "server_time": time.time(),
         }
 

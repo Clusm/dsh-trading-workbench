@@ -30,6 +30,12 @@ exchange_stream:
   reconnect_seconds: 5
   queue_size: 5000
 
+# 账户镜像只做影子比较；Dashboard、快循环和决策仍读取Broker REST真值。
+account_mirror:
+  enabled: true
+  shadow_only: true
+  rest_reconcile_seconds: 60
+
 llm:
   provider: opencode
   api_key_env: OPENCODE_API_KEY

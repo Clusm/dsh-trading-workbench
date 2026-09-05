@@ -431,6 +431,58 @@ class AuditDatabase:
 
         self._apply_migration(2, "exchange_event_inbox", apply_exchange_event_inbox)
 
+        def apply_account_mirror() -> None:
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS account_balances (
+                    asset TEXT PRIMARY KEY,
+                    wallet_balance REAL NOT NULL DEFAULT 0,
+                    cross_wallet_balance REAL NOT NULL DEFAULT 0,
+                    available_balance REAL,
+                    unrealized_pnl REAL NOT NULL DEFAULT 0,
+                    balance_change REAL,
+                    event_time_ms INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    source TEXT NOT NULL
+                )"""
+            )
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS account_positions (
+                    symbol TEXT NOT NULL,
+                    position_side TEXT NOT NULL,
+                    position_amt REAL NOT NULL DEFAULT 0,
+                    entry_price REAL NOT NULL DEFAULT 0,
+                    break_even_price REAL,
+                    unrealized_pnl REAL NOT NULL DEFAULT 0,
+                    isolated_wallet REAL NOT NULL DEFAULT 0,
+                    margin_type TEXT,
+                    leverage INTEGER,
+                    event_time_ms INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    PRIMARY KEY(symbol, position_side)
+                )"""
+            )
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS mirror_reconciliations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    checked_at TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    initialized INTEGER NOT NULL DEFAULT 0,
+                    matched INTEGER NOT NULL,
+                    missing_mirror INTEGER NOT NULL DEFAULT 0,
+                    missing_rest INTEGER NOT NULL DEFAULT 0,
+                    qty_mismatch INTEGER NOT NULL DEFAULT 0,
+                    wallet_delta REAL,
+                    details_json TEXT NOT NULL
+                )"""
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mirror_reconciliations_time "
+                "ON mirror_reconciliations(checked_at)"
+            )
+
+        self._apply_migration(3, "account_shadow_mirror", apply_account_mirror)
+
     def close(self) -> None:
         self.conn.close()
 

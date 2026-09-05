@@ -8,11 +8,12 @@ import asyncio
 import json
 import os
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
 from exchange.event_inbox import ExchangeEventInbox
+from exchange.event_models import ExchangeEvent
 
 
 USER_EVENTS = "/".join([
@@ -49,13 +50,16 @@ class BinanceUserDataStream:
     def __init__(self, *, api_key: str, rest_base_url: str, environment: str,
                  inbox: ExchangeEventInbox, keepalive_minutes: float = 30,
                  planned_reconnect_hours: float = 23, reconnect_seconds: float = 5,
-                 queue_size: int = 5000, trust_env: bool = True) -> None:
+                 queue_size: int = 5000,
+                 event_applier: Callable[[ExchangeEvent], bool] | None = None,
+                 trust_env: bool = True) -> None:
         if environment not in STREAM_BASES:
             raise ValueError(f"私有流不支持执行环境: {environment!r}")
         self.api_key = str(api_key)
         self.rest_base_url = str(rest_base_url).rstrip("/")
         self.environment = environment
         self.inbox = inbox
+        self.event_applier = event_applier
         self.keepalive_seconds = max(60.0, float(keepalive_minutes) * 60)
         self.planned_reconnect_seconds = max(300.0, float(planned_reconnect_hours) * 3600)
         self.reconnect_seconds = max(1.0, float(reconnect_seconds))
@@ -74,6 +78,7 @@ class BinanceUserDataStream:
         self.reconnects = 0
         self.events_received = 0
         self.events_inserted = 0
+        self.events_applied = 0
         self.queue_overflows = 0
         self.persistence_errors = 0
         self.last_persisted_at: float | None = None
@@ -100,6 +105,7 @@ class BinanceUserDataStream:
             "reconnects": self.reconnects,
             "events_received": self.events_received,
             "events_inserted": self.events_inserted,
+            "events_applied": self.events_applied,
             "queue_depth": self._queue.qsize(),
             "queue_capacity": self.queue_size,
             "queue_overflows": self.queue_overflows,
@@ -134,9 +140,13 @@ class BinanceUserDataStream:
                     try:
                         event, inserted = await asyncio.to_thread(
                             self.inbox.receive, payload, source="user_stream")
-                        if event.event_type == "listenKeyExpired":
+                        applied = event.event_type == "listenKeyExpired"
+                        if self.event_applier is not None and event.event_type != "listenKeyExpired":
+                            applied = bool(await asyncio.to_thread(self.event_applier, event))
+                        if applied:
                             await asyncio.to_thread(
                                 self.inbox.mark, event.event_key, "APPLIED")
+                            self.events_applied += 1
                         self.last_db_write_latency_ms = round(
                             (time.perf_counter() - started) * 1000, 3)
                         self.last_persisted_at = time.time()

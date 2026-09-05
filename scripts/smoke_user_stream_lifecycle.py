@@ -86,6 +86,9 @@ class FakeService:
             "keepalive_minutes": 30, "planned_reconnect_hours": 23,
             "reconnect_seconds": 5, "queue_size": 5000,
         }
+        self.settings.raw_settings["account_mirror"] = {
+            "enabled": False, "shadow_only": True, "rest_reconcile_seconds": 60,
+        }
         self.db = AuditDatabase(self.settings.db_file)
         self.broker = SimpleNamespace(
             api_key="must-not-leak", base_url="https://demo-fapi.binance.com",
