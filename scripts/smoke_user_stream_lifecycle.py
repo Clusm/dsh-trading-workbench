@@ -99,7 +99,8 @@ class FakeService:
 
     def latest(self):
         return {
-            "startup_safety": self._startup_safety, "account_risk": {},
+            "startup_safety": self._startup_safety,
+            "account_risk": {"allow_new": True, "mode": "audit_only"},
             "capital_state": {"initial_equity": 500.0, "session_equity": 500.0},
             "channel_state": {"strategy": {}, "ai": {}}, "ts": time.time(),
         }
@@ -124,6 +125,13 @@ with TestClient(app) as client:
     check("流异常不改变主健康口径", health["ok"] is True)
     encoded = str(health)
     check("健康信息不泄露API Key", "must-not-leak" not in encoded)
+    ready = client.get("/api/ready")
+    check("全部现有开仓前置条件满足时ready=200", ready.status_code == 200 and
+          ready.json()["ready"] is True)
+    service.control.state = "close_only"
+    blocked_ready = client.get("/api/ready")
+    check("控制状态非normal时ready=503", blocked_ready.status_code == 503 and
+          "control_state_close_only" in blocked_ready.json()["reasons"])
 instance = FakeUserStream.instances[-1]
 check("有界队列配置传入流", instance.kwargs["queue_size"] == 5000)
 check("生命周期停止流", instance.stopped is True)
@@ -139,4 +147,4 @@ with TestClient(blocked_app) as client:
     check("阻断原因明确", blocked["reason"] == "observe_only_required")
 blocked_service.db.close()
 
-print("\n结果: 8 通过 / 0 失败")
+print("\n结果: 10 通过 / 0 失败")

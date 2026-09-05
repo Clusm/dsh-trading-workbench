@@ -1342,6 +1342,21 @@ def create_app(service: TradingService) -> FastAPI:
                                   "state": "disabled", "active": False,
                                   "reason": "not_started",
                               })))
+        try:
+            pending_row = service.db.fetch_one(
+                "SELECT COUNT(*) AS count FROM exchange_events WHERE status='RECEIVED'")
+            pending_events = int(pending_row["count"] if pending_row else 0)
+            db_readable = True
+        except Exception:
+            pending_events = None
+            db_readable = False
+        user_stream_status["persisted_pending"] = pending_events
+        last_event_at = user_stream_status.get("last_event_at")
+        user_stream_status["last_event_age_seconds"] = (
+            round(max(0.0, time.time() - float(last_event_at)), 3)
+            if last_event_at is not None else None
+        )
+        cycle_ts = latest.get("ts")
         return {
             "ok": bool(safety.get("ready", False)) and not broker_state.get("error"),
             "broker_mode": str(getattr(service.broker, "mode", "paper")),
@@ -1350,10 +1365,40 @@ def create_app(service: TradingService) -> FastAPI:
             "account_risk": latest.get("account_risk") or {},
             "broker_error": broker_state.get("error"),
             "cycle_running": service.cycle_running(),
+            "cycle_age_seconds": (round(max(0.0, time.time() - float(cycle_ts)), 3)
+                                  if cycle_ts else None),
+            "db_readable": db_readable,
             # M4观察期不把私有流纳入总健康判定；REST仍是账户真值源。
             "exchange_stream": user_stream_status,
             "server_time": time.time(),
         }
+
+    @app.get("/api/ready")
+    def api_ready():
+        """开仓就绪门：只呈现现有前置条件，不新增或改变任何风险阈值。"""
+        latest = _latest_or_empty(service)
+        safety = latest.get("startup_safety") or getattr(service, "_startup_safety", {})
+        account_risk = latest.get("account_risk") or {}
+        broker_state = _broker_state_cached(service)
+        reasons: list[str] = []
+        if broker_state.get("error"):
+            reasons.append("broker_state_unavailable")
+        if not safety.get("ready", False):
+            reasons.append("startup_safety_not_ready")
+        if service.control.state != "normal":
+            reasons.append(f"control_state_{service.control.state}")
+        if not account_risk.get("allow_new", False):
+            reasons.append("account_risk_blocks_new")
+        payload = {
+            "ready": not reasons,
+            "reasons": reasons,
+            "broker_mode": str(getattr(service.broker, "mode", "paper")),
+            "control_state": service.control.state,
+            "startup_safety": safety,
+            "account_risk": account_risk,
+            "server_time": time.time(),
+        }
+        return JSONResponse(payload, status_code=200 if payload["ready"] else 503)
 
     @app.get("/api/badges")
     def api_badges():
