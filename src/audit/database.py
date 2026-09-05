@@ -15,6 +15,12 @@ def utc_now() -> str:
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS agents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -332,8 +338,25 @@ class AuditDatabase:
         self._migrate()
         self.conn.commit()
 
+    def _apply_migration(self, version: int, name: str, action: Any) -> None:
+        exists = self.conn.execute(
+            "SELECT version FROM schema_migrations WHERE version=?", (version,)
+        ).fetchone()
+        if exists:
+            return
+        try:
+            action()
+            self.conn.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at) VALUES(?,?,?)",
+                (version, name, utc_now()),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def _migrate(self) -> None:
-        """为旧库补齐双通道列；新库由 SCHEMA 直接创建。"""
+        """按版本为旧库补列；每个迁移只执行一次并可安全重启。"""
         migrations = {
             "trade_decisions": [
                 ("channel", "TEXT DEFAULT 'ai'"),
@@ -366,11 +389,16 @@ class AuditDatabase:
                 ("confidence", "REAL"),
             ],
         }
-        for table, columns in migrations.items():
-            existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
-            for column, declaration in columns:
-                if column not in existing:
-                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        def apply_legacy_columns() -> None:
+            for table, columns in migrations.items():
+                existing = {
+                    r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                for column, declaration in columns:
+                    if column not in existing:
+                        self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+        self._apply_migration(1, "legacy_channel_and_audit_columns", apply_legacy_columns)
 
     def close(self) -> None:
         self.conn.close()

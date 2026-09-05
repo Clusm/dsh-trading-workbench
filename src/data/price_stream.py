@@ -34,8 +34,9 @@ from typing import Awaitable, Callable, Iterable
 from data.market_query import push_stream_price
 
 FSTREAM_BASE = "wss://fstream.binance.com"
-# 组合流支持在运行中增减订阅（SUBSCRIBE / UNSUBSCRIBE），单流做不到
-COMBINED_PATH = "/stream?streams={streams}"
+# Binance 2026-09-04 文档已将 ticker/markPrice/kline 等常规行情迁移到
+# /market。旧的无路由地址只再推 /public 类数据，会出现“握手成功但零帧”。
+MARKET_COMBINED_PATH = "/market/stream?streams={streams}"
 
 # 握手成功但迟迟收不到首帧，基本可以判定该出口不支持合约推送
 FIRST_FRAME_TIMEOUT = 15.0
@@ -125,7 +126,7 @@ class PriceStream:
             await asyncio.sleep(FAST_RETRY_SECONDS)
             return
 
-        url = FSTREAM_BASE + COMBINED_PATH.format(streams="/".join(streams))
+        url = self.connection_url(streams)
         kwargs: dict[str, object] = {
             "open_timeout": 15.0,
             "ping_interval": 20.0,
@@ -139,11 +140,17 @@ class PriceStream:
         async with websockets.connect(url, **kwargs) as ws:  # type: ignore[arg-type]
             self._subscribed = set(self._wanted_symbols())
             # 首帧超时是识别"能握手但收不到数据"的唯一手段
-            await asyncio.wait_for(ws.recv(), timeout=FIRST_FRAME_TIMEOUT)
+            first_frame = await asyncio.wait_for(ws.recv(), timeout=FIRST_FRAME_TIMEOUT)
+            self._handle_frame(first_frame)
             self._failures = 0
             self._state = "live"
             await self._emit()
             await self._consume(ws)
+
+    @staticmethod
+    def connection_url(streams: list[str]) -> str:
+        """构造币安USD-M常规行情组合流地址。"""
+        return FSTREAM_BASE + MARKET_COMBINED_PATH.format(streams="/".join(streams))
 
     async def _consume(self, ws) -> None:
         """收帧循环；订阅列表变化时增量调整。"""
