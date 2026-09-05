@@ -49,6 +49,9 @@ RESUBSCRIBE_INTERVAL = 15.0
 
 
 def _proxy() -> str | None:
+    if (os.environ.get("MTA_NO_PROXY", "").strip().lower() in
+            {"1", "true", "yes", "on"}) or os.environ.get("NO_PROXY") == "*":
+        return None
     for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
         val = (os.environ.get(key) or "").strip()
         if val:
@@ -133,9 +136,9 @@ class PriceStream:
             "ping_timeout": 20.0,
             # 币安要求 60 秒内回 pong，库自动处理
         }
-        proxy = _proxy()
-        if proxy:
-            kwargs["proxy"] = proxy
+        # websockets 15 会自动发现Windows系统代理；无显式项目代理时传None，
+        # 避免残留注册表代理让连接表现为随机ConnectionRefusedError。
+        kwargs["proxy"] = _proxy()
 
         async with websockets.connect(url, **kwargs) as ws:  # type: ignore[arg-type]
             self._subscribed = set(self._wanted_symbols())

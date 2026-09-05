@@ -83,8 +83,11 @@ def apply_proxy_env(env_path: str | Path | None = None) -> dict[str, str]:
         # 写入 NO_PROXY='*' 能让 environment 分支返回非空（{'no':'*'}），
         # 从而阻断注册表回退，并让 httpx 对所有主机绕过代理。
         for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
-            os.environ.pop(key, None)
-            os.environ.pop(key.lower(), None)
+            # 保留为空值而不是删除：load_settings() 随后会调用load_dotenv，
+            # dotenv只填充不存在的键。若这里删除，.env里的旧代理会被再次注入，
+            # 使同一进程出现“REST直连、WebSocket却走坏代理”的分裂出口。
+            os.environ[key] = ""
+            os.environ[key.lower()] = ""
         os.environ["NO_PROXY"] = "*"
         os.environ["no_proxy"] = "*"
         return {}

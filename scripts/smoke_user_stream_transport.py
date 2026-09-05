@@ -42,10 +42,10 @@ check("demo不混用生产主机", demo.connection_url("secret") ==
 check("testnet不混用生产主机", testnet.connection_url("secret") ==
       "wss://stream.binancefuture.com/ws/secret")
 
-print("\n[2] 配置默认关闭且仅观察")
+print("\n[2] 配置已进入仅观察期")
 settings = yaml.safe_load((ROOT / "config" / "settings.yaml").read_text(encoding="utf-8"))
 cfg = settings["exchange_stream"]
-check("默认不随服务启动", cfg["enabled"] is False)
+check("随服务启动", cfg["enabled"] is True)
 check("默认observe_only", cfg["observe_only"] is True)
 check("提前30分钟续期", cfg["keepalive_minutes"] == 30)
 

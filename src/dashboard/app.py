@@ -21,6 +21,8 @@ from fastapi.templating import Jinja2Templates
 from core.service import TradingService
 from data.market_query import get_live_prices
 from data.price_stream import PriceStream
+from exchange.event_inbox import ExchangeEventInbox
+from exchange.user_stream import BinanceUserDataStream
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -1003,11 +1005,58 @@ def create_app(service: TradingService) -> FastAPI:
         stream = PriceStream(lambda: _position_symbols(service))
         app.state.price_stream = stream
         task = asyncio.create_task(stream.serve())
+
+        # 私有账户流分阶段接入：当前只把原始事件写入幂等收件箱，不能更新账户、
+        # 不能驱动订单。配置若关闭、不适用于paper、或缺少凭据，健康接口会明确说明。
+        exchange_cfg = service.settings.raw_settings.get("exchange_stream", {}) or {}
+        exchange_enabled = bool(exchange_cfg.get("enabled", False))
+        observe_only = bool(exchange_cfg.get("observe_only", True))
+        user_stream = None
+        user_task = None
+        user_stream_runtime: dict[str, Any] = {
+            "enabled": exchange_enabled,
+            "observe_only": observe_only,
+            "state": "disabled",
+            "active": False,
+            "reason": "configuration_disabled",
+        }
+        if exchange_enabled and not observe_only:
+            user_stream_runtime.update(state="blocked", reason="observe_only_required")
+        elif exchange_enabled:
+            broker = service.broker
+            api_key = str(getattr(broker, "api_key", "") or "")
+            rest_base_url = str(getattr(broker, "base_url", "") or "")
+            environment = str(getattr(broker, "environment", getattr(broker, "mode", "")) or "")
+            if not api_key or not rest_base_url or environment not in {"demo", "testnet", "live"}:
+                user_stream_runtime.update(state="unavailable", reason="broker_not_supported")
+            else:
+                user_stream = BinanceUserDataStream(
+                    api_key=api_key,
+                    rest_base_url=rest_base_url,
+                    environment=environment,
+                    inbox=ExchangeEventInbox(service.db),
+                    keepalive_minutes=float(exchange_cfg.get("keepalive_minutes", 30)),
+                    planned_reconnect_hours=float(exchange_cfg.get("planned_reconnect_hours", 23)),
+                    reconnect_seconds=float(exchange_cfg.get("reconnect_seconds", 5)),
+                    trust_env=bool(getattr(broker, "_trust_env", True)),
+                )
+                user_stream_runtime = user_stream.status()
+                user_task = asyncio.create_task(user_stream.serve())
+        app.state.user_stream = user_stream
+        app.state.user_stream_runtime = user_stream_runtime
         try:
             yield
         finally:
             stream.stop()
             task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if user_stream is not None:
+                user_stream.stop()
+            if user_task is not None:
+                user_task.cancel()
+                await asyncio.gather(user_task, return_exceptions=True)
+            if user_stream is not None:
+                await user_stream.close()
 
     app = FastAPI(title="Multi-Agent Trader Console", lifespan=lifespan)
 
@@ -1285,6 +1334,13 @@ def create_app(service: TradingService) -> FastAPI:
         latest = _latest_or_empty(service)
         safety = latest.get("startup_safety") or getattr(service, "_startup_safety", {})
         broker_state = _broker_state_cached(service)
+        user_stream = getattr(app.state, "user_stream", None)
+        user_stream_status = (user_stream.status() if user_stream is not None else
+                              dict(getattr(app.state, "user_stream_runtime", {
+                                  "enabled": False, "observe_only": True,
+                                  "state": "disabled", "active": False,
+                                  "reason": "not_started",
+                              })))
         return {
             "ok": bool(safety.get("ready", False)) and not broker_state.get("error"),
             "broker_mode": str(getattr(service.broker, "mode", "paper")),
@@ -1293,6 +1349,8 @@ def create_app(service: TradingService) -> FastAPI:
             "account_risk": latest.get("account_risk") or {},
             "broker_error": broker_state.get("error"),
             "cycle_running": service.cycle_running(),
+            # M4观察期不把私有流纳入总健康判定；REST仍是账户真值源。
+            "exchange_stream": user_stream_status,
             "server_time": time.time(),
         }
 

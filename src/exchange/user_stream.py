@@ -31,6 +31,9 @@ STREAM_BASES = {
 
 
 def _proxy() -> str | None:
+    if (os.environ.get("MTA_NO_PROXY", "").strip().lower() in
+            {"1", "true", "yes", "on"}) or os.environ.get("NO_PROXY") == "*":
+        return None
     for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
         value = (os.environ.get(key) or "").strip()
         if value:
@@ -55,12 +58,37 @@ class BinanceUserDataStream:
         self._client = httpx.AsyncClient(timeout=15.0, trust_env=trust_env)
         self._stop = False
         self.state = "disabled"
+        self.started_at: float | None = None
+        self.connected_at: float | None = None
         self.last_event_at: float | None = None
+        self.last_keepalive_at: float | None = None
+        self.last_disconnect_at: float | None = None
         self.last_error: str | None = None
         self.reconnects = 0
+        self.events_received = 0
+        self.events_inserted = 0
 
     def stop(self) -> None:
         self._stop = True
+
+    def status(self) -> dict[str, Any]:
+        """返回可公开到健康接口的脱敏状态，绝不包含API Key/listenKey/URL。"""
+        return {
+            "enabled": True,
+            "observe_only": True,
+            "environment": self.environment,
+            "state": self.state,
+            "active": self.state == "live",
+            "started_at": self.started_at,
+            "connected_at": self.connected_at,
+            "last_event_at": self.last_event_at,
+            "last_keepalive_at": self.last_keepalive_at,
+            "last_disconnect_at": self.last_disconnect_at,
+            "last_error": self.last_error,
+            "reconnects": self.reconnects,
+            "events_received": self.events_received,
+            "events_inserted": self.events_inserted,
+        }
 
     def connection_url(self, listen_key: str) -> str:
         base = STREAM_BASES[self.environment]
@@ -91,10 +119,12 @@ class BinanceUserDataStream:
             refreshed = await self._listen_key("PUT")
             if refreshed and refreshed != listen_key:
                 raise RuntimeError("续期返回了不同listenKey，需要重建连接")
+            self.last_keepalive_at = time.time()
 
     async def _session(self) -> None:
         import websockets
 
+        self.state = "connecting"
         listen_key = await self._listen_key("POST")
         if not listen_key:
             raise RuntimeError("无法创建listenKey")
@@ -104,15 +134,15 @@ class BinanceUserDataStream:
             "ping_interval": 20.0,
             "ping_timeout": 20.0,
         }
-        proxy = _proxy()
-        if proxy:
-            kwargs["proxy"] = proxy
+        # websockets 15 默认会自动发现Windows系统代理；没有项目级代理时也要
+        # 显式传None，否则可能命中注册表里已失效的本地端口。
+        kwargs["proxy"] = _proxy()
         keepalive = asyncio.create_task(self._keepalive(listen_key))
         started = time.monotonic()
         try:
-            self.state = "connecting"
             async with websockets.connect(url, **kwargs) as ws:
                 self.state = "live"
+                self.connected_at = time.time()
                 self.last_error = None
                 while not self._stop:
                     if time.monotonic() - started >= self.planned_reconnect_seconds:
@@ -122,11 +152,15 @@ class BinanceUserDataStream:
                     except asyncio.TimeoutError:
                         continue
                     payload = json.loads(raw)
-                    event, _ = self.inbox.receive(payload, source="user_stream")
+                    event, inserted = self.inbox.receive(payload, source="user_stream")
+                    self.events_received += 1
+                    if inserted:
+                        self.events_inserted += 1
                     self.last_event_at = time.time()
                     if event.event_type == "listenKeyExpired":
                         return
         finally:
+            self.last_disconnect_at = time.time()
             keepalive.cancel()
             await asyncio.gather(keepalive, return_exceptions=True)
             try:
@@ -136,6 +170,7 @@ class BinanceUserDataStream:
 
     async def serve(self) -> None:
         self._stop = False
+        self.started_at = time.time()
         while not self._stop:
             try:
                 await self._session()

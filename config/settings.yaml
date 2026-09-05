@@ -14,9 +14,9 @@ paths:
 stability:
   risk_guard_mode: audit_only
 
-# USD-M私有账户流分阶段启用；当前仅完成代码与回放，默认不随服务启动。
+# USD-M私有账户流进入观察期：只落幂等收件箱，不更新账户镜像、不驱动订单。
 exchange_stream:
-  enabled: false
+  enabled: true
   observe_only: true
   keepalive_minutes: 30
   planned_reconnect_hours: 23

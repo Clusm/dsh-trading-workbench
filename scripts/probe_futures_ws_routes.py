@@ -17,6 +17,9 @@ from core.net_env import apply_proxy_env  # noqa: E402
 
 
 def _proxy() -> str | None:
+    if (os.environ.get("MTA_NO_PROXY", "").strip().lower() in
+            {"1", "true", "yes", "on"}) or os.environ.get("NO_PROXY") == "*":
+        return None
     for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
         value = (os.environ.get(key) or "").strip()
         if value:
@@ -33,9 +36,7 @@ async def probe(name: str, url: str, timeout: float) -> dict[str, object]:
         "ping_interval": 20.0,
         "ping_timeout": 20.0,
     }
-    proxy = _proxy()
-    if proxy:
-        kwargs["proxy"] = proxy
+    kwargs["proxy"] = _proxy()
     try:
         async with websockets.connect(url, **kwargs) as ws:  # type: ignore[arg-type]
             raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
