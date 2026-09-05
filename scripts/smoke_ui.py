@@ -136,6 +136,12 @@ from core.config_loader import load_settings  # noqa: E402
 import os  # noqa: E402
 os.environ["EXECUTION_MODE"] = "paper"
 settings = load_settings(ROOT)
+# 隔离状态文件：测试服务不得读写真实 data/ 下的 capital/channel/control
+# 状态（曾发生 paper 测试把 baseline=0 覆写进真实 capital_state.json）。
+# db/logs/artifacts 均由 project_root 派生，指向临时目录即可整体隔离。
+iso_root = tmp / "iso_root"
+(iso_root / "data").mkdir(parents=True, exist_ok=True)
+settings.project_root = iso_root
 real_svc = TradingService(settings)
 from dashboard.app import create_app  # noqa: E402
 app = create_app(real_svc)

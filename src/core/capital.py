@@ -1,10 +1,27 @@
-"""会话资金管理：固定 200U 起始；会话权益亏到阈值则平仓并从 200U 重启。"""
+"""会话资金管理：固定起始资金；会话权益亏到阈值则平仓并从起始资金重启。
+
+基线口径：会话权益只反映「交易成果」，与交易所账户里的绝对余额无关——
+    session_equity = 交易所权益 - baseline
+    baseline      = 锚点时刻交易所权益 - 起始资金
+因此 demo 账户自带的钱（本例 5000U）不会计入会话资金，后续充值/提现也不该
+被算作交易收益。
+
+历史故障（2026-09-05 修复）：某个以 EXECUTION_MODE=paper 启动的进程触发了
+手动重置，paper 分支把 baseline 写成 0 并落盘；而基线状态文件当时不记录
+执行模式，后续 demo 进程把 0 当成合法基线继承，会话权益从此等于交易所全部
+余额（5028U）。加固要点：
+  1. 状态文件记录 mode，跨执行模式绝不复用基线；
+  2. 非 paper 模式下 baseline=0 只在「交易所权益恰好等于起始资金」时合法；
+  3. 权益接口不可用时拒绝落盘基线（宁可内存临时值，不固化错误值）；
+  4. 不再把 paper 账本的配置值当成交易所权益。
+"""
 from __future__ import annotations
 
 import json
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,36 +52,68 @@ class CapitalManager:
         self._equity_stale = False
         self.baseline = self._load_or_init_baseline()
 
+    def _mode(self) -> str:
+        return str(getattr(self.broker, "mode", "paper") or "paper")
+
+    def _baseline_plausible(self, baseline: float, exchange_eq: float) -> bool:
+        """基线合理性校验——堵住「基线被清零/写坏后永久继承」这类故障。
+
+        非 paper 模式下 baseline=0 只在一种情况成立：锚点时刻交易所权益恰好
+        等于起始资金（例如测试网重置后钱包正好 500）。若交易所权益与起始资金
+        存在显著差距而 baseline 却为 0，说明基线已被污染（历史上正是 paper
+        分支写入的 0），必须重新锚定而不是照单全收。
+        """
+        if exchange_eq <= 0:
+            # 交易所权益拿不到，无从判断，保守沿用现有基线
+            return True
+        if baseline < 0:
+            return False
+        # 会话权益不可能亏穿起始资金的负数区间（真爆仓会先触发重置）
+        if exchange_eq - baseline < -self.initial_equity:
+            return False
+        gap = exchange_eq - self.initial_equity
+        if baseline <= 0 and abs(gap) > max(1.0, abs(self.initial_equity) * 0.01):
+            return False
+        return True
+
     def _load_or_init_baseline(self) -> float:
+        mode = self._mode()
         if self.state_file.exists():
             try:
                 data = json.loads(self.state_file.read_text(encoding="utf-8"))
-                if data.get("initial_equity") == self.initial_equity:
-                    mode = getattr(self.broker, "mode", "paper")
+                # 起始资金被改过（如 200 → 500）或执行模式变了，基线必须重算。
+                # mode 不同即视为不同账本，paper 写入的基线绝不能给 demo 用。
+                if data.get("initial_equity") == self.initial_equity and data.get("mode") == mode:
                     if mode == "paper":
                         return 0.0
-                    # baseline >= 0 都是合法基线（0 = 会话起点交易所权益
-                    # 恰好等于起始资金，比如测试网重置后钱包就是 500、
-                    # 起始资金也是 500）。只有负值或键缺失才需要重算。
                     if "baseline" in data:
                         baseline = float(data["baseline"])
-                        if baseline >= 0:
+                        exchange_eq = self._exchange_equity()
+                        if self._baseline_plausible(baseline, exchange_eq):
                             return baseline
+                        self.db.log_risk_event(
+                            event_type="baseline_implausible", severity="critical",
+                            details=f"基线失效：baseline={baseline:.2f} 与交易所权益 {exchange_eq:.2f}、"
+                                    f"起始资金 {self.initial_equity:.2f} 不匹配（多为跨执行模式复用或基线被清零），已重新锚定",
+                            action_taken="re-anchor baseline")
             except Exception:
                 pass
-        mode = getattr(self.broker, "mode", "paper")
-        exchange_eq = self._exchange_equity() if mode != "paper" else 0.0
         if mode == "paper":
             baseline = 0.0
-        elif exchange_eq <= 0:
-            # 接口不可用且无缓存：不落盘猜测值（错误基线一旦固化，
-            # 接口恢复后 session_equity 会永久偏移），内存里临时用 0，
-            # 下次启动接口恢复时再正确固化。
-            return 0.0
         else:
+            exchange_eq = self._exchange_equity()
+            if exchange_eq <= 0:
+                # 接口不可用且无缓存：不落盘猜测值（错误基线一旦固化，
+                # 接口恢复后 session_equity 会永久偏移），内存里临时用 0，
+                # 下次启动接口恢复时再正确固化。
+                return 0.0
             baseline = exchange_eq - self.initial_equity
             if baseline < 0:
                 baseline = max(exchange_eq, self.initial_equity) - self.initial_equity
+            if self._equity_stale:
+                # 用的是缓存权益，能正确算出会话权益但不固化，
+                # 等接口恢复后再落盘。
+                return baseline
         self._save(baseline)
         return baseline
 
@@ -78,16 +127,21 @@ class CapitalManager:
                     return v
             except Exception:
                 pass
-            try:
-                state = getattr(self.broker, "state", {})
-                if isinstance(state, dict) and "error" not in state:
-                    v = float(state.get("initial_equity") or 0.0)
-                    if v and v > 0:
-                        self._last_exchange_equity = v
-                        self._equity_stale = False
-                        return v
-            except Exception:
-                pass
+            # 备用口径：demo/testnet/live broker 的 state["initial_equity"] 取自
+            # 交易所真实权益，可用；但 paper broker 的该字段是本地账本的配置值
+            # （等于起始资金），拿它当交易所权益会算出 baseline = 配置值 - 起始
+            # 资金 = 0，正是历史上基线被清零的路径。paper 模式禁用此兜底。
+            if self._mode() != "paper":
+                try:
+                    state = getattr(self.broker, "state", {})
+                    if isinstance(state, dict) and "error" not in state:
+                        v = float(state.get("initial_equity") or 0.0)
+                        if v and v > 0:
+                            self._last_exchange_equity = v
+                            self._equity_stale = False
+                            return v
+                except Exception:
+                    pass
             time.sleep(1.0)
         # 接口暂时不可用时，返回最近一次有效权益，绝不能当成 0/爆仓
         if self._last_exchange_equity and self._last_exchange_equity > 0:
@@ -98,12 +152,22 @@ class CapitalManager:
 
     def _save(self, baseline: float) -> None:
         with self._save_lock:
-            tmp = self.state_file.with_name(
-                f"{self.state_file.stem}.tmp-{os.getpid()}-{threading.get_ident()}")
-            tmp.write_text(json.dumps({
+            payload: dict[str, Any] = {}
+            try:
+                if self.state_file.exists():
+                    payload = json.loads(self.state_file.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+            # mode 与 baseline 同写同读：baseline 只在同执行模式下有意义
+            payload.update({
                 "initial_equity": self.initial_equity,
                 "baseline": baseline,
-            }, ensure_ascii=False), encoding="utf-8")
+                "mode": self._mode(),
+                "anchored_at": datetime.now(timezone.utc).isoformat(),
+            })
+            tmp = self.state_file.with_name(
+                f"{self.state_file.stem}.tmp-{os.getpid()}-{threading.get_ident()}")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, self.state_file)
 
     def session_equity(self) -> float:
@@ -133,6 +197,7 @@ class CapitalManager:
         return 0.0
 
     def sync(self, prices: dict[str, float] | None = None) -> dict[str, Any]:
+        mode = self._mode()
         exchange_eq = self._exchange_equity()
         if getattr(self, "_equity_stale", False):
             session_eq = round(exchange_eq - self.baseline, 2) if exchange_eq > 0 else self.session_equity()
@@ -158,6 +223,16 @@ class CapitalManager:
                 session_eq = self.session_equity()
         result = {"session_equity": session_eq, "reset": False, "equity_available": True}
         if session_eq <= self.threshold and self.reset_on_bankruptcy:
+            # 重置前必须再确认一次权益是新鲜的：用失效/缓存权益算出的基线一旦
+            # 落盘，接口恢复后会话权益会永久偏移（历史故障根因之一）。
+            recheck_eq = self._exchange_equity()
+            if recheck_eq <= 0 or self._equity_stale:
+                self.db.log_risk_event(
+                    event_type="capital_reset_skipped", severity="warn",
+                    details=f"会话权益 {session_eq:.2f} 已触及破产线，但交易所权益不可用"
+                            f"（{recheck_eq:.2f}），本轮跳过重置以免写入错误基线",
+                    action_taken="skip reset; keep positions")
+                return result
             try:
                 self.broker.close_all(prices or {}, self.db)
             except Exception as e:
@@ -165,7 +240,7 @@ class CapitalManager:
                                        details=f"{type(e).__name__}: {e}", action_taken="continue")
             if getattr(self.broker, "mode", "paper") == "paper" and hasattr(self.broker, "reset_capital"):
                 self.broker.reset_capital(self.initial_equity)
-            new_baseline = 0.0 if getattr(self.broker, "mode", "paper") == "paper" else (self._exchange_equity() - self.initial_equity)
+            new_baseline = 0.0 if mode == "paper" else (recheck_eq - self.initial_equity)
             self.last_reset = {
                 "old_baseline": self.baseline,
                 "new_baseline": new_baseline,
@@ -186,12 +261,23 @@ class CapitalManager:
 
         实盘模式下资金是真实的，不存在"重置"——dashboard 端也不显示该按钮。
         """
-        mode = getattr(self.broker, "mode", "paper")
+        mode = self._mode()
         if mode == "live":
             self.db.log_risk_event(event_type="manual_reset_rejected", severity="warn",
                                    details="实盘模式不允许手动重置资金",
                                    action_taken="rejected")
             return {"ok": False, "error": "实盘模式不允许重置资金"}
+        # 非 paper 模式下基线要按交易所权益重算：权益拿不到就别动仓位也别落盘，
+        # 否则 0 - 起始资金 会被固化成负基线（历史故障：基线被写成 0）。
+        exchange_eq = 0.0
+        if mode != "paper":
+            exchange_eq = self._exchange_equity()
+            if exchange_eq <= 0 or self._equity_stale:
+                self.db.log_risk_event(
+                    event_type="manual_reset_rejected", severity="warn",
+                    details=f"交易所权益不可用（{exchange_eq:.2f}），拒绝重置以免写入错误基线",
+                    action_taken="rejected")
+                return {"ok": False, "error": "交易所权益接口不可用，拒绝重置基线（未平仓）"}
         try:
             self.broker.close_all(prices or {}, self.db)
         except Exception as e:
@@ -201,7 +287,7 @@ class CapitalManager:
             self.broker.reset_capital(self.initial_equity)
         # paper：baseline=0，session_equity 直接等于账本现金；
         # demo/testnet：baseline=交易所余额-初始权益，使 session_equity 回到 initial_equity。
-        new_baseline = 0.0 if mode == "paper" else (self._exchange_equity() - self.initial_equity)
+        new_baseline = 0.0 if mode == "paper" else (exchange_eq - self.initial_equity)
         self.last_reset = {
             "old_baseline": self.baseline,
             "new_baseline": new_baseline,

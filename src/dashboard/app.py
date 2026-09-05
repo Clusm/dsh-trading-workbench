@@ -347,6 +347,10 @@ def _event_type_cn(value: Any) -> str:
         "ai_daily_loss_stop": "AI当日亏损熔断",
         "broker_created": "交易通道创建",
         "broker_fallback_paper": "降级纸面交易",
+        "broker_unknown_mode": "未知执行模式已拒绝启动",
+        "baseline_implausible": "资金基线失效已重锚",
+        "baseline_reanchored": "资金基线手动重锚",
+        "capital_reset_skipped": "破产重置已跳过",
         "decision_downgraded": "决策校验降级",
         "action_space_no_open": "本轮禁止开仓",
         "intent_log_error": "intent落库错误",
@@ -849,6 +853,48 @@ def _last_snapshot_equity(service: TradingService) -> float | None:
     return None
 
 
+def _parse_iso(value: Any) -> float | None:
+    """把 ISO 时间串转为 epoch 秒，失败返回 None。"""
+    try:
+        s = str(value).strip()
+        if not s:
+            return None
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
+def _baseline_just_reanchored(service: TradingService) -> bool:
+    """基线是否在最后一条快照之后被重锚过。
+
+    重锚（修正污染基线、手动重置、破产重启）会让会话权益一次性大幅跳变——
+    例如基线被清零污染时显示 5028U，重锚后回到 532U，跳变 89%。这是合法
+    修正，不能被脏读闸门当成异常丢弃（历史上被丢弃 22 次，导致错误数值
+    长期驻留在区间统计里）。
+    """
+    try:
+        cap_cfg = service.settings.raw_settings.get("capital", {}) or {}
+        path = service.settings.project_root / str(
+            cap_cfg.get("state_file", "data/capital_state.json"))
+        if not path.exists():
+            return False
+        data = json.loads(path.read_text(encoding="utf-8"))
+        anchor_ts = _parse_iso(data.get("anchored_at"))
+        if anchor_ts is None:
+            return False
+        row = service.db.fetch_one(
+            "SELECT created_at FROM portfolio_snapshots ORDER BY id DESC LIMIT 1")
+        snap_ts = _parse_iso(row["created_at"] if isinstance(row, dict) else row[0]) if row else None
+        return snap_ts is None or anchor_ts > snap_ts
+    except Exception:
+        return False
+
+
 def _maybe_snapshot(service: TradingService, equity: float,
                     unrealized_pnl: float, positions: list[dict[str, Any]]) -> None:
     global _last_snapshot_mono, _last_bad_snapshot_log_mono
@@ -860,6 +906,23 @@ def _maybe_snapshot(service: TradingService, equity: float,
         eq = float(equity or 0.0)
         prev = _last_snapshot_equity(service)
         if prev and abs(eq - prev) / prev > _SNAPSHOT_MAX_JUMP_RATIO:
+            if _baseline_just_reanchored(service):
+                # 基线刚重锚：跳变是修正而非脏读，放行并留审计痕迹
+                try:
+                    service.db.log_risk_event(
+                        event_type="baseline_reanchored", severity="warn",
+                        details=f"资金基线已重锚，权益快照跳变视为合法修正并放行："
+                                f"上一条 {prev:.2f} → 本次 {eq:.2f}",
+                        action_taken="accept_snapshot")
+                except Exception:
+                    pass
+                margin_used = sum(float(p.get("margin") or 0.0) for p in positions)
+                service.db.log_portfolio_snapshot(
+                    equity=eq, margin_balance=eq, available_balance=eq - margin_used,
+                    unrealized_pnl=float(unrealized_pnl or 0.0), margin_used=margin_used,
+                    raw={"source": "dashboard_status", "baseline_reanchored": True},
+                )
+                return
             # 脏读：跳过本次写入。仍推进节流时间戳，避免每个周期都触发告警。
             if now - _last_bad_snapshot_log_mono >= _BAD_SNAPSHOT_LOG_INTERVAL_S:
                 _last_bad_snapshot_log_mono = now
