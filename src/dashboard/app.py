@@ -312,8 +312,11 @@ def _event_type_cn(value: Any) -> str:
         "capital_reset_close_error": "资金重置平仓错误",
         "capital_reset": "资金重启",
         "equity_unavailable": "账户权益不可用",
+        "account_risk_stop": "账户级风险熔断",
+        "startup_safety_block": "启动安全核验拦截",
         "manual_emergency_close": "手动紧急平仓",
         "cycle_error": "决策循环错误",
+        "service_shutdown_deferred": "服务关闭等待在途决策",
         "futures_order_error": "合约下单错误",
         "futures_sl_failed": "止损设置失败",
         "futures_tp_failed": "止盈设置失败",
@@ -1211,6 +1214,8 @@ def create_app(service: TradingService) -> FastAPI:
         quota = service.quota.status()
         return {
             "control_state": service.control.state,
+            "account_risk": latest.get("account_risk") or {},
+            "startup_safety": latest.get("startup_safety") or getattr(service, "_startup_safety", {}),
             "broker_mode": getattr(service.broker, "mode", "paper"),
             "capital": {
                 "session_equity": cap["session_equity"],
@@ -1273,6 +1278,23 @@ def create_app(service: TradingService) -> FastAPI:
             _status_cache["ts"] = time.monotonic()
             _status_cache["payload"] = payload
         return payload
+
+    @app.get("/api/health")
+    def api_health():
+        """只读运维健康摘要；账户或保护单状态未知即视为不健康。"""
+        latest = _latest_or_empty(service)
+        safety = latest.get("startup_safety") or getattr(service, "_startup_safety", {})
+        broker_state = _broker_state_cached(service)
+        return {
+            "ok": bool(safety.get("ready", False)) and not broker_state.get("error"),
+            "broker_mode": str(getattr(service.broker, "mode", "paper")),
+            "control_state": service.control.state,
+            "startup_safety": safety,
+            "account_risk": latest.get("account_risk") or {},
+            "broker_error": broker_state.get("error"),
+            "cycle_running": service.cycle_running(),
+            "server_time": time.time(),
+        }
 
     @app.get("/api/badges")
     def api_badges():

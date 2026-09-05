@@ -10,6 +10,10 @@ paths:
   reviews_dir: data/reviews
   knowledge_dir: knowledge
 
+# 稳定性机制与风险档分开配置。账户级风险守卫先审计，不改变当前交易行为。
+stability:
+  risk_guard_mode: audit_only
+
 llm:
   provider: opencode
   api_key_env: OPENCODE_API_KEY
@@ -23,8 +27,12 @@ llm:
   reasoning_effort: low
   timeout_seconds: 180
   # 瞬时错误（504/429/5xx/网络异常）重试次数与退避间隔
-  max_retries: 1
-  retry_backoff_seconds: 2.0
+  # 2026-09-05 实测：该供应商网关不稳定，qwen3.7-max 全量统计
+  # ok 475 / error 222（失败率约 32%），错误几乎全是 504 Gateway Time-out，
+  # 且耗时在同一请求上可从 15s 抖动到 124s——属**瞬时**故障，重试即可绕过。
+  # 由 1 提到 3：单次失败率 32% → 连续 4 次全败约 1%，AI 通道不再整轮降级。
+  max_retries: 3
+  retry_backoff_seconds: 3.0
 
 execution:
   default_mode: demo
@@ -105,7 +113,10 @@ decision_cycle:
   fast_interval_seconds: 30
   # AI 通道每轮行情查询预算（次）。orchestrator 占全系统 prompt token 的 95%，
   # 查询结果在 messages 里逐轮累积只增不减，这是最主要的成本闸门。
-  query_budget: 8
+  # 2026-09-05 实测：预算 8 时 prompt 逐轮膨胀 6655→8666→13522 tok，
+  # 单次耗时 7.5s→15.3s→33s→124s，最终突破网关 60s 上限返回 504，
+  # AI 通道因此整轮降级 no_trade。降到 4 以把峰值压回超时线内。
+  query_budget: 4
 
 intel_cache:
   ttl_seconds: 3600

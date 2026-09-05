@@ -62,16 +62,33 @@ def apply_proxy_env(env_path: str | Path | None = None) -> dict[str, str]:
     必须在任何 httpx 调用之前执行（建议放在入口脚本 import 业务模块之前）。
     .env 里没配代理时不做任何事，保持原有行为。
     """
-    # 运维直连开关：本机代理服务未运行时，启动入口可显式要求清掉所有代理。
-    # 不能只是不写新值，因为父进程或 run_web_service.py 可能已注入旧代理。
-    if os.getenv("MTA_NO_PROXY", "").strip().lower() in {"1", "true", "yes", "on"}:
-        for key in PROXY_KEYS:
-            os.environ.pop(key, None)
-            os.environ.pop(key.lower(), None)
-        return {}
-
     path = Path(env_path) if env_path else Path(__file__).resolve().parents[2] / ".env"
     values = _read_env_file(path)
+
+    # 直连开关：环境变量优先，其次 .env。
+    # 必须同时读 .env，不能只看 os.environ——本函数通常早于 load_dotenv()
+    # 执行（run_web.py 中位于 import 业务模块之前），此时 .env 尚未被 dotenv
+    # 载入进程，只看环境变量会让 .env 里的开关静默失效。
+    no_proxy_flag = (
+        os.getenv("MTA_NO_PROXY", "").strip()
+        or values.get("MTA_NO_PROXY", "")
+        or values.get("mta_no_proxy", "")
+    )
+    if no_proxy_flag.strip().lower() in {"1", "true", "yes", "on"}:
+        # 为什么要显式写入 NO_PROXY='*' 而不是把代理变量全删掉：
+        # Windows 上 urllib.request.getproxies() 的实现是
+        #   getproxies_environment() or getproxies_registry()
+        # 环境变量一旦为空，就会**回退去读「系统代理」注册表项**，
+        # httpx(trust_env=True) 因此仍会走那个可能已经死掉的代理 → 10061 拒绝连接。
+        # 写入 NO_PROXY='*' 能让 environment 分支返回非空（{'no':'*'}），
+        # 从而阻断注册表回退，并让 httpx 对所有主机绕过代理。
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            os.environ.pop(key, None)
+            os.environ.pop(key.lower(), None)
+        os.environ["NO_PROXY"] = "*"
+        os.environ["no_proxy"] = "*"
+        return {}
+
     applied: dict[str, str] = {}
     for key in PROXY_KEYS:
         val = values.get(key) or values.get(key.lower())

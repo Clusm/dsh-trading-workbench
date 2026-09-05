@@ -24,7 +24,9 @@ from core.channels import ChannelManager
 from data.market_universe import MarketUniverse
 from data.market_query import get_live_prices
 from core.intel_cache import IntelCache
+from core.instance_lock import InstanceLock
 from core.quotas import TradeQuotaManager
+from core.risk_guard import AccountRiskGuard
 from llm.base import LLMClient
 from llm.mock_client import MockLLMClient
 
@@ -54,6 +56,10 @@ def build_execution_feedback(state: dict[str, Any], decision: Any,
 class TradingService:
     def __init__(self, settings: Settings):
         self.settings = settings
+        # 单实例是资金安全约束而非便利功能：两个进程会各自持有旧内存状态，
+        # 在不同时间覆写基线/通道台账，且可能重复提交订单。
+        self._instance_lock = InstanceLock(settings.project_root / "data" / "trading_service.lock")
+        self._instance_lock.acquire()
         self.db = AuditDatabase(settings.db_file)
         self.logger = JsonlLogger(settings.logs_dir)
         self.recorder = AgentRecorder(self.db, self.logger, settings.artifacts_dir)
@@ -79,6 +85,13 @@ class TradingService:
                 "strong_max_margin_usage",
                 settings.raw_risk.get("max_margin_usage", 0.80),
             )),
+        )
+        stability_cfg = settings.raw_settings.get("stability", {}) or {}
+        self.risk_guard = AccountRiskGuard(
+            state_file=settings.project_root / "data" / "account_risk_state.json",
+            daily_loss_stop=float(settings.raw_risk.get("daily_loss_stop", 0.15)),
+            max_drawdown=float(settings.raw_risk.get("max_drawdown_from_peak", 0.30)),
+            mode=str(stability_cfg.get("risk_guard_mode", "audit_only")),
         )
         ch_cfg = settings.raw_settings.get("channels", {}) or {}
         mu_cfg = settings.raw_settings.get("market_universe", {}) or {}
@@ -119,6 +132,10 @@ class TradingService:
         # 避免 LLM 长决策（最长 600s）期间 SL/TP 补挂与限价单到期撤单全部停摆。
         self._protection_lock = threading.Lock()
         self._run_thread: threading.Thread | None = None
+        self._run_thread_lock = threading.Lock()
+        self._startup_safety: dict[str, Any] = {
+            "ready": False, "reason": "尚未完成仓位/保护单核验", "checked_at": None,
+        }
         self._purge_old_logs()
 
     def _purge_old_logs(self, keep_days: int = 7) -> None:
@@ -203,6 +220,11 @@ class TradingService:
         if not self._protection_lock.acquire(blocking=False):
             return {"skipped": True, "reason": "protection_sync_running"}
         try:
+            # 慢决策仍在进行时，也要持续检查账户级止损；一旦触线，执行节点
+            # 提交前读取到 close_only 后会丢弃尚未发出的开仓 intent。
+            session_equity = self.capital.session_equity()
+            equity_available = not bool(getattr(self.capital, "_equity_stale", True))
+            account_risk = self._sync_account_risk(session_equity, equity_available)
             state = self.broker.state if isinstance(self.broker.state, dict) else {}
             symbols = [str(p.get("symbol")) for p in state.get("positions", [])]
             prices = get_live_prices(symbols) if symbols else {}
@@ -225,7 +247,8 @@ class TradingService:
                                            action_taken="continue")
             # 快循环也刷新通道/会话权益快照，让页面数值接近实时（慢循环 10 分钟太长）
             self._refresh_latest_channels(state, prices)
-            return {"ts": time.time(), "receipts": receipts, "prices": prices}
+            return {"ts": time.time(), "receipts": receipts, "prices": prices,
+                    "account_risk": account_risk}
         finally:
             self._protection_lock.release()
 
@@ -235,14 +258,30 @@ class TradingService:
         return build_execution_feedback(state, decision, channel_status, broker_state)
 
     def request_run(self) -> bool:
-        if self._run_thread and self._run_thread.is_alive():
-            return False
-        self._run_thread = threading.Thread(target=self.run_once, daemon=True)
-        self._run_thread.start()
+        # Web手动触发与调度线程可能同时到达，检查和赋值必须原子；
+        # 否则两个线程都可能越过 is_alive() 并各自启动一次慢决策。
+        with self._run_thread_lock:
+            if self._run_thread and self._run_thread.is_alive():
+                return False
+            worker = threading.Thread(target=self._run_once_background, daemon=True)
+            self._run_thread = worker
+            worker.start()
         return True
 
+    def _run_once_background(self) -> None:
+        try:
+            self.run_once()
+        except Exception as e:
+            self.db.log_risk_event(event_type="cycle_error", severity="error",
+                                   details=f"{type(e).__name__}: {e}", action_taken="skip cycle")
+        finally:
+            with self._run_thread_lock:
+                if self._run_thread is threading.current_thread():
+                    self._run_thread = None
+
     def cycle_running(self) -> bool:
-        return bool(self._run_thread and self._run_thread.is_alive())
+        with self._run_thread_lock:
+            return bool(self._run_thread and self._run_thread.is_alive())
 
     def _run_once_inner(self) -> dict[str, Any]:
         run_id = str(uuid.uuid4())
@@ -250,13 +289,14 @@ class TradingService:
         capital_result = self.capital.sync()
         equity_available = bool(capital_result.get("equity_available", True))
         session_equity = self.capital.session_equity()
-        if hasattr(self.broker, "sync_positions"):
-            try:
-                self.broker.sync_positions()
-            except Exception as e:
-                self.db.log_risk_event(event_type="futures_sync_error", severity="warn",
-                                       details=f"{type(e).__name__}: {e}", action_taken="skip")
-        allow_new = bool(self.control.allow_new_positions and equity_available)
+        startup_safety = self._verify_startup_safety()
+        account_risk = self._sync_account_risk(session_equity, equity_available)
+        allow_new = bool(
+            self.control.allow_new_positions
+            and equity_available
+            and account_risk.get("allow_new", False)
+            and startup_safety.get("ready", False)
+        )
         # 先同步双通道资金状态（60/40 日切重算、AI 熔断、通道保证金上限）
         broker_state = self.broker.state if isinstance(self.broker.state, dict) else {}
         position_symbols = [str(p.get("symbol")) for p in broker_state.get("positions", [])]
@@ -334,6 +374,8 @@ class TradingService:
                 "last_reset": self.capital.last_reset,
             },
             "control_state": self.control.state,
+            "account_risk": account_risk,
+            "startup_safety": startup_safety,
             "quota_state": self.quota.status(),
             "channel_state": channel_status,
             "intel_cache": self.intel_cache.stats(),
@@ -343,6 +385,48 @@ class TradingService:
         with self._lock:
             self._latest = result
         return result
+
+    def _verify_startup_safety(self) -> dict[str, Any]:
+        """开仓前核验交易所仓位与保护单；未知状态默认禁止开仓。"""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            if hasattr(self.broker, "sync_positions"):
+                self.broker.sync_positions()
+            if hasattr(self.broker, "sync_protections"):
+                self.broker.sync_protections()
+            if hasattr(self.broker, "protection_coverage"):
+                coverage = self.broker.protection_coverage()
+                if not coverage.get("ok", False):
+                    result = {"ready": False, "reason": str(coverage.get("reason") or "保护单核验失败"),
+                              "checked_at": now, "coverage": coverage}
+                    self._startup_safety = result
+                    self.db.log_risk_event(event_type="startup_safety_block", severity="critical",
+                                           details=result["reason"], action_taken="block new opens")
+                    return result
+            result = {"ready": True, "reason": "", "checked_at": now}
+        except Exception as e:
+            result = {"ready": False, "reason": f"{type(e).__name__}: {e}", "checked_at": now}
+            self.db.log_risk_event(event_type="startup_safety_block", severity="critical",
+                                   details=result["reason"], action_taken="block new opens")
+        self._startup_safety = result
+        return result
+
+    def _sync_account_risk(self, session_equity: float, equity_available: bool) -> dict[str, Any]:
+        """更新账户级闸门；首次触发时将控制面持久化为 close_only。"""
+        account_risk = self.risk_guard.sync(
+            session_equity,
+            equity_available=equity_available,
+            anchor_id=self.capital.anchor_id,
+        )
+        if (account_risk.get("latched") and account_risk.get("enforced")
+                and self.control.state == "normal"):
+            self.control.set_state("close_only")
+            self.db.log_risk_event(
+                event_type="account_risk_stop", severity="critical",
+                details=str(account_risk.get("reason") or "账户级风险阈值触发"),
+                action_taken="set close_only; block new opens",
+            )
+        return account_risk
 
     def latest(self) -> dict[str, Any]:
         with self._lock:
@@ -378,8 +462,24 @@ class TradingService:
         self._thread = threading.Thread(target=self._loop, args=(interval_minutes,), daemon=True)
         self._thread.start()
 
-    def stop_background(self) -> None:
+    def stop_background(self, wait_seconds: float = 5.0) -> bool:
+        """停止调度并等待在途慢决策；返回是否已安全静默。
+
+        不能在慢决策仍可能访问 Broker/DB 时先关闭共享资源。超时后由调用方
+        保留资源和实例锁，进程退出时交给操作系统回收，避免产生半关闭竞态。
+        """
         self._stop_event.set()
+        deadline = time.monotonic() + max(0.0, float(wait_seconds))
+        scheduler = self._thread
+        if scheduler and scheduler is not threading.current_thread() and scheduler.is_alive():
+            scheduler.join(timeout=max(0.0, deadline - time.monotonic()))
+        with self._run_thread_lock:
+            worker = self._run_thread
+        if worker and worker is not threading.current_thread() and worker.is_alive():
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        scheduler_alive = bool(scheduler and scheduler.is_alive())
+        worker_alive = bool(worker and worker.is_alive())
+        return not scheduler_alive and not worker_alive
 
     def _loop(self, interval_minutes: float) -> None:
         fast_interval = float(self.settings.raw_settings.get("decision_cycle", {}).get("fast_interval_seconds", 30))
@@ -387,15 +487,9 @@ class TradingService:
         while not self._stop_event.is_set():
             now = time.monotonic()
             if now >= next_slow:
-                self._run_thread = threading.current_thread()
-                try:
-                    self.run_once()
-                except Exception as e:
-                    self.db.log_risk_event(event_type="cycle_error", severity="error",
-                                           details=f"{type(e).__name__}: {e}", action_taken="skip cycle")
-                finally:
-                    if self._run_thread is threading.current_thread():
-                        self._run_thread = None
+                # 慢决策放到独立线程，调度线程继续运行快循环，避免长 LLM 调用
+                # 使保护单同步、限价单处理和账户熔断停摆数分钟。
+                self.request_run()
                 next_slow = time.monotonic() + interval_minutes * 60
             else:
                 try:
@@ -464,10 +558,22 @@ class TradingService:
         return generated
 
     def close(self) -> None:
-        self.stop_background()
+        if not self.stop_background():
+            try:
+                self.db.log_risk_event(
+                    event_type="service_shutdown_deferred", severity="warn",
+                    details="在途决策未在5秒内结束，保留Broker/DB/实例锁直到进程退出",
+                    action_taken="defer resource close",
+                )
+            except Exception:
+                pass
+            return
         if hasattr(self.broker, "close"):
             try:
                 self.broker.close()
             except Exception:
                 pass
-        self.db.close()
+        try:
+            self.db.close()
+        finally:
+            self._instance_lock.release()

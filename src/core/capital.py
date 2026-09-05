@@ -55,6 +55,18 @@ class CapitalManager:
     def _mode(self) -> str:
         return str(getattr(self.broker, "mode", "paper") or "paper")
 
+    @property
+    def anchor_id(self) -> str:
+        """当前资金锚点的稳定标识，供账户级风控切分会话使用。"""
+        try:
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+            anchored_at = str(data.get("anchored_at") or "").strip()
+            if anchored_at:
+                return f"{self._mode()}:{anchored_at}"
+        except Exception:
+            pass
+        return f"{self._mode()}:{self.initial_equity:.8f}:{self.baseline:.8f}"
+
     def _baseline_plausible(self, baseline: float, exchange_eq: float) -> bool:
         """基线合理性校验——堵住「基线被清零/写坏后永久继承」这类故障。
 

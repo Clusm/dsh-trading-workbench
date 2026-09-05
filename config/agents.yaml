@@ -11,8 +11,11 @@ agents:
     role: discretionary_trader
     model: qwen3.7-max
     temperature: 0.3
-    max_tokens: 8000
-    reasoning_effort: high
+    # 2026-09-05 实测降档：high+8000 在多轮工具调用后单次耗时冲到 124s，
+    # 被网关 60s 上限截断返回 504，AI 通道整轮 no_trade。
+    # 降为 medium+4000 以把峰值耗时压回超时线内；若供应商网关放宽可改回。
+    max_tokens: 4000
+    reasoning_effort: medium
   - name: market_agent
     role: crypto_market_intel
     model: qwen3.7-flash

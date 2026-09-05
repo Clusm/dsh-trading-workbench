@@ -1354,6 +1354,30 @@ class BinanceFuturesBroker:
                                        details=f"sync_protections: {type(e).__name__} {e}",
                                        action_taken="skip fast protection sync")
 
+    def protection_coverage(self) -> dict[str, Any]:
+        """读取交易所当前保护单，供启动/开仓闸门使用。
+
+        查询失败必须明确返回 ``ok=False``，不能把“不知道”解释成“没有仓位风险”。
+        """
+        positions = self.positions(force=True)
+        missing: list[str] = []
+        for pos in positions:
+            symbol = str(pos.get("symbol") or "")
+            algos = self._open_algos(symbol)
+            if algos is None:
+                return {"ok": False, "positions": len(positions), "missing": [symbol],
+                        "reason": f"{symbol} 保护单查询失败"}
+            stop = [a for a in algos if str(a.get("orderType") or "") == "STOP_MARKET"]
+            take = [a for a in algos if str(a.get("orderType") or "") == "TAKE_PROFIT_MARKET"]
+            if len(stop) != 1 or len(take) != 1:
+                missing.append(symbol)
+        return {
+            "ok": not missing,
+            "positions": len(positions),
+            "missing": missing,
+            "reason": "" if not missing else f"缺少或重复保护单: {', '.join(missing)}",
+        }
+
     def sync_positions(self) -> None:
         try:
             pos = self.positions()
