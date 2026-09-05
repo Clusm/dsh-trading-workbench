@@ -89,6 +89,9 @@ class FakeService:
         self.settings.raw_settings["account_mirror"] = {
             "enabled": False, "shadow_only": True, "rest_reconcile_seconds": 60,
         }
+        self.settings.raw_settings["order_mirror"] = {
+            "enabled": False, "shadow_only": True,
+        }
         self.db = AuditDatabase(self.settings.db_file)
         self.broker = SimpleNamespace(
             api_key="must-not-leak", base_url="https://demo-fapi.binance.com",

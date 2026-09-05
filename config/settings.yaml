@@ -36,6 +36,11 @@ account_mirror:
   shadow_only: true
   rest_reconcile_seconds: 60
 
+# 订单事件状态机同样仅作影子审计，不接管Broker订单读写。
+order_mirror:
+  enabled: true
+  shadow_only: true
+
 llm:
   provider: opencode
   api_key_env: OPENCODE_API_KEY

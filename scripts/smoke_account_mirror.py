@@ -100,6 +100,6 @@ check("镜像状态保持shadow_only", restarted.status()["shadow_only"] is True
 
 versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
-check("数据库迁移版本1到3完整", versions == [1, 2, 3])
+check("数据库迁移版本1到4完整", versions == [1, 2, 3, 4])
 db.close()
 print("\n结果: 14 通过 / 0 失败")

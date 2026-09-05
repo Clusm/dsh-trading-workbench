@@ -483,6 +483,47 @@ class AuditDatabase:
 
         self._apply_migration(3, "account_shadow_mirror", apply_account_mirror)
 
+        def apply_order_mirror() -> None:
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS exchange_order_mirror (
+                    environment TEXT NOT NULL,
+                    exchange_order_id TEXT NOT NULL,
+                    client_order_id TEXT,
+                    symbol TEXT NOT NULL,
+                    side TEXT,
+                    position_side TEXT,
+                    order_type TEXT,
+                    purpose TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    execution_type TEXT,
+                    original_qty REAL NOT NULL DEFAULT 0,
+                    cumulative_qty REAL NOT NULL DEFAULT 0,
+                    avg_price REAL NOT NULL DEFAULT 0,
+                    last_fill_qty REAL NOT NULL DEFAULT 0,
+                    last_fill_price REAL NOT NULL DEFAULT 0,
+                    realized_pnl REAL NOT NULL DEFAULT 0,
+                    commission REAL NOT NULL DEFAULT 0,
+                    commission_asset TEXT,
+                    reduce_only INTEGER NOT NULL DEFAULT 0,
+                    close_position INTEGER NOT NULL DEFAULT 0,
+                    trade_id TEXT,
+                    event_time_ms INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    PRIMARY KEY(environment, exchange_order_id)
+                )"""
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_exchange_order_mirror_client "
+                "ON exchange_order_mirror(environment, client_order_id)"
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_exchange_order_mirror_status "
+                "ON exchange_order_mirror(environment, status, symbol)"
+            )
+
+        self._apply_migration(4, "order_shadow_mirror", apply_order_mirror)
+
     def close(self) -> None:
         self.conn.close()
 

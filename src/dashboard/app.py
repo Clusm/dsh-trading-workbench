@@ -23,6 +23,7 @@ from data.market_query import get_live_prices
 from data.price_stream import PriceStream
 from exchange.event_inbox import ExchangeEventInbox
 from exchange.account_mirror import AccountMirror
+from exchange.order_mirror import OrderMirror
 from exchange.user_stream import BinanceUserDataStream
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -1015,6 +1016,7 @@ def create_app(service: TradingService) -> FastAPI:
         user_stream = None
         user_task = None
         mirror = None
+        order_mirror = None
         mirror_task = None
         user_stream_runtime: dict[str, Any] = {
             "enabled": exchange_enabled,
@@ -1038,13 +1040,26 @@ def create_app(service: TradingService) -> FastAPI:
                 mirror_cfg = service.settings.raw_settings.get("account_mirror", {}) or {}
                 mirror_enabled = bool(mirror_cfg.get("enabled", False))
                 mirror_shadow = bool(mirror_cfg.get("shadow_only", True))
+                allowed = list(getattr(broker, "_symbol_filters", {}).keys()) or list(
+                    (service.settings.raw_settings.get("market_universe", {}) or {}).get(
+                        "core_symbols", []))
                 if mirror_enabled and mirror_shadow:
-                    allowed = list(getattr(broker, "_symbol_filters", {}).keys()) or list(
-                        (service.settings.raw_settings.get("market_universe", {}) or {}).get(
-                            "core_symbols", []))
                     mirror = AccountMirror(
                         service.db, environment=environment, allowed_symbols=allowed)
                     mirror.replay_pending()
+                order_cfg = service.settings.raw_settings.get("order_mirror", {}) or {}
+                if bool(order_cfg.get("enabled", False)) and bool(
+                        order_cfg.get("shadow_only", True)):
+                    order_mirror = OrderMirror(
+                        service.db, environment=environment, allowed_symbols=allowed)
+                    order_mirror.replay_pending()
+
+                def apply_shadow_event(event):
+                    applied = mirror.apply_event(event) if mirror is not None else False
+                    if order_mirror is not None:
+                        applied = order_mirror.apply_event(event) or applied
+                    return applied
+
                 user_stream = BinanceUserDataStream(
                     api_key=api_key,
                     rest_base_url=rest_base_url,
@@ -1054,7 +1069,8 @@ def create_app(service: TradingService) -> FastAPI:
                     planned_reconnect_hours=float(exchange_cfg.get("planned_reconnect_hours", 23)),
                     reconnect_seconds=float(exchange_cfg.get("reconnect_seconds", 5)),
                     queue_size=int(exchange_cfg.get("queue_size", 5000)),
-                    event_applier=mirror.apply_event if mirror is not None else None,
+                    event_applier=(apply_shadow_event
+                                   if mirror is not None or order_mirror is not None else None),
                     trust_env=bool(getattr(broker, "_trust_env", True)),
                 )
                 user_stream_runtime = user_stream.status()
@@ -1077,6 +1093,7 @@ def create_app(service: TradingService) -> FastAPI:
         app.state.user_stream = user_stream
         app.state.user_stream_runtime = user_stream_runtime
         app.state.account_mirror = mirror
+        app.state.order_mirror = order_mirror
         try:
             yield
         finally:
@@ -1406,6 +1423,20 @@ def create_app(service: TradingService) -> FastAPI:
                 "enabled": True, "shadow_only": True, "state": "degraded",
                 "last_error": type(exc).__name__,
             }
+        order_mirror = getattr(app.state, "order_mirror", None)
+        order_cfg = service.settings.raw_settings.get("order_mirror", {}) or {}
+        try:
+            order_mirror_status = (order_mirror.status() if order_mirror is not None else {
+                "enabled": bool(order_cfg.get("enabled", False)),
+                "shadow_only": bool(order_cfg.get("shadow_only", True)),
+                "state": ("blocked" if order_cfg.get("enabled") and
+                          not order_cfg.get("shadow_only", True) else "disabled"),
+            })
+        except Exception as exc:
+            order_mirror_status = {
+                "enabled": True, "shadow_only": True, "state": "degraded",
+                "last_error": type(exc).__name__,
+            }
         cycle_ts = latest.get("ts")
         account_risk = (latest.get("account_risk") or
                         getattr(service, "_account_risk_status", {}) or {})
@@ -1434,6 +1465,7 @@ def create_app(service: TradingService) -> FastAPI:
             # M4观察期不把私有流纳入总健康判定；REST仍是账户真值源。
             "exchange_stream": user_stream_status,
             "account_mirror": mirror_status,
+            "order_mirror": order_mirror_status,
             "server_time": time.time(),
         }
 
