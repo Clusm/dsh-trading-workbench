@@ -84,7 +84,7 @@ class FakeService:
         self.settings.raw_settings["exchange_stream"] = {
             "enabled": True, "observe_only": observe_only,
             "keepalive_minutes": 30, "planned_reconnect_hours": 23,
-            "reconnect_seconds": 5,
+            "reconnect_seconds": 5, "queue_size": 5000,
         }
         self.db = AuditDatabase(self.settings.db_file)
         self.broker = SimpleNamespace(
@@ -125,6 +125,7 @@ with TestClient(app) as client:
     encoded = str(health)
     check("健康信息不泄露API Key", "must-not-leak" not in encoded)
 instance = FakeUserStream.instances[-1]
+check("有界队列配置传入流", instance.kwargs["queue_size"] == 5000)
 check("生命周期停止流", instance.stopped is True)
 check("生命周期关闭客户端", instance.closed is True)
 service.db.close()
@@ -138,4 +139,4 @@ with TestClient(blocked_app) as client:
     check("阻断原因明确", blocked["reason"] == "observe_only_required")
 blocked_service.db.close()
 
-print("\n结果: 7 通过 / 0 失败")
+print("\n结果: 8 通过 / 0 失败")

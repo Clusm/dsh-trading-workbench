@@ -30,6 +30,10 @@ STREAM_BASES = {
 }
 
 
+class EventQueueFull(RuntimeError):
+    """内存收件队列已满；调用方应断线并触发REST对账。"""
+
+
 def _proxy() -> str | None:
     if (os.environ.get("MTA_NO_PROXY", "").strip().lower() in
             {"1", "true", "yes", "on"}) or os.environ.get("NO_PROXY") == "*":
@@ -45,7 +49,7 @@ class BinanceUserDataStream:
     def __init__(self, *, api_key: str, rest_base_url: str, environment: str,
                  inbox: ExchangeEventInbox, keepalive_minutes: float = 30,
                  planned_reconnect_hours: float = 23, reconnect_seconds: float = 5,
-                 trust_env: bool = True) -> None:
+                 queue_size: int = 5000, trust_env: bool = True) -> None:
         if environment not in STREAM_BASES:
             raise ValueError(f"私有流不支持执行环境: {environment!r}")
         self.api_key = str(api_key)
@@ -55,8 +59,11 @@ class BinanceUserDataStream:
         self.keepalive_seconds = max(60.0, float(keepalive_minutes) * 60)
         self.planned_reconnect_seconds = max(300.0, float(planned_reconnect_hours) * 3600)
         self.reconnect_seconds = max(1.0, float(reconnect_seconds))
+        self.queue_size = max(1, int(queue_size))
+        self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=self.queue_size)
         self._client = httpx.AsyncClient(timeout=15.0, trust_env=trust_env)
         self._stop = False
+        self._transport_connected = False
         self.state = "disabled"
         self.started_at: float | None = None
         self.connected_at: float | None = None
@@ -67,6 +74,11 @@ class BinanceUserDataStream:
         self.reconnects = 0
         self.events_received = 0
         self.events_inserted = 0
+        self.queue_overflows = 0
+        self.persistence_errors = 0
+        self.last_persisted_at: float | None = None
+        self.last_db_write_latency_ms: float | None = None
+        self.reconcile_required = False
 
     def stop(self) -> None:
         self._stop = True
@@ -88,7 +100,61 @@ class BinanceUserDataStream:
             "reconnects": self.reconnects,
             "events_received": self.events_received,
             "events_inserted": self.events_inserted,
+            "queue_depth": self._queue.qsize(),
+            "queue_capacity": self.queue_size,
+            "queue_overflows": self.queue_overflows,
+            "persistence_errors": self.persistence_errors,
+            "last_persisted_at": self.last_persisted_at,
+            "last_db_write_latency_ms": self.last_db_write_latency_ms,
+            "reconcile_required": self.reconcile_required,
         }
+
+    def _enqueue_payload(self, payload: dict[str, Any]) -> None:
+        self.events_received += 1
+        self.last_event_at = time.time()
+        try:
+            self._queue.put_nowait(payload)
+        except asyncio.QueueFull as exc:
+            self.queue_overflows += 1
+            self.reconcile_required = True
+            self.state = "degraded"
+            self.last_error = "EventQueueFull"
+            raise EventQueueFull("私有事件队列已满") from exc
+
+    async def _consume_inbox(self) -> None:
+        """单消费者串行落库；短暂DB错误时保留当前事件并持续重试。"""
+        while not self._stop or not self._queue.empty():
+            try:
+                payload = await asyncio.wait_for(self._queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            try:
+                while True:
+                    started = time.perf_counter()
+                    try:
+                        _event, inserted = await asyncio.to_thread(
+                            self.inbox.receive, payload, source="user_stream")
+                        self.last_db_write_latency_ms = round(
+                            (time.perf_counter() - started) * 1000, 3)
+                        self.last_persisted_at = time.time()
+                        if inserted:
+                            self.events_inserted += 1
+                        if self._transport_connected and self.last_error == "PersistenceError":
+                            self.state = "live"
+                            self.last_error = None
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        self.persistence_errors += 1
+                        self.reconcile_required = True
+                        self.state = "degraded"
+                        self.last_error = "PersistenceError"
+                        if self._stop:
+                            return
+                        await asyncio.sleep(self.reconnect_seconds)
+            finally:
+                self._queue.task_done()
 
     def connection_url(self, listen_key: str) -> str:
         base = STREAM_BASES[self.environment]
@@ -141,6 +207,7 @@ class BinanceUserDataStream:
         started = time.monotonic()
         try:
             async with websockets.connect(url, **kwargs) as ws:
+                self._transport_connected = True
                 self.state = "live"
                 self.connected_at = time.time()
                 self.last_error = None
@@ -152,14 +219,12 @@ class BinanceUserDataStream:
                     except asyncio.TimeoutError:
                         continue
                     payload = json.loads(raw)
-                    event, inserted = self.inbox.receive(payload, source="user_stream")
-                    self.events_received += 1
-                    if inserted:
-                        self.events_inserted += 1
-                    self.last_event_at = time.time()
-                    if event.event_type == "listenKeyExpired":
+                    self._enqueue_payload(payload)
+                    body = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+                    if body.get("e") == "listenKeyExpired":
                         return
         finally:
+            self._transport_connected = False
             self.last_disconnect_at = time.time()
             keepalive.cancel()
             await asyncio.gather(keepalive, return_exceptions=True)
@@ -171,21 +236,31 @@ class BinanceUserDataStream:
     async def serve(self) -> None:
         self._stop = False
         self.started_at = time.time()
-        while not self._stop:
-            try:
-                await self._session()
-                if not self._stop:
+        consumer = asyncio.create_task(self._consume_inbox())
+        try:
+            while not self._stop:
+                try:
+                    await self._session()
+                    if not self._stop:
+                        self.reconnects += 1
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # 异常文本可能带连接URL，绝不把listenKey写入状态或日志。
+                    self.last_error = type(exc).__name__
+                    self.state = "degraded"
                     self.reconnects += 1
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # 异常文本可能带连接URL，绝不把listenKey写入状态或日志。
-                self.last_error = type(exc).__name__
-                self.state = "degraded"
-                self.reconnects += 1
-            if not self._stop:
-                await asyncio.sleep(self.reconnect_seconds)
-        self.state = "stopped"
+                if not self._stop:
+                    await asyncio.sleep(self.reconnect_seconds)
+        finally:
+            self._stop = True
+            try:
+                await asyncio.wait_for(self._queue.join(), timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+            self.state = "stopped"
 
     async def close(self) -> None:
         self.stop()

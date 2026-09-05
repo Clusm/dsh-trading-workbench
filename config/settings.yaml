@@ -21,6 +21,7 @@ exchange_stream:
   keepalive_minutes: 30
   planned_reconnect_hours: 23
   reconnect_seconds: 5
+  queue_size: 5000
 
 llm:
   provider: opencode

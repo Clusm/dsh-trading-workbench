@@ -1038,6 +1038,7 @@ def create_app(service: TradingService) -> FastAPI:
                     keepalive_minutes=float(exchange_cfg.get("keepalive_minutes", 30)),
                     planned_reconnect_hours=float(exchange_cfg.get("planned_reconnect_hours", 23)),
                     reconnect_seconds=float(exchange_cfg.get("reconnect_seconds", 5)),
+                    queue_size=int(exchange_cfg.get("queue_size", 5000)),
                     trust_env=bool(getattr(broker, "_trust_env", True)),
                 )
                 user_stream_runtime = user_stream.status()

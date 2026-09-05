@@ -1,6 +1,7 @@
 """User Data Stream环境路由与安全默认值回归；不连接网络。"""
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 from pathlib import Path
@@ -48,10 +49,36 @@ cfg = settings["exchange_stream"]
 check("随服务启动", cfg["enabled"] is True)
 check("默认observe_only", cfg["observe_only"] is True)
 check("提前30分钟续期", cfg["keepalive_minutes"] == 30)
+check("事件队列有界", cfg["queue_size"] == 5000)
 
-import asyncio
+print("\n[3] 健康状态脱敏且队列溢出可见")
+bounded = BinanceUserDataStream(
+    api_key="must-not-leak", rest_base_url="https://demo-fapi.binance.com",
+    environment="demo", inbox=inbox, queue_size=1,
+)
+bounded._enqueue_payload({"e": "ACCOUNT_UPDATE", "E": 1})
+try:
+    bounded._enqueue_payload({"e": "ACCOUNT_UPDATE", "E": 2})
+except RuntimeError:
+    pass
+status = bounded.status()
+check("队列严格限制容量", status["queue_depth"] == 1 and status["queue_capacity"] == 1)
+check("溢出进入degraded并要求对账", status["state"] == "degraded" and
+      status["reconcile_required"] is True and status["queue_overflows"] == 1)
+check("状态不泄露API Key", "must-not-leak" not in str(status))
+
+print("\n[4] 单消费者把事件串行写入幂等收件箱")
+live._enqueue_payload({"e": "ACCOUNT_UPDATE", "E": 11, "T": 12, "a": {"P": []}})
+live.stop()
+asyncio.run(live._consume_inbox())
+persisted = live.status()
+check("事件已持久化且队列清空", persisted["events_inserted"] == 1 and
+      persisted["queue_depth"] == 0)
+check("记录DB写延迟", persisted["last_db_write_latency_ms"] is not None)
+
 asyncio.run(live.close())
 asyncio.run(demo.close())
 asyncio.run(testnet.close())
+asyncio.run(bounded.close())
 db.close()
-print("\n结果: 6 通过 / 0 失败")
+print("\n结果: 12 通过 / 0 失败")
