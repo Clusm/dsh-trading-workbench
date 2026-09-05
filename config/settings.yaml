@@ -14,6 +14,13 @@ paths:
 stability:
   risk_guard_mode: audit_only
 
+database_backup:
+  enabled: true
+  directory: data/backups
+  interval_hours: 24
+  retry_hours: 1
+  keep_days: 14
+
 # USD-M私有账户流进入观察期：只落幂等收件箱，不更新账户镜像、不驱动订单。
 exchange_stream:
   enabled: true

@@ -21,6 +21,7 @@ from llm.factory import build_llm_for_agent
 from exchange.factory import create_broker
 from core.capital import CapitalManager
 from core.channels import ChannelManager
+from core.db_backup import DatabaseBackupManager
 from data.market_universe import MarketUniverse
 from data.market_query import get_live_prices
 from core.intel_cache import IntelCache
@@ -61,6 +62,15 @@ class TradingService:
         self._instance_lock = InstanceLock(settings.project_root / "data" / "trading_service.lock")
         self._instance_lock.acquire()
         self.db = AuditDatabase(settings.db_file)
+        backup_cfg = settings.raw_settings.get("database_backup", {}) or {}
+        self.db_backup = DatabaseBackupManager(
+            self.db,
+            settings.project_root / str(backup_cfg.get("directory", "data/backups")),
+            enabled=bool(backup_cfg.get("enabled", True)),
+            interval_hours=float(backup_cfg.get("interval_hours", 24)),
+            keep_days=int(backup_cfg.get("keep_days", 14)),
+            retry_hours=float(backup_cfg.get("retry_hours", 1)),
+        )
         self.logger = JsonlLogger(settings.logs_dir)
         self.recorder = AgentRecorder(self.db, self.logger, settings.artifacts_dir)
         self.broker = create_broker(settings, self.db)
@@ -522,6 +532,8 @@ class TradingService:
         fast_interval = float(self.settings.raw_settings.get("decision_cycle", {}).get("fast_interval_seconds", 30))
         next_slow = time.monotonic()
         while not self._stop_event.is_set():
+            # SQLite在线备份包含WAL内容；频率门禁在manager内部，循环检查成本近似为零。
+            self.db_backup.maybe_backup()
             now = time.monotonic()
             if now >= next_slow:
                 # 慢决策放到独立线程，调度线程继续运行快循环，避免长 LLM 调用

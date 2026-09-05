@@ -1382,6 +1382,8 @@ def create_app(service: TradingService) -> FastAPI:
                                   if cycle_ts else None),
             "db_readable": db_readable,
             "runtime": runtime,
+            "database_backup": (service.db_backup.status()
+                                if hasattr(service, "db_backup") else {"enabled": False}),
             # M4观察期不把私有流纳入总健康判定；REST仍是账户真值源。
             "exchange_stream": user_stream_status,
             "server_time": time.time(),
