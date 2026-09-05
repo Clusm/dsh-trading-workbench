@@ -1014,6 +1014,40 @@ class BinanceFuturesBroker:
                                            details=f"{symbol}: 取消Algo单失败 {type(e).__name__} {e}",
                                            action_taken="继续")
 
+    def _cleanup_closed_symbol_algos(self, symbol: str) -> int:
+        """二次确认已无仓位后，串行撤销保护触发后遗留的另一侧Algo单。"""
+        with self._resync_lock:
+            current = [p for p in self.positions(force=True)
+                       if str(p.get("symbol") or "") == symbol and
+                       abs(float(p.get("positionAmt") or 0.0)) > 1e-12]
+            if current:
+                return 0
+            algos = self._open_algos(symbol)
+            if algos is None:
+                return 0
+            canceled = 0
+            for algo in algos:
+                algo_id = str(algo.get("algoId") or "")
+                if not algo_id:
+                    continue
+                try:
+                    self._signed("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
+                    canceled += 1
+                    if self.db:
+                        self.db.cancel_order_by_exchange_id(exchange_order_id=algo_id)
+                except Exception as exc:
+                    if self.db:
+                        self.db.log_risk_event(
+                            event_type="futures_adjust_error", severity="warn",
+                            details=f"{symbol}: 孤儿Algo撤销失败 {algo_id}: {type(exc).__name__}",
+                            action_taken="retry next sync")
+            if canceled and self.db:
+                self.db.log_risk_event(
+                    event_type="futures_orphan_protection_canceled", severity="warn",
+                    details=f"{symbol}: 仓位归零后二次确认，已撤销 {canceled} 张残留Algo保护单",
+                    action_taken="cancel orphan algo orders")
+            return canceled
+
     def _algo_prices(self, symbol: str) -> dict[str, float] | None:
         """当前交易所侧 SL/TP 价格。查询失败返回 None（区别于"无挂单"的 {}）。"""
         algos = self._open_algos(symbol)
@@ -1479,6 +1513,8 @@ class BinanceFuturesBroker:
                         closed_symbols.append(symbol)
                 self._save_ledger(ledger)
             if closed_symbols:
+                for symbol in closed_symbols:
+                    self._cleanup_closed_symbol_algos(symbol)
                 self._reconcile_external_closes(closed_symbols)
             if self.db:
                 # 只在仓位真正变化（新开/加减仓/改杠杆/换来源）时才写流水，

@@ -344,6 +344,7 @@ def _event_type_cn(value: Any) -> str:
         "control_block_open": "控制状态拦截开仓",
         "snapshot_rejected": "权益快照跳变已拦截",
         "futures_close_reconcile_mismatch": "外部平仓补记数量不符",
+        "futures_orphan_protection_canceled": "孤儿保护单已自动撤销",
         "futures_close_source_error": "分通道强平错误",
         "futures_unsupported_symbol": "不支持的交易对已拦截",
         "signal_fn_missing": "策略信号函数缺失",

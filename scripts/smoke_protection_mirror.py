@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 
@@ -10,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from audit.database import AuditDatabase  # noqa: E402
+from exchange.binance_futures import BinanceFuturesBroker  # noqa: E402
 from exchange.protection_mirror import ProtectionOrderMirror  # noqa: E402
 
 
@@ -103,4 +105,35 @@ versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
 check("数据库迁移版本1到8完整", versions == [1, 2, 3, 4, 5, 6, 7, 8])
 db.close()
+
+print("\n[4] 仓位归零后自动收口残留Algo保护单")
+class CleanupDB:
+    def __init__(self):
+        self.canceled = []
+        self.events = []
+
+    def cancel_order_by_exchange_id(self, *, exchange_order_id):
+        self.canceled.append(exchange_order_id)
+
+    def log_risk_event(self, **kwargs):
+        self.events.append(kwargs)
+
+
+cleanup_db = CleanupDB()
+broker = BinanceFuturesBroker.__new__(BinanceFuturesBroker)
+broker.db = cleanup_db
+broker._resync_lock = threading.RLock()
+broker.positions = lambda force=False: []
+broker._open_algos = lambda symbol=None: [
+    algo(99, "BTCUSDT", "STOP_MARKET", "SELL", "0.1", "59000")]
+deletes = []
+broker._signed = lambda method, path, params=None, attempts=2: deletes.append(
+    (method, path, dict(params or {}))) or {"code": "200"}
+check("无仓位时残留Algo被撤销", broker._cleanup_closed_symbol_algos("BTCUSDT") == 1)
+check("撤销同时收口本地订单生命周期", cleanup_db.canceled == ["99"])
+check("自动清理事件可审计", cleanup_db.events[0]["event_type"] ==
+      "futures_orphan_protection_canceled")
+broker.positions = lambda force=False: [{"symbol": "BTCUSDT", "positionAmt": "0.1"}]
+check("二次确认仍有仓位时绝不撤保护单",
+      broker._cleanup_closed_symbol_algos("BTCUSDT") == 0 and len(deletes) == 1)
 print(f"\n结果: {passed} 通过 / 0 失败")
