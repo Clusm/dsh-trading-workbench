@@ -14,6 +14,14 @@ paths:
 stability:
   risk_guard_mode: audit_only
 
+# USD-M私有账户流分阶段启用；当前仅完成代码与回放，默认不随服务启动。
+exchange_stream:
+  enabled: false
+  observe_only: true
+  keepalive_minutes: 30
+  planned_reconnect_hours: 23
+  reconnect_seconds: 5
+
 llm:
   provider: opencode
   api_key_env: OPENCODE_API_KEY
