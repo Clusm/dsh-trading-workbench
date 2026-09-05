@@ -40,6 +40,7 @@ account_mirror:
 order_mirror:
   enabled: true
   shadow_only: true
+  rest_reconcile_seconds: 60
 
 exchange_safety_monitor:
   enabled: true

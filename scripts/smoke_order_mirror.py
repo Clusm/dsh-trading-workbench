@@ -105,8 +105,49 @@ status = restarted.status()
 check("状态统计可观测", status["status_counts"].get("FILLED") == 1 and
       status["status_counts"].get("CANCELED") == 1)
 
+print("\n[5] REST挂单差异报告与迟到快照保护")
+recon_db = AuditDatabase(
+    Path(tempfile.mkdtemp(prefix="mta-order-reconcile-")) / "orders.sqlite")
+recon = OrderMirror(recon_db, environment="demo", allowed_symbols=["BTCUSDT"])
+rest_order = {
+    "symbol": "BTCUSDT", "orderId": 201, "clientOrderId": "mta-201",
+    "side": "BUY", "positionSide": "LONG", "type": "LIMIT", "status": "NEW",
+    "origQty": "0.2", "executedQty": "0", "avgPrice": "0",
+    "reduceOnly": "false", "closePosition": False, "updateTime": 5000,
+}
+first = recon.reconcile_snapshot([rest_order])
+check("首次REST快照初始化镜像", first["initialized"] is True and first["matched"] is True)
+mirrored = recon_db.fetch_one(
+    "SELECT status,purpose,reduce_only,source FROM exchange_order_mirror "
+    "WHERE exchange_order_id='201'")
+check("REST挂单已按ENTRY补入影子镜像", mirrored["status"] == "NEW" and
+      mirrored["purpose"] == "ENTRY" and mirrored["reduce_only"] == 0 and
+      mirrored["source"] == "rest_reconcile")
+second = recon.reconcile_snapshot([rest_order])
+check("一致的后续快照通过", second["matched"] is True)
+recon.apply_event(normalize_user_event(order_event(
+    event_ms=6000, status="PARTIALLY_FILLED", execution="TRADE",
+    cumulative="0.1", last_qty="0.1", order_id=201)))
+stale = recon.reconcile_snapshot([rest_order])
+check("状态与数量差异被记录", stale["status_mismatch"] == ["201"] and
+      stale["qty_mismatch"] == ["201"])
+still_partial = recon_db.fetch_one(
+    "SELECT status,cumulative_qty,event_time_ms FROM exchange_order_mirror "
+    "WHERE exchange_order_id='201'")
+check("迟到REST快照不回退较新私有流状态", still_partial["status"] == "PARTIALLY_FILLED" and
+      still_partial["cumulative_qty"] == 0.1 and still_partial["event_time_ms"] == 6000)
+
+class FakeBroker:
+    def open_orders(self):
+        return [dict(rest_order, updateTime=7000)]
+
+check("Broker强制REST入口可对账", recon.reconcile_broker(FakeBroker())["matched"] is False)
+check("对账状态和报告可观测", recon.status()["last_reconciliation"] is not None and
+      recon.status()["last_reconcile_at"] is not None)
+recon_db.close()
+
 versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
-check("数据库迁移版本1到5完整", versions == [1, 2, 3, 4, 5])
+check("数据库迁移版本1到6完整", versions == [1, 2, 3, 4, 5, 6])
 db.close()
-print("\n结果: 15 通过 / 0 失败")
+print("\n结果: 22 通过 / 0 失败")

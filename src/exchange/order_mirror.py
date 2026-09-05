@@ -13,6 +13,7 @@ from exchange.event_models import ExchangeEvent, normalize_user_event
 _USDT_PERPETUAL = re.compile(r"^[0-9A-Z]+USDT$")
 _TERMINAL = {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}
 _RANK = {
+    "UNKNOWN": 0,
     "NEW": 10,
     "PARTIALLY_FILLED": 20,
     "FILLED": 30,
@@ -30,6 +31,12 @@ def _float(value: Any) -> float:
         return 0.0
 
 
+def _bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 class OrderMirror:
     def __init__(self, db: AuditDatabase, *, environment: str,
                  allowed_symbols: Iterable[str] = ()) -> None:
@@ -37,6 +44,7 @@ class OrderMirror:
         self.environment = str(environment)
         self.allowed_symbols = {str(s).upper() for s in allowed_symbols if s}
         self.last_event_at: float | None = None
+        self.last_reconcile_at: float | None = None
         self.last_error: str | None = None
         self.events_applied = 0
         self.stale_events = 0
@@ -72,8 +80,8 @@ class OrderMirror:
             return False
         status = str(order.get("X") or "UNKNOWN").upper()
         event_ms = int(event.transaction_time_ms or event.event_time_ms or 0)
-        reduce_only = bool(order.get("R", False))
-        close_position = bool(order.get("cp", False))
+        reduce_only = _bool(order.get("R", False))
+        close_position = _bool(order.get("cp", False))
         order_type = str(order.get("o") or "UNKNOWN").upper()
         now = utc_now()
         with self.db.lock:
@@ -152,19 +160,146 @@ class OrderMirror:
                 self.last_error = type(exc).__name__
         return applied
 
+    def reconcile_broker(self, broker: Any) -> dict[str, Any]:
+        """比较普通挂单REST真值与事件镜像，并用当前REST挂单补齐镜像。"""
+        try:
+            result = self.reconcile_snapshot(broker.open_orders())
+            self.last_error = None
+            return result
+        except Exception as exc:
+            self.last_error = type(exc).__name__
+            raise
+
+    def reconcile_snapshot(self, orders: list[dict[str, Any]]) -> dict[str, Any]:
+        active = tuple(sorted(set(_RANK) - _TERMINAL))
+        placeholders = ",".join("?" for _ in active)
+        local_rows = self.db.fetch_all(
+            "SELECT * FROM exchange_order_mirror WHERE environment=? "
+            f"AND status IN ({placeholders})",
+            (self.environment, *active),
+        )
+        local = {str(row["exchange_order_id"]): row for row in local_rows}
+        valid: list[dict[str, Any]] = []
+        rest: dict[str, dict[str, Any]] = {}
+        for row in orders or []:
+            symbol = str(row.get("symbol") or "").upper()
+            if not self._allowed(symbol):
+                self.out_of_scope += 1
+                continue
+            exchange_id = str(row.get("orderId") or "")
+            if not exchange_id:
+                continue
+            normalized = dict(row)
+            normalized["symbol"] = symbol
+            valid.append(normalized)
+            rest[exchange_id] = normalized
+
+        initialized = not bool(self.db.fetch_one(
+            "SELECT exchange_order_id FROM exchange_order_mirror WHERE environment=? LIMIT 1",
+            (self.environment,),
+        ))
+        missing_local = sorted(rest.keys() - local.keys())
+        missing_exchange = sorted(local.keys() - rest.keys())
+        status_mismatch = sorted(
+            order_id for order_id in rest.keys() & local.keys()
+            if str(rest[order_id].get("status") or "UNKNOWN").upper()
+            != str(local[order_id]["status"] or "UNKNOWN").upper()
+        )
+        qty_mismatch = sorted(
+            order_id for order_id in rest.keys() & local.keys()
+            if (abs(_float(rest[order_id].get("origQty")) -
+                    _float(local[order_id]["original_qty"])) > 1e-9 or
+                abs(_float(rest[order_id].get("executedQty")) -
+                    _float(local[order_id]["cumulative_qty"])) > 1e-9)
+        )
+        matched = not (missing_local or missing_exchange or status_mismatch or qty_mismatch)
+        details = {
+            "missing_local": missing_local,
+            "missing_exchange": missing_exchange,
+            "status_mismatch": status_mismatch,
+            "qty_mismatch": qty_mismatch,
+        }
+        now = utc_now()
+        event_ms = int(time.time() * 1000)
+        with self.db.lock:
+            self.db.conn.execute(
+                """INSERT INTO order_mirror_reconciliations(
+                    checked_at,environment,initialized,matched,missing_local,
+                    missing_exchange,status_mismatch,qty_mismatch,details_json
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (now, self.environment, int(initialized), int(matched or initialized),
+                 len(missing_local), len(missing_exchange), len(status_mismatch),
+                 len(qty_mismatch),
+                 json.dumps(details, ensure_ascii=False, separators=(",", ":"))),
+            )
+            for row in valid:
+                exchange_id = str(row.get("orderId"))
+                order_type = str(row.get("type") or row.get("origType") or "UNKNOWN").upper()
+                reduce_only = _bool(row.get("reduceOnly", False))
+                close_position = _bool(row.get("closePosition", False))
+                row_event_ms = int(row.get("updateTime") or row.get("time") or event_ms)
+                self.db.conn.execute(
+                    """INSERT INTO exchange_order_mirror(
+                        environment,exchange_order_id,client_order_id,symbol,side,
+                        position_side,order_type,purpose,status,execution_type,
+                        original_qty,cumulative_qty,avg_price,last_fill_qty,last_fill_price,
+                        realized_pnl,commission,commission_asset,reduce_only,close_position,
+                        trade_id,event_time_ms,updated_at,source
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(environment,exchange_order_id) DO UPDATE SET
+                        client_order_id=excluded.client_order_id,symbol=excluded.symbol,
+                        side=excluded.side,position_side=excluded.position_side,
+                        order_type=excluded.order_type,purpose=excluded.purpose,
+                        status=excluded.status,original_qty=excluded.original_qty,
+                        cumulative_qty=excluded.cumulative_qty,avg_price=excluded.avg_price,
+                        reduce_only=excluded.reduce_only,close_position=excluded.close_position,
+                        event_time_ms=MAX(exchange_order_mirror.event_time_ms,excluded.event_time_ms),
+                        updated_at=excluded.updated_at,source=excluded.source
+                    WHERE exchange_order_mirror.status NOT IN
+                        ('FILLED','CANCELED','EXPIRED','REJECTED','EXPIRED_IN_MATCH')
+                      AND excluded.event_time_ms >= exchange_order_mirror.event_time_ms
+                      AND CASE excluded.status
+                            WHEN 'UNKNOWN' THEN 0 WHEN 'NEW' THEN 10
+                            WHEN 'PARTIALLY_FILLED' THEN 20 ELSE 30 END
+                          >= CASE exchange_order_mirror.status
+                            WHEN 'UNKNOWN' THEN 0 WHEN 'NEW' THEN 10
+                            WHEN 'PARTIALLY_FILLED' THEN 20 ELSE 30 END""",
+                    (
+                        self.environment, exchange_id,
+                        str(row.get("clientOrderId") or "") or None,
+                        str(row.get("symbol")), str(row.get("side") or "").upper() or None,
+                        str(row.get("positionSide") or "BOTH").upper(), order_type,
+                        self._purpose(order_type, reduce_only, close_position),
+                        str(row.get("status") or "UNKNOWN").upper(), "REST_SNAPSHOT",
+                        _float(row.get("origQty")), _float(row.get("executedQty")),
+                        _float(row.get("avgPrice")), 0.0, 0.0, 0.0, 0.0, None,
+                        int(reduce_only), int(close_position), None, row_event_ms, now,
+                        "rest_reconcile",
+                    ),
+                )
+            self.db.conn.commit()
+        self.last_reconcile_at = time.time()
+        return {"initialized": initialized, "matched": bool(matched or initialized),
+                **details, "checked_at": now}
+
     def status(self) -> dict[str, Any]:
         counts = {str(row["status"]): int(row["count"]) for row in self.db.fetch_all(
             "SELECT status,COUNT(*) AS count FROM exchange_order_mirror "
             "WHERE environment=? GROUP BY status", (self.environment,))}
+        latest = self.db.fetch_one(
+            "SELECT * FROM order_mirror_reconciliations "
+            "WHERE environment=? ORDER BY id DESC LIMIT 1", (self.environment,))
         return {
             "enabled": True,
             "shadow_only": True,
             "environment": self.environment,
             "last_event_at": self.last_event_at,
+            "last_reconcile_at": self.last_reconcile_at,
             "last_error": self.last_error,
             "events_applied": self.events_applied,
             "stale_events": self.stale_events,
             "invalid_transitions": self.invalid_transitions,
             "out_of_scope": self.out_of_scope,
             "status_counts": counts,
+            "last_reconciliation": dict(latest) if latest else None,
         }

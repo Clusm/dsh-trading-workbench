@@ -1083,24 +1083,40 @@ def create_app(service: TradingService) -> FastAPI:
                     reconnect_seconds=float(exchange_cfg.get("reconnect_seconds", 5)),
                     queue_size=int(exchange_cfg.get("queue_size", 5000)),
                     event_applier=(apply_shadow_event
-                                   if mirror is not None or order_mirror is not None else None),
+                                   if (mirror is not None or order_mirror is not None or
+                                       safety_monitor is not None) else None),
                     trust_env=bool(getattr(broker, "_trust_env", True)),
                 )
                 user_stream_runtime = user_stream.status()
                 user_task = asyncio.create_task(user_stream.serve())
-                if mirror is not None:
+                if mirror is not None or order_mirror is not None:
                     reconcile_seconds = max(
                         15.0, float(mirror_cfg.get("rest_reconcile_seconds", 60)))
+                    order_reconcile_seconds = max(
+                        15.0, float(order_cfg.get("rest_reconcile_seconds", 60)))
 
                     async def reconcile_loop():
+                        next_account = 0.0
+                        next_orders = 0.0
                         while True:
-                            try:
-                                await asyncio.to_thread(mirror.reconcile_broker, broker)
-                            except asyncio.CancelledError:
-                                raise
-                            except Exception:
-                                pass
-                            await asyncio.sleep(reconcile_seconds)
+                            now = time.monotonic()
+                            if mirror is not None and now >= next_account:
+                                try:
+                                    await asyncio.to_thread(mirror.reconcile_broker, broker)
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception:
+                                    pass
+                                next_account = now + reconcile_seconds
+                            if order_mirror is not None and now >= next_orders:
+                                try:
+                                    await asyncio.to_thread(order_mirror.reconcile_broker, broker)
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception:
+                                    pass
+                                next_orders = now + order_reconcile_seconds
+                            await asyncio.sleep(1.0)
 
                     mirror_task = asyncio.create_task(reconcile_loop())
         app.state.user_stream = user_stream

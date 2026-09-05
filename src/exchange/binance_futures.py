@@ -391,6 +391,11 @@ class BinanceFuturesBroker:
             self._positions_cache = (time.time(), rows)
         return rows
 
+    def open_orders(self) -> list[dict[str, Any]]:
+        """强制读取当前普通 USD-M 挂单，供启动和周期性最终一致性校验。"""
+        data = self._signed("GET", "/fapi/v1/openOrders")
+        return list(data or []) if isinstance(data, list) else []
+
     def margin_used(self, channel: str | None = None) -> float:
         """按来源台账统计已用保证金；channel 为 strategy/ai/None。"""
         try:

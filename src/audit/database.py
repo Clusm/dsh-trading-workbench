@@ -552,6 +552,29 @@ class AuditDatabase:
 
         self._apply_migration(5, "exchange_safety_monitor", apply_exchange_safety_monitor)
 
+        def apply_order_mirror_reconciliation() -> None:
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS order_mirror_reconciliations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    checked_at TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    initialized INTEGER NOT NULL DEFAULT 0,
+                    matched INTEGER NOT NULL,
+                    missing_local INTEGER NOT NULL DEFAULT 0,
+                    missing_exchange INTEGER NOT NULL DEFAULT 0,
+                    status_mismatch INTEGER NOT NULL DEFAULT 0,
+                    qty_mismatch INTEGER NOT NULL DEFAULT 0,
+                    details_json TEXT NOT NULL
+                )"""
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_order_mirror_reconcile_time "
+                "ON order_mirror_reconciliations(checked_at)"
+            )
+
+        self._apply_migration(
+            6, "order_mirror_rest_reconciliation", apply_order_mirror_reconciliation)
+
     def close(self) -> None:
         self.conn.close()
 
