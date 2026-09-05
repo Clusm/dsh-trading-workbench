@@ -58,6 +58,11 @@ def create_broker(settings: Settings, db: AuditDatabase):
                 base_url=cfg.get("base_url_map", BASE_URLS).get(mode, BASE_URLS[mode]),
                 db=db,
                 environment=mode,
+                protection_mirror_enabled=bool(
+                    (settings.raw_settings.get("protection_order_mirror", {}) or {}).get(
+                        "enabled", False)
+                    and (settings.raw_settings.get("protection_order_mirror", {}) or {}).get(
+                        "read_enabled", False)),
             )
             db.log_risk_event(event_type="broker_created", severity="info",
                               details=f"execution broker={mode} base_url={broker.base_url}",

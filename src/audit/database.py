@@ -614,6 +614,52 @@ class AuditDatabase:
 
         self._apply_migration(7, "order_outbox", apply_order_outbox)
 
+        def apply_protection_order_mirror() -> None:
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS protection_order_mirror (
+                    environment TEXT NOT NULL,
+                    algo_id TEXT NOT NULL,
+                    client_algo_id TEXT,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    position_side TEXT,
+                    order_type TEXT NOT NULL,
+                    purpose TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    quantity REAL NOT NULL,
+                    actual_qty REAL NOT NULL DEFAULT 0,
+                    trigger_price REAL NOT NULL,
+                    reduce_only INTEGER NOT NULL DEFAULT 0,
+                    close_position INTEGER NOT NULL DEFAULT 0,
+                    event_time_ms INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    PRIMARY KEY(environment,algo_id)
+                )"""
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_protection_mirror_symbol "
+                "ON protection_order_mirror(environment,status,symbol)"
+            )
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS protection_reconciliations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    checked_at TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    matched INTEGER NOT NULL,
+                    positions INTEGER NOT NULL,
+                    open_algos INTEGER NOT NULL,
+                    orphan_orders INTEGER NOT NULL DEFAULT 0,
+                    missing_protection INTEGER NOT NULL DEFAULT 0,
+                    direction_mismatch INTEGER NOT NULL DEFAULT 0,
+                    qty_mismatch INTEGER NOT NULL DEFAULT 0,
+                    unsafe_orders INTEGER NOT NULL DEFAULT 0,
+                    details_json TEXT NOT NULL
+                )"""
+            )
+
+        self._apply_migration(8, "protection_order_mirror", apply_protection_order_mirror)
+
     def close(self) -> None:
         self.conn.close()
 

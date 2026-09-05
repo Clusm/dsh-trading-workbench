@@ -19,6 +19,7 @@ import httpx
 from agents.models import RiskVerdict, TradeDecision, TradeIntent
 from audit.database import AuditDatabase, utc_now
 from exchange.order_outbox import OrderOutbox
+from exchange.protection_mirror import ProtectionOrderMirror
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -41,7 +42,8 @@ class BinanceFuturesBroker:
     def __init__(self, api_key: str, api_secret: str,
                  base_url: str = "https://demo-fapi.binance.com",
                  db: AuditDatabase | None = None, environment: str = "demo",
-                 ledger_file: Path | None = None):
+                 ledger_file: Path | None = None,
+                 protection_mirror_enabled: bool = False):
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
@@ -67,6 +69,10 @@ class BinanceFuturesBroker:
         self._client_lock = threading.RLock()
         self._symbol_filters: dict[str, dict[str, Any]] = {}
         self._load_exchange_info()
+        self.protection_order_mirror = (
+            ProtectionOrderMirror(
+                db, environment=environment, allowed_symbols=self._symbol_filters.keys())
+            if db is not None and protection_mirror_enabled else None)
         self.last_error: str | None = None
         # 账户/持仓短缓存：页面和决策循环共用，减少 Binance 请求与限流
         self.cache_ttl_seconds = 2.0
@@ -338,8 +344,9 @@ class BinanceFuturesBroker:
             raise ValueError("newClientOrderId is required for outbox submission")
         symbol = str(request.get("symbol") or "").upper()
         side = str(request.get("side") or "").upper()
-        if self.order_outbox is not None:
-            self.order_outbox.prepare(
+        outbox = getattr(self, "order_outbox", None)
+        if outbox is not None:
+            outbox.prepare(
                 client_order_id=client_id, symbol=symbol, side=side,
                 position_side=str(request.get("positionSide") or "BOTH"),
                 order_type=str(request.get("type") or "UNKNOWN"), purpose=purpose,
@@ -352,11 +359,11 @@ class BinanceFuturesBroker:
             data = self._signed("POST", "/fapi/v1/order", request)
         except Exception as exc:
             definite_rejection = str(exc).startswith("Binance ") and "HTTP 5" not in str(exc)
-            if self.order_outbox is not None:
+            if outbox is not None:
                 if definite_rejection:
-                    self.order_outbox.reject(client_id, exc)
+                    outbox.reject(client_id, exc)
                 else:
-                    self.order_outbox.mark_unknown(client_id, exc)
+                    outbox.mark_unknown(client_id, exc)
             if definite_rejection:
                 raise
             try:
@@ -373,8 +380,8 @@ class BinanceFuturesBroker:
                              f"(orderId={data.get('orderId')})"),
                     action_taken="outbox reconciled; no repost")
         result = dict(data or {}) if isinstance(data, dict) else {}
-        if self.order_outbox is not None:
-            self.order_outbox.acknowledge(client_id, result)
+        if outbox is not None:
+            outbox.acknowledge(client_id, result)
         return result
 
     def _wait_fill(self, symbol: str, order_id: Any) -> dict[str, Any]:
@@ -454,11 +461,17 @@ class BinanceFuturesBroker:
         data = self._signed("GET", "/fapi/v1/openOrders")
         return list(data or []) if isinstance(data, list) else []
 
+    def open_algo_orders(self) -> list[dict[str, Any]]:
+        """强制读取当前USD-M Algo保护单；失败必须向上抛，不能伪装为空。"""
+        data = self._signed("GET", "/fapi/v1/openAlgoOrders", {})
+        return list(data or []) if isinstance(data, list) else []
+
     def order_submission_ready(self) -> bool:
         """UNKNOWN/SUBMITTING存在时禁止新开仓；减仓和平仓不受此门禁影响。"""
-        if self.order_outbox is None:
+        order_outbox = getattr(self, "order_outbox", None)
+        if order_outbox is None:
             return True
-        status = self.order_outbox.status()
+        status = order_outbox.status()
         return (int(status.get("unknown_orders", 0)) == 0 and
                 int(status.get("submitting_orders", 0)) == 0)
 
@@ -1416,6 +1429,9 @@ class BinanceFuturesBroker:
 
         查询失败必须明确返回 ``ok=False``，不能把“不知道”解释成“没有仓位风险”。
         """
+        protection_mirror = getattr(self, "protection_order_mirror", None)
+        if protection_mirror is not None:
+            return protection_mirror.reconcile_broker(self)
         positions = self.positions(force=True)
         missing: list[str] = []
         for pos in positions:

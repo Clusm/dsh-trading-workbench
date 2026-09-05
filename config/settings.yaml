@@ -46,6 +46,11 @@ exchange_safety_monitor:
   enabled: true
   observe_only: true
 
+protection_order_mirror:
+  enabled: true
+  read_enabled: true
+  rest_reconcile_seconds: 30
+
 llm:
   provider: opencode
   api_key_env: OPENCODE_API_KEY

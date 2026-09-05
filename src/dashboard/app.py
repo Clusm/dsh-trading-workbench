@@ -1020,6 +1020,7 @@ def create_app(service: TradingService) -> FastAPI:
         mirror = None
         order_mirror = None
         order_outbox = None
+        protection_mirror = None
         safety_monitor = None
         mirror_task = None
         user_stream_runtime: dict[str, Any] = {
@@ -1042,6 +1043,7 @@ def create_app(service: TradingService) -> FastAPI:
                 inbox = ExchangeEventInbox(service.db)
                 inbox.recover_transport_controls()
                 order_outbox = getattr(broker, "order_outbox", None)
+                protection_mirror = getattr(broker, "protection_order_mirror", None)
                 if order_outbox is not None:
                     order_outbox.recover_stale_submitting()
                     order_outbox.reconcile_unknown(broker)
@@ -1097,16 +1099,22 @@ def create_app(service: TradingService) -> FastAPI:
                 )
                 user_stream_runtime = user_stream.status()
                 user_task = asyncio.create_task(user_stream.serve())
-                if mirror is not None or order_mirror is not None or order_outbox is not None:
+                if (mirror is not None or order_mirror is not None or
+                        order_outbox is not None or protection_mirror is not None):
                     reconcile_seconds = max(
                         15.0, float(mirror_cfg.get("rest_reconcile_seconds", 60)))
                     order_reconcile_seconds = max(
                         15.0, float(order_cfg.get("rest_reconcile_seconds", 60)))
+                    protection_cfg = service.settings.raw_settings.get(
+                        "protection_order_mirror", {}) or {}
+                    protection_reconcile_seconds = max(
+                        15.0, float(protection_cfg.get("rest_reconcile_seconds", 30)))
 
                     async def reconcile_loop():
                         next_account = 0.0
                         next_orders = 0.0
                         next_outbox = 0.0
+                        next_protection = 0.0
                         while True:
                             now = time.monotonic()
                             if mirror is not None and now >= next_account:
@@ -1133,6 +1141,15 @@ def create_app(service: TradingService) -> FastAPI:
                                 except Exception:
                                     pass
                                 next_outbox = now + 15.0
+                            if protection_mirror is not None and now >= next_protection:
+                                try:
+                                    await asyncio.to_thread(
+                                        protection_mirror.reconcile_broker, broker)
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception:
+                                    pass
+                                next_protection = now + protection_reconcile_seconds
                             await asyncio.sleep(1.0)
 
                     mirror_task = asyncio.create_task(reconcile_loop())
@@ -1141,6 +1158,7 @@ def create_app(service: TradingService) -> FastAPI:
         app.state.account_mirror = mirror
         app.state.order_mirror = order_mirror
         app.state.order_outbox = order_outbox
+        app.state.protection_order_mirror = protection_mirror
         app.state.exchange_safety_monitor = safety_monitor
         try:
             yield
@@ -1505,6 +1523,17 @@ def create_app(service: TradingService) -> FastAPI:
                 "enabled": True, "state": "degraded", "last_error": type(exc).__name__,
                 "unknown_orders": -1, "submitting_orders": -1,
             }
+        protection_mirror = getattr(app.state, "protection_order_mirror", None)
+        try:
+            protection_mirror_status = (
+                protection_mirror.status() if protection_mirror is not None else {
+                    "enabled": False, "read_enabled": False, "state": "disabled",
+                })
+        except Exception as exc:
+            protection_mirror_status = {
+                "enabled": True, "read_enabled": True, "state": "degraded",
+                "last_error": type(exc).__name__,
+            }
         cycle_ts = latest.get("ts")
         account_risk = (latest.get("account_risk") or
                         getattr(service, "_account_risk_status", {}) or {})
@@ -1535,6 +1564,7 @@ def create_app(service: TradingService) -> FastAPI:
             "account_mirror": mirror_status,
             "order_mirror": order_mirror_status,
             "order_outbox": order_outbox_status,
+            "protection_order_mirror": protection_mirror_status,
             "exchange_safety_monitor": safety_status,
             "server_time": time.time(),
         }

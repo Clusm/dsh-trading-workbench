@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -47,14 +49,19 @@ def make_broker(db, trades):
     return b
 
 
-OPEN_LONG = {"id": 275, "symbol": "ZECUSDT", "side": "LONG", "qty": 0.12, "leverage": 10}
+NOW_MS = int(time.time() * 1000)
+OPEN_LONG = {
+    "id": 275, "symbol": "ZECUSDT", "side": "LONG", "qty": 0.12,
+    "leverage": 10, "entry_price": 859.33,
+    "opened_at": datetime.fromtimestamp((NOW_MS - 60_000) / 1000, timezone.utc).isoformat(),
+}
 
 TRADES = [
     # 最新在前（userTrades 默认倒序）
     {"orderId": 900003, "side": "SELL", "qty": "0.12", "price": "861.50",
-     "realizedPnl": "0.26", "commission": "0.0207"},
+     "realizedPnl": "0.26", "commission": "0.0207", "time": NOW_MS},
     {"orderId": 900002, "side": "BUY", "qty": "0.12", "price": "859.33",
-     "realizedPnl": "0", "commission": "0.0206"},
+     "realizedPnl": "0", "commission": "0.0206", "time": NOW_MS - 30_000},
 ]
 
 print("=== 用例 1：本地 LONG，交易所有一笔未记录的 SELL → 应补记 ===")
@@ -68,7 +75,8 @@ assert o["side"] == "LONG", "side 应为原仓位方向，配合 action=close �
 assert o["raw"]["action"] == "close"
 assert o["qty"] == 0.12 and o["price"] == 861.50
 assert abs(o["raw"]["net_pnl"] - (0.26 - 0.0207)) < 1e-9
-assert o["order_source"] == "exchange_sync"
+assert o["order_source"] == "ai", "补记盈亏必须回到原持仓通道"
+assert o["raw"]["sync_source"] == "exchange_sync"
 print("  ✓ 补记内容正确")
 
 # 验证 _enrich_orders 能把它显示成"平多"
@@ -90,7 +98,8 @@ print("  ✓ 未重复插入")
 print("\n=== 用例 3：查不到方向匹配的成交 → 什么都不写 ===")
 db3 = FakeDB(OPEN_LONG)
 make_broker(db3, [{"orderId": 1, "side": "BUY", "qty": "0.12", "price": "859.33",
-                   "realizedPnl": "0", "commission": "0"}])._reconcile_one_close("ZECUSDT")
+                   "realizedPnl": "0", "commission": "0", "time": NOW_MS}]
+            )._reconcile_one_close("ZECUSDT")
 assert not db3.orders, db3.orders
 print("  ✓ 无成交证据时不凭空捏造")
 
