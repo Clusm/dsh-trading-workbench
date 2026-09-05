@@ -53,7 +53,10 @@ class BinanceFuturesBroker:
         # 看板会周期性读取账户；30 秒超时叠加重试会把一次请求拖到 60 秒以上。
         # 读请求采用较短超时，失败后由看板保留最近有效快照。
         self._client_timeout = httpx.Timeout(12.0, connect=5.0)
-        self._client = httpx.Client(timeout=self._client_timeout)
+        # MTA_NO_PROXY 不只清环境变量，还要禁用 httpx 的系统代理发现；
+        # 否则 Windows 的遗留代理/PAC 仍会被读取，直连启动照样卡在账户查询。
+        self._trust_env = os.getenv("MTA_NO_PROXY", "").strip().lower() not in {"1", "true", "yes", "on"}
+        self._client = self._new_client()
         # 客户端重建锁：dashboard 线程（紧急平仓/资金重置）与交易/同步循环
         # 并发触发 10054/-1021/-1022 重建 client 时，若各自 close 共享句柄会
         # 互相踩踏，报 "client has been closed"。RLock 串行化 close+重建。
@@ -85,6 +88,9 @@ class BinanceFuturesBroker:
         self._calibrate_time()
 
     # ---------- 基础设施 ----------
+    def _new_client(self) -> httpx.Client:
+        return httpx.Client(timeout=self._client_timeout, trust_env=self._trust_env)
+
     def _calibrate_time(self) -> None:
         """用交易所服务器时间校准本机时钟偏移（P2 recvWindow）。失败静默，不影响启动。"""
         try:
@@ -142,7 +148,7 @@ class BinanceFuturesBroker:
                             self._client.close()
                         except Exception:
                             pass
-                        self._client = httpx.Client(timeout=self._client_timeout)
+                        self._client = self._new_client()
                 # -1021(时间戳超窗)/-1022(签名无效，多由时间戳过期引起)：
                 # 重校准服务器时间偏移后重试（仅 GET 会进入第二次循环；
                 # 实测校准偏移随时间漂移 5ms/小时，长期运行后会零星失败）
