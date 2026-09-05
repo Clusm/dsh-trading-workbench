@@ -33,6 +33,11 @@ class AgentState(TypedDict, total=False):
     tickets: list[dict[str, Any]]
     strategy_decision: ChannelDecision
     ai_decision: ChannelDecision
+    # 会合屏障：merge 有两个上游分支（strategy_trader 2 跳 / ai_trader 3 跳），
+    # LangGraph 的扇入屏障只在同一超级步内有效，跨步完成时 merge 会被触发两次，
+    # 导致下游 risk/execution 各跑两遍（adjust 意图重复撤旧挂新）。该标记确保
+    # risk/execution 只在双通道都已就位、decision 完整产出的那一次真正执行。
+    channels_merged: bool
     decision: TradeDecision
     risk_verdict: RiskVerdict
     execution: list[dict[str, Any]]
@@ -356,6 +361,12 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
         return {"ai_decision": decision, "ai_error": ai_error}
 
     def merge_node(state: AgentState) -> dict[str, Any]:
+        # 会合屏障：仅当双通道决策都已就位才真正产出 decision。两分支跳数不同，
+        # merge 会先被短分支（strategy_trader）触发一次、再被长分支（ai_trader）
+        # 触发一次；第一次触发时下游 risk/execution 因 channels_merged 未置位而空转，
+        # 避免「先按半个决策执行、再按完整决策执行一遍」的双执行。
+        if state.get("strategy_decision") is None or state.get("ai_decision") is None:
+            return {}
         strategy_decision = state.get("strategy_decision") or ChannelDecision(
             channel="strategy", decision="no_trade", reasoning="策略通道无决策")
         ai_decision = state.get("ai_decision") or ChannelDecision(
@@ -402,9 +413,16 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 reasoning=f"[策略] {strategy_decision.reasoning} | [AI] {ai_decision.reasoning}",
                 strategy_refs=list(dict.fromkeys(strategy_decision.strategy_refs + ai_decision.strategy_refs)),
             )
-        return {"decision": merged, "conflicts": conflicts}
+        return {"decision": merged, "conflicts": conflicts, "channels_merged": True}
+
+    def route_after_merge(state: AgentState) -> str:
+        """未完成会合的分支就地结束，避免它继续调度 risk/execution。"""
+        return "risk" if state.get("channels_merged") else "end"
 
     def risk_node(state: AgentState) -> dict[str, Any]:
+        # 会合屏障：未双通道合并完成前不评估（对应 merge 的首次空转触发）
+        if not state.get("channels_merged"):
+            return {}
         decision = state.get("decision")
         if decision is None:
             decision = TradeDecision(decision="no_trade", reasoning="双通道未产出决策")
@@ -428,6 +446,9 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
         return {"risk_verdict": verdict, "execution_prices": prices}
 
     def execution_node(state: AgentState) -> dict[str, Any]:
+        # 会合屏障：未双通道合并完成前不执行，防止决策链每轮跑两遍导致的重复下单风险。
+        if not state.get("channels_merged"):
+            return {}
         decision = state.get("decision")
         verdict = state.get("risk_verdict")
         receipts: list[dict[str, Any]] = []
@@ -502,7 +523,7 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
     g.add_edge("strategy", "ai_trader")
     g.add_edge("strategy_trader", "merge")
     g.add_edge("ai_trader", "merge")
-    g.add_edge("merge", "risk")
+    g.add_conditional_edges("merge", route_after_merge, {"risk": "risk", "end": END})
     g.add_edge("risk", "execution")
     g.add_edge("execution", END)
     return g.compile()
