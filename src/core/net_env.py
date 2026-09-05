@@ -62,6 +62,14 @@ def apply_proxy_env(env_path: str | Path | None = None) -> dict[str, str]:
     必须在任何 httpx 调用之前执行（建议放在入口脚本 import 业务模块之前）。
     .env 里没配代理时不做任何事，保持原有行为。
     """
+    # 运维直连开关：本机代理服务未运行时，启动入口可显式要求清掉所有代理。
+    # 不能只是不写新值，因为父进程或 run_web_service.py 可能已注入旧代理。
+    if os.getenv("MTA_NO_PROXY", "").strip().lower() in {"1", "true", "yes", "on"}:
+        for key in PROXY_KEYS:
+            os.environ.pop(key, None)
+            os.environ.pop(key.lower(), None)
+        return {}
+
     path = Path(env_path) if env_path else Path(__file__).resolve().parents[2] / ".env"
     values = _read_env_file(path)
     applied: dict[str, str] = {}

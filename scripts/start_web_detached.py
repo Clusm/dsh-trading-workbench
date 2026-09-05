@@ -44,10 +44,15 @@ def build_env(proxy: str | None) -> dict[str, str]:
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         env.pop(key, None)
     if proxy:
+        env.pop("MTA_NO_PROXY", None)
         env["HTTP_PROXY"] = proxy
         env["HTTPS_PROXY"] = proxy
         env["http_proxy"] = proxy
         env["https_proxy"] = proxy
+    else:
+        # run_web_service.py 会兼容旧启动方式而注入默认代理；用进程内开关
+        # 让 run_web.py 的 apply_proxy_env() 显式清除它，保证 --no-proxy 真直连。
+        env["MTA_NO_PROXY"] = "1"
     env["NO_PROXY"] = "127.0.0.1,localhost"
     env["no_proxy"] = "127.0.0.1,localhost"
     env["PYTHONUNBUFFERED"] = "1"
