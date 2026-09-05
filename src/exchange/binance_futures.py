@@ -18,6 +18,7 @@ import httpx
 
 from agents.models import RiskVerdict, TradeDecision, TradeIntent
 from audit.database import AuditDatabase, utc_now
+from exchange.order_outbox import OrderOutbox
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -45,6 +46,9 @@ class BinanceFuturesBroker:
         self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
         self.db = db
+        self.order_outbox = OrderOutbox(db, environment=environment) if db is not None else None
+        if self.order_outbox is not None:
+            self.order_outbox.recover_stale_submitting()
         self.mode = environment
         self.environment = environment
         self.ledger_file = Path(ledger_file) if ledger_file is not None else (
@@ -319,6 +323,60 @@ class BinanceFuturesBroker:
                               ticket_id=ticket_id, margin_mode=margin_mode)
         return cid
 
+    def query_order(self, symbol: str, client_order_id: str) -> dict[str, Any]:
+        """按clientOrderId强制查询普通订单；UNKNOWN命令只能走此入口恢复。"""
+        data = self._signed("GET", "/fapi/v1/order", {
+            "symbol": symbol, "origClientOrderId": client_order_id,
+        }, attempts=2)
+        return dict(data or {}) if isinstance(data, dict) else {}
+
+    def _submit_standard_order(self, params: dict[str, Any], *, purpose: str) -> dict[str, Any]:
+        """普通USD-M订单的唯一POST入口：先写Outbox，异常后只查询不重发。"""
+        request = dict(params)
+        client_id = str(request.get("newClientOrderId") or "")
+        if not client_id:
+            raise ValueError("newClientOrderId is required for outbox submission")
+        symbol = str(request.get("symbol") or "").upper()
+        side = str(request.get("side") or "").upper()
+        if self.order_outbox is not None:
+            self.order_outbox.prepare(
+                client_order_id=client_id, symbol=symbol, side=side,
+                position_side=str(request.get("positionSide") or "BOTH"),
+                order_type=str(request.get("type") or "UNKNOWN"), purpose=purpose,
+                qty=float(request.get("quantity") or 0.0),
+                price=float(request["price"]) if request.get("price") is not None else None,
+                reduce_only=str(request.get("reduceOnly", "false")).lower() == "true",
+                endpoint="/fapi/v1/order", request=request,
+            )
+        try:
+            data = self._signed("POST", "/fapi/v1/order", request)
+        except Exception as exc:
+            definite_rejection = str(exc).startswith("Binance ") and "HTTP 5" not in str(exc)
+            if self.order_outbox is not None:
+                if definite_rejection:
+                    self.order_outbox.reject(client_id, exc)
+                else:
+                    self.order_outbox.mark_unknown(client_id, exc)
+            if definite_rejection:
+                raise
+            try:
+                reconciled = self.query_order(symbol, client_id)
+            except Exception:
+                reconciled = {}
+            if not reconciled.get("orderId"):
+                raise
+            data = reconciled
+            if self.db:
+                self.db.log_risk_event(
+                    event_type="futures_order_submit_reconciled", severity="warn",
+                    details=(f"{symbol}: POST异常后按clientOrderId对账成功 "
+                             f"(orderId={data.get('orderId')})"),
+                    action_taken="outbox reconciled; no repost")
+        result = dict(data or {}) if isinstance(data, dict) else {}
+        if self.order_outbox is not None:
+            self.order_outbox.acknowledge(client_id, result)
+        return result
+
     def _wait_fill(self, symbol: str, order_id: Any) -> dict[str, Any]:
         terminal = {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}
         data = {}
@@ -395,6 +453,14 @@ class BinanceFuturesBroker:
         """强制读取当前普通 USD-M 挂单，供启动和周期性最终一致性校验。"""
         data = self._signed("GET", "/fapi/v1/openOrders")
         return list(data or []) if isinstance(data, list) else []
+
+    def order_submission_ready(self) -> bool:
+        """UNKNOWN/SUBMITTING存在时禁止新开仓；减仓和平仓不受此门禁影响。"""
+        if self.order_outbox is None:
+            return True
+        status = self.order_outbox.status()
+        return (int(status.get("unknown_orders", 0)) == 0 and
+                int(status.get("submitting_orders", 0)) == 0)
 
     def margin_used(self, channel: str | None = None) -> float:
         """按来源台账统计已用保证金；channel 为 strategy/ai/None。"""
@@ -744,29 +810,15 @@ class BinanceFuturesBroker:
                 order_params["price"] = self._format_price(symbol, limit_price)
                 order_params["timeInForce"] = "GTC"
             try:
-                data = self._signed("POST", "/fapi/v1/order", order_params)
+                data = self._submit_standard_order(order_params, purpose="ENTRY")
             except Exception as e:
-                # 超时/连接中断 ≠ 下单失败：交易所可能已受理。按 clientOrderId
-                # 对账一次；查到则继续正常流程（记账+保护），查不到才向上抛。
-                reconciled = None
-                try:
-                    reconciled = self._signed("GET", "/fapi/v1/order",
-                                              {"symbol": symbol, "origClientOrderId": cid}, attempts=2)
-                except Exception:
-                    reconciled = None
-                if not isinstance(reconciled, dict) or not reconciled.get("orderId"):
-                    if self.db:
-                        self.db.log_risk_event(
-                            event_type="futures_order_submit_lost", severity="critical",
-                            details=f"{symbol}: 下单请求异常且按 clientOrderId 对账无果，放弃本分片: {type(e).__name__} {e}",
-                            action_taken="manual attention required")
-                    raise
-                data = reconciled
                 if self.db:
                     self.db.log_risk_event(
-                        event_type="futures_order_submit_reconciled", severity="warn",
-                        details=f"{symbol}: 下单请求异常但按 clientOrderId 对账成功（orderId={data.get('orderId')}），继续记账与保护",
-                        action_taken="reconciled")
+                        event_type="futures_order_submit_lost", severity="critical",
+                        details=(f"{symbol}: Outbox下单失败或UNKNOWN对账无果，"
+                                 f"禁止重发: {type(e).__name__} {e}"),
+                        action_taken="outbox retained; no repost")
+                raise
             if intent.order_type == "MARKET":
                 data = self._wait_fill(symbol, data.get("orderId")) or data
             chunk_confirmed = self._fill_confirmed(data)
@@ -1137,10 +1189,10 @@ class BinanceFuturesBroker:
         for chunk in chunks:
             qty = self._format_qty(symbol, chunk)
             cid = base_cid if len(chunks) == 1 else f"{base_cid}-{order_count}"
-            data = self._signed("POST", "/fapi/v1/order", {
+            data = self._submit_standard_order({
                 "symbol": symbol, "side": side, "type": intent.order_type,
                 "quantity": qty, "reduceOnly": "true", "newClientOrderId": cid,
-            })
+            }, purpose="EXIT")
             if intent.order_type == "MARKET":
                 data = self._wait_fill(symbol, data.get("orderId")) or data
             chunk_confirmed = self._fill_confirmed(data)
@@ -1256,10 +1308,10 @@ class BinanceFuturesBroker:
                 for chunk in chunks:
                     qty = self._format_qty(symbol, chunk)
                     cid = f"mta-{uuid.uuid4().hex[:28]}"
-                    data = self._signed("POST", "/fapi/v1/order", {
+                    data = self._submit_standard_order({
                         "symbol": symbol, "side": side, "type": "MARKET",
                         "quantity": qty, "reduceOnly": "true", "newClientOrderId": cid,
-                    })
+                    }, purpose="EXIT")
                     data = self._wait_fill(symbol, data.get("orderId")) or data
                     chunk_confirmed = self._fill_confirmed(data)
                     close_all_unconfirmed = close_all_unconfirmed or not chunk_confirmed

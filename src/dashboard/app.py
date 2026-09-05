@@ -1019,6 +1019,7 @@ def create_app(service: TradingService) -> FastAPI:
         user_task = None
         mirror = None
         order_mirror = None
+        order_outbox = None
         safety_monitor = None
         mirror_task = None
         user_stream_runtime: dict[str, Any] = {
@@ -1040,6 +1041,10 @@ def create_app(service: TradingService) -> FastAPI:
             else:
                 inbox = ExchangeEventInbox(service.db)
                 inbox.recover_transport_controls()
+                order_outbox = getattr(broker, "order_outbox", None)
+                if order_outbox is not None:
+                    order_outbox.recover_stale_submitting()
+                    order_outbox.reconcile_unknown(broker)
                 mirror_cfg = service.settings.raw_settings.get("account_mirror", {}) or {}
                 mirror_enabled = bool(mirror_cfg.get("enabled", False))
                 mirror_shadow = bool(mirror_cfg.get("shadow_only", True))
@@ -1069,6 +1074,8 @@ def create_app(service: TradingService) -> FastAPI:
                     applied = mirror.apply_event(event) if mirror is not None else False
                     if order_mirror is not None:
                         applied = order_mirror.apply_event(event) or applied
+                    if order_outbox is not None:
+                        applied = order_outbox.apply_event(event) or applied
                     if safety_monitor is not None:
                         applied = safety_monitor.apply_event(event) or applied
                     return applied
@@ -1084,12 +1091,13 @@ def create_app(service: TradingService) -> FastAPI:
                     queue_size=int(exchange_cfg.get("queue_size", 5000)),
                     event_applier=(apply_shadow_event
                                    if (mirror is not None or order_mirror is not None or
-                                       safety_monitor is not None) else None),
+                                       order_outbox is not None or safety_monitor is not None)
+                                   else None),
                     trust_env=bool(getattr(broker, "_trust_env", True)),
                 )
                 user_stream_runtime = user_stream.status()
                 user_task = asyncio.create_task(user_stream.serve())
-                if mirror is not None or order_mirror is not None:
+                if mirror is not None or order_mirror is not None or order_outbox is not None:
                     reconcile_seconds = max(
                         15.0, float(mirror_cfg.get("rest_reconcile_seconds", 60)))
                     order_reconcile_seconds = max(
@@ -1098,6 +1106,7 @@ def create_app(service: TradingService) -> FastAPI:
                     async def reconcile_loop():
                         next_account = 0.0
                         next_orders = 0.0
+                        next_outbox = 0.0
                         while True:
                             now = time.monotonic()
                             if mirror is not None and now >= next_account:
@@ -1116,6 +1125,14 @@ def create_app(service: TradingService) -> FastAPI:
                                 except Exception:
                                     pass
                                 next_orders = now + order_reconcile_seconds
+                            if order_outbox is not None and now >= next_outbox:
+                                try:
+                                    await asyncio.to_thread(order_outbox.reconcile_unknown, broker)
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception:
+                                    pass
+                                next_outbox = now + 15.0
                             await asyncio.sleep(1.0)
 
                     mirror_task = asyncio.create_task(reconcile_loop())
@@ -1123,6 +1140,7 @@ def create_app(service: TradingService) -> FastAPI:
         app.state.user_stream_runtime = user_stream_runtime
         app.state.account_mirror = mirror
         app.state.order_mirror = order_mirror
+        app.state.order_outbox = order_outbox
         app.state.exchange_safety_monitor = safety_monitor
         try:
             yield
@@ -1477,6 +1495,16 @@ def create_app(service: TradingService) -> FastAPI:
                 "enabled": True, "shadow_only": True, "state": "degraded",
                 "last_error": type(exc).__name__,
             }
+        order_outbox = getattr(app.state, "order_outbox", None)
+        try:
+            order_outbox_status = (order_outbox.status() if order_outbox is not None else {
+                "enabled": False, "unknown_orders": 0, "submitting_orders": 0,
+            })
+        except Exception as exc:
+            order_outbox_status = {
+                "enabled": True, "state": "degraded", "last_error": type(exc).__name__,
+                "unknown_orders": -1, "submitting_orders": -1,
+            }
         cycle_ts = latest.get("ts")
         account_risk = (latest.get("account_risk") or
                         getattr(service, "_account_risk_status", {}) or {})
@@ -1506,6 +1534,7 @@ def create_app(service: TradingService) -> FastAPI:
             "exchange_stream": user_stream_status,
             "account_mirror": mirror_status,
             "order_mirror": order_mirror_status,
+            "order_outbox": order_outbox_status,
             "exchange_safety_monitor": safety_status,
             "server_time": time.time(),
         }
@@ -1527,6 +1556,16 @@ def create_app(service: TradingService) -> FastAPI:
             reasons.append(f"control_state_{service.control.state}")
         if not account_risk.get("allow_new", False):
             reasons.append("account_risk_blocks_new")
+        order_outbox = getattr(app.state, "order_outbox", None)
+        if order_outbox is not None:
+            try:
+                outbox_status = order_outbox.status()
+                if int(outbox_status.get("unknown_orders", 0)) > 0:
+                    reasons.append("order_outbox_unknown")
+                if int(outbox_status.get("submitting_orders", 0)) > 0:
+                    reasons.append("order_outbox_submitting")
+            except Exception:
+                reasons.append("order_outbox_unavailable")
         payload = {
             "ready": not reasons,
             "reasons": reasons,

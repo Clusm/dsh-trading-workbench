@@ -92,6 +92,6 @@ check("状态接口保持只观察", restarted.status()["observe_only"] is True)
 
 versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
-check("数据库迁移版本1到6完整", versions == [1, 2, 3, 4, 5, 6])
+check("数据库迁移版本1到7完整", versions == [1, 2, 3, 4, 5, 6, 7])
 db.close()
 print("\n结果: 13 通过 / 0 失败")

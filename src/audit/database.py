@@ -575,6 +575,45 @@ class AuditDatabase:
         self._apply_migration(
             6, "order_mirror_rest_reconciliation", apply_order_mirror_reconciliation)
 
+        def apply_order_outbox() -> None:
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS order_outbox (
+                    client_order_id TEXT PRIMARY KEY,
+                    environment TEXT NOT NULL,
+                    business_key TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    position_side TEXT,
+                    order_type TEXT NOT NULL,
+                    purpose TEXT NOT NULL,
+                    qty REAL NOT NULL,
+                    price REAL,
+                    reduce_only INTEGER NOT NULL DEFAULT 0,
+                    endpoint TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    exchange_order_id TEXT,
+                    request_json TEXT NOT NULL,
+                    response_json TEXT,
+                    error_type TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    resolved_at TEXT
+                )"""
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_order_outbox_status "
+                "ON order_outbox(environment,status,updated_at)"
+            )
+            self.conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_order_outbox_pending_entry
+                   ON order_outbox(environment,business_key)
+                   WHERE purpose='ENTRY' AND status IN
+                       ('SUBMITTING','UNKNOWN','ACKNOWLEDGED','NEW','PARTIALLY_FILLED')"""
+            )
+
+        self._apply_migration(7, "order_outbox", apply_order_outbox)
+
     def close(self) -> None:
         self.conn.close()
 

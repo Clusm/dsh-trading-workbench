@@ -336,11 +336,18 @@ class TradingService:
         session_equity = self.capital.session_equity()
         startup_safety = self._verify_startup_safety()
         account_risk = self._sync_account_risk(session_equity, equity_available)
+        try:
+            order_submission_ready = (
+                self.broker.order_submission_ready()
+                if hasattr(self.broker, "order_submission_ready") else True)
+        except Exception:
+            order_submission_ready = False
         allow_new = bool(
             self.control.allow_new_positions
             and equity_available
             and account_risk.get("allow_new", False)
             and startup_safety.get("ready", False)
+            and order_submission_ready
         )
         # 先同步双通道资金状态（60/40 日切重算、AI 熔断、通道保证金上限）
         broker_state = self.broker.state if isinstance(self.broker.state, dict) else {}
