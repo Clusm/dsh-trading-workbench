@@ -13,7 +13,7 @@ import yaml
 
 # 警告：不要在本模块再定义名为 `_get_json` 的函数（会遮蔽这里的导入，
 # 使 query_symbol_detail 100% 抛 TypeError）。共享连接版请叫 `_shared_get`。
-from data.binance_public import _atr, _ema, _get_json, _trend_from_ema, get_all_24h_tickers, select_top_symbols
+from data.binance_public import _atr, _get_json, _trend_from_ema, get_all_24h_tickers, select_top_symbols
 from data.rate_limit import cooldown_remaining
 
 BASE_URL = "https://fapi.binance.com"

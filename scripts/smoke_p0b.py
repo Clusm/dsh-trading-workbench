@@ -41,7 +41,8 @@ PRICES = {"BTCUSDT": 60000.0, "ETHUSDT": 3000.0, "SOLUSDT": 150.0}
 
 
 def space_open(**kw):
-    cfg = dict(RISK_CFG); cfg.update(kw.pop("cfg", {}))
+    cfg = dict(RISK_CFG)
+    cfg.update(kw.pop("cfg", {}))
     return ActionSpace.from_context(risk_config=cfg, allow_new_positions=True,
                                     portfolio=kw.pop("portfolio", {"positions": []}), **kw)
 

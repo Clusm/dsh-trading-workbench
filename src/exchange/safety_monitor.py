@@ -10,6 +10,11 @@ from exchange.event_models import ExchangeEvent, normalize_user_event
 
 
 class ExchangeSafetyMonitor:
+    """消费账户配置与保证金告警事件的只读安全监视器。
+
+    监视器不改变控制状态、不平仓；MARGIN_CALL 只写 critical 审计并立即触发一次 REST
+    账户对账，以便控制层获得新鲜真值。事件键保证重复投递不会重复制造安全事件。
+    """
     def __init__(self, db: AuditDatabase, *, environment: str,
                  account_mirror: Any = None, broker: Any = None) -> None:
         self.db = db
@@ -23,6 +28,7 @@ class ExchangeSafetyMonitor:
         self.reconcile_failures = 0
 
     def apply_event(self, event: ExchangeEvent) -> bool:
+        """消费支持的安全事件；成功识别并处理时返回 True。"""
         if event.event_type == "ACCOUNT_CONFIG_UPDATE":
             self._apply_config(event)
             self.config_events += 1
@@ -118,6 +124,7 @@ class ExchangeSafetyMonitor:
             self.db.conn.commit()
 
     def replay_pending(self) -> int:
+        """重放收件箱中尚未应用的安全事件，返回本轮应用数量。"""
         rows = self.db.fetch_all(
             "SELECT event_key,payload_json,source FROM exchange_events "
             "WHERE status='RECEIVED' AND event_type IN ('ACCOUNT_CONFIG_UPDATE','MARGIN_CALL') "
@@ -139,6 +146,7 @@ class ExchangeSafetyMonitor:
         return applied
 
     def status(self) -> dict[str, Any]:
+        """返回观察计数、错误和最近一条安全事件。"""
         latest = self.db.fetch_one(
             "SELECT * FROM exchange_safety_events ORDER BY observed_at DESC LIMIT 1")
         return {

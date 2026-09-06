@@ -190,8 +190,6 @@ def suite() -> None:
 
 def suite_injected() -> None:
     """注回旧逻辑后，[1] 的核心断言必须全部 FAIL。"""
-    import agents.orchestrator as orch
-
     print("[R] 反向验证：注回旧逻辑（最后一轮不兜底）")
     llm = FakeLLM()
     d, llm, db, _, _ = run_once(llm=llm)

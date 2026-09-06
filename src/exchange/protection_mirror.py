@@ -22,6 +22,12 @@ def _bool(value: Any) -> bool:
 
 
 class ProtectionOrderMirror:
+    """只读镜像 USD-M Algo 止损/止盈单并核对持仓覆盖。
+
+    对每个非零白名单仓位，安全覆盖要求恰好一张同方向、同数量、reduce-only 且触发价
+    有效的 STOP_MARKET 和 TAKE_PROFIT_MARKET。镜像本身不撤单或补单，只向上层报告
+    missing/orphan/direction/quantity/unsafe 分类结果。
+    """
     def __init__(self, db: AuditDatabase, *, environment: str,
                  allowed_symbols: Iterable[str] = ()) -> None:
         self.db = db
@@ -36,6 +42,7 @@ class ProtectionOrderMirror:
             not self.allowed_symbols or symbol in self.allowed_symbols)
 
     def reconcile_broker(self, broker: Any) -> dict[str, Any]:
+        """从 Broker 拉取真实持仓和 Algo 单后执行一次只读对账。"""
         try:
             positions = broker.positions(force=True)
             algos = broker.open_algo_orders()
@@ -48,6 +55,7 @@ class ProtectionOrderMirror:
 
     def reconcile_snapshot(self, positions: list[dict[str, Any]],
                            algos: list[dict[str, Any]]) -> dict[str, Any]:
+        """对给定快照做确定性覆盖检查，并原子写入镜像与对账记录。"""
         held: dict[str, float] = {}
         for row in positions or []:
             symbol = str(row.get("symbol") or "").upper()
@@ -162,6 +170,7 @@ class ProtectionOrderMirror:
                 "reason": "" if matched else "保护单镜像与持仓不一致", "checked_at": now}
 
     def status(self) -> dict[str, Any]:
+        """返回最近一次保护覆盖结果和当前镜像中的活动 Algo 单数量。"""
         latest = self.db.fetch_one(
             "SELECT * FROM protection_reconciliations "
             "WHERE environment=? ORDER BY id DESC LIMIT 1", (self.environment,))

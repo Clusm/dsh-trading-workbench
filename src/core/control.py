@@ -10,6 +10,11 @@ VALID_STATES = {"normal", "pause", "close_only", "emergency"}
 
 
 class ControlState:
+    """线程安全、可持久化的全局交易控制开关。
+
+    状态文件损坏时当前兼容行为回退为 ``normal``；因此写入必须使用原子替换，避免服务
+    崩溃留下半截 JSON。是否允许开新仓只由 ``normal`` 决定，其他状态保留减仓能力。
+    """
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -28,14 +33,17 @@ class ControlState:
 
     @property
     def state(self) -> str:
+        """返回当前控制状态的锁内快照。"""
         with self._lock:
             return self._state
 
     @property
     def allow_new_positions(self) -> bool:
+        """仅在 ``normal`` 状态返回 True；不代表其他风险闸门已经放行。"""
         return self.state == "normal"
 
     def set_state(self, state: str) -> bool:
+        """校验并原子持久化控制状态；非法状态不写文件并返回 False。"""
         if state not in VALID_STATES:
             return False
         with self._lock:

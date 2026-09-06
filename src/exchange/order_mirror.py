@@ -38,6 +38,11 @@ def _bool(value: Any) -> bool:
 
 
 class OrderMirror:
+    """以私有流为增量、REST 为真值的只读订单状态镜像。
+
+    状态机拒绝迟到事件造成的终态回退，并将不合法跃迁记录为异常。当前镜像用于观察和
+    对账，不替代 Broker 的订单提交与查询路径。
+    """
     def __init__(self, db: AuditDatabase, *, environment: str,
                  allowed_symbols: Iterable[str] = ()) -> None:
         self.db = db

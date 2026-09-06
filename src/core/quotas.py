@@ -11,6 +11,7 @@ from audit.database import AuditDatabase
 
 
 class TradeQuotaManager:
+    """统计交易软目标完成度，不以配额强迫开仓或绕过风险判断。"""
     # 统计结果短缓存：页面 5~15 秒轮询一次 status，不必每次都扫 1000 行订单
     COUNTS_CACHE_TTL = 30.0
 

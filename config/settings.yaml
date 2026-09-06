@@ -52,22 +52,19 @@ protection_order_mirror:
   rest_reconcile_seconds: 30
 
 llm:
-  provider: opencode
-  api_key_env: OPENCODE_API_KEY
-  base_url_env: OPENCODE_BASE_URL
-  model_env: OPENCODE_MODEL
-  default_model: glm-5.3-flash
-  default_base_url: https://tokenrhythm.studio/v1
+  provider: sensenova
+  api_key_env: SENSENOVA_API_KEY
+  base_url_env: SENSENOVA_BASE_URL
+  model_env: SENSENOVA_MODEL
+  default_model: deepseek-v4-flash
+  default_base_url: https://token.sensenova.cn/v1
   mock: false
   temperature: 0.2
   max_tokens: 2000
   reasoning_effort: low
   timeout_seconds: 180
   # 瞬时错误（504/429/5xx/网络异常）重试次数与退避间隔
-  # 2026-09-05 实测：该供应商网关不稳定，qwen3.7-max 全量统计
-  # ok 475 / error 222（失败率约 32%），错误几乎全是 504 Gateway Time-out，
-  # 且耗时在同一请求上可从 15s 抖动到 124s——属**瞬时**故障，重试即可绕过。
-  # 由 1 提到 3：单次失败率 32% → 连续 4 次全败约 1%，AI 通道不再整轮降级。
+  # 保留有限重试处理 429/5xx/网络异常；鉴权和参数类 4xx 不重试。
   max_retries: 3
   retry_backoff_seconds: 3.0
 

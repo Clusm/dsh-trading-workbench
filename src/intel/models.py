@@ -12,6 +12,7 @@ def utc_now() -> str:
 
 
 class IntelEvent(BaseModel):
+    """带来源、时效、质量与原始哈希的标准化情报事件。"""
     source: str
     kind: str
     chain: str | None = None
@@ -27,6 +28,7 @@ class IntelEvent(BaseModel):
 
 
 class FuturesFeature(BaseModel):
+    """某一 USD-M 合约在指定事件时刻的公开微观结构特征。"""
     symbol: str
     event_time: str
     received_at: str = Field(default_factory=utc_now)

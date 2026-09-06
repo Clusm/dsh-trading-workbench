@@ -12,7 +12,6 @@ import importlib
 import json
 import sys
 import threading
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -117,6 +116,11 @@ def _completed(df: pd.DataFrame, now: datetime) -> pd.DataFrame:
 
 
 class SignalScanner:
+    """加载外部 strategy_lab 的 final 策略卡并生成有时效的 SignalTicket。
+
+    扫描器只计算确定性信号，不直接下单。外部模块来源、注册表和策略函数任一校验失败
+    时安全降级为空票据，避免导入同名错误模块后产生伪信号。
+    """
     def __init__(self, knowledge_dir: Path, strategy_lab_src: str,
                  state_file: Path, db: AuditDatabase | None = None,
                  kline_limit: int = 500, ticket_valid_bars: int = 2,

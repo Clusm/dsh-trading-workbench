@@ -850,7 +850,7 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                             event_type="decision_downgraded", severity="warn",
                             details=f"裸 JSON 输出降级不交易：{'；'.join(issues)}",
                             action_taken="no_trade")
-                except Exception as e2:
+                except Exception:
                     decision = TradeDecision(decision="no_trade", reasoning=f"LLM输出解析失败，自动不交易: {e}")
                     last_error = e
             break

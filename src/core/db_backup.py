@@ -13,6 +13,11 @@ from audit.database import AuditDatabase
 
 
 class DatabaseBackupManager:
+    """使用 SQLite 在线备份 API 创建包含 WAL 提交内容的一致性备份。
+
+    调度循环可频繁调用 ``maybe_backup``；管理器内部控制周期、失败重试和保留天数，
+    不会用普通文件复制正在写入的数据库。
+    """
     def __init__(self, db: AuditDatabase, backup_dir: Path, *, enabled: bool = True,
                  interval_hours: float = 24, keep_days: int = 14,
                  retry_hours: float = 1) -> None:

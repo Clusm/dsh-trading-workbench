@@ -152,7 +152,6 @@ def analyze_symbol(client: httpx.Client, symbol: str,
     closes1m = [float(k[4]) for k in k1m]
     highs1m = [float(k[2]) for k in k1m]
     lows1m = [float(k[3]) for k in k1m]
-    quote_vols1m = [float(k[7]) for k in k1m]
     closes15 = [float(k[4]) for k in k15]
     highs15 = [float(k[2]) for k in k15]
     lows15 = [float(k[3]) for k in k15]
@@ -177,17 +176,11 @@ def analyze_symbol(client: httpx.Client, symbol: str,
     rng = (max(highs15[-20:]) - min(lows15[-20:]))
     range_position = ((closes15[-1] - min(lows15[-20:])) / rng * 100) if rng > 0 else 50.0
 
-    atr1 = _atr(highs1m, lows1m, closes1m)
-    atr1_pct = (atr1 / closes1m[-1] * 100) if atr1 and closes1m[-1] else 0.0
     atr1h = _atr(highs1h, lows1h, closes1h)
     atr1h_pct = (atr1h / closes1h[-1] * 100) if atr1h and closes1h[-1] else 0.0
     high_10h = max(highs1m[-600:]) if highs1m else closes1m[-1]
     low_10h = min(lows1m[-600:]) if lows1m else closes1m[-1]
     ret_10h = ((closes1m[-1] / closes1m[0] - 1) * 100) if len(closes1m) >= 2 else 0.0
-    recent_vol1m = quote_vols1m[-1] if quote_vols1m else 0.0
-    base_vol1m = statistics.fmean(quote_vols1m[-21:-1]) if len(quote_vols1m) >= 21 else 0.0
-    vol_ratio_1m = (recent_vol1m / base_vol1m) if base_vol1m > 0 else 0.0
-
     atr4h = _atr(highs4h, lows4h, closes4h)
     atr4h_pct = (atr4h / closes4h[-1] * 100) if atr4h and closes4h[-1] else 0.0
     atr1d = _atr(highs1d, lows1d, closes1d)

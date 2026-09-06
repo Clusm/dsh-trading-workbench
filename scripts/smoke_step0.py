@@ -11,9 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from agents.orchestrator import (  # noqa: E402
-    DecisionValidationError, _build_decision, _pack_tool_result, MAX_STRICT_SUBMITS,
+    DecisionValidationError, _build_decision, _pack_tool_result,
 )
-from agents.models import TradeIntent, TradeDecision, RiskVerdict  # noqa: E402
+from agents.models import TradeIntent  # noqa: E402
 from audit.database import AuditDatabase  # noqa: E402
 
 ok = fail = 0

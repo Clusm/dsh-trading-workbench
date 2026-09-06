@@ -57,6 +57,13 @@ def build_execution_feedback(state: dict[str, Any], decision: Any,
 
 
 class TradingService:
+    """聚合交易依赖并管理快慢循环、控制面和资源生命周期。
+
+    每个项目目录只允许一个实例。慢循环持有 ``_cycle_lock`` 执行情报、决策与下单；
+    快循环使用独立 ``_protection_lock``，确保 LLM 阻塞时仍可完成保护单和订单对账。
+    ``_lock`` 只保护内存快照，不能在持有它时进行网络 I/O。关闭时必须先停止后台线程，
+    再关闭流、Broker、数据库，最后释放实例锁。
+    """
     def __init__(self, settings: Settings):
         self.settings = settings
         # 单实例是资金安全约束而非便利功能：两个进程会各自持有旧内存状态，
@@ -199,6 +206,7 @@ class TradingService:
         return cfg
 
     def run_once(self) -> dict[str, Any]:
+        """同步运行一轮慢决策；已有慢循环时返回 skipped，绝不并发执行两轮。"""
         if not self._cycle_lock.acquire(blocking=False):
             return {"skipped": True, "reason": "cycle_running"}
         started = time.perf_counter()
@@ -311,6 +319,7 @@ class TradingService:
         return build_execution_feedback(state, decision, channel_status, broker_state)
 
     def request_run(self) -> bool:
+        """请求后台执行一轮慢决策；已有请求运行时返回 False。"""
         # Web手动触发与调度线程可能同时到达，检查和赋值必须原子；
         # 否则两个线程都可能越过 is_alive() 并各自启动一次慢决策。
         with self._run_thread_lock:
@@ -333,6 +342,7 @@ class TradingService:
                     self._run_thread = None
 
     def cycle_running(self) -> bool:
+        """返回手动或定时慢循环是否仍在执行。"""
         with self._run_thread_lock:
             return bool(self._run_thread and self._run_thread.is_alive())
 
@@ -513,10 +523,12 @@ class TradingService:
         return account_risk
 
     def latest(self) -> dict[str, Any]:
+        """返回最近完整服务快照的浅拷贝，供 Dashboard 只读展示。"""
         with self._lock:
             return dict(self._latest)
 
     def set_control(self, new_state: str) -> dict[str, Any]:
+        """更新控制状态；emergency 会在状态落盘后执行多轮紧急平仓。"""
         if not self.control.set_state(new_state):
             return {"ok": False, "error": "invalid state"}
         receipts = []
@@ -540,6 +552,7 @@ class TradingService:
         return {"ok": True, "state": new_state, "receipts": receipts}
 
     def start_background(self, interval_minutes: float) -> None:
+        """启动快慢循环和只读情报线程；重复调用不会创建第二组线程。"""
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
@@ -662,6 +675,7 @@ class TradingService:
         return generated
 
     def close(self) -> None:
+        """幂等关闭线程、流、Broker、数据库及实例锁。"""
         if not self.stop_background():
             try:
                 self.db.log_risk_event(

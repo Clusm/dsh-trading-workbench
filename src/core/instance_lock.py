@@ -11,6 +11,11 @@ from pathlib import Path
 
 
 class InstanceLock:
+    """用 PID 状态文件阻止同一项目目录启动两个交易服务实例。
+
+    获取锁时会校验旧 PID 是否仍存活；只有确认进程不存在才接管陈旧锁。实例拥有者退出
+    时才可释放文件，避免另一个进程误删正在使用的安全锁。
+    """
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -24,6 +24,7 @@ from llm.base import LLMClient
 
 
 class AgentState(TypedDict, total=False):
+    """LangGraph 单轮共享状态；字段均为当前 run 的结构化中间产物。"""
     run_id: str
     decision_id: str
     market: MarketBrief

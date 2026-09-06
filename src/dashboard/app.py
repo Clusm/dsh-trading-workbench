@@ -495,6 +495,30 @@ def _last_decision_from_db(service: TradingService) -> dict[str, Any] | None:
     return row
 
 
+def _intel_snapshot(service: TradingService) -> dict[str, Any]:
+    """读取可选情报侧车；组件缺席或快照失败时返回明确的降级状态。"""
+    sidecar = getattr(service, "intel_sidecar", None)
+    snapshot = getattr(sidecar, "snapshot", None)
+    if callable(snapshot):
+        try:
+            return snapshot()
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "status": "degraded",
+                "shadow_only": True,
+                "execution_weight": 0.0,
+                "errors": [f"snapshot:{type(exc).__name__}"],
+            }
+    return {
+        "enabled": False,
+        "status": "unavailable",
+        "shadow_only": True,
+        "execution_weight": 0.0,
+        "errors": ["intel_sidecar_unavailable"],
+    }
+
+
 def _latest_or_empty(service: TradingService) -> dict[str, Any]:
     latest = service.latest()
     empty = {
@@ -510,7 +534,7 @@ def _latest_or_empty(service: TradingService) -> dict[str, Any]:
         "quota_state": service.quota.status(),
         "channel_state": latest.get("channel_state") or {},
         "intel_cache": latest.get("intel_cache"),
-        "web3_intel": latest.get("web3_intel") or service.intel_sidecar.snapshot(),
+        "web3_intel": latest.get("web3_intel") or _intel_snapshot(service),
         "ts": None,
     }
     if not empty.get("channel_state") and not (latest or {}).get("channel_state"):
@@ -1015,8 +1039,12 @@ def create_app(service: TradingService) -> FastAPI:
         intel_cfg = service.settings.raw_settings.get("web3_intel", {}) or {}
         liquidation_stream = None
         liquidation_task = None
-        if bool(intel_cfg.get("liquidation_stream_enabled", True)):
-            liquidation_stream = LiquidationStream(service.intel_sidecar.record_liquidation)
+        # 清算流属于可选情报能力。生命周期测试、诊断工具或降级运行可能注入
+        # 不带 intel_sidecar 的精简服务，此时跳过清算流而不影响主服务启动。
+        intel_sidecar = getattr(service, "intel_sidecar", None)
+        liquidation_handler = getattr(intel_sidecar, "record_liquidation", None)
+        if bool(intel_cfg.get("liquidation_stream_enabled", True)) and callable(liquidation_handler):
+            liquidation_stream = LiquidationStream(liquidation_handler)
             liquidation_task = asyncio.create_task(liquidation_stream.serve())
         app.state.liquidation_stream = liquidation_stream
 
@@ -1426,7 +1454,7 @@ def create_app(service: TradingService) -> FastAPI:
             "onchain": {"summary": latest["onchain"].summary,
                         "generated_at": latest["onchain"].generated_at} if latest["onchain"] else None,
             "intel_cache": latest.get("intel_cache"),
-            "web3_intel": latest.get("web3_intel") or service.intel_sidecar.snapshot(),
+            "web3_intel": latest.get("web3_intel") or _intel_snapshot(service),
             "channel_state": latest.get("channel_state") or {},
             "cycle_age_seconds": round(time.time() - float(latest.get("ts") or time.time()), 1),
             "cycle_running": service.cycle_running(),
@@ -1466,7 +1494,7 @@ def create_app(service: TradingService) -> FastAPI:
     @app.get("/api/intel")
     def api_intel():
         """只读情报侧车快照；不触发网络采集，也不接触交易接口。"""
-        payload = service.intel_sidecar.snapshot()
+        payload = _intel_snapshot(service)
         payload["observability"] = service.db.intel_observability()
         return payload
 
@@ -1585,7 +1613,7 @@ def create_app(service: TradingService) -> FastAPI:
                                 if hasattr(service, "db_backup") else {"enabled": False}),
             "risk_incidents": service.db.risk_incident_summary(),
             # 情报侧车只影响可观测性，不参与总交易健康判定。
-            "web3_intel": service.intel_sidecar.snapshot(),
+            "web3_intel": _intel_snapshot(service),
             "liquidation_stream": (getattr(app.state, "liquidation_stream", None).status()
                                    if getattr(app.state, "liquidation_stream", None) is not None
                                    else {"enabled": False}),
@@ -1879,9 +1907,6 @@ def create_app(service: TradingService) -> FastAPI:
         if mode not in SWITCHABLE_MODES:
             raise HTTPException(status_code=400, detail=f"未知模式：{mode}")
         env_vals = _read_env_file(_env_file(service))
-        exec_cfg = service.settings.raw_settings.get("execution", {}) or {}
-        key_map = exec_cfg.get("api_key_env_map", {}) or {}
-        secret_map = exec_cfg.get("api_secret_env_map", {}) or {}
         if mode == "live":
             key = os.environ.get("BINANCE_LIVE_API_KEY", "") or env_vals.get("BINANCE_LIVE_API_KEY", "")
             secret = os.environ.get("BINANCE_LIVE_API_SECRET", "") or env_vals.get("BINANCE_LIVE_API_SECRET", "")

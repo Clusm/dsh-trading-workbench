@@ -1,68 +1,93 @@
 # multi-agent-trader
 
-个人实战学习项目：多 Agent 加密货币交易实验平台。
+本地运行的多 Agent 数字货币合约实验系统。系统仅处理币安 USD-M、USDT 本位永续合约
+白名单，默认连接 Binance Demo Trading；AI 生成候选决策，确定性代码负责风控、幂等
+下单、保护单、账户对账和完整审计。
 
-当前阶段：phase 4（OpenCode Zen LLM + Tool Call按需查询任意symbol + 200U会话资金 + Binance Demo Trading + 交易软目标）。
+当前资金核算以 500 U 为会话起点。Web3 与市场微观结构情报处于只读影子阶段，执行权重
+固定为 0，不会改变现有风险档或交易决策。
 
-## 运行
+LLM 默认通过 SenseNova OpenAI 兼容网关调用 `deepseek-v4-flash`。本机凭据建议放在
+`.env.local`；该文件后加载并覆盖 `.env`，两者均不会进入 Git。
 
-```bash
-# 阶段1：接入真实免费数据源，跑一轮完整决策
-.venv/Scripts/python.exe scripts/run_phase1.py
+## 快速开始
 
-# 持续运行，每5分钟一轮
-.venv/Scripts/python.exe scripts/run_phase1.py --loop
+环境要求：Windows、PowerShell、Python 3.11+。
 
-# 生成每日复盘
-.venv/Scripts/python.exe scripts/run_review.py
-
-# 启动本地 Web 控制台（默认后台每5分钟跑一轮）
-.venv/Scripts/python.exe scripts/run_web.py
-# 浏览器打开 http://127.0.0.1:8000
+```powershell
+python -m venv .venv
+.venv\Scripts\pip.exe install -r requirements.txt
+Copy-Item .env.example .env
+.venv\Scripts\python.exe scripts\verify_profile_lock.py
+.venv\Scripts\python.exe scripts\run_web.py
 ```
 
-执行环境：
-- `EXECUTION_MODE=demo`：Binance Demo Trading，主网真实行情 + 虚拟资金，推荐。key 在 https://demo.binance.com 的 API Management 创建，填入 `BINANCE_DEMO_API_KEY` / `BINANCE_DEMO_API_SECRET`。
-- `EXECUTION_MODE=testnet`：传统测试网，模拟行情。
-- `EXECUTION_MODE=paper`：本地纸面成交，不需要币安 key。
-- 缺少对应 key 时自动回退 paper。
-- 会话资金固定 200U；会话权益亏到 ≤1U 时自动全平并从 200U 重启（见 `config/settings.yaml` 的 `capital`）。
-- 行情扫描：Top 40 USDT永续全部提供 1m×600（10小时）、15m、1h K线及ATR/量能/资金费率/OI指标。
-- 交易目标（软目标，非强制）：每小时短线 5 笔、每日小时级 3 笔；是否交易、品种、方向均由主 Agent 自主决定。
-- 主 Agent 支持 Tool Call：可主动查询任意 USDT 永续的 1m/5m/15m/1h/4h/1d K线、ATR、量能、资金费率、OI，也可查询 Top 活跃合约。
+控制台地址：`http://127.0.0.1:8000`。
 
-## 双交易通道（当前架构）
+执行环境由 `.env` 中的 `EXECUTION_MODE` 决定：
 
-- `signal_scanner`：确定性扫描 strategy_lab final 策略卡，生成 SignalTicket。
-- `strategy_trader`：策略交易 AI，执行 ticket，订单来源 `strategy`。
-- `ai_trader`：AI 自决策通道，独立判断，订单来源 `ai`，默认逐仓。
-- 虚拟账本 60/40 每日 UTC 重算；AI 账户当日 -30% 熔断；两个通道分别计算保证金上限。
-- 所有新开仓强制同时设置初始止损和止盈。
-- 设计文档：`docs/dual_agent_design.md`
+- `demo`：币安模拟盘，主网行情与虚拟资金，当前默认模式；
+- `testnet`：传统测试网；
+- `paper`：本地纸面成交；
+- `live`：真实账户，必须显式配置对应密钥并完成上线核验。
 
-策略研究代码保留在独立的 `ai-trader/strategy_lab` 工作区，本项目通过
-`config/settings.yaml` 中相对项目根目录的 `signal_scanner.strategy_lab_src`
-动态加载。接入或升级策略库后可先运行以下无网络、无下单冒烟测试：
+缺少当前环境的密钥时，Broker 工厂会安全回退到 paper。不要把 `.env`、API 密钥、签名
+请求或 `data/` 运行状态提交到 Git。
 
-```bash
-.venv/Scripts/python.exe scripts/smoke_signal_scanner_integration.py
+## 运行模型
+
+- 慢循环每 10 分钟运行：行情与策略扫描、双通道决策、确定性风控和执行。
+- 快循环每 30 秒运行：账户/订单/保护单对账与存量仓位安全检查。
+- `strategy` 通道消费 strategy_lab 的确定性策略票据。
+- `ai` 通道使用 LLM 和白名单行情工具形成候选决策。
+- 当前所有实际 LLM 节点统一使用 `deepseek-v4-flash`；Risk/Execution 是确定性代码。
+- AI 决策节点使用 SenseNova 支持的最高 `xhigh` 推理档；其他节点按职责使用 low/high。
+- 所有新开仓必须携带初始止损和止盈，并经过 ActionSpace、Risk Agent 与 Outbox。
+- 市场情报覆盖 20 个明确配置的 USD-M 合约；AI 单轮行情查询预算为 4 次。
+
+## 核心安全边界
+
+- 风险参数由 `config/risk_learning.yaml` 与 `config/risk_profile.lock.json` 锁定。
+- 交易范围由 `config/settings.yaml` 的 `market_universe.core_symbols` 限定。
+- 账户流、账户镜像和订单镜像目前主要用于观察、持久化与对账。
+- Outbox 对不确定提交进行隔离，避免网络超时后重复下单。
+- 保护单镜像检查缺失、孤儿、方向和数量不一致。
+- SQLite 保存决策、意图、风控、订单、快照、事件、incident 和影子评估结果。
+
+## 常用检查
+
+```powershell
+# 核心配置未漂移
+.venv\Scripts\python.exe scripts\verify_profile_lock.py
+
+# 基础回归
+.venv\Scripts\python.exe scripts\check_quality.py
+.venv\Scripts\python.exe scripts\smoke_service_lifecycle.py
+.venv\Scripts\python.exe scripts\smoke_ui.py
+
+# 显式联网验证 LLM 文本与 Function Calling（会产生一次小额 API 调用）
+.venv\Scripts\python.exe scripts\verify_llm_provider.py
+
+# 安装开发工具后执行静态检查
+.venv\Scripts\pip.exe install -r requirements-dev.txt
 ```
-
-启动时扫描器会校验 `signals.REGISTRY`、`features.build_features`、模块来源目录，
-以及所有启用策略卡引用的 `signal_fn`；任一不匹配都会安全降级为无策略交易。
-
-LLM 走 OpenCode Zen：主 Agent=deepseek-v4-pro（reasoning_effort=max），其余=deepseek-v4-flash。没有 key 时自动回退 Mock LLM。跑通后会：
-
-- 在 `data/agent_trader.sqlite` 写入 Agent 运行、LLM 调用、决策与风控记录；
-- 在 `data/artifacts/` 保存每个 Agent 的结构化输出；
-- 在 `data/logs/YYYY-MM-DD/` 写 JSONL 原始日志。
 
 ## 目录
 
-- `src/core`：配置、LangGraph 图、Agent 运行记录
-- `src/llm`：DeepSeek 客户端与 Mock 客户端
-- `src/agents`：各 Agent 节点与数据模型
-- `src/dashboard`：本地 FastAPI 控制台
-- `src/audit`：SQLite 审计库与 JSONL 日志
-- `knowledge`：策略报告与结构化策略卡片（strategy_cards.json）
-- `config`：全局配置、Agent 配置、风险档位
+- `src/core`：服务生命周期、图编排、资金、通道、控制和风险守卫；
+- `src/agents`：Agent 节点、模型、策略与执行逻辑；
+- `src/exchange`：Binance Broker、Outbox、私有流、镜像和安全监控；
+- `src/intel`：只读 USD-M/Web3 情报与 A/B/C 影子评估；
+- `src/audit`：SQLite 迁移、审计查询和 JSONL 日志；
+- `src/dashboard`：FastAPI 控制台；
+- `scripts`：启动、冒烟、诊断与显式在线核验脚本；
+- `docs`：架构、运行恢复、维护规范和历史设计记录。
+
+进一步阅读：
+
+- [项目说明书](docs/项目说明书.md)
+- [运行与故障恢复手册](docs/运行与故障恢复手册_2026-09-06.md)
+- [代码维护规范](docs/代码维护规范.md)
+- [稳定性与 AI 情报升级计划](docs/USD-M合约系统稳定性与AI情报升级开发计划_2026-09-05.md)
+
+本项目不保证盈利。Demo 测试通过不代表实盘安全，也不构成投资建议。

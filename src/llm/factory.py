@@ -20,18 +20,18 @@ def _agent_cfg(settings: Settings, agent_name: str) -> dict[str, Any]:
 def build_llm_for_agent(settings: Settings, agent_name: str) -> tuple[LLMClient, str]:
     base = settings.llm_config
     acfg = _agent_cfg(settings, agent_name)
-    api_key_env = base.get("api_key_env", "OPENCODE_API_KEY")
+    api_key_env = base.get("api_key_env", "SENSENOVA_API_KEY")
     api_key = os.getenv(api_key_env, "").strip()
     model = (
-        str(acfg.get("model") or os.getenv(base.get("model_env", "OPENCODE_MODEL"), "").strip()
+        str(acfg.get("model") or os.getenv(base.get("model_env", "SENSENOVA_MODEL"), "").strip()
             or base.get("default_model", "deepseek-v4-flash"))
     )
     if not api_key or not model or model in ("", "none"):
         return MockLLMClient(), "mock"
 
     base_url = (
-        os.getenv(base.get("base_url_env", "OPENCODE_BASE_URL"), "").strip()
-        or base.get("default_base_url", "https://opencode.ai/zen/v1")
+        os.getenv(base.get("base_url_env", "SENSENOVA_BASE_URL"), "").strip()
+        or base.get("default_base_url", "https://token.sensenova.cn/v1")
     )
     client = OpenAICompatibleLLMClient(
         api_key=api_key,

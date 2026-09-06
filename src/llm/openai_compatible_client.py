@@ -1,4 +1,4 @@
-"""OpenAI 兼容接口客户端：OpenCode Zen / DeepSeek 等。"""
+"""OpenAI 兼容接口客户端：SenseNova、OpenCode Zen 等。"""
 from __future__ import annotations
 
 import os
@@ -28,22 +28,42 @@ class OpenAICompatibleLLMClient(LLMClient):
                  max_tokens: int = 2000, timeout_seconds: int = 60,
                  reasoning_effort: str | None = None,
                  max_retries: int = 1, retry_backoff_seconds: float = 2.0):
-        self.api_key = (api_key or os.getenv("OPENCODE_API_KEY", "")).strip()
-        self.base_url = (base_url or os.getenv("OPENCODE_BASE_URL", "https://opencode.ai/zen/v1")).rstrip("/")
-        self.model = model or os.getenv("OPENCODE_MODEL", "deepseek-v4-flash")
+        self.api_key = (
+            api_key
+            or os.getenv("SENSENOVA_API_KEY", "")
+            or os.getenv("OPENCODE_API_KEY", "")
+        ).strip()
+        self.base_url = (
+            base_url
+            or os.getenv("SENSENOVA_BASE_URL", "")
+            or os.getenv("OPENCODE_BASE_URL", "https://token.sensenova.cn/v1")
+        ).rstrip("/")
+        self.model = (
+            model
+            or os.getenv("SENSENOVA_MODEL", "")
+            or os.getenv("OPENCODE_MODEL", "deepseek-v4-flash")
+        )
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout_seconds = timeout_seconds
         self.reasoning_effort = reasoning_effort
         self.max_retries = max(0, int(max_retries))
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
+        # 与 Binance Broker 使用同一网络语义：MTA_NO_PROXY=1 时不仅依赖调用方
+        # 清理环境变量，还关闭 httpx 的系统代理/PAC 自动发现，避免请求误入失效代理。
+        self._trust_env = os.getenv("MTA_NO_PROXY", "").strip().lower() not in {
+            "1", "true", "yes", "on",
+        }
 
     def _post(self, payload: dict[str, Any]) -> httpx.Response:
         """单次 POST，带 max_retries 次瞬时错误重试（指数退避）。"""
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                with httpx.Client(timeout=self.timeout_seconds) as client:
+                with httpx.Client(
+                    timeout=self.timeout_seconds,
+                    trust_env=self._trust_env,
+                ) as client:
                     r = client.post(
                         f"{self.base_url}/chat/completions",
                         headers={"Authorization": f"Bearer {self.api_key}"},
@@ -61,7 +81,7 @@ class OpenAICompatibleLLMClient(LLMClient):
 
     def complete(self, system: str, user: str) -> LLMResponse:
         if not self.api_key:
-            raise RuntimeError("OPENCODE_API_KEY 未设置")
+            raise RuntimeError("LLM API key 未设置")
         payload = {
             "model": self.model,
             "messages": [
@@ -94,7 +114,7 @@ class OpenAICompatibleLLMClient(LLMClient):
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
              tool_choice: str = "auto") -> dict[str, Any]:
         if not self.api_key:
-            raise RuntimeError("OPENCODE_API_KEY 未设置")
+            raise RuntimeError("LLM API key 未设置")
         payload = {
             "model": self.model,
             "messages": messages,

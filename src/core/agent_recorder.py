@@ -15,6 +15,7 @@ from audit.jsonl_logger import JsonlLogger
 
 
 class AgentRecorder:
+    """将 Agent 运行结果同时写入 SQLite、JSONL 和可检查的结构化工件。"""
     def __init__(self, db: AuditDatabase, logger: JsonlLogger, artifacts_dir: Path):
         self.db = db
         self.logger = logger

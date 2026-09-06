@@ -12,10 +12,17 @@ from audit.database import AuditDatabase
 
 
 def utc_today() -> str:
+    """返回通道账本统一使用的 UTC 交易日。"""
     return datetime.now(timezone.utc).date().isoformat()
 
 
 class ChannelManager:
+    """维护 strategy/ai 两个虚拟资金通道及其独立约束。
+
+    通道只分配同一真实账户中的会话权益，不创建交易所子账户。状态文件保存 UTC 日切
+    基准和 AI 熔断状态；``RLock`` 保证页面读取、快循环和慢循环不会交叉覆盖日切结果。
+    通道权益之和应与会话权益保持同一口径，未实现盈亏不得固化进次日基准。
+    """
     def __init__(self, state_file: Path, broker: Any, db: AuditDatabase,
                  strategy_weight: float = 0.6, ai_weight: float = 0.4,
                  channel_max_margin_usage: float = 0.8,
@@ -253,6 +260,11 @@ class ChannelManager:
     def sync(self, prices: dict[str, float] | None = None,
              session_equity: float | None = None,
              read_only: bool = False) -> dict[str, Any]:
+        """返回两个通道的权益、日收益、保证金上限与开仓许可。
+
+        ``read_only=True`` 用于 Dashboard 查询，禁止触发 UTC 日切重分；普通同步可能更新
+        状态文件和日统计，但不会绕过 Broker/风控直接创建订单。
+        """
         with self.lock:
             return self._sync_locked(prices, session_equity, read_only)
 

@@ -18,7 +18,6 @@
   python scripts/cleanup_ghost_orders.py --apply --db <path>   # 指定数据库
 """
 import argparse
-import json
 import sys
 from pathlib import Path
 

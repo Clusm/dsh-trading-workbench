@@ -7,10 +7,9 @@
 """
 from __future__ import annotations
 
-import os
 import sqlite3
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

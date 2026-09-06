@@ -29,6 +29,12 @@ from audit.database import AuditDatabase
 
 
 class CapitalManager:
+    """维护交易所绝对权益与本项目会话权益之间的稳定映射。
+
+    状态文件持久化 ``baseline``、执行模式和锚定时间。所有写入采用临时文件替换，
+    并由可重入锁保护；交易所权益未知时宁可返回保守口径，也不会固化猜测基线。
+    本类还承担破产线与总保证金硬上限检查，触发动作会写入风险审计。
+    """
     def __init__(self, state_file: Path, broker: Any, db: AuditDatabase,
                  initial_equity: float = 200.0, bankruptcy_threshold: float = 1.0,
                  reset_on_bankruptcy: bool = True, max_margin_usage: float = 0.80):
@@ -183,6 +189,11 @@ class CapitalManager:
             os.replace(tmp, self.state_file)
 
     def session_equity(self) -> float:
+        """返回以配置起始资金为锚的会话权益，单位为 USDT。
+
+        交易所暂时不可用且没有可信缓存时返回起始资金作为中性展示值；调用方必须结合
+        ``sync()`` 返回的 ``equity_available`` 判断能否开新仓。
+        """
         eq = self._exchange_equity()
         if eq <= 0:
             # 接口完全不可用且无缓存时 _exchange_equity() 返回 0。
@@ -209,6 +220,11 @@ class CapitalManager:
         return 0.0
 
     def sync(self, prices: dict[str, float] | None = None) -> dict[str, Any]:
+        """同步权益并执行资金级硬保护。
+
+        可能的副作用包括全平、重锚和写风险事件。权益为旧缓存时跳过破产及保证金处置，
+        返回 ``equity_available=False``，由上层阻断新开仓。
+        """
         mode = self._mode()
         exchange_eq = self._exchange_equity()
         if getattr(self, "_equity_stale", False):
@@ -315,6 +331,7 @@ class CapitalManager:
         return {"ok": True, "session_equity": self.initial_equity}
 
     def portfolio(self) -> dict[str, Any]:
+        """生成提供给决策层的会话资金快照，不暴露交易所容器绝对余额。"""
         state = {}
         try:
             state = dict(self.broker.state)

@@ -47,6 +47,11 @@ def _proxy() -> str | None:
 
 
 class BinanceUserDataStream:
+    """管理 Binance USD-M listenKey、WebSocket 接收队列与事件持久化。
+
+    网络线程只负责收包和排队，消费线程先写幂等收件箱再调用镜像；队列溢出或持久化
+    失败会设置 ``reconcile_required``，要求 REST 对账恢复真值，不能静默丢事件。
+    """
     def __init__(self, *, api_key: str, rest_base_url: str, environment: str,
                  inbox: ExchangeEventInbox, keepalive_minutes: float = 30,
                  planned_reconnect_hours: float = 23, reconnect_seconds: float = 5,

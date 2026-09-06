@@ -28,6 +28,11 @@ def _int(value: Any) -> int | None:
 
 
 class AccountMirror:
+    """将私有流账户事件持久化，并与 Broker REST 真值做影子对账。
+
+    当前镜像不向交易决策提供权威余额，也不驱动下单；发现缺失、数量或钱包差异时记录
+    对账结果，由健康接口和安全控制层决定是否阻断新仓。
+    """
     def __init__(self, db: AuditDatabase, *, environment: str,
                  allowed_symbols: Iterable[str] = ()) -> None:
         self.db = db

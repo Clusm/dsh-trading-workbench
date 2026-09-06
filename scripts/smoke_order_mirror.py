@@ -148,6 +148,6 @@ recon_db.close()
 
 versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
-check("数据库迁移版本1到8完整", versions == [1, 2, 3, 4, 5, 6, 7, 8])
+check("数据库迁移版本1到13完整", versions == list(range(1, 14)))
 db.close()
 print("\n结果: 22 通过 / 0 失败")

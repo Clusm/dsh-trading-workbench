@@ -37,6 +37,12 @@ def _parse_iso(value: Any) -> Any:
 
 
 class BinanceFuturesBroker:
+    """币安 USD-M 合约边界，封装签名请求、订单幂等、持仓台账与保护单。
+
+    Broker 只接受交易所返回的合约过滤规则，并通过 Outbox 在 POST 前持久化意图。
+    网络结果不确定时不重复提交；开仓来源台账用于 strategy/ai 通道归因。该类会进行真实
+    网络和订单操作，测试必须使用临时状态与替身，不能连接生产凭据。
+    """
     mode = "testnet"
 
     def __init__(self, api_key: str, api_secret: str,
@@ -796,7 +802,6 @@ class BinanceFuturesBroker:
 
         first_cid = None
         first_exchange_id = None
-        total_margin = 0.0
         order_count = 0
         fill_unconfirmed = False
         base_cid = getattr(intent, "client_order_id", None) or f"mta-{uuid.uuid4().hex[:28]}"
@@ -848,7 +853,6 @@ class BinanceFuturesBroker:
                 except Exception:
                     open_commission = None
             margin = self._position_margin(symbol)
-            total_margin = margin
             order_count += 1
             if first_cid is None:
                 first_cid = cid

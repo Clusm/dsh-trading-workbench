@@ -19,6 +19,7 @@ SUPPORTED_USER_EVENTS = {
 
 @dataclass(frozen=True)
 class ExchangeEvent:
+    """标准化后的不可变交易所事件，保留原始 payload 供审计与重放。"""
     event_key: str
     event_type: str
     event_time_ms: int | None

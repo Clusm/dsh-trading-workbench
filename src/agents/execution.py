@@ -35,6 +35,11 @@ def _parse_time(value: str | None) -> datetime | None:
 
 
 class PaperBroker:
+    """本地纸面成交 Broker，用于无交易所密钥的功能验证。
+
+    状态持久化到项目根派生的文件，并模拟 strategy/ai 双账本；它不应与 demo/live 共用
+    资金状态文件，也不能作为交易所真实成交、手续费或滑点的准确替代。
+    """
     def __init__(self, state_file: Path, initial_equity: float = 200.0,
                  strategy_weight: float = 0.6, ai_weight: float = 0.4):
         self.state_file = Path(state_file)

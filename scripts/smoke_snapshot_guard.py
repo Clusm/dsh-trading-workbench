@@ -20,7 +20,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from dashboard.app import _BAD_SNAPSHOT_LOG_INTERVAL_S, _maybe_snapshot  # noqa: E402
+from dashboard.app import _maybe_snapshot  # noqa: E402
 
 PASS, FAIL = 0, 0
 

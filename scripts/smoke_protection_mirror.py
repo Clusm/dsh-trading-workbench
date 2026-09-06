@@ -103,7 +103,7 @@ check("最新对账与活动单数量可观测", status["active_orders"] == 4 an
       status["last_reconciliation"]["matched"] == 1)
 versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
-check("数据库迁移版本1到8完整", versions == [1, 2, 3, 4, 5, 6, 7, 8])
+check("数据库迁移版本1到13完整", versions == list(range(1, 14)))
 db.close()
 
 print("\n[4] 仓位归零后自动收口残留Algo保护单")

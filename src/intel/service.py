@@ -101,6 +101,7 @@ class ReadOnlyIntelService:
         }
 
     def snapshot(self) -> dict[str, Any]:
+        """返回与内部状态隔离的深拷贝，防止 Dashboard 修改采集缓存。"""
         with self._lock:
             snapshot = dict(self._snapshot)
             snapshot["liquidations"] = list(self._liquidations)
@@ -152,6 +153,10 @@ class ReadOnlyIntelService:
             self._liquidations = self._liquidations[-100:]
 
     def maybe_refresh(self, *, force: bool = False) -> dict[str, Any]:
+        """按刷新窗口采集公开数据；失败时保留旧快照并标记 degraded。
+
+        无论配置内容如何，本方法都不会改变 ``shadow_only`` 或执行权重，也不接触 Broker。
+        """
         now = time.monotonic()
         with self._lock:
             if not self.enabled:

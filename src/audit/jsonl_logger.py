@@ -8,6 +8,7 @@ from typing import Any
 
 
 class JsonlLogger:
+    """按 UTC 日期追加结构化 JSONL 日志，作为 SQLite 审计的原始旁路记录。"""
     def __init__(self, logs_dir: Path):
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(parents=True, exist_ok=True)

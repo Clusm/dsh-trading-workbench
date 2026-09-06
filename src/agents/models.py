@@ -12,6 +12,7 @@ def now() -> str:
 
 
 class MarketBrief(BaseModel):
+    """市场 Agent 输出的结构化行情摘要与关键价格。"""
     agent: str = "market_agent"
     generated_at: str = Field(default_factory=now)
     regime: str = "unknown"
@@ -25,6 +26,7 @@ class MarketBrief(BaseModel):
 
 
 class MacroBrief(BaseModel):
+    """宏观 Agent 输出的风险环境摘要；缺失数据必须显式表示未知。"""
     agent: str = "macro_agent"
     generated_at: str = Field(default_factory=now)
     risk_events_24h: list[str] = Field(default_factory=list)
@@ -36,6 +38,7 @@ class MacroBrief(BaseModel):
 
 
 class OnchainBrief(BaseModel):
+    """链上 Agent 输出的只读观察摘要，不具有订单执行权限。"""
     agent: str = "onchain_agent"
     generated_at: str = Field(default_factory=now)
     stablecoin_change_24h: str = "n/a"
@@ -47,6 +50,7 @@ class OnchainBrief(BaseModel):
 
 
 class StrategyRef(BaseModel):
+    """与当前市场状态匹配的一张策略卡引用。"""
     strategy_id: str
     name: str
     applicable: bool = False
@@ -55,6 +59,7 @@ class StrategyRef(BaseModel):
 
 
 class StrategyRefs(BaseModel):
+    """策略库节点返回的候选策略引用集合。"""
     agent: str = "strategy_agent"
     generated_at: str = Field(default_factory=now)
     refs: list[StrategyRef] = Field(default_factory=list)
@@ -62,6 +67,7 @@ class StrategyRefs(BaseModel):
 
 
 class TradeIntent(BaseModel):
+    """单个结构化交易意图；仍需 ActionSpace 与确定性风控审批。"""
     symbol: str
     action: Literal["open", "close", "reduce", "adjust"] = "open"
     side: Literal["LONG", "SHORT"]
@@ -103,6 +109,7 @@ class PositionReview(BaseModel):
 
 
 class TradeDecision(BaseModel):
+    """主决策的候选交易集合及其可审计理由，不等同于已下单。"""
     decision: Literal["no_trade", "open", "close", "reduce", "adjust"]
     intents: list[TradeIntent] = Field(default_factory=list)
     position_reviews: list[PositionReview] = Field(default_factory=list)
@@ -112,6 +119,7 @@ class TradeDecision(BaseModel):
 
 
 class RiskVerdict(BaseModel):
+    """确定性风控对候选意图的审批结果和调整后可执行集合。"""
     verdict: Literal["approved", "reduced", "rejected"]
     reasons: list[str] = Field(default_factory=list)
     adjusted_intents: list[TradeIntent] = Field(default_factory=list)

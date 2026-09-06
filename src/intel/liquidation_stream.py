@@ -8,6 +8,10 @@ from typing import Any, Callable
 
 
 class LiquidationStream:
+    """订阅公开强平聚合流并将原始事件交给只读情报侧车。
+
+    连接失败会退避重连；本类不持有交易密钥，也不从强平事件直接生成订单。
+    """
     def __init__(self, on_event: Callable[[dict[str, Any]], None]):
         self.on_event = on_event
         self._stop = False

@@ -30,7 +30,6 @@ def main() -> None:
     recorder = AgentRecorder(db, logger, settings.artifacts_dir)
 
     # 阶段0固定 mock；阶段1接入 DeepSeek 后再切换
-    llm_cfg = settings.llm_config
     llm = MockLLMClient()
     model = "mock"
 

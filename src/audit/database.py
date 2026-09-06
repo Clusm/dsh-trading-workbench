@@ -327,6 +327,12 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
 
 
 class AuditDatabase:
+    """SQLite 审计仓储与向前迁移入口。
+
+    连接启用 WAL，并允许跨线程访问；所有共享写操作必须持有 ``lock`` 并在同一临界区
+    提交。迁移按版本单向执行，不回写历史含义。此数据库保存审计事实，不以删除旧记录
+    的方式恢复系统状态。
+    """
     def __init__(self, db_file: Path):
         self.db_file = Path(db_file)
         self.db_file.parent.mkdir(parents=True, exist_ok=True)

@@ -9,6 +9,7 @@ from exchange.event_models import ExchangeEvent, normalize_user_event
 
 
 class ExchangeEventInbox:
+    """私有流事件的幂等收件箱；先落原始事件，再由各镜像状态机消费。"""
     def __init__(self, db: AuditDatabase):
         self.db = db
 

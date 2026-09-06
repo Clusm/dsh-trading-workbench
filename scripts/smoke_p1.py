@@ -105,12 +105,17 @@ check("无持仓时给了 reviews 被拦",
 
 print("\n[3] 端到端：模型漏掉持仓表态 -> 收到 issues -> 修正后成功")
 class SLLM:
-    def __init__(self, script): self.script = script; self.calls = 0; self.results = []
+    def __init__(self, script):
+        self.script = script
+        self.calls = 0
+        self.results = []
+
     def chat(self, messages, tools=None, tool_choice="auto"):
         for m in messages:
             if m.get("role") == "tool":
                 self.results.append(json.loads(m["content"] or "{}"))
-        idx = min(self.calls, len(self.script) - 1); self.calls += 1
+        idx = min(self.calls, len(self.script) - 1)
+        self.calls += 1
         return {"choices": [{"message": {"role": "assistant", "content": None,
                                          "tool_calls": self.script[idx]},
                              "finish_reason": "tool_calls"}], "usage": {}, "model": "s"}

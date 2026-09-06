@@ -29,6 +29,12 @@ class DuplicateOrderSubmission(RuntimeError):
 
 
 class OrderOutbox:
+    """持久化普通订单提交状态，消除网络不确定性导致的重复下单。
+
+    调用顺序必须是 ``prepare`` 落库后才能发送 POST。若请求超时或连接断开，订单进入
+    ``UNKNOWN``，后续只按 ``clientOrderId`` 查询交易所，不允许重发。状态只能前进，
+    终态不会被迟到的 WebSocket 事件回退。
+    """
     def __init__(self, db: AuditDatabase, *, environment: str) -> None:
         self.db = db
         self.environment = str(environment)
@@ -40,12 +46,14 @@ class OrderOutbox:
     @staticmethod
     def business_key(*, symbol: str, side: str, position_side: str | None,
                      purpose: str) -> str:
+        """构造同一交易目的的稳定业务键，用于识别未决开仓冲突。"""
         return f"{purpose}:{symbol.upper()}:{(position_side or side).upper()}"
 
     def prepare(self, *, client_order_id: str, symbol: str, side: str,
                 position_side: str | None, order_type: str, purpose: str,
                 qty: float, price: float | None, reduce_only: bool,
                 endpoint: str, request: dict[str, Any]) -> None:
+        """在交易所 POST 前记录 SUBMITTING；重复 ID 或未决开仓会直接拒绝。"""
         now = utc_now()
         key = self.business_key(symbol=symbol, side=side,
                                 position_side=position_side, purpose=purpose)
@@ -97,6 +105,7 @@ class OrderOutbox:
             return int(cursor.rowcount)
 
     def acknowledge(self, client_order_id: str, response: dict[str, Any]) -> None:
+        """用交易所同步响应确认订单；响应终态会同时写入解决时间。"""
         status = str(response.get("status") or "ACKNOWLEDGED").upper()
         if status not in _ACTIVE | _TERMINAL:
             status = "ACKNOWLEDGED"
@@ -107,10 +116,12 @@ class OrderOutbox:
             response=response, error_type=None, resolved_at=resolved)
 
     def mark_unknown(self, client_order_id: str, exc: BaseException) -> None:
+        """将无法确认提交结果的订单标为 UNKNOWN，等待查询或私有流收敛。"""
         self._update(client_order_id, status="UNKNOWN",
                      error_type=type(exc).__name__)
 
     def reject(self, client_order_id: str, exc: BaseException) -> None:
+        """记录可确定未被交易所接受的订单失败。"""
         self._update(client_order_id, status="REJECTED",
                      error_type=type(exc).__name__, resolved_at=utc_now())
 
@@ -145,6 +156,7 @@ class OrderOutbox:
             self.db.conn.commit()
 
     def apply_event(self, event: ExchangeEvent) -> bool:
+        """应用匹配本环境 Outbox 的订单私有流事件；无关事件返回 False。"""
         if event.event_type != "ORDER_TRADE_UPDATE":
             return False
         order = event.payload.get("o") if isinstance(event.payload.get("o"), dict) else {}
@@ -169,6 +181,7 @@ class OrderOutbox:
         return True
 
     def reconcile_unknown(self, broker: Any) -> int:
+        """按 clientOrderId 查询 UNKNOWN 订单，返回本轮成功收敛的数量。"""
         rows = self.db.fetch_all(
             "SELECT client_order_id,symbol FROM order_outbox "
             "WHERE environment=? AND status='UNKNOWN' ORDER BY updated_at",
@@ -191,6 +204,7 @@ class OrderOutbox:
         return resolved
 
     def status(self) -> dict[str, Any]:
+        """返回当前环境的状态计数和最近一次对账信息。"""
         counts = {str(row["status"]): int(row["count"]) for row in self.db.fetch_all(
             "SELECT status,COUNT(*) AS count FROM order_outbox "
             "WHERE environment=? GROUP BY status", (self.environment,))}

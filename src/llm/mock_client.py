@@ -1,6 +1,8 @@
 """Mock LLM：没有 DeepSeek key 时使用，返回固定 JSON 文本。"""
 from __future__ import annotations
 
+from typing import Any
+
 from .base import LLMClient, LLMResponse
 
 
