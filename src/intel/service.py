@@ -103,6 +103,17 @@ class ReadOnlyIntelService:
             snapshot["liquidations"] = list(self._liquidations)
             return json.loads(json.dumps(snapshot, ensure_ascii=False))
 
+    def record_internal_error(self, stage: str, exc: Exception) -> None:
+        """记录侧车自身降级，不污染正式交易风险事件。"""
+        with self._lock:
+            current = dict(self._snapshot)
+            errors = list(current.get("errors") or [])
+            errors.append(f"{stage}:{type(exc).__name__}")
+            current["errors"] = errors[-20:]
+            current["status"] = "degraded"
+            current["last_error_at"] = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            self._snapshot = current
+
     def record_liquidation(self, payload: dict[str, Any]) -> None:
         """标准化公开强平事件；非白名单数据立即丢弃。"""
         order = payload.get("o") if isinstance(payload.get("o"), dict) else {}
@@ -286,7 +297,7 @@ class ReadOnlyIntelService:
             self.db.log_shadow_decision(
                 decision_id=str(uuid.uuid4()), symbol=symbol, signal=signal,
                 reference_price=mark, confidence=self._confidence(directional),
-                source="binance_top_trader_proxy", execution_weight=0.0,
+                source="B_contract_market", execution_weight=0.0,
                 feature_json=json.dumps(dumped, ensure_ascii=False),
             )
         # premiumIndex 是全市场快照，可让所有白名单影子决策按 5 分钟频率回看，
@@ -299,6 +310,7 @@ class ReadOnlyIntelService:
                                           grace_minutes=max(10, int(self.refresh_seconds / 30)))
         wallet_tracker = self._refresh_wallet_tracker(received, fresh_until)
         token_audit = self._refresh_token_audit(received, fresh_until)
+        self._record_fused_shadows(rows, wallet_tracker, token_audit)
         return {
             **self._empty_snapshot("ok" if rows and not errors else "degraded"),
             "updated_at": received.isoformat(timespec="milliseconds"),
@@ -310,6 +322,63 @@ class ReadOnlyIntelService:
             "token_audit": token_audit,
             "shadow_evaluation": self.db.intel_observability(),
         }
+
+    def record_baseline_shadow(self, *, run_id: str, decision: Any,
+                               prices: dict[str, float]) -> int:
+        """记录 A 组：当前系统开仓决策的零权重副本。"""
+        if decision is None:
+            return 0
+        intents = list(getattr(decision, "intents", None) or [])
+        inserted = 0
+        for intent in intents:
+            if str(getattr(intent, "action", "open")) != "open":
+                continue
+            symbol = str(getattr(intent, "symbol", ""))
+            side = str(getattr(intent, "side", ""))
+            reference = _safe_float(prices.get(symbol))
+            if symbol not in self._symbol_set or side not in {"LONG", "SHORT"} or not reference:
+                continue
+            payload = (intent.model_dump() if hasattr(intent, "model_dump") else {
+                "symbol": symbol, "side": side, "action": "open",
+            })
+            self.db.log_shadow_decision(
+                decision_id=f"A:{run_id}:{symbol}:{side}", symbol=symbol,
+                signal="bullish" if side == "LONG" else "bearish",
+                reference_price=reference,
+                confidence=float(getattr(intent, "confidence", 0.5) or 0.5),
+                source="A_current_baseline", execution_weight=0.0,
+                feature_json=json.dumps(payload, ensure_ascii=False),
+            )
+            inserted += 1
+        return inserted
+
+    def _record_fused_shadows(self, rows: list[dict[str, Any]],
+                              wallet_tracker: dict[str, Any],
+                              token_audit: dict[str, Any]) -> None:
+        """记录 C 组；无明确 Web3 方向时必须为 unknown。"""
+        wallet_by: dict[str, dict[str, Any]] = {}
+        for event in list(wallet_tracker.get("events") or []):
+            symbol = str(event.get("symbol") or "")
+            if symbol in self._symbol_set and event.get("inferred_signal") in {"bullish", "bearish"}:
+                wallet_by[symbol] = event
+        flags_by = {
+            str(item.get("symbol")): list(item.get("red_flags") or [])
+            for item in list(token_audit.get("audits") or [])
+        }
+        for row in rows:
+            symbol = str(row["symbol"])
+            wallet = wallet_by.get(symbol)
+            red_flags = flags_by.get(symbol, [])
+            signal = str(wallet.get("inferred_signal")) if wallet and not red_flags else "unknown"
+            confidence = min(float(row.get("signal") != "unknown") * 0.25 + 0.55, 0.9) if signal != "unknown" else 0.0
+            payload = {"contract_market": row, "wallet_event": wallet,
+                       "token_red_flags": red_flags, "fusion_available": signal != "unknown"}
+            self.db.log_shadow_decision(
+                decision_id=str(uuid.uuid4()), symbol=symbol, signal=signal,
+                reference_price=_safe_float(row.get("mark_price")), confidence=confidence,
+                source="C_contract_plus_web3", execution_weight=0.0,
+                feature_json=json.dumps(payload, ensure_ascii=False),
+            )
 
     def _contract_map(self) -> dict[tuple[str, str], str]:
         """返回 (chain_id, lowercase contract) -> 白名单 USD-M symbol。"""
@@ -340,6 +409,7 @@ class ReadOnlyIntelService:
             address = str(cfg.get("address") or "")
             chain_id = str(cfg.get("chain_id") or "1")
             label = str(cfg.get("label") or "watched_wallet")[:80]
+            role = str(cfg.get("role") or "observe_only")
             if not EVM_ADDRESS_RE.fullmatch(address):
                 errors.append(f"invalid_address:{label}")
                 continue
@@ -365,7 +435,14 @@ class ReadOnlyIntelService:
                     amount = _safe_float(transfer.get("value"))
                     normalized = (amount / (10 ** decimals)) if amount is not None else None
                     direction = "out" if str(transfer.get("from") or "").lower() == address.lower() else "in"
-                    clean = {"wallet_label": label, "direction": direction, "amount": normalized,
+                    inferred = "unknown"
+                    if role == "smart_money":
+                        inferred = "bullish" if direction == "in" else "bearish"
+                    elif role == "exchange":
+                        inferred = "bearish" if direction == "in" else "bullish"
+                    clean = {"wallet_label": label, "wallet_role": role,
+                             "direction": direction, "inferred_signal": inferred,
+                             "amount": normalized,
                              "tx_hash": str(transfer.get("hash") or "")[:80]}
                     raw_hash = hashlib.sha256(
                         json.dumps({"chain": chain_id, "contract": contract, **clean},

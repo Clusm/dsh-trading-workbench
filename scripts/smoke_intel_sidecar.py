@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -61,6 +62,16 @@ check("一致看多信号", all(row["signal"] == "bullish" for row in first["sym
 check("迁移版本9已应用", db.fetch_one("SELECT version FROM schema_migrations WHERE version=9") is not None)
 check("情报事件已落库", db.fetch_one("SELECT COUNT(*) n FROM intel_events")["n"] == 2)
 check("影子决策权重为零", db.fetch_one("SELECT MAX(execution_weight) w FROM shadow_decisions")["w"] == 0)
+sources = {row["source"] for row in db.fetch_all("SELECT DISTINCT source FROM shadow_decisions")}
+check("B/C影子组同时记录", sources == {"B_contract_market", "C_contract_plus_web3"})
+check("无Web3配置时C组未知", db.fetch_one(
+    "SELECT COUNT(*) n FROM shadow_decisions WHERE source='C_contract_plus_web3' AND signal='unknown'")["n"] == 2)
+baseline_intent = SimpleNamespace(action="open", symbol="BTCUSDT", side="LONG", confidence=0.7)
+baseline_decision = SimpleNamespace(intents=[baseline_intent])
+check("A组复制当前系统开仓方向", service.record_baseline_shadow(
+    run_id="smoke", decision=baseline_decision, prices={"BTCUSDT": 100000}) == 1)
+check("A组仍为零执行权重", db.fetch_one(
+    "SELECT execution_weight FROM shadow_decisions WHERE source='A_current_baseline'")["execution_weight"] == 0)
 service.record_liquidation({"E": int(time.time() * 1000), "o": {"s": "BTCUSDT", "S": "SELL",
                                                     "ap": "100000", "z": "0.1"}})
 service.record_liquidation({"E": int(time.time() * 1000), "o": {"s": "BADUSDT", "S": "BUY",
@@ -82,4 +93,4 @@ check("生成5m/15m/1h/4h回看", int(outcomes["n"]) >= 4)
 check("看多且上涨判定正确", db.fetch_one("SELECT MIN(correct) c FROM shadow_outcomes WHERE correct IS NOT NULL")["c"] == 1)
 
 db.close()
-print("\n结果: 12 通过 / 0 失败")
+print("\n结果: 16 通过 / 0 失败")

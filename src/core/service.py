@@ -411,6 +411,14 @@ class TradingService:
         )
         state = graph.invoke({"run_id": run_id, "decision_id": decision_id})
         decision = state.get("decision")
+        market_brief = state.get("market")
+        try:
+            self.intel_sidecar.record_baseline_shadow(
+                run_id=run_id, decision=decision,
+                prices=dict(getattr(market_brief, "last_prices", {}) or {}),
+            )
+        except Exception as exc:
+            self.intel_sidecar.record_internal_error("baseline_shadow", exc)
         if decision is not None:
             self.db.log_trade_decision(
                 decision_id=decision_id, run_id=run_id, decision=decision.decision,

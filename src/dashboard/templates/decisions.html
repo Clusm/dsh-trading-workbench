@@ -140,6 +140,23 @@
       </table>
     </div>
     {% endif %}
+    {% set evals = (wi.shadow_evaluation or {}).evaluations or [] %}
+    {% if evals %}
+    <div class="table-wrap" style="margin-top:10px">
+      <table>
+        <thead><tr><th>影子组</th><th class="num">周期</th><th class="num">方向样本</th><th class="num">准确率</th><th class="num">观察天数</th><th>晋级条件</th></tr></thead>
+        <tbody>
+        {% for ev in evals %}
+          <tr><td>{{ ev.source }}</td><td class="num">{{ ev.horizon_minutes }}m</td>
+            <td class="num">{{ ev.directional_samples }}/200</td>
+            <td class="num">{{ '%.1f%%'|format(ev.accuracy * 100) if ev.accuracy is not none else '—' }}</td>
+            <td class="num">{{ ev.observation_span_days }}/7</td>
+            <td><span class="badge {{ 'ok' if ev.promotion_ready else 'muted' }}">{{ '可人工评审' if ev.promotion_ready else '继续观察' }}</span></td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
     <details class="chain-raw">
       <summary>查看 Web3/合约市场情报原始输出</summary>
       <pre>{{ wi|tojson(indent=2) }}</pre>

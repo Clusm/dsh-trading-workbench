@@ -808,7 +808,8 @@ class AuditDatabase:
             rows = self.conn.execute(
                 """SELECT d.source,o.horizon_minutes,COUNT(*) samples,
                           SUM(CASE WHEN o.correct=1 THEN 1 ELSE 0 END) correct,
-                          SUM(CASE WHEN o.correct IS NOT NULL THEN 1 ELSE 0 END) directional
+                          SUM(CASE WHEN o.correct IS NOT NULL THEN 1 ELSE 0 END) directional,
+                          MAX(0, julianday(MAX(d.created_at))-julianday(MIN(d.created_at))) span_days
                    FROM shadow_outcomes o JOIN shadow_decisions d ON d.decision_id=o.decision_id
                    GROUP BY d.source,o.horizon_minutes ORDER BY d.source,o.horizon_minutes"""
             ).fetchall()
@@ -816,15 +817,18 @@ class AuditDatabase:
         for row in rows:
             directional = int(row["directional"] or 0)
             correct = int(row["correct"] or 0)
+            span_days = round(float(row["span_days"] or 0.0), 2)
             evaluations.append({
                 "source": row["source"], "horizon_minutes": int(row["horizon_minutes"]),
                 "samples": int(row["samples"]), "directional_samples": directional,
                 "accuracy": round(correct / directional, 4) if directional else None,
-                "promotion_ready": directional >= 200,
+                "observation_span_days": span_days,
+                "promotion_ready": directional >= 200 and span_days >= 7.0,
             })
         return {"events_24h": event_count, "feature_coverage": feature_count,
                 "last_event_at": latest, "evaluations": evaluations,
-                "minimum_promotion_samples": 200}
+                "minimum_promotion_samples": 200, "minimum_observation_days": 7,
+                "auto_promotion": False}
 
     def _insert(self, sql: str, params: tuple[Any, ...]) -> None:
         with self.lock:
