@@ -873,7 +873,10 @@ class AuditDatabase:
                              AND datetime(sampled_at)<=datetime(?) ORDER BY sampled_at""",
                         (row["symbol"], row["created_at"], now.isoformat(timespec="milliseconds")),
                     ).fetchall()
-                    path = [float(item["mark_price"]) for item in samples]
+                    # 路径必须包含入场点，否则单边下跌时 MFE 会错误显示为负数，
+                    # 单边上涨时 MAE 也会错误显示为正数。
+                    path = [float(row["reference_price"])]
+                    path.extend(float(item["mark_price"]) for item in samples)
                     path.append(float(exit_price))
                     path_returns = [
                         (price / float(row["reference_price"]) - 1.0) * 100.0 * direction
@@ -905,11 +908,14 @@ class AuditDatabase:
                 """SELECT d.source,o.horizon_minutes,COUNT(*) samples,
                           SUM(CASE WHEN o.correct=1 THEN 1 ELSE 0 END) correct,
                           SUM(CASE WHEN o.correct IS NOT NULL THEN 1 ELSE 0 END) directional,
+                          COUNT(o.net_return_pct) net_samples,
                           AVG(o.net_return_pct) avg_net,
                           MIN(o.net_return_pct) worst_net,
-                          AVG(CASE WHEN o.net_return_pct>0 THEN 1.0 ELSE 0.0 END) net_win_rate,
+                          AVG(CASE WHEN o.net_return_pct IS NULL THEN NULL
+                                   WHEN o.net_return_pct>0 THEN 1.0 ELSE 0.0 END) net_win_rate,
                           AVG(o.mfe_pct) avg_mfe,
                           AVG(o.mae_pct) avg_mae,
+                          AVG(CASE WHEN o.net_return_pct IS NOT NULL THEN o.sample_count END) avg_path_samples,
                           MAX(0, julianday(MAX(d.created_at))-julianday(MIN(d.created_at))) span_days
                    FROM shadow_outcomes o JOIN shadow_decisions d ON d.decision_id=o.decision_id
                    GROUP BY d.source,o.horizon_minutes ORDER BY d.source,o.horizon_minutes"""
@@ -921,11 +927,16 @@ class AuditDatabase:
             span_days = round(float(row["span_days"] or 0.0), 2)
             avg_net = float(row["avg_net"]) if row["avg_net"] is not None else None
             worst_net = float(row["worst_net"]) if row["worst_net"] is not None else None
+            net_samples = int(row["net_samples"] or 0)
+            avg_path_samples = (float(row["avg_path_samples"])
+                                if row["avg_path_samples"] is not None else 0.0)
+            required_path_samples = max(2, int(row["horizon_minutes"]) // 5)
             evaluations.append({
                 "source": row["source"], "horizon_minutes": int(row["horizon_minutes"]),
                 "samples": int(row["samples"]), "directional_samples": directional,
                 "accuracy": round(correct / directional, 4) if directional else None,
                 "observation_span_days": span_days,
+                "net_samples": net_samples,
                 "avg_net_return_pct": round(avg_net, 5) if avg_net is not None else None,
                 "worst_net_return_pct": round(worst_net, 5) if worst_net is not None else None,
                 "net_win_rate": (round(float(row["net_win_rate"]), 4)
@@ -934,8 +945,11 @@ class AuditDatabase:
                                 if row["avg_mfe"] is not None else None),
                 "avg_mae_pct": (round(float(row["avg_mae"]), 5)
                                 if row["avg_mae"] is not None else None),
-                "promotion_ready": (directional >= 200 and span_days >= 7.0
-                                    and avg_net is not None and avg_net > 0),
+                "avg_path_samples": round(avg_path_samples, 2),
+                "required_path_samples": required_path_samples,
+                "promotion_ready": (directional >= 200 and net_samples >= 200
+                                    and span_days >= 7.0 and avg_net is not None
+                                    and avg_net > 0 and avg_path_samples >= required_path_samples),
             })
         return {"events_24h": event_count, "feature_coverage": feature_count,
                 "last_event_at": latest, "evaluations": evaluations,

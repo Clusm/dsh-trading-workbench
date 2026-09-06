@@ -116,7 +116,7 @@ metric = db.fetch_one(
     "FROM shadow_outcomes WHERE correct IS NOT NULL LIMIT 1")
 check("影子结果扣除费用与滑点", metric["net_return_pct"] < metric["gross_signal_return_pct"])
 check("影子结果记录MFE/MAE", metric["mfe_pct"] is not None and metric["mae_pct"] is not None
-      and metric["sample_count"] >= 1)
+      and metric["sample_count"] >= 2 and metric["mfe_pct"] >= 0 and metric["mae_pct"] <= 0)
 
 db.close()
 print("\n结果: 19 通过 / 0 失败")

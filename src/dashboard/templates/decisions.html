@@ -144,14 +144,15 @@
     {% if evals %}
     <div class="table-wrap" style="margin-top:10px">
       <table>
-        <thead><tr><th>影子组</th><th class="num">周期</th><th class="num">方向样本</th><th class="num">准确率</th><th class="num">平均净收益</th><th class="num">MFE/MAE</th><th class="num">观察天数</th><th>晋级条件</th></tr></thead>
+        <thead><tr><th>影子组</th><th class="num">周期</th><th class="num">方向/净值样本</th><th class="num">准确率</th><th class="num">平均净收益</th><th class="num">MFE/MAE</th><th class="num">路径覆盖</th><th class="num">观察天数</th><th>晋级条件</th></tr></thead>
         <tbody>
         {% for ev in evals %}
           <tr><td>{{ ev.source }}</td><td class="num">{{ ev.horizon_minutes }}m</td>
-            <td class="num">{{ ev.directional_samples }}/200</td>
+            <td class="num">{{ ev.directional_samples }}/{{ ev.net_samples }}/200</td>
             <td class="num">{{ '%.1f%%'|format(ev.accuracy * 100) if ev.accuracy is not none else '—' }}</td>
             <td class="num">{{ '%.3f%%'|format(ev.avg_net_return_pct) if ev.avg_net_return_pct is not none else '—' }}</td>
             <td class="num">{% if ev.avg_mfe_pct is not none %}{{ '%.3f'|format(ev.avg_mfe_pct) }}/{{ '%.3f'|format(ev.avg_mae_pct) }}%{% else %}—{% endif %}</td>
+            <td class="num">{{ ev.avg_path_samples }}/{{ ev.required_path_samples }}</td>
             <td class="num">{{ ev.observation_span_days }}/7</td>
             <td><span class="badge {{ 'ok' if ev.promotion_ready else 'muted' }}">{{ '可人工评审' if ev.promotion_ready else '继续观察' }}</span></td></tr>
         {% endfor %}
