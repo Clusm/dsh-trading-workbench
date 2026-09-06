@@ -770,6 +770,17 @@ class AuditDatabase:
             11, "shadow_cost_excursion_and_mark_samples",
             apply_shadow_cost_and_excursion_metrics)
 
+        def normalize_shadow_excursion_bounds() -> None:
+            # 入场点收益为0，故定义上 MFE 不得小于0、MAE不得大于0。
+            self.conn.execute(
+                "UPDATE shadow_outcomes SET mfe_pct=MAX(0,mfe_pct) WHERE mfe_pct IS NOT NULL")
+            self.conn.execute(
+                "UPDATE shadow_outcomes SET mae_pct=MIN(0,mae_pct) WHERE mae_pct IS NOT NULL")
+
+        self._apply_migration(
+            12, "normalize_shadow_excursion_bounds",
+            normalize_shadow_excursion_bounds)
+
     def close(self) -> None:
         self.conn.close()
 
