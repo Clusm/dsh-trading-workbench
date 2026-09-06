@@ -725,6 +725,14 @@ class AuditDatabase:
 
         self._apply_migration(9, "readonly_intel_and_shadow_evaluation", apply_readonly_intel_sidecar)
 
+        def normalize_shadow_cohort_names() -> None:
+            self.conn.execute(
+                "UPDATE shadow_decisions SET source='B_contract_market' "
+                "WHERE source='binance_top_trader_proxy'"
+            )
+
+        self._apply_migration(10, "normalize_shadow_cohort_names", normalize_shadow_cohort_names)
+
     def close(self) -> None:
         self.conn.close()
 
