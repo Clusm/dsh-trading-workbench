@@ -179,12 +179,32 @@ class ReadOnlyIntelService:
         return list(dict.fromkeys(selected))
 
     def _get_json(self, client: httpx.Client, path: str, params: dict[str, Any] | None = None) -> Any:
-        response = client.get(f"{PUBLIC_BASE_URL}{path}", params=params)
-        response.raise_for_status()
-        payload = response.json()
-        if isinstance(payload, dict) and payload.get("code") not in (None, 0):
-            raise RuntimeError(f"Binance {path}: {payload.get('msg') or payload.get('code')}")
-        return payload
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = client.get(f"{PUBLIC_BASE_URL}{path}", params=params)
+                # 公开行情只对瞬时限流和服务端错误重试；其它4xx通常是契约错误。
+                if response.status_code == 429 or response.status_code >= 500:
+                    response.raise_for_status()
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload, dict) and payload.get("code") not in (None, 0):
+                    raise RuntimeError(
+                        f"Binance {path}: {payload.get('msg') or payload.get('code')}")
+                return payload
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                status = exc.response.status_code
+                if status != 429 and status < 500:
+                    raise
+                retry_after = _safe_float(exc.response.headers.get("Retry-After")) or 0.0
+                time.sleep(min(2.0, max(retry_after, 0.25 * (2 ** attempt))))
+            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as exc:
+                last_error = exc
+                time.sleep(0.25 * (2 ** attempt))
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Binance {path}: empty retry state")
 
     def _fetch_ratios(self, symbol: str) -> tuple[dict[str, float | None], int | None, list[str]]:
         values: dict[str, float | None] = {}

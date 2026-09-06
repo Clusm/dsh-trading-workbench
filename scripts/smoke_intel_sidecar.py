@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from audit.database import AuditDatabase  # noqa: E402
 from intel.service import ReadOnlyIntelService  # noqa: E402
+import httpx  # noqa: E402
 
 
 def check(name: str, condition: bool) -> None:
@@ -78,6 +79,25 @@ service.record_liquidation({"E": int(time.time() * 1000), "o": {"s": "BADUSDT", 
                                                     "ap": "1", "z": "1"}})
 check("强平流只保留白名单", len(service.snapshot()["liquidations"]) == 1)
 
+retry_service = ReadOnlyIntelService(db=db, config={"enabled": False}, symbols=["BTCUSDT"])
+
+
+class RetryClient:
+    def __init__(self):
+        self.calls = 0
+
+    def get(self, url, params=None):
+        self.calls += 1
+        request = httpx.Request("GET", url)
+        if self.calls == 1:
+            return httpx.Response(503, request=request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+
+retry_client = RetryClient()
+check("公开行情503有界重试后恢复", retry_service._get_json(retry_client, "/test") == {"ok": True}
+      and retry_client.calls == 2)
+
 print("\n[2] 到期影子回看")
 with db.lock:
     old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(timespec="milliseconds")
@@ -93,4 +113,4 @@ check("生成5m/15m/1h/4h回看", int(outcomes["n"]) >= 4)
 check("看多且上涨判定正确", db.fetch_one("SELECT MIN(correct) c FROM shadow_outcomes WHERE correct IS NOT NULL")["c"] == 1)
 
 db.close()
-print("\n结果: 16 通过 / 0 失败")
+print("\n结果: 17 通过 / 0 失败")
