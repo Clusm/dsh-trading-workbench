@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -335,6 +336,7 @@ class AuditDatabase:
         self.conn.execute("PRAGMA journal_mode=WAL")
         # 跨进程访问（诊断脚本/DB浏览器）撞写锁时等待而不是立刻抛 database is locked
         self.conn.execute("PRAGMA busy_timeout=5000")
+        self._write_metrics = {"count": 0, "errors": 0, "total_ms": 0.0, "last_ms": None}
         self.conn.executescript(SCHEMA)
         self._migrate()
         self.conn.commit()
@@ -994,9 +996,29 @@ class AuditDatabase:
                 "auto_promotion": False}
 
     def _insert(self, sql: str, params: tuple[Any, ...]) -> None:
+        started = time.perf_counter()
         with self.lock:
-            self.conn.execute(sql, params)
-            self.conn.commit()
+            try:
+                self.conn.execute(sql, params)
+                self.conn.commit()
+            except Exception:
+                self._write_metrics["errors"] += 1
+                raise
+            finally:
+                elapsed = (time.perf_counter() - started) * 1000.0
+                self._write_metrics["count"] += 1
+                self._write_metrics["total_ms"] += elapsed
+                self._write_metrics["last_ms"] = elapsed
+
+    def write_metrics(self) -> dict[str, Any]:
+        with self.lock:
+            count = int(self._write_metrics["count"])
+            return {
+                "writes": count,
+                "write_errors": int(self._write_metrics["errors"]),
+                "last_write_ms": round(float(self._write_metrics["last_ms"] or 0.0), 3),
+                "avg_write_ms": round(float(self._write_metrics["total_ms"]) / count, 3) if count else 0.0,
+            }
 
     def fetch_all(self, sql: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         with self.lock:

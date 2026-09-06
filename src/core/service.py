@@ -157,9 +157,11 @@ class TradingService:
         self._account_risk_status: dict[str, Any] = {}
         self._last_fast_cycle_at: float | None = None
         self._last_fast_cycle_error: str | None = None
+        self._last_fast_cycle_duration_ms: float | None = None
         self._last_slow_cycle_started_at: float | None = None
         self._last_slow_cycle_at: float | None = None
         self._last_slow_cycle_error: str | None = None
+        self._last_slow_cycle_duration_ms: float | None = None
         self._purge_old_logs()
 
     def _purge_old_logs(self, keep_days: int = 7) -> None:
@@ -199,6 +201,7 @@ class TradingService:
     def run_once(self) -> dict[str, Any]:
         if not self._cycle_lock.acquire(blocking=False):
             return {"skipped": True, "reason": "cycle_running"}
+        started = time.perf_counter()
         with self._lock:
             self._last_slow_cycle_started_at = time.time()
         try:
@@ -212,6 +215,8 @@ class TradingService:
                 self._last_slow_cycle_error = type(exc).__name__
             raise
         finally:
+            with self._lock:
+                self._last_slow_cycle_duration_ms = round((time.perf_counter() - started) * 1000.0, 3)
             self._cycle_lock.release()
 
     def refresh_after_reset(self) -> None:
@@ -256,6 +261,7 @@ class TradingService:
         """
         if not self._protection_lock.acquire(blocking=False):
             return {"skipped": True, "reason": "protection_sync_running"}
+        started = time.perf_counter()
         try:
             # 慢决策仍在进行时，也要持续检查账户级止损；一旦触线，执行节点
             # 提交前读取到 close_only 后会丢弃尚未发出的开仓 intent。
@@ -295,6 +301,8 @@ class TradingService:
                 self._last_fast_cycle_error = type(exc).__name__
             raise
         finally:
+            with self._lock:
+                self._last_fast_cycle_duration_ms = round((time.perf_counter() - started) * 1000.0, 3)
             self._protection_lock.release()
 
     def _build_feedback(self, state: dict[str, Any], decision: Any,
@@ -334,9 +342,11 @@ class TradingService:
             return {
                 "last_fast_cycle_at": self._last_fast_cycle_at,
                 "last_fast_cycle_error": self._last_fast_cycle_error,
+                "last_fast_cycle_duration_ms": self._last_fast_cycle_duration_ms,
                 "last_slow_cycle_started_at": self._last_slow_cycle_started_at,
                 "last_slow_cycle_at": self._last_slow_cycle_at,
                 "last_slow_cycle_error": self._last_slow_cycle_error,
+                "last_slow_cycle_duration_ms": self._last_slow_cycle_duration_ms,
             }
 
     def _run_once_inner(self) -> dict[str, Any]:

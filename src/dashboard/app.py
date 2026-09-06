@@ -1579,6 +1579,7 @@ def create_app(service: TradingService) -> FastAPI:
             "cycle_age_seconds": (round(max(0.0, time.time() - float(cycle_ts)), 3)
                                   if cycle_ts else None),
             "db_readable": db_readable,
+            "database_writes": service.db.write_metrics(),
             "runtime": runtime,
             "database_backup": (service.db_backup.status()
                                 if hasattr(service, "db_backup") else {"enabled": False}),

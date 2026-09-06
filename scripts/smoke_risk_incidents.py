@@ -35,5 +35,17 @@ db.log_risk_event(event_type="futures_sync_error", severity="warn", details="rec
 row = db.list_risk_incidents()[0]
 check("复发自动重开", row["status"] == "OPEN" and row["occurrence_count"] == 3)
 check("摘要正确", db.risk_incident_summary()["open"] == 1)
+
+print("\n[3] 写入延迟指标")
+db.log_portfolio_snapshot(
+    equity=100.0,
+    margin_balance=100.0,
+    available_balance=100.0,
+    unrealized_pnl=0.0,
+    margin_used=0.0,
+)
+metrics = db.write_metrics()
+check("写入次数可观测", metrics["writes"] >= 1)
+check("写入延迟非负", metrics["last_write_ms"] >= 0.0 and metrics["avg_write_ms"] >= 0.0)
 db.close()
-print("\n结果: 8 通过 / 0 失败")
+print("\n结果: 10 通过 / 0 失败")
