@@ -1,6 +1,7 @@
 """审计数据库：阶段 0 先建核心表并记录 agent_runs / llm_calls / artifacts / 决策链路。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -781,6 +782,31 @@ class AuditDatabase:
             12, "normalize_shadow_excursion_bounds",
             normalize_shadow_excursion_bounds)
 
+        def apply_risk_incident_lifecycle() -> None:
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS risk_incidents (
+                    incident_key TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    scope TEXT NOT NULL DEFAULT '',
+                    severity TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'OPEN',
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    occurrence_count INTEGER NOT NULL DEFAULT 1,
+                    last_details TEXT,
+                    last_action_taken TEXT,
+                    acknowledged_at TEXT,
+                    resolved_at TEXT,
+                    raw_json TEXT NOT NULL DEFAULT '{}'
+                )"""
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_risk_incidents_status_severity "
+                "ON risk_incidents(status, severity, last_seen_at)"
+            )
+
+        self._apply_migration(13, "risk_incident_lifecycle", apply_risk_incident_lifecycle)
+
     def close(self) -> None:
         self.conn.close()
 
@@ -1112,12 +1138,95 @@ class AuditDatabase:
 
     def log_risk_event(self, *, event_type: str, severity: str, details: str,
                        action_taken: str = "", raw: dict[str, Any] | None = None) -> None:
-        self._insert(
-            """INSERT INTO risk_events(event_id, created_at, event_type, severity, details,
-               action_taken, raw_json) VALUES(?,?,?,?,?,?,?)""",
-            (str(uuid.uuid4()), utc_now(), event_type, severity, details, action_taken,
-             json.dumps(raw or {}, ensure_ascii=False)),
-        )
+        now = utc_now()
+        raw_data = raw if isinstance(raw, dict) else {}
+        raw_json = json.dumps(raw_data, ensure_ascii=False)
+        with self.lock:
+            self.conn.execute(
+                """INSERT INTO risk_events(event_id, created_at, event_type, severity, details,
+                   action_taken, raw_json) VALUES(?,?,?,?,?,?,?)""",
+                (str(uuid.uuid4()), now, event_type, severity, details, action_taken, raw_json),
+            )
+            # info 只是审计流水；只有需处置的风险才进入 incident 生命周期。
+            if severity in {"warn", "error", "critical"}:
+                scope = str(raw_data.get("symbol") or raw_data.get("environment") or "")[:80]
+                incident_key = hashlib.sha256(
+                    f"{event_type}|{scope}".encode("utf-8")).hexdigest()
+                row = self.conn.execute(
+                    "SELECT severity,status FROM risk_incidents WHERE incident_key=?", (incident_key,)
+                ).fetchone()
+                ranks = {"warn": 1, "error": 2, "critical": 3}
+                if row is None:
+                    self.conn.execute(
+                        """INSERT INTO risk_incidents(incident_key,event_type,scope,severity,status,
+                           first_seen_at,last_seen_at,occurrence_count,last_details,last_action_taken,raw_json)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (incident_key, event_type, scope, severity, "OPEN", now, now, 1,
+                         details, action_taken, raw_json),
+                    )
+                else:
+                    next_severity = (severity if ranks.get(severity, 0) >=
+                                     ranks.get(str(row["severity"]), 0)
+                                     else str(row["severity"]))
+                    next_status = "OPEN" if str(row["status"]) == "RESOLVED" else str(row["status"])
+                    self.conn.execute(
+                        """UPDATE risk_incidents SET severity=?,status=?,last_seen_at=?,
+                           occurrence_count=occurrence_count+1,last_details=?,last_action_taken=?,
+                           resolved_at=CASE WHEN ?='OPEN' THEN NULL ELSE resolved_at END,raw_json=?
+                           WHERE incident_key=?""",
+                        (next_severity, next_status, now, details, action_taken, next_status,
+                         raw_json, incident_key),
+                    )
+            self.conn.commit()
+
+    def risk_incident_summary(self) -> dict[str, int]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT status,severity,COUNT(*) n FROM risk_incidents GROUP BY status,severity"
+            ).fetchall()
+        summary = {"open": 0, "acknowledged": 0, "resolved": 0, "critical_open": 0}
+        for row in rows:
+            status = str(row["status"]).lower()
+            count = int(row["n"])
+            if status == "open":
+                summary["open"] += count
+                if row["severity"] == "critical":
+                    summary["critical_open"] += count
+            elif status == "acknowledged":
+                summary["acknowledged"] += count
+            elif status == "resolved":
+                summary["resolved"] += count
+        return summary
+
+    def list_risk_incidents(self, *, status: str | None = None,
+                            limit: int = 100) -> list[sqlite3.Row]:
+        allowed = {"OPEN", "ACKNOWLEDGED", "RESOLVED"}
+        with self.lock:
+            if status and status.upper() in allowed:
+                return self.conn.execute(
+                    "SELECT * FROM risk_incidents WHERE status=? ORDER BY last_seen_at DESC LIMIT ?",
+                    (status.upper(), max(1, min(int(limit), 500))),
+                ).fetchall()
+            return self.conn.execute(
+                "SELECT * FROM risk_incidents ORDER BY last_seen_at DESC LIMIT ?",
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+
+    def set_risk_incident_status(self, *, incident_key: str, status: str) -> bool:
+        status = status.upper()
+        if status not in {"ACKNOWLEDGED", "RESOLVED"}:
+            return False
+        now = utc_now()
+        with self.lock:
+            cursor = self.conn.execute(
+                """UPDATE risk_incidents SET status=?,
+                   acknowledged_at=CASE WHEN ?='ACKNOWLEDGED' THEN ? ELSE acknowledged_at END,
+                   resolved_at=CASE WHEN ?='RESOLVED' THEN ? ELSE resolved_at END
+                   WHERE incident_key=?""",
+                (status, status, now, status, now, incident_key),
+            )
+            self.conn.commit()
+        return cursor.rowcount > 0
 
     def log_order(self, *, client_order_id: str, exchange_order_id: str | None,
                   symbol: str, side: str, order_type: str, qty: float, price: float | None,

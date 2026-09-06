@@ -1582,6 +1582,7 @@ def create_app(service: TradingService) -> FastAPI:
             "runtime": runtime,
             "database_backup": (service.db_backup.status()
                                 if hasattr(service, "db_backup") else {"enabled": False}),
+            "risk_incidents": service.db.risk_incident_summary(),
             # 情报侧车只影响可观测性，不参与总交易健康判定。
             "web3_intel": service.intel_sidecar.snapshot(),
             "liquidation_stream": (getattr(app.state, "liquidation_stream", None).status()
@@ -1643,11 +1644,7 @@ def create_app(service: TradingService) -> FastAPI:
         查询失败一律降级为 0，绝不因为角标这种增强提示影响页面主流程。
         """
         try:
-            row = service.db.fetch_one(
-                "SELECT COUNT(*) c FROM risk_events WHERE severity='critical' "
-                "AND datetime(created_at) >= datetime('now','-1 day')"
-            )
-            critical = int(row["c"]) if row else 0
+            critical = int(service.db.risk_incident_summary().get("critical_open", 0))
         except Exception:
             critical = 0
         try:
@@ -1656,6 +1653,25 @@ def create_app(service: TradingService) -> FastAPI:
         except Exception:
             ai_halted = False
         return {"critical_events": critical, "ai_halted": ai_halted, "server_time": time.time()}
+
+    @app.get("/api/incidents")
+    def api_incidents(status: str = "", limit: int = 100):
+        rows = service.db.list_risk_incidents(status=status or None, limit=limit)
+        return {"summary": service.db.risk_incident_summary(),
+                "incidents": [dict(row) for row in rows], "server_time": time.time()}
+
+    @app.post("/api/incidents/{incident_key}/acknowledge")
+    def api_incident_acknowledge(incident_key: str):
+        if not service.db.set_risk_incident_status(
+                incident_key=incident_key, status="ACKNOWLEDGED"):
+            raise HTTPException(status_code=404, detail="incident not found")
+        return {"ok": True, "status": "ACKNOWLEDGED"}
+
+    @app.post("/api/incidents/{incident_key}/resolve")
+    def api_incident_resolve(incident_key: str):
+        if not service.db.set_risk_incident_status(incident_key=incident_key, status="RESOLVED"):
+            raise HTTPException(status_code=404, detail="incident not found")
+        return {"ok": True, "status": "RESOLVED"}
 
     # ---- 轻量价格接口：只给"当前仓位"表快轮询用。
     # 持仓数量/开仓价来自 8 秒缓存的 broker state（变化很少），
