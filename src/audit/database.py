@@ -733,6 +733,43 @@ class AuditDatabase:
 
         self._apply_migration(10, "normalize_shadow_cohort_names", normalize_shadow_cohort_names)
 
+        def apply_shadow_cost_and_excursion_metrics() -> None:
+            existing = {
+                row["name"] for row in self.conn.execute(
+                    "PRAGMA table_info(shadow_outcomes)").fetchall()
+            }
+            columns = {
+                "gross_signal_return_pct": "REAL",
+                "fee_cost_pct": "REAL",
+                "slippage_cost_pct": "REAL",
+                "funding_cost_pct": "REAL",
+                "net_return_pct": "REAL",
+                "mfe_pct": "REAL",
+                "mae_pct": "REAL",
+                "sample_count": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, declaration in columns.items():
+                if name not in existing:
+                    self.conn.execute(
+                        f"ALTER TABLE shadow_outcomes ADD COLUMN {name} {declaration}")
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS mark_price_samples (
+                    symbol TEXT NOT NULL,
+                    sampled_at TEXT NOT NULL,
+                    mark_price REAL NOT NULL,
+                    source TEXT NOT NULL,
+                    PRIMARY KEY(symbol, sampled_at)
+                )"""
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mark_price_samples_time "
+                "ON mark_price_samples(sampled_at, symbol)"
+            )
+
+        self._apply_migration(
+            11, "shadow_cost_excursion_and_mark_samples",
+            apply_shadow_cost_and_excursion_metrics)
+
     def close(self) -> None:
         self.conn.close()
 
@@ -769,9 +806,27 @@ class AuditDatabase:
              execution_weight, feature_json),
         )
 
+    def record_mark_price_samples(self, *, sampled_at: str, prices: dict[str, float],
+                                  source: str = "binance_usdm_premium_index",
+                                  retention_days: int = 90) -> int:
+        rows = [(symbol, sampled_at, float(price), source)
+                for symbol, price in prices.items() if float(price) > 0]
+        with self.lock:
+            self.conn.executemany(
+                """INSERT OR REPLACE INTO mark_price_samples(symbol,sampled_at,mark_price,source)
+                   VALUES(?,?,?,?)""", rows)
+            self.conn.execute(
+                "DELETE FROM mark_price_samples WHERE datetime(sampled_at)<datetime('now', ?)",
+                (f"-{max(7, int(retention_days))} days",),
+            )
+            self.conn.commit()
+        return len(rows)
+
     def evaluate_shadow_decisions(self, *, prices: dict[str, float],
                                   horizons: tuple[int, ...] = (5, 15, 60, 240),
-                                  grace_minutes: int = 15) -> int:
+                                  grace_minutes: int = 15,
+                                  round_trip_fee_bps: float = 10.0,
+                                  slippage_bps: float = 4.0) -> int:
         """以当前标记价回看到期影子信号；不读取或修改任何订单。"""
         now = datetime.now(timezone.utc)
         inserted = 0
@@ -781,7 +836,8 @@ class AuditDatabase:
                 lower = (now - timedelta(minutes=horizon + max(1, grace_minutes))).isoformat(
                     timespec="milliseconds")
                 rows = self.conn.execute(
-                    """SELECT d.decision_id,d.symbol,d.signal,d.reference_price
+                    """SELECT d.decision_id,d.symbol,d.signal,d.reference_price,
+                              d.created_at,d.feature_json
                        FROM shadow_decisions d
                        LEFT JOIN shadow_outcomes o ON o.decision_id=d.decision_id AND o.horizon_minutes=?
                        WHERE o.decision_id IS NULL AND d.created_at<=? AND d.created_at>?
@@ -796,10 +852,42 @@ class AuditDatabase:
                     signal = str(row["signal"])
                     correct = None if signal not in {"bullish", "bearish"} else int(
                         (signal == "bullish" and ret > 0) or (signal == "bearish" and ret < 0))
+                    direction = 1.0 if signal == "bullish" else (-1.0 if signal == "bearish" else 0.0)
+                    gross = ret * direction if direction else None
+                    fee_cost = max(0.0, float(round_trip_fee_bps)) / 100.0
+                    slip_cost = max(0.0, float(slippage_bps)) / 100.0
+                    funding_rate = 0.0
+                    try:
+                        feature = json.loads(row["feature_json"] or "{}")
+                        if isinstance(feature, dict) and isinstance(feature.get("contract_market"), dict):
+                            feature = feature["contract_market"]
+                        funding_rate = float(feature.get("funding_rate") or 0.0)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        funding_rate = 0.0
+                    funding_cost = direction * funding_rate * 100.0 * (horizon / 480.0)
+                    net = (gross - fee_cost - slip_cost - funding_cost
+                           if gross is not None else None)
+                    samples = self.conn.execute(
+                        """SELECT mark_price FROM mark_price_samples
+                           WHERE symbol=? AND datetime(sampled_at)>=datetime(?)
+                             AND datetime(sampled_at)<=datetime(?) ORDER BY sampled_at""",
+                        (row["symbol"], row["created_at"], now.isoformat(timespec="milliseconds")),
+                    ).fetchall()
+                    path = [float(item["mark_price"]) for item in samples]
+                    path.append(float(exit_price))
+                    path_returns = [
+                        (price / float(row["reference_price"]) - 1.0) * 100.0 * direction
+                        for price in path
+                    ] if direction else []
+                    mfe = max(path_returns) if path_returns else None
+                    mae = min(path_returns) if path_returns else None
                     self.conn.execute(
                         """INSERT OR IGNORE INTO shadow_outcomes(decision_id,horizon_minutes,
-                           evaluated_at,exit_price,return_pct,correct) VALUES(?,?,?,?,?,?)""",
-                        (row["decision_id"], horizon, utc_now(), float(exit_price), ret, correct),
+                           evaluated_at,exit_price,return_pct,correct,gross_signal_return_pct,
+                           fee_cost_pct,slippage_cost_pct,funding_cost_pct,net_return_pct,
+                           mfe_pct,mae_pct,sample_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (row["decision_id"], horizon, utc_now(), float(exit_price), ret, correct,
+                         gross, fee_cost, slip_cost, funding_cost, net, mfe, mae, len(path)),
                     )
                     inserted += 1
             self.conn.commit()
@@ -817,6 +905,11 @@ class AuditDatabase:
                 """SELECT d.source,o.horizon_minutes,COUNT(*) samples,
                           SUM(CASE WHEN o.correct=1 THEN 1 ELSE 0 END) correct,
                           SUM(CASE WHEN o.correct IS NOT NULL THEN 1 ELSE 0 END) directional,
+                          AVG(o.net_return_pct) avg_net,
+                          MIN(o.net_return_pct) worst_net,
+                          AVG(CASE WHEN o.net_return_pct>0 THEN 1.0 ELSE 0.0 END) net_win_rate,
+                          AVG(o.mfe_pct) avg_mfe,
+                          AVG(o.mae_pct) avg_mae,
                           MAX(0, julianday(MAX(d.created_at))-julianday(MIN(d.created_at))) span_days
                    FROM shadow_outcomes o JOIN shadow_decisions d ON d.decision_id=o.decision_id
                    GROUP BY d.source,o.horizon_minutes ORDER BY d.source,o.horizon_minutes"""
@@ -826,12 +919,23 @@ class AuditDatabase:
             directional = int(row["directional"] or 0)
             correct = int(row["correct"] or 0)
             span_days = round(float(row["span_days"] or 0.0), 2)
+            avg_net = float(row["avg_net"]) if row["avg_net"] is not None else None
+            worst_net = float(row["worst_net"]) if row["worst_net"] is not None else None
             evaluations.append({
                 "source": row["source"], "horizon_minutes": int(row["horizon_minutes"]),
                 "samples": int(row["samples"]), "directional_samples": directional,
                 "accuracy": round(correct / directional, 4) if directional else None,
                 "observation_span_days": span_days,
-                "promotion_ready": directional >= 200 and span_days >= 7.0,
+                "avg_net_return_pct": round(avg_net, 5) if avg_net is not None else None,
+                "worst_net_return_pct": round(worst_net, 5) if worst_net is not None else None,
+                "net_win_rate": (round(float(row["net_win_rate"]), 4)
+                                 if row["net_win_rate"] is not None else None),
+                "avg_mfe_pct": (round(float(row["avg_mfe"]), 5)
+                                if row["avg_mfe"] is not None else None),
+                "avg_mae_pct": (round(float(row["avg_mae"]), 5)
+                                if row["avg_mae"] is not None else None),
+                "promotion_ready": (directional >= 200 and span_days >= 7.0
+                                    and avg_net is not None and avg_net > 0),
             })
         return {"events_24h": event_count, "feature_coverage": feature_count,
                 "last_event_at": latest, "evaluations": evaluations,

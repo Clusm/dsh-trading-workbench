@@ -33,7 +33,7 @@ columns = {row["name"] for row in db.fetch_all("PRAGMA table_info(orders)")}
 versions = db.fetch_all("SELECT version, name FROM schema_migrations ORDER BY version")
 check("补齐order_source列", "order_source" in columns)
 check("补齐margin_mode列", "margin_mode" in columns)
-check("记录迁移版本1到10", [row["version"] for row in versions] == list(range(1, 11)))
+check("记录迁移版本1到11", [row["version"] for row in versions] == list(range(1, 12)))
 db.log_shadow_decision(
     decision_id="legacy-b", symbol="BTCUSDT", signal="bullish", reference_price=100.0,
     confidence=0.5, source="binance_top_trader_proxy", execution_weight=0.0,
@@ -48,7 +48,7 @@ db.close()
 print("\n[2] 重启后迁移不重复")
 again = AuditDatabase(db_path)
 versions_again = again.fetch_all("SELECT version FROM schema_migrations")
-check("版本记录保持唯一", [row["version"] for row in versions_again] == list(range(1, 11)))
+check("版本记录保持唯一", [row["version"] for row in versions_again] == list(range(1, 12)))
 check("旧B组名称已归一", again.fetch_one(
     "SELECT source FROM shadow_decisions WHERE decision_id='legacy-b'")["source"] == "B_contract_market")
 again.close()

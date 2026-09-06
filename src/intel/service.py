@@ -56,6 +56,9 @@ class ReadOnlyIntelService:
         self.execution_weight = 0.0
         self.refresh_seconds = max(60.0, float(self.config.get("refresh_seconds", 300)))
         self.fresh_seconds = max(60, int(self.config.get("fresh_seconds", 600)))
+        self.round_trip_fee_bps = max(0.0, float(self.config.get("round_trip_fee_bps", 10)))
+        self.slippage_bps = max(0.0, float(self.config.get("slippage_bps", 4)))
+        self.sample_retention_days = max(7, int(self.config.get("sample_retention_days", 90)))
         self.priority_count = max(1, int(self.config.get("priority_count", 3)))
         self.rotation_count = max(1, int(self.config.get("rotation_count", 4)))
         self.symbols = [s for s in dict.fromkeys(symbols) if self._valid_symbol(s)]
@@ -326,8 +329,13 @@ class ReadOnlyIntelService:
             symbol: price for symbol, row in premium_by.items()
             if symbol in self._symbol_set and (price := _safe_float(row.get("markPrice")))
         }
+        self.db.record_mark_price_samples(
+            sampled_at=received.isoformat(timespec="milliseconds"), prices=all_prices,
+            retention_days=self.sample_retention_days)
         self.db.evaluate_shadow_decisions(prices=all_prices,
-                                          grace_minutes=max(10, int(self.refresh_seconds / 30)))
+                                          grace_minutes=max(10, int(self.refresh_seconds / 30)),
+                                          round_trip_fee_bps=self.round_trip_fee_bps,
+                                          slippage_bps=self.slippage_bps)
         wallet_tracker = self._refresh_wallet_tracker(received, fresh_until)
         token_audit = self._refresh_token_audit(received, fresh_until)
         self._record_fused_shadows(rows, wallet_tracker, token_audit)

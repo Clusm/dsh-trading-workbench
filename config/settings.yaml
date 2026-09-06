@@ -173,6 +173,10 @@ web3_intel:
   token_contracts: {}
   etherscan_api_key_env: ETHERSCAN_API_KEY
   liquidation_stream_enabled: true
+  # 仅用于影子结果核算，不改变下单手续费、风险档或仓位。
+  round_trip_fee_bps: 10
+  slippage_bps: 4
+  sample_retention_days: 90
 
 symbol_universe:
   # 市场快照只做 regime 判断，不需要深扫 40 个币；AI 按需自己查询

@@ -111,6 +111,12 @@ outcomes = db.fetch_one("SELECT COUNT(*) n FROM shadow_outcomes")
 check("轮转覆盖下一个标的", second["symbols"][1]["symbol"] != first["symbols"][1]["symbol"])
 check("生成5m/15m/1h/4h回看", int(outcomes["n"]) >= 4)
 check("看多且上涨判定正确", db.fetch_one("SELECT MIN(correct) c FROM shadow_outcomes WHERE correct IS NOT NULL")["c"] == 1)
+metric = db.fetch_one(
+    "SELECT gross_signal_return_pct,net_return_pct,mfe_pct,mae_pct,sample_count "
+    "FROM shadow_outcomes WHERE correct IS NOT NULL LIMIT 1")
+check("影子结果扣除费用与滑点", metric["net_return_pct"] < metric["gross_signal_return_pct"])
+check("影子结果记录MFE/MAE", metric["mfe_pct"] is not None and metric["mae_pct"] is not None
+      and metric["sample_count"] >= 1)
 
 db.close()
-print("\n结果: 17 通过 / 0 失败")
+print("\n结果: 19 通过 / 0 失败")
