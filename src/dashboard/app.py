@@ -202,12 +202,9 @@ def _pct(value: Any, digits: int = 2) -> str:
 
 
 def _price(value: Any) -> str:
-    """价格格式化：定点 8 位小数后去掉尾零，绝不丢精度、绝不出现科学计数法。
+    """把价格显示为五位有效数字，去掉尾零且不使用科学计数法。
 
-    此前用 5 位有效数字（%.5g / toPrecision(5)），会把 BTC 这类大价位
-    （118234.5 -> 118230.0 / "1.1823e+5"）截掉小数，也会把 108.234 压成
-    108.23。价格量级跨度从 1e-8 到 1e5，必须按"保留足够小数位再删尾零"
-    处理，而不是按有效数字截断。
+    这里只改变 Web 展示字符串；数据库、风控、下单和盈亏计算继续使用原始精度。
     """
     if value is None or value == "":
         return "-"
@@ -219,11 +216,11 @@ def _price(value: Any) -> str:
         return "-"
     if f == 0:
         return "0"
-    if abs(f) < 1e-6:
-        # 极小价位（meme 币）：定点会直接显示成 0，退回有效数字表示
-        s = f"{f:.8g}"
-        return s
-    s = f"{f:.8f}".rstrip("0").rstrip(".")
+    decimal_places = 4 - math.floor(math.log10(abs(f)))
+    rounded = round(f, decimal_places)
+    s = f"{rounded:.{max(0, decimal_places)}f}"
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
     return s or "0"
 
 

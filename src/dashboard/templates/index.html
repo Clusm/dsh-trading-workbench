@@ -137,7 +137,7 @@
     <table><thead><tr><th data-sort="str">时间</th><th data-sort="str">交易对</th><th>方向</th><th class="num" data-sort="num">仓位</th><th class="num" data-sort="num">保证金</th><th class="num" data-sort="num">价格</th><th class="num" data-sort="num">盈亏</th><th>状态</th></tr></thead>
     <tbody>
     {% for o in orders %}
-    <tr><td class="muted" style="white-space:nowrap">{{ o.created_at[:19].replace('T',' ') }}</td><td><strong>{{ o.symbol }}</strong></td><td>{{ o.display_side or (o.side|side_cn) }}{% if o.is_protection %} <span class="badge muted" style="font-size:10px">保护</span>{% endif %}</td><td class="num">{{ "%.2f"|format(o.notional) }} U</td><td class="num">{{ "%.2f"|format(o.margin) }} U</td><td class="num">{{ o.price or '-' }}</td><td class="num {{ 'pos' if o.pnl is not none and o.pnl >= 0 else ('neg' if o.pnl is not none else 'muted') }}">{{ o.pnl|signed if o.pnl is not none else ('持仓中' if o.status=='FILLED' else '-') }}</td><td><span class="badge {{ 'ok' if o.status=='FILLED' else 'muted' }}">{{ o.status|status_cn }}</span></td></tr>
+    <tr><td class="muted" style="white-space:nowrap">{{ o.created_at[:19].replace('T',' ') }}</td><td><strong>{{ o.symbol }}</strong></td><td>{{ o.display_side or (o.side|side_cn) }}{% if o.is_protection %} <span class="badge muted" style="font-size:10px">保护</span>{% endif %}</td><td class="num">{{ "%.2f"|format(o.notional) }} U</td><td class="num">{{ "%.2f"|format(o.margin) }} U</td><td class="num">{{ o.price|price if o.price is not none else '-' }}</td><td class="num {{ 'pos' if o.pnl is not none and o.pnl >= 0 else ('neg' if o.pnl is not none else 'muted') }}">{{ o.pnl|signed if o.pnl is not none else ('持仓中' if o.status=='FILLED' else '-') }}</td><td><span class="badge {{ 'ok' if o.status=='FILLED' else 'muted' }}">{{ o.status|status_cn }}</span></td></tr>
     {% endfor %}</tbody></table>
     </div>
     {% else %}<div class="empty">暂无订单 <span class="muted">运行一轮后产生首笔订单</span></div>{% endif %}
@@ -379,7 +379,7 @@ async function loadOrders(){
           `<td>${o.display_side || SIDE_CN[o.side] || o.side}${o.is_protection ? ' <span class="badge muted" style="font-size:10px">保护</span>' : ''}</td>` +
           `<td class="num">${FMT.num(o.notional)} U</td>` +
           `<td class="num">${FMT.num(o.margin)} U</td>` +
-          `<td class="num">${o.price != null ? o.price : '-'}</td>` +
+          `<td class="num">${o.price != null ? FMT.px(o.price) : '-'}</td>` +
           `<td class="num ${pnlCls}">${pnlTxt}</td>` +
           `<td><span class="badge ${o.status === 'FILLED' ? 'ok' : 'muted'}">${o.status_cn || o.status}</span></td></tr>`;
       }).join('') + '</tbody></table></div>';

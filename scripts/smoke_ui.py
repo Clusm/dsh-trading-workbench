@@ -112,7 +112,7 @@ _set_env_mode(env2, "testnet")
 check("缺失时追加写入", "EXECUTION_MODE=testnet" in env2.read_text(encoding="utf-8"))
 
 print("\n[4] 事件中文化映射完整")
-from dashboard.app import _event_type_cn, _ago, _mode_cn  # noqa: E402
+from dashboard.app import _event_type_cn, _ago, _mode_cn, _price  # noqa: E402
 import re  # noqa: E402
 
 types: set[str] = set()
@@ -129,6 +129,10 @@ check("全部事件类型都有中文映射", not missing, f"缺映射：{missin
 
 check("_ago 中文化", "前" in _ago(datetime.now(timezone.utc).isoformat()))
 check("live 模式标注", _mode_cn("live") == "实盘")
+check("价格保留五位有效数字", _price(744.53325581) == "744.53")
+check("价格删除无意义尾零", _price("38.00000000") == "38")
+check("极小价格不使用科学计数法", _price(0.000012345678) == "0.000012346")
+check("高价价格按五位有效数字舍入", _price(118234.5) == "118230")
 
 print("\n[5] 事件页路由（TestClient）")
 from fastapi.testclient import TestClient  # noqa: E402
