@@ -32,10 +32,14 @@ from core.service import build_execution_feedback  # noqa: E402
 from core.intel_cache import IntelCache  # noqa: E402
 from core.graph import build_graph  # noqa: E402
 from llm.factory import build_llm_for_agent  # noqa: E402
+from signal_engine import resolve_strategy_lab_src  # noqa: E402
 
 
 def signal_scanner_config(settings, universe=None) -> dict:
     cfg = dict(settings.raw_settings.get("signal_scanner", {}) or {})
+    cfg["strategy_lab_src"] = resolve_strategy_lab_src(
+        settings.project_root, cfg.get("strategy_lab_src")
+    )
     cfg["signal_state_file"] = str(
         settings.project_root / str(cfg.get("signal_state_file", "data/signal_scanner_state.json"))
     )

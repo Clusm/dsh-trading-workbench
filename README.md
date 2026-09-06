@@ -40,6 +40,17 @@
 - 所有新开仓强制同时设置初始止损和止盈。
 - 设计文档：`docs/dual_agent_design.md`
 
+策略研究代码保留在独立的 `ai-trader/strategy_lab` 工作区，本项目通过
+`config/settings.yaml` 中相对项目根目录的 `signal_scanner.strategy_lab_src`
+动态加载。接入或升级策略库后可先运行以下无网络、无下单冒烟测试：
+
+```bash
+.venv/Scripts/python.exe scripts/smoke_signal_scanner_integration.py
+```
+
+启动时扫描器会校验 `signals.REGISTRY`、`features.build_features`、模块来源目录，
+以及所有启用策略卡引用的 `signal_fn`；任一不匹配都会安全降级为无策略交易。
+
 LLM 走 OpenCode Zen：主 Agent=deepseek-v4-pro（reasoning_effort=max），其余=deepseek-v4-flash。没有 key 时自动回退 Mock LLM。跑通后会：
 
 - 在 `data/agent_trader.sqlite` 写入 Agent 运行、LLM 调用、决策与风控记录；

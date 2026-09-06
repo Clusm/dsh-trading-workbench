@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import os
 import sys
 import threading
 import uuid
@@ -33,6 +32,17 @@ TF_MINUTES: dict[str, int] = {
 _KLINES_CACHE: dict[tuple, tuple[float, pd.DataFrame]] = {}
 _CACHE_LOCK = threading.Lock()
 _KLINES_TTL = 20.0
+
+
+def resolve_strategy_lab_src(project_root: Path, configured: str | Path | None) -> str:
+    """把策略研究目录稳定解析为绝对路径；空配置仍保留为空以触发安全降级。"""
+    raw = str(configured or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = Path(project_root) / path
+    return str(path.resolve())
 
 
 def utc_now() -> datetime:
@@ -137,8 +147,31 @@ class SignalScanner:
         if src not in sys.path:
             sys.path.insert(0, src)
         # 注意：本目录下的模块名不要叫 signals/features，避免遮蔽 strategy_lab。
-        self._registry = importlib.import_module("signals").REGISTRY
-        self._features_mod = importlib.import_module("features")
+        signals_mod = importlib.import_module("signals")
+        features_mod = importlib.import_module("features")
+        expected_dir = self.strategy_lab_src.resolve()
+        for name, module in (("signals", signals_mod), ("features", features_mod)):
+            module_file = Path(str(getattr(module, "__file__", ""))).resolve()
+            if module_file.parent != expected_dir:
+                raise RuntimeError(
+                    f"strategy_lab 模块冲突：{name} 实际加载自 {module_file}，"
+                    f"预期目录 {expected_dir}"
+                )
+        registry = getattr(signals_mod, "REGISTRY", None)
+        if not isinstance(registry, dict):
+            raise RuntimeError("strategy_lab signals.REGISTRY 缺失或类型错误")
+        if not callable(getattr(features_mod, "build_features", None)):
+            raise RuntimeError("strategy_lab features.build_features 缺失")
+        required = {
+            str(card.get("signal_fn") or "")
+            for card in load_cards(self.knowledge_dir)
+            if card.get("indicatorized") and card.get("signal_fn")
+        }
+        missing = sorted(required - set(registry))
+        if missing:
+            raise RuntimeError(f"strategy_lab 缺少策略卡所需 signal_fn: {', '.join(missing)}")
+        self._registry = registry
+        self._features_mod = features_mod
 
     def _load_state(self) -> dict[str, Any]:
         if self.state_file.exists():

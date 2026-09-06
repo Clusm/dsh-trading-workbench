@@ -127,8 +127,8 @@ quotas:
   daily_hourly_target: 3
 
 signal_scanner:
-  # 策略研究环境路径：只做动态 import，不复制源码；为空或路径不存在时策略通道自动降级
-  strategy_lab_src: ""
+  # 相对项目根目录解析；策略源码保留在独立研究仓库，不复制进交易系统。
+  strategy_lab_src: ../../ai-trader/strategy_lab/src
   kline_limit: 300
   # 信号触发后 ticket 的有效期（按 K 线根数）
   ticket_valid_bars: 2
