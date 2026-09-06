@@ -31,6 +31,7 @@ from core.risk_guard import AccountRiskGuard
 from llm.base import LLMClient
 from llm.mock_client import MockLLMClient
 from signal_engine import resolve_strategy_lab_src
+from intel import ReadOnlyIntelService
 
 
 def build_execution_feedback(state: dict[str, Any], decision: Any,
@@ -117,6 +118,11 @@ class TradingService:
             full_scan_interval_minutes=mu_cfg.get("full_scan_interval_minutes", 60),
             db=self.db,
         )
+        self.intel_sidecar = ReadOnlyIntelService(
+            db=self.db,
+            config=self.settings.raw_settings.get("web3_intel", {}) or {},
+            symbols=list(mu_cfg.get("core_symbols") or []),
+        )
         self.channels = ChannelManager(
             state_file=settings.project_root / str(ch_cfg.get("state_file", "data/channel_state.json")),
             broker=self.broker,
@@ -138,6 +144,7 @@ class TradingService:
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._intel_thread: threading.Thread | None = None
         self._cycle_lock = threading.Lock()
         # 保护单/挂单对账的独立轻量锁：与慢循环的 _cycle_lock 分开，
         # 避免 LLM 长决策（最长 600s）期间 SL/TP 补挂与限价单到期撤单全部停摆。
@@ -435,6 +442,7 @@ class TradingService:
             "quota_state": self.quota.status(),
             "channel_state": channel_status,
             "intel_cache": self.intel_cache.stats(),
+            "web3_intel": self.intel_sidecar.snapshot(),
             "ts": time.time(),
         }
         self.execution_feedback = self._build_feedback(state, decision, channel_status, broker_state)
@@ -519,6 +527,19 @@ class TradingService:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._loop, args=(interval_minutes,), daemon=True)
         self._thread.start()
+        if self.intel_sidecar.enabled and not (self._intel_thread and self._intel_thread.is_alive()):
+            self._intel_thread = threading.Thread(
+                target=self._intel_loop, name="readonly-intel-sidecar", daemon=True)
+            self._intel_thread.start()
+
+    def _intel_loop(self) -> None:
+        """独立只读采集循环；失败不会传播到交易调度线程。"""
+        while not self._stop_event.is_set():
+            snapshot = self.intel_sidecar.maybe_refresh(force=True)
+            with self._lock:
+                if self._latest:
+                    self._latest["web3_intel"] = snapshot
+            self._stop_event.wait(self.intel_sidecar.refresh_seconds)
 
     def stop_background(self, wait_seconds: float = 5.0) -> bool:
         """停止调度并等待在途慢决策；返回是否已安全静默。
@@ -536,8 +557,13 @@ class TradingService:
         if worker and worker is not threading.current_thread() and worker.is_alive():
             worker.join(timeout=max(0.0, deadline - time.monotonic()))
         scheduler_alive = bool(scheduler and scheduler.is_alive())
+        # 生命周期单测和极早期构造失败路径可能没有创建该属性。
+        intel_worker = getattr(self, "_intel_thread", None)
+        if intel_worker and intel_worker is not threading.current_thread() and intel_worker.is_alive():
+            intel_worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        intel_alive = bool(intel_worker and intel_worker.is_alive())
         worker_alive = bool(worker and worker.is_alive())
-        return not scheduler_alive and not worker_alive
+        return not scheduler_alive and not worker_alive and not intel_alive
 
     def _loop(self, interval_minutes: float) -> None:
         fast_interval = float(self.settings.raw_settings.get("decision_cycle", {}).get("fast_interval_seconds", 30))

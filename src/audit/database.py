@@ -5,7 +5,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -660,8 +660,171 @@ class AuditDatabase:
 
         self._apply_migration(8, "protection_order_mirror", apply_protection_order_mirror)
 
+        def apply_readonly_intel_sidecar() -> None:
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS futures_features (
+                    symbol TEXT PRIMARY KEY,
+                    event_time TEXT NOT NULL,
+                    received_at TEXT NOT NULL,
+                    fresh_until TEXT NOT NULL,
+                    quality TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    feature_json TEXT NOT NULL
+                )"""
+            )
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS intel_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    raw_hash TEXT NOT NULL UNIQUE,
+                    source TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    chain TEXT,
+                    contract TEXT,
+                    candidate_symbol TEXT,
+                    observed_at TEXT NOT NULL,
+                    received_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    confidence REAL NOT NULL DEFAULT 0,
+                    quality TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                )"""
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_intel_events_symbol_time "
+                "ON intel_events(candidate_symbol, observed_at)"
+            )
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS shadow_decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    signal TEXT NOT NULL,
+                    reference_price REAL,
+                    confidence REAL NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL,
+                    execution_weight REAL NOT NULL DEFAULT 0,
+                    feature_json TEXT NOT NULL
+                )"""
+            )
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS shadow_outcomes (
+                    decision_id TEXT NOT NULL,
+                    horizon_minutes INTEGER NOT NULL,
+                    evaluated_at TEXT NOT NULL,
+                    exit_price REAL NOT NULL,
+                    return_pct REAL NOT NULL,
+                    correct INTEGER,
+                    PRIMARY KEY(decision_id, horizon_minutes),
+                    FOREIGN KEY(decision_id) REFERENCES shadow_decisions(decision_id)
+                )"""
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_shadow_decisions_symbol_time "
+                "ON shadow_decisions(symbol, created_at)"
+            )
+
+        self._apply_migration(9, "readonly_intel_and_shadow_evaluation", apply_readonly_intel_sidecar)
+
     def close(self) -> None:
         self.conn.close()
+
+    def upsert_futures_feature(self, *, feature: dict[str, Any]) -> None:
+        self._insert(
+            """INSERT INTO futures_features(symbol,event_time,received_at,fresh_until,quality,source,feature_json)
+               VALUES(?,?,?,?,?,?,?)
+               ON CONFLICT(symbol) DO UPDATE SET event_time=excluded.event_time,
+               received_at=excluded.received_at,fresh_until=excluded.fresh_until,
+               quality=excluded.quality,source=excluded.source,feature_json=excluded.feature_json""",
+            (feature["symbol"], feature["event_time"], feature["received_at"],
+             feature["fresh_until"], feature["quality"], feature["source"],
+             json.dumps(feature, ensure_ascii=False)),
+        )
+
+    def log_intel_event(self, *, event: dict[str, Any]) -> None:
+        self._insert(
+            """INSERT OR IGNORE INTO intel_events(raw_hash,source,kind,chain,contract,
+               candidate_symbol,observed_at,received_at,expires_at,confidence,quality,payload_json)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (event["raw_hash"], event["source"], event["kind"], event.get("chain"),
+             event.get("contract"), event.get("candidate_symbol"), event["observed_at"],
+             event["received_at"], event["expires_at"], event["confidence"],
+             event["quality"], json.dumps(event.get("payload") or {}, ensure_ascii=False)),
+        )
+
+    def log_shadow_decision(self, *, decision_id: str, symbol: str, signal: str,
+                            reference_price: float | None, confidence: float, source: str,
+                            execution_weight: float, feature_json: str) -> None:
+        self._insert(
+            """INSERT INTO shadow_decisions(decision_id,created_at,symbol,signal,reference_price,
+               confidence,source,execution_weight,feature_json) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (decision_id, utc_now(), symbol, signal, reference_price, confidence, source,
+             execution_weight, feature_json),
+        )
+
+    def evaluate_shadow_decisions(self, *, prices: dict[str, float],
+                                  horizons: tuple[int, ...] = (5, 15, 60, 240),
+                                  grace_minutes: int = 15) -> int:
+        """以当前标记价回看到期影子信号；不读取或修改任何订单。"""
+        now = datetime.now(timezone.utc)
+        inserted = 0
+        with self.lock:
+            for horizon in horizons:
+                cutoff = (now - timedelta(minutes=horizon)).isoformat(timespec="milliseconds")
+                lower = (now - timedelta(minutes=horizon + max(1, grace_minutes))).isoformat(
+                    timespec="milliseconds")
+                rows = self.conn.execute(
+                    """SELECT d.decision_id,d.symbol,d.signal,d.reference_price
+                       FROM shadow_decisions d
+                       LEFT JOIN shadow_outcomes o ON o.decision_id=d.decision_id AND o.horizon_minutes=?
+                       WHERE o.decision_id IS NULL AND d.created_at<=? AND d.created_at>?
+                         AND d.reference_price>0""",
+                    (horizon, cutoff, lower),
+                ).fetchall()
+                for row in rows:
+                    exit_price = prices.get(str(row["symbol"]))
+                    if not exit_price or float(exit_price) <= 0:
+                        continue
+                    ret = (float(exit_price) / float(row["reference_price"]) - 1.0) * 100.0
+                    signal = str(row["signal"])
+                    correct = None if signal not in {"bullish", "bearish"} else int(
+                        (signal == "bullish" and ret > 0) or (signal == "bearish" and ret < 0))
+                    self.conn.execute(
+                        """INSERT OR IGNORE INTO shadow_outcomes(decision_id,horizon_minutes,
+                           evaluated_at,exit_price,return_pct,correct) VALUES(?,?,?,?,?,?)""",
+                        (row["decision_id"], horizon, utc_now(), float(exit_price), ret, correct),
+                    )
+                    inserted += 1
+            self.conn.commit()
+        return inserted
+
+    def intel_observability(self) -> dict[str, Any]:
+        """情报覆盖率与影子样本进度；供看板读取，不参与风控。"""
+        with self.lock:
+            event_count = int(self.conn.execute(
+                "SELECT COUNT(*) FROM intel_events WHERE datetime(observed_at)>=datetime('now','-1 day')"
+            ).fetchone()[0])
+            feature_count = int(self.conn.execute("SELECT COUNT(*) FROM futures_features").fetchone()[0])
+            latest = self.conn.execute("SELECT MAX(received_at) FROM intel_events").fetchone()[0]
+            rows = self.conn.execute(
+                """SELECT d.source,o.horizon_minutes,COUNT(*) samples,
+                          SUM(CASE WHEN o.correct=1 THEN 1 ELSE 0 END) correct,
+                          SUM(CASE WHEN o.correct IS NOT NULL THEN 1 ELSE 0 END) directional
+                   FROM shadow_outcomes o JOIN shadow_decisions d ON d.decision_id=o.decision_id
+                   GROUP BY d.source,o.horizon_minutes ORDER BY d.source,o.horizon_minutes"""
+            ).fetchall()
+        evaluations = []
+        for row in rows:
+            directional = int(row["directional"] or 0)
+            correct = int(row["correct"] or 0)
+            evaluations.append({
+                "source": row["source"], "horizon_minutes": int(row["horizon_minutes"]),
+                "samples": int(row["samples"]), "directional_samples": directional,
+                "accuracy": round(correct / directional, 4) if directional else None,
+                "promotion_ready": directional >= 200,
+            })
+        return {"events_24h": event_count, "feature_coverage": feature_count,
+                "last_event_at": latest, "evaluations": evaluations,
+                "minimum_promotion_samples": 200}
 
     def _insert(self, sql: str, params: tuple[Any, ...]) -> None:
         with self.lock:

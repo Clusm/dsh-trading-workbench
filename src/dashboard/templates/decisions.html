@@ -46,6 +46,10 @@
 
   .strategy-row td { vertical-align:top; }
   .strategy-row .s-note { display:block; color:var(--muted); font-size:12px; margin-top:3px; }
+  .intel-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:9px; margin-top:10px; }
+  .intel-box { border:1px solid var(--border); border-radius:9px; padding:10px 12px; background:var(--panel2); }
+  .intel-box .label { font-size:11.5px; color:var(--muted); margin-bottom:5px; }
+  .intel-box .value { font-size:13px; color:var(--text2); line-height:1.55; }
 </style>
 
 <div class="row" style="justify-content:space-between; align-items:flex-start; margin-bottom:14px">
@@ -101,6 +105,44 @@
       <pre>{{ latest.macro.model_dump_json(indent=2) if latest.macro else '{}' }}</pre>
       <div class="raw-label">onchain_agent</div>
       <pre>{{ latest.onchain.model_dump_json(indent=2) if latest.onchain else '{}' }}</pre>
+    </details>
+    {% set wi = latest.web3_intel or {} %}
+    <div class="intel-grid">
+      <div class="intel-box">
+        <div class="label">聪明钱代理 · {{ wi.status or 'waiting' }}</div>
+        <div class="value">币安 Top Trader 账户/持仓与主动买卖比；仅影子观察，执行权重 {{ wi.execution_weight or 0 }}；
+          24h 事件 {{ (wi.shadow_evaluation or {}).events_24h or 0 }}</div>
+      </div>
+      <div class="intel-box">
+        <div class="label">钱包跟踪 · {{ (wi.wallet_tracker or {}).status or 'unconfigured' }}</div>
+        <div class="value">{{ (wi.wallet_tracker or {}).note or '尚未配置只读钱包地址' }}</div>
+      </div>
+      <div class="intel-box">
+        <div class="label">Token Audit · {{ (wi.token_audit or {}).status or 'unconfigured' }}</div>
+        <div class="value">{{ (wi.token_audit or {}).note or '尚未配置合约地址映射' }}</div>
+      </div>
+    </div>
+    {% if wi.symbols %}
+    <div class="table-wrap" style="margin-top:10px">
+      <table>
+        <thead><tr><th>USD-M</th><th>影子方向</th><th class="num">大户账户比</th><th class="num">大户持仓比</th><th class="num">主动买卖比</th><th class="num">资金费率</th><th class="num">基差 bp</th><th>质量</th></tr></thead>
+        <tbody>
+        {% for row in wi.symbols %}
+          <tr><td><strong>{{ row.symbol }}</strong></td><td>{{ row.signal }}</td>
+            <td class="num">{{ '%.3f'|format(row.top_account_ratio) if row.top_account_ratio is not none else '—' }}</td>
+            <td class="num">{{ '%.3f'|format(row.top_position_ratio) if row.top_position_ratio is not none else '—' }}</td>
+            <td class="num">{{ '%.3f'|format(row.taker_buy_sell_ratio) if row.taker_buy_sell_ratio is not none else '—' }}</td>
+            <td class="num">{{ '%.5f'|format(row.funding_rate) if row.funding_rate is not none else '—' }}</td>
+            <td class="num">{{ '%.2f'|format(row.basis_bps) if row.basis_bps is not none else '—' }}</td>
+            <td><span class="badge {{ 'ok' if row.quality == 'good' else 'warn' }}">{{ row.quality }}</span></td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    <details class="chain-raw">
+      <summary>查看 Web3/合约市场情报原始输出</summary>
+      <pre>{{ wi|tojson(indent=2) }}</pre>
     </details>
   </div>
 

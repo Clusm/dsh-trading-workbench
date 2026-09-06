@@ -158,6 +158,22 @@ decision_cycle:
 intel_cache:
   ttl_seconds: 3600
 
+# 只读情报侧车：不持有交易密钥，不进入下单图，初始阶段仅展示和影子评估。
+web3_intel:
+  enabled: true
+  shadow_only: true
+  execution_weight: 0
+  refresh_seconds: 300
+  fresh_seconds: 600
+  # BTC/ETH/SOL 每轮采集，其余白名单轮转，约 20 分钟覆盖一次全池。
+  priority_count: 3
+  rotation_count: 4
+  # 真实钱包跟踪和 Token Audit 必须显式配置，空值表示 unknown/unconfigured。
+  watched_wallets: []
+  token_contracts: {}
+  etherscan_api_key_env: ETHERSCAN_API_KEY
+  liquidation_stream_enabled: true
+
 symbol_universe:
   # 市场快照只做 regime 判断，不需要深扫 40 个币；AI 按需自己查询
   top_n: 20

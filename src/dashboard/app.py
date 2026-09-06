@@ -26,6 +26,7 @@ from exchange.account_mirror import AccountMirror
 from exchange.order_mirror import OrderMirror
 from exchange.safety_monitor import ExchangeSafetyMonitor
 from exchange.user_stream import BinanceUserDataStream
+from intel.liquidation_stream import LiquidationStream
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -509,6 +510,7 @@ def _latest_or_empty(service: TradingService) -> dict[str, Any]:
         "quota_state": service.quota.status(),
         "channel_state": latest.get("channel_state") or {},
         "intel_cache": latest.get("intel_cache"),
+        "web3_intel": latest.get("web3_intel") or service.intel_sidecar.snapshot(),
         "ts": None,
     }
     if not empty.get("channel_state") and not (latest or {}).get("channel_state"):
@@ -1010,6 +1012,13 @@ def create_app(service: TradingService) -> FastAPI:
         stream = PriceStream(lambda: _position_symbols(service))
         app.state.price_stream = stream
         task = asyncio.create_task(stream.serve())
+        intel_cfg = service.settings.raw_settings.get("web3_intel", {}) or {}
+        liquidation_stream = None
+        liquidation_task = None
+        if bool(intel_cfg.get("liquidation_stream_enabled", True)):
+            liquidation_stream = LiquidationStream(service.intel_sidecar.record_liquidation)
+            liquidation_task = asyncio.create_task(liquidation_stream.serve())
+        app.state.liquidation_stream = liquidation_stream
 
         # 私有账户流分阶段接入：当前只把原始事件写入幂等收件箱，不能更新账户、
         # 不能驱动订单。配置若关闭、不适用于paper、或缺少凭据，健康接口会明确说明。
@@ -1167,6 +1176,11 @@ def create_app(service: TradingService) -> FastAPI:
             stream.stop()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            if liquidation_stream is not None:
+                liquidation_stream.stop()
+            if liquidation_task is not None:
+                liquidation_task.cancel()
+                await asyncio.gather(liquidation_task, return_exceptions=True)
             if user_stream is not None:
                 user_stream.stop()
             if mirror_task is not None:
@@ -1412,6 +1426,7 @@ def create_app(service: TradingService) -> FastAPI:
             "onchain": {"summary": latest["onchain"].summary,
                         "generated_at": latest["onchain"].generated_at} if latest["onchain"] else None,
             "intel_cache": latest.get("intel_cache"),
+            "web3_intel": latest.get("web3_intel") or service.intel_sidecar.snapshot(),
             "channel_state": latest.get("channel_state") or {},
             "cycle_age_seconds": round(time.time() - float(latest.get("ts") or time.time()), 1),
             "cycle_running": service.cycle_running(),
@@ -1446,6 +1461,13 @@ def create_app(service: TradingService) -> FastAPI:
         with _status_lock:
             _status_cache["ts"] = time.monotonic()
             _status_cache["payload"] = payload
+        return payload
+
+    @app.get("/api/intel")
+    def api_intel():
+        """只读情报侧车快照；不触发网络采集，也不接触交易接口。"""
+        payload = service.intel_sidecar.snapshot()
+        payload["observability"] = service.db.intel_observability()
         return payload
 
     @app.get("/api/health")
@@ -1560,6 +1582,11 @@ def create_app(service: TradingService) -> FastAPI:
             "runtime": runtime,
             "database_backup": (service.db_backup.status()
                                 if hasattr(service, "db_backup") else {"enabled": False}),
+            # 情报侧车只影响可观测性，不参与总交易健康判定。
+            "web3_intel": service.intel_sidecar.snapshot(),
+            "liquidation_stream": (getattr(app.state, "liquidation_stream", None).status()
+                                   if getattr(app.state, "liquidation_stream", None) is not None
+                                   else {"enabled": False}),
             # M4观察期不把私有流纳入总健康判定；REST仍是账户真值源。
             "exchange_stream": user_stream_status,
             "account_mirror": mirror_status,
