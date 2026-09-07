@@ -148,9 +148,12 @@ if src_db.exists():
     check("旧库迁移补上新列", need <= cols2, f"缺 {need - cols2}")
     before = db2.fetch_one("SELECT COUNT(*) c FROM trade_decisions")["c"]
     check("已有 decision 数据未丢失", before > 0, f"count={before}")
+    before_intents = db2.fetch_one("SELECT COUNT(*) c FROM trade_intents")["c"]
     db2.log_trade_intent(intent_id="mig1", decision_id="d", run_id="r",
                          intent=it, status="approved")
-    check("迁移后写入正常", db2.fetch_one("SELECT COUNT(*) c FROM trade_intents")["c"] == 1)
+    after_intents = db2.fetch_one("SELECT COUNT(*) c FROM trade_intents")["c"]
+    check("迁移后写入正常", after_intents == before_intents + 1,
+          f"before={before_intents}, after={after_intents}")
     db2.close()
 else:
     print("  SKIP  未找到 data/agent_trader.sqlite")

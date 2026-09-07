@@ -1638,14 +1638,20 @@ class BinanceFuturesBroker:
                 # 主同步和 Algo 查询都成功，旧的传输故障才可视为恢复。若账户已经
                 # 空仓且没有残留保护单，历史 SL/TP/杠杆失败也不再构成当前风险。
                 if orphan_cleanup is not None:
-                    self.db.resolve_risk_incidents_by_type("futures_sync_error")
+                    self.db.resolve_risk_incidents_by_type(
+                        "futures_sync_error",
+                        "futures_close_nopos",
+                    )
+                    if orphan_cleanup == 0:
+                        self.db.resolve_risk_incidents_by_type(
+                            "futures_orphan_protection_canceled"
+                        )
                     if not pos and orphan_cleanup == 0:
                         self.db.resolve_risk_incidents_by_type(
                             "futures_sl_failed",
                             "futures_tp_failed",
                             "futures_protection_fallback",
                             "futures_leverage_error",
-                            "futures_orphan_protection_canceled",
                         )
         except Exception as e:
             if self.db:

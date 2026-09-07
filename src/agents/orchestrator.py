@@ -690,6 +690,7 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
     query_used = 0
     queried: list[str] = []
     force_submit = False
+    decision_was_downgraded = False
 
     for round_no in range(MAX_ROUNDS):
         started = time.monotonic()
@@ -775,6 +776,7 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                     last_error = None
                     submitted = True
                     if issues:
+                        decision_was_downgraded = True
                         db.log_risk_event(
                             event_type="decision_downgraded", severity="warn",
                             details=f"submit_decision 重试 {submit_attempts} 次后降级不交易：{'；'.join(issues)}",
@@ -840,6 +842,7 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                             issues = action_space.check_position_reviews(
                                 decision.position_reviews, decision.intents)
                     if issues:
+                        decision_was_downgraded = True
                         decision = TradeDecision(
                             decision="no_trade",
                             reasoning=(decision.reasoning or "")
@@ -891,4 +894,6 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
         error=last_error,
         run_id=run_id,
     )
+    if not decision_was_downgraded and last_error is None:
+        db.resolve_risk_incidents_by_type("decision_downgraded")
     return decision

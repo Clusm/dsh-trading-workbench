@@ -270,6 +270,7 @@ def evaluate_risk(decision: TradeDecision, risk_config: dict[str, Any],
         reasons=json.dumps(verdict.reasons, ensure_ascii=False),
         raw_json=verdict.model_dump_json(),
     )
+    db.resolve_risk_incidents_by_type("risk_rejected")
     return verdict
 
 

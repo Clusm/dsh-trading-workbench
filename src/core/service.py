@@ -71,6 +71,9 @@ class TradingService:
         self._instance_lock = InstanceLock(settings.project_root / "data" / "trading_service.lock")
         self._instance_lock.acquire()
         self.db = AuditDatabase(settings.db_file)
+        # 新实例已成功取得单实例锁，说明上一次“等待在途决策”的关闭过程已经结束；
+        # 原告警保留在事件流水中，但不应继续显示为当前未恢复事故。
+        self.db.resolve_risk_incidents_by_type("service_shutdown_deferred")
         backup_cfg = settings.raw_settings.get("database_backup", {}) or {}
         self.db_backup = DatabaseBackupManager(
             self.db,
