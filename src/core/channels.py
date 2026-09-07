@@ -139,6 +139,15 @@ class ChannelManager:
             total = float(session_equity or 0.0)
             if total <= 0 or not hasattr(self.broker, "positions"):
                 return None
+            # Binance account 同一响应同时提供 totalMarginBalance 与
+            # totalUnrealizedProfit；优先使用它可避免账户快照和逐仓快照相隔数百毫秒
+            # 时，行情波动被误算成已实现资金残差。
+            if hasattr(self.broker, "account"):
+                account = self.broker.account()
+                if isinstance(account, dict) and account:
+                    unrealized = float(account.get("totalUnrealizedProfit") or 0.0)
+                    realized = total - unrealized
+                    return realized if realized > 0 else None
             positions = self.broker.positions()
             if positions is None:
                 return None
@@ -163,14 +172,9 @@ class ChannelManager:
             total = float(session_equity or 0.0)
             if total <= 0 or not hasattr(self.broker, "positions"):
                 return False
-            positions = self.broker.positions()
-            if positions is None:
+            realized_total = self._exchange_realized_total(total)
+            if realized_total is None:
                 return False
-            unrealized = sum(
-                float(p.get("unRealizedProfit") or p.get("upnl") or 0.0)
-                for p in positions
-            )
-            realized_total = total - unrealized
         except Exception:
             return False
 

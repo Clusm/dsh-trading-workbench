@@ -642,6 +642,38 @@ def _capital_overview(service: TradingService, broker_state: dict[str, Any],
     }
 
 
+def _channel_state_for_display(service: TradingService, channel_state: dict[str, Any],
+                               positions: list[dict[str, Any]]) -> dict[str, Any]:
+    """用持仓表同源的实时浮盈刷新通道展示，避免两套标记价造成瞬时差额。"""
+    result = dict(channel_state or {})
+    max_usage = float(getattr(service.channels, "channel_max_margin_usage", 0.8))
+    for channel in ("strategy", "ai"):
+        current = dict(result.get(channel) or {})
+        if not current:
+            continue
+        daily = dict(current.get("daily_stats") or {})
+        realized = float(daily.get("realized_pnl") or 0.0)
+        unrealized = sum(
+            float(position.get("upnl") or 0.0)
+            for position in positions
+            if str(position.get("source") or "ai") == channel
+        )
+        day_start = float(current.get("day_start_equity") or 0.0)
+        equity = day_start + realized + unrealized
+        margin = float(current.get("margin_used") or 0.0)
+        margin_cap = equity * max_usage
+        halted = bool(current.get("halted"))
+        current.update({
+            "equity": equity,
+            "day_pnl": equity - day_start,
+            "day_return": (equity - day_start) / day_start if day_start else 0.0,
+            "margin_cap": margin_cap,
+            "allow_new": margin <= margin_cap and not halted,
+        })
+        result[channel] = current
+    return result
+
+
 def _enriched_positions(service: TradingService, latest: dict[str, Any],
                          broker_state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     market = latest.get("market")
@@ -1448,6 +1480,14 @@ def create_app(service: TradingService) -> FastAPI:
         broker_error = broker_state.get("error") if isinstance(broker_state, dict) else None
         _maybe_snapshot(service, cap["session_equity"], cap["unrealized_pnl"], positions)
         quota = service.quota.status()
+        # 总资金与通道卡必须消费同一轮账户快照。latest.channel_state 可能比当前
+        # broker_state 早一个快循环，持仓波动时会出现 0.x U 的瞬时不相等。
+        try:
+            channel_state = service.channels.sync(
+                {}, session_equity=cap["session_equity"], read_only=True)
+            channel_state = _channel_state_for_display(service, channel_state, positions)
+        except Exception:
+            channel_state = latest.get("channel_state") or {}
         return {
             "control_state": service.control.state,
             "account_risk": latest.get("account_risk") or {},
@@ -1480,7 +1520,7 @@ def create_app(service: TradingService) -> FastAPI:
                         "generated_at": latest["onchain"].generated_at} if latest["onchain"] else None,
             "intel_cache": latest.get("intel_cache"),
             "web3_intel": latest.get("web3_intel") or _intel_snapshot(service),
-            "channel_state": latest.get("channel_state") or {},
+            "channel_state": channel_state,
             "cycle_age_seconds": round(time.time() - float(latest.get("ts") or time.time()), 1),
             "cycle_running": service.cycle_running(),
             "quota": quota,

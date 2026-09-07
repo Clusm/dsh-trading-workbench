@@ -117,6 +117,7 @@ from dashboard.app import (  # noqa: E402
     _ALGOS_LOCK,
     _ago,
     _algo_prices_by_symbol,
+    _channel_state_for_display,
     _event_type_cn,
     _mode_cn,
     _price,
@@ -156,6 +157,19 @@ check("失败冷却期内不重复查询", algo_service.broker._open_algos.call_
       str(algo_service.broker._open_algos.call_count))
 with _ALGOS_LOCK:
     _ALGOS_CACHE.update({"ts": 0.0, "attempt_ts": 0.0, "by_symbol": {}, "refreshing": False})
+
+display_service = MagicMock()
+display_service.channels.channel_max_margin_usage = 0.8
+display_channels = _channel_state_for_display(display_service, {
+    "strategy": {"day_start_equity": 300.0, "margin_used": 0.0,
+                 "daily_stats": {"realized_pnl": 1.0}},
+    "ai": {"day_start_equity": 200.0, "margin_used": 20.0,
+           "daily_stats": {"realized_pnl": -2.0}},
+}, [{"source": "ai", "upnl": 5.0}])
+check("通道展示使用持仓表同源浮盈",
+      display_channels["strategy"]["equity"] == 301.0
+      and display_channels["ai"]["equity"] == 203.0,
+      str(display_channels))
 check("live 模式标注", _mode_cn("live") == "实盘")
 check("价格保留五位有效数字", _price(744.53325581) == "744.53")
 check("价格删除无意义尾零", _price("38.00000000") == "38")

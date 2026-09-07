@@ -33,6 +33,14 @@ class ActiveBroker:
         return {"positions": {"BTCUSDT": {"source": "ai"}}}
 
 
+class AtomicAccountBroker(ActiveBroker):
+    """账户快照浮盈与逐仓浮盈不同，验证对账优先采用原子账户字段。"""
+
+    @staticmethod
+    def account() -> dict:
+        return {"totalUnrealizedProfit": 4.0}
+
+
 ok = fail = 0
 
 
@@ -87,6 +95,21 @@ active_total = active["strategy"]["equity"] + active["ai"]["equity"]
 check("持仓时通道合计仍对齐", abs(active_total - 525.0) < 1e-8, str(active_total))
 check("5U 浮盈只进入 AI 实时权益", abs(active["ai"]["day_start_equity"] - 208.0) < 1e-8
       and abs(active["ai"]["equity"] - 213.0) < 1e-8, str(active["ai"]))
+
+print("\n[1c] 账户原子快照优先于逐仓异步快照")
+atomic_state = tmp / "channel_state_atomic.json"
+atomic_state.write_text(json.dumps({
+    "date": utc_today(),
+    "strategy_day_start_equity": 300.0,
+    "ai_day_start_equity": 200.0,
+    "ai_halted": False,
+    "pnl_reset_at": None,
+}), encoding="utf-8")
+atomic_manager = ChannelManager(atomic_state, AtomicAccountBroker(), db)
+atomic_manager.sync(session_equity=524.0)
+check("对账使用账户快照的 4U 浮盈",
+      abs(atomic_manager.state["strategy_day_start_equity"] - 312.0) < 1e-8,
+      str(atomic_manager.state))
 
 print("\n[2] 跨日以交易所真实权益为总锚点")
 state_file_2 = tmp / "channel_state_rollover.json"
