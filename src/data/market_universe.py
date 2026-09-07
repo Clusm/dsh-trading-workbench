@@ -100,6 +100,9 @@ class MarketUniverse:
                                        details=f"{type(e).__name__}: {e}", action_taken="skip_short_anomaly")
             return []
         prev = self.state.get("prev_prices") or {}
+        resolver = getattr(self.db, "resolve_risk_incidents_by_type", None)
+        if callable(resolver):
+            resolver("market_universe_price_fail")
         scored: list[tuple[float, str]] = []
         for symbol, price in prices.items():
             if symbol in prev and prev.get(symbol, 0.0) > 0:
@@ -120,6 +123,9 @@ class MarketUniverse:
                 self.db.log_risk_event(event_type="market_universe_full_scan_fail", severity="warn",
                                        details=f"{type(e).__name__}: {e}", action_taken="keep_old_pool")
             return self.state.get("full_pool") or []
+        resolver = getattr(self.db, "resolve_risk_incidents_by_type", None)
+        if callable(resolver):
+            resolver("market_universe_full_scan_fail")
         sorted_by_vol = sorted(
             [t for t in tickers if str(t.get("symbol", "")).endswith("USDT")],
             key=lambda x: float(x.get("quoteVolume") or 0.0),

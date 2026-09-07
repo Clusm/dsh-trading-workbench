@@ -377,6 +377,8 @@ def _event_type_cn(value: Any) -> str:
         "strategy_ticket_expired": "策略ticket过期",
         "strategy_conflict_skip": "策略通道冲突跳过",
         "channel_daily_rebalance": "通道每日重算",
+        "channel_equity_drift": "通道权益对账偏差",
+        "channel_equity_reconciled": "通道权益已自动对账",
         "channel_margin_breach": "通道保证金超限强平",
         "ai_daily_loss_stop": "AI当日亏损熔断",
         "broker_created": "交易通道创建",

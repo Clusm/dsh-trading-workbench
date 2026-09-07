@@ -112,12 +112,13 @@ class ChannelManager:
         except Exception:
             return 0.0
 
-    def _channel_pnl(self, channel: str) -> float:
-        """该通道今日已实现盈亏（净额，含手续费）。"""
-        return float(self.daily_trade_stats(channel).get("realized_pnl", 0.0))
+    def _channel_pnl(self, channel: str, date: str | None = None) -> float:
+        """该通道指定 UTC 日的已实现盈亏（净额，含手续费）。"""
+        return float(self.daily_trade_stats(channel, date).get("realized_pnl", 0.0))
 
     def _channel_realized_equity(self, channel: str,
-                                 session_equity: float | None = None) -> float:
+                                 session_equity: float | None = None,
+                                 date: str | None = None) -> float:
         """仅含已实现盈亏的通道权益（不含未实现浮盈）。
 
         专供 UTC 日切重分基准用：日切时若把未实现浮盈固化进新基准，
@@ -125,7 +126,84 @@ class ChannelManager:
         （实测虚增 10+）。基准只能用真实已落袋的钱重分。
         """
         return (self._channel_day_start(channel, session_equity)
-                + self._channel_pnl(channel))
+                + self._channel_pnl(channel, date))
+
+    def _exchange_realized_total(self, session_equity: float | None) -> float | None:
+        """把交易所会话权益转换为不含浮盈的已实现权益。
+
+        资金费、测试网账务修正或外部触发的成交不一定完整出现在本地订单表中，
+        所以跨日重分不能只累加本地成交。交易所总权益减去当前全部未实现盈亏，
+        才是两通道在日切时应共同锚定的真实已实现资金。
+        """
+        try:
+            total = float(session_equity or 0.0)
+            if total <= 0 or not hasattr(self.broker, "positions"):
+                return None
+            positions = self.broker.positions()
+            if positions is None:
+                return None
+            unrealized = sum(
+                float(p.get("unRealizedProfit") or p.get("upnl") or 0.0)
+                for p in positions
+            )
+            realized = total - unrealized
+            return realized if realized > 0 else None
+        except Exception:
+            return None
+
+    def _reconcile_flat_session(self, session_equity: float | None) -> bool:
+        """空仓时修复通道合计与交易所会话权益之间的小幅历史残差。
+
+        修复只移动两个虚拟通道的日初基准，不修改总资金、风险参数或成交记录；
+        当日各通道已经记录的盈亏保持不变。超过会话权益 10% 的差异不自动吸收，
+        避免把充值、测试网重置等大额外部变化误认成交易收益。
+        """
+        try:
+            total = float(session_equity or 0.0)
+            if total <= 0 or not hasattr(self.broker, "positions"):
+                return False
+            positions = self.broker.positions()
+            if positions is None or len(positions) != 0:
+                return False
+        except Exception:
+            return False
+
+        pnl_s = self._channel_pnl("strategy")
+        pnl_a = self._channel_pnl("ai")
+        start_s = self._channel_day_start("strategy", total)
+        start_a = self._channel_day_start("ai", total)
+        residual = total - (start_s + start_a + pnl_s + pnl_a)
+        if abs(residual) < 0.01:
+            return False
+
+        if abs(residual) > total * 0.10:
+            fingerprint = f"{utc_today()}:{residual:.2f}"
+            if self.state.get("equity_drift_alert") != fingerprint:
+                self.state["equity_drift_alert"] = fingerprint
+                self._save()
+                self.db.log_risk_event(
+                    event_type="channel_equity_drift",
+                    severity="warn",
+                    details=(f"通道合计与会话权益相差 {residual:.2f} U，超过自动修复阈值；"
+                             "可能存在充值、转出或测试网资金重置"),
+                    action_taken="保留原通道基准，等待人工核对",
+                )
+            return False
+
+        weight_total = self.strategy_weight + self.ai_weight
+        strategy_share = self.strategy_weight / weight_total if weight_total > 0 else 0.6
+        self.state["strategy_day_start_equity"] = start_s + residual * strategy_share
+        self.state["ai_day_start_equity"] = start_a + residual * (1.0 - strategy_share)
+        self.state.pop("equity_drift_alert", None)
+        self.state["last_equity_reconcile"] = datetime.now(timezone.utc).isoformat()
+        self._save()
+        self.db.log_risk_event(
+            event_type="channel_equity_reconciled",
+            severity="info",
+            details=f"空仓对账修复通道历史残差 {residual:.4f} U",
+            action_taken="按既有通道权重调整日初虚拟基准",
+        )
+        return True
 
     def _channel_equity(self, prices: dict[str, float], channel: str,
                         session_equity: float | None = None) -> float:
@@ -214,8 +292,9 @@ class ChannelManager:
         # 日切重分只用已实现权益（基准+当日已实现），绝不含未实现浮盈：
         # 浮盈没落袋就写进基准，随后回吐/实际平价与浮盈不同，渠道与总
         # 权益永远对不上（实测虚增基准 10+，通道合计少总权益 8+）。
-        eq_s = self._channel_realized_equity("strategy", session_equity)
-        eq_a = self._channel_realized_equity("ai", session_equity)
+        previous_date = str(self.state.get("date") or "") or None
+        eq_s = self._channel_realized_equity("strategy", session_equity, previous_date)
+        eq_a = self._channel_realized_equity("ai", session_equity, previous_date)
         # 先把上一日统计落库（初始状态不落库）
         if self.state.get("date"):
             for channel, end_eq, start_eq in (
@@ -238,6 +317,11 @@ class ChannelManager:
             rebalanced = True
         else:
             total = eq_s + eq_a
+            # 对交易所模式以真实账户为总锚点，吸收本地订单表无法完整归属的资金费、
+            # 外部保护单成交和账务修正；再按既有 6:4 规则做每日重分。
+            exchange_total = self._exchange_realized_total(session_equity)
+            if exchange_total is not None:
+                total = exchange_total
             if total <= 0 and session_equity and session_equity > 0:
                 # 纸面等无交易历史：用总权益（同样不含未实现——paper 无浮动概念）
                 total = float(session_equity)
@@ -273,7 +357,12 @@ class ChannelManager:
                      read_only: bool) -> dict[str, Any]:
         prices = dict(prices or {})
         rebalanced = False if read_only else self._rebalance_if_needed(prices, session_equity)
-        status: dict[str, Any] = {"date": utc_today(), "rebalanced": rebalanced}
+        reconciled = False if read_only else self._reconcile_flat_session(session_equity)
+        status: dict[str, Any] = {
+            "date": utc_today(),
+            "rebalanced": rebalanced,
+            "reconciled": reconciled,
+        }
         for channel in ("strategy", "ai"):
             eq = self._channel_equity(prices, channel, session_equity)
             day_start = self._channel_day_start(channel, session_equity)

@@ -209,6 +209,8 @@ class SignalScanner:
         # 多张策略卡经常复用同一 symbol/timeframe。成功结果和失败结果都在本轮
         # 记忆，避免一次 DNS 故障被“策略卡×交易对×周期”放大为数百次请求和告警。
         cycle_klines: dict[tuple[str, str], pd.DataFrame | None] = {}
+        scan_had_error = False
+        scan_had_success = False
 
         for card in cards:
             if not card.get("indicatorized"):
@@ -240,7 +242,9 @@ class SignalScanner:
                             cycle_klines[market_key] = _completed(
                                 fetch_klines(symbol, tf, self.kline_limit), now
                             )
+                            scan_had_success = True
                         except Exception as e:
+                            scan_had_error = True
                             cycle_klines[market_key] = None
                             if self.db:
                                 self.db.log_risk_event(
@@ -322,6 +326,7 @@ class SignalScanner:
                             seen[dedup_key] = {"signal_id": signal_id, "ts": utc_now().isoformat()}
                         tickets.append(ticket)
                     except Exception as e:
+                        scan_had_error = True
                         if self.db:
                             self.db.log_risk_event(
                                 event_type="signal_scan_error", severity="warn",
@@ -341,6 +346,11 @@ class SignalScanner:
         self._save_state(state)
         if self._features_mod is not None and hasattr(self._features_mod, "clear_feature_cache"):
             self._features_mod.clear_feature_cache()
+        # 至少有一组行情完整处理、且本轮没有扫描异常，才能证明旧故障已经恢复。
+        # 只靠“返回了 0 个信号”不能判健康，因为网络全失败时同样会返回空列表。
+        resolver = getattr(self.db, "resolve_risk_incidents_by_type", None)
+        if scan_had_success and not scan_had_error and callable(resolver):
+            resolver("signal_scan_error")
         return tickets
 
     def _make_ticket(self, card: dict[str, Any], symbol: str, tf: str, side: str,

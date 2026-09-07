@@ -1029,7 +1029,7 @@ class BinanceFuturesBroker:
                                            details=f"{symbol}: 取消Algo单失败 {type(e).__name__} {e}",
                                            action_taken="继续")
 
-    def _cleanup_closed_symbol_algos(self, symbol: str) -> int:
+    def _cleanup_closed_symbol_algos(self, symbol: str) -> int | None:
         """二次确认已无仓位后，串行撤销保护触发后遗留的另一侧Algo单。"""
         with self._resync_lock:
             current = [p for p in self.positions(force=True)
@@ -1039,8 +1039,9 @@ class BinanceFuturesBroker:
                 return 0
             algos = self._open_algos(symbol)
             if algos is None:
-                return 0
+                return None
             canceled = 0
+            failed = False
             for algo in algos:
                 algo_id = str(algo.get("algoId") or "")
                 if not algo_id:
@@ -1051,6 +1052,7 @@ class BinanceFuturesBroker:
                     if self.db:
                         self.db.cancel_order_by_exchange_id(exchange_order_id=algo_id)
                 except Exception as exc:
+                    failed = True
                     if self.db:
                         self.db.log_risk_event(
                             event_type="futures_adjust_error", severity="warn",
@@ -1058,26 +1060,30 @@ class BinanceFuturesBroker:
                             action_taken="retry next sync")
             if canceled and self.db:
                 self.db.log_risk_event(
-                    event_type="futures_orphan_protection_canceled", severity="warn",
+                    event_type="futures_orphan_protection_canceled", severity="info",
                     details=f"{symbol}: 仓位归零后二次确认，已撤销 {canceled} 张残留Algo保护单",
                     action_taken="cancel orphan algo orders")
-            return canceled
+            return None if failed else canceled
 
-    def _retry_orphan_algo_cleanup(self, position_symbols: set[str]) -> int:
+    def _retry_orphan_algo_cleanup(self, position_symbols: set[str]) -> int | None:
         """每轮重试清理历史孤儿单，弥补首次平仓收口遇到网络故障的情况。"""
         algos = self._open_algos()
         if algos is None:
-            return 0
+            return None
         orphan_symbols = {
             str(row.get("symbol") or "")
             for row in algos
             if str(row.get("symbol") or "") not in position_symbols
         }
-        return sum(
-            self._cleanup_closed_symbol_algos(symbol)
-            for symbol in sorted(orphan_symbols)
-            if symbol
-        )
+        total = 0
+        for symbol in sorted(orphan_symbols):
+            if not symbol:
+                continue
+            result = self._cleanup_closed_symbol_algos(symbol)
+            if result is None:
+                return None
+            total += result
+        return total
 
     def _algo_prices(self, symbol: str) -> dict[str, float] | None:
         """当前交易所侧 SL/TP 价格。查询失败返回 None（区别于"无挂单"的 {}）。"""
@@ -1546,7 +1552,7 @@ class BinanceFuturesBroker:
             # 不能只在台账第一次发现平仓时清理：若当时网络失败，symbol 已从台账
             # 删除，后续循环将永远没有重试机会。以交易所当前仓位为真值，每轮重新
             # 发现并二次确认所有无仓位 Algo 单。
-            self._retry_orphan_algo_cleanup(exchange_symbols)
+            orphan_cleanup = self._retry_orphan_algo_cleanup(exchange_symbols)
             if closed_symbols:
                 self._reconcile_external_closes(closed_symbols)
             if self.db:
@@ -1613,6 +1619,18 @@ class BinanceFuturesBroker:
                         continue
                     self.db.close_open_position(symbol=key[0], side=key[1],
                                                 note="交易所已无此仓位，收口")
+                # 主同步和 Algo 查询都成功，旧的传输故障才可视为恢复。若账户已经
+                # 空仓且没有残留保护单，历史 SL/TP/杠杆失败也不再构成当前风险。
+                if orphan_cleanup is not None:
+                    self.db.resolve_risk_incidents_by_type("futures_sync_error")
+                    if not pos and orphan_cleanup == 0:
+                        self.db.resolve_risk_incidents_by_type(
+                            "futures_sl_failed",
+                            "futures_tp_failed",
+                            "futures_protection_fallback",
+                            "futures_leverage_error",
+                            "futures_orphan_protection_canceled",
+                        )
         except Exception as e:
             if self.db:
                 self.db.log_risk_event(event_type="futures_sync_error", severity="warn",
