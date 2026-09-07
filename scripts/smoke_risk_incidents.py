@@ -36,7 +36,15 @@ row = db.list_risk_incidents()[0]
 check("复发自动重开", row["status"] == "OPEN" and row["occurrence_count"] == 3)
 check("摘要正确", db.risk_incident_summary()["open"] == 1)
 
-print("\n[3] 写入延迟指标")
+print("\n[3] 健康恢复可按事件类型自动收口运行类 incident")
+db.log_risk_event(event_type="equity_unavailable", severity="warn", details="temporary")
+db.log_risk_event(event_type="startup_safety_block", severity="critical", details="temporary")
+resolved = db.resolve_risk_incidents_by_type("equity_unavailable", "startup_safety_block")
+summary = db.risk_incident_summary()
+check("两类运行故障已收口", resolved == 2)
+check("自动收口不影响仍在复发的其他事件", summary["resolved"] == 2 and summary["open"] == 1)
+
+print("\n[4] 写入延迟指标")
 db.log_portfolio_snapshot(
     equity=100.0,
     margin_balance=100.0,
@@ -48,4 +56,4 @@ metrics = db.write_metrics()
 check("写入次数可观测", metrics["writes"] >= 1)
 check("写入延迟非负", metrics["last_write_ms"] >= 0.0 and metrics["avg_write_ms"] >= 0.0)
 db.close()
-print("\n结果: 10 通过 / 0 失败")
+print("\n结果: 12 通过 / 0 失败")

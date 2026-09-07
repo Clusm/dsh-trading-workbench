@@ -496,6 +496,9 @@ class TradingService:
                                            details=result["reason"], action_taken="block new opens")
                     return result
             result = {"ready": True, "reason": "", "checked_at": now}
+            resolver = getattr(self.db, "resolve_risk_incidents_by_type", None)
+            if callable(resolver):
+                resolver("startup_safety_block")
         except Exception as e:
             result = {"ready": False, "reason": f"{type(e).__name__}: {e}", "checked_at": now}
             self.db.log_risk_event(event_type="startup_safety_block", severity="critical",

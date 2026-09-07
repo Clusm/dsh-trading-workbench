@@ -234,6 +234,9 @@ class CapitalManager:
                                    action_taken="skip capital checks; block new opens")
             return {"session_equity": session_eq, "reset": False,
                     "equity_available": False, "stale": True}
+        resolver = getattr(self.db, "resolve_risk_incidents_by_type", None)
+        if callable(resolver):
+            resolver("equity_unavailable")
         session_eq = round(exchange_eq - self.baseline, 2)
         # 硬规则：保证金不得超过会话权益上限
         if session_eq > 0:

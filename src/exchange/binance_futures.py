@@ -68,11 +68,11 @@ class BinanceFuturesBroker:
         # MTA_NO_PROXY 不只清环境变量，还要禁用 httpx 的系统代理发现；
         # 否则 Windows 的遗留代理/PAC 仍会被读取，直连启动照样卡在账户查询。
         self._trust_env = os.getenv("MTA_NO_PROXY", "").strip().lower() not in {"1", "true", "yes", "on"}
-        self._client = self._new_client()
         # 客户端重建锁：dashboard 线程（紧急平仓/资金重置）与交易/同步循环
-        # 并发触发 10054/-1021/-1022 重建 client 时，若各自 close 共享句柄会
-        # 互相踩踏，报 "client has been closed"。RLock 串行化 close+重建。
+        # 必须同时覆盖“发请求”和“关闭+重建”：只锁重建仍可能关闭其他线程正在
+        # 使用的共享句柄，继而产生 Cannot send a request, as the client has been closed。
         self._client_lock = threading.RLock()
+        self._client = self._new_client()
         self._symbol_filters: dict[str, dict[str, Any]] = {}
         self._load_exchange_info()
         self.protection_order_mirror = (
@@ -107,10 +107,28 @@ class BinanceFuturesBroker:
     def _new_client(self) -> httpx.Client:
         return httpx.Client(timeout=self._client_timeout, trust_env=self._trust_env)
 
+    def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """串行使用共享客户端，并在传输层故障后原子替换连接池。
+
+        Broker 的签名读写需要严格顺序与幂等保证，牺牲少量并发度换取不会在另一个
+        请求执行期间关闭连接池。公开行情仍走独立客户端，不受此锁影响。
+        """
+        with self._client_lock:
+            try:
+                return self._client.request(method, url, **kwargs)
+            except httpx.TransportError:
+                old_client = self._client
+                self._client = self._new_client()
+                try:
+                    old_client.close()
+                except Exception:
+                    pass
+                raise
+
     def _calibrate_time(self) -> None:
         """用交易所服务器时间校准本机时钟偏移（P2 recvWindow）。失败静默，不影响启动。"""
         try:
-            r = self._client.get(f"{self.base_url}/fapi/v1/time")
+            r = self._request("GET", f"{self.base_url}/fapi/v1/time")
             server_ms = int(r.json().get("serverTime") or 0)
             if server_ms > 0:
                 self._time_offset_ms = server_ms - int(time.time() * 1000)
@@ -132,18 +150,18 @@ class BinanceFuturesBroker:
         for i in range(max_attempts):
             # 每次尝试重新生成 timestamp/signature，避免重试必撞 recvWindow；
             # timestamp 按启动时校准的服务器时钟偏移修正
+            # 必须先删除上一轮 signature，否则第二轮会把旧签名本身也参与 HMAC，
+            # 稳定触发 Binance -1022。
+            params.pop("signature", None)
             params["timestamp"] = int(time.time() * 1000) + self._time_offset_ms
             params["recvWindow"] = 5000
             params["signature"] = self._sign(params)
             try:
-                if method == "GET":
-                    r = self._client.get(f"{self.base_url}{path}", params=params, headers=headers)
-                elif method == "POST":
-                    r = self._client.post(f"{self.base_url}{path}", params=params, headers=headers)
-                elif method == "DELETE":
-                    r = self._client.delete(f"{self.base_url}{path}", params=params, headers=headers)
-                else:
+                if method not in {"GET", "POST", "DELETE"}:
                     raise ValueError(f"unsupported method {method}")
+                r = self._request(
+                    method, f"{self.base_url}{path}", params=params, headers=headers
+                )
                 if r.status_code >= 500:
                     raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
                 data = r.json()
@@ -155,16 +173,7 @@ class BinanceFuturesBroker:
                 return data
             except Exception as e:
                 last_err = e
-                # 10054/连接被重置时，旧 keep-alive 连接可能已失效，重建 client 再重试
                 msg = str(e)
-                if "10054" in msg or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
-                    # 串行化 client 重建，避免多线程并发 close 共享句柄互相踩踏
-                    with self._client_lock:
-                        try:
-                            self._client.close()
-                        except Exception:
-                            pass
-                        self._client = self._new_client()
                 # -1021(时间戳超窗)/-1022(签名无效，多由时间戳过期引起)：
                 # 重校准服务器时间偏移后重试（仅 GET 会进入第二次循环；
                 # 实测校准偏移随时间漂移 5ms/小时，长期运行后会零星失败）
@@ -176,7 +185,9 @@ class BinanceFuturesBroker:
 
     def _load_exchange_info(self) -> None:
         try:
-            data = self._client.get(f"{self.base_url}/fapi/v1/exchangeInfo", timeout=20).json()
+            data = self._request(
+                "GET", f"{self.base_url}/fapi/v1/exchangeInfo", timeout=20
+            ).json()
             for s in data.get("symbols", []):
                 if s.get("status") != "TRADING" or not s.get("symbol", "").endswith("USDT"):
                     continue
@@ -1052,6 +1063,22 @@ class BinanceFuturesBroker:
                     action_taken="cancel orphan algo orders")
             return canceled
 
+    def _retry_orphan_algo_cleanup(self, position_symbols: set[str]) -> int:
+        """每轮重试清理历史孤儿单，弥补首次平仓收口遇到网络故障的情况。"""
+        algos = self._open_algos()
+        if algos is None:
+            return 0
+        orphan_symbols = {
+            str(row.get("symbol") or "")
+            for row in algos
+            if str(row.get("symbol") or "") not in position_symbols
+        }
+        return sum(
+            self._cleanup_closed_symbol_algos(symbol)
+            for symbol in sorted(orphan_symbols)
+            if symbol
+        )
+
     def _algo_prices(self, symbol: str) -> dict[str, float] | None:
         """当前交易所侧 SL/TP 价格。查询失败返回 None（区别于"无挂单"的 {}）。"""
         algos = self._open_algos(symbol)
@@ -1516,9 +1543,11 @@ class BinanceFuturesBroker:
                         ledger.get("positions", {}).pop(symbol, None)
                         closed_symbols.append(symbol)
                 self._save_ledger(ledger)
+            # 不能只在台账第一次发现平仓时清理：若当时网络失败，symbol 已从台账
+            # 删除，后续循环将永远没有重试机会。以交易所当前仓位为真值，每轮重新
+            # 发现并二次确认所有无仓位 Algo 单。
+            self._retry_orphan_algo_cleanup(exchange_symbols)
             if closed_symbols:
-                for symbol in closed_symbols:
-                    self._cleanup_closed_symbol_algos(symbol)
                 self._reconcile_external_closes(closed_symbols)
             if self.db:
                 # 只在仓位真正变化（新开/加减仓/改杠杆/换来源）时才写流水，
@@ -1780,4 +1809,5 @@ class BinanceFuturesBroker:
             return
 
     def close(self) -> None:
-        self._client.close()
+        with self._client_lock:
+            self._client.close()

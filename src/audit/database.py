@@ -1256,6 +1256,22 @@ class AuditDatabase:
             self.conn.commit()
         return cursor.rowcount > 0
 
+    def resolve_risk_incidents_by_type(self, *event_types: str) -> int:
+        """在健康探测明确恢复后，批量收口指定运行类 incident。"""
+        types = tuple(dict.fromkeys(str(item) for item in event_types if str(item)))
+        if not types:
+            return 0
+        now = utc_now()
+        placeholders = ",".join("?" for _ in types)
+        with self.lock:
+            cursor = self.conn.execute(
+                f"""UPDATE risk_incidents SET status='RESOLVED',resolved_at=?
+                    WHERE status!='RESOLVED' AND event_type IN ({placeholders})""",
+                (now, *types),
+            )
+            self.conn.commit()
+        return int(cursor.rowcount)
+
     def log_order(self, *, client_order_id: str, exchange_order_id: str | None,
                   symbol: str, side: str, order_type: str, qty: float, price: float | None,
                   status: str, raw: dict[str, Any] | None = None,

@@ -136,4 +136,10 @@ check("自动清理事件可审计", cleanup_db.events[0]["event_type"] ==
 broker.positions = lambda force=False: [{"symbol": "BTCUSDT", "positionAmt": "0.1"}]
 check("二次确认仍有仓位时绝不撤保护单",
       broker._cleanup_closed_symbol_algos("BTCUSDT") == 0 and len(deletes) == 1)
+broker.positions = lambda force=False: []
+broker._open_algos = lambda symbol=None: [
+    algo(100, "BTCUSDT", "STOP_MARKET", "SELL", "0.1", "59000")
+] if symbol is None else [algo(100, "BTCUSDT", "STOP_MARKET", "SELL", "0.1", "59000")]
+check("首次清理失败后后续同步仍会重试孤儿单",
+      broker._retry_orphan_algo_cleanup(set()) == 1 and deletes[-1][2]["algoId"] == "100")
 print(f"\n结果: {passed} 通过 / 0 失败")

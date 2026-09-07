@@ -6,6 +6,7 @@ import sys
 import tempfile
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -16,8 +17,10 @@ warnings.filterwarnings("ignore", category=PerformanceWarning)
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from audit.database import AuditDatabase  # noqa: E402
 from core.config_loader import load_settings  # noqa: E402
 from signal_engine import SignalScanner, resolve_strategy_lab_src  # noqa: E402
+import signal_engine.scanner as scanner_module  # noqa: E402
 
 
 def synthetic_ohlcv(rows: int = 300) -> pd.DataFrame:
@@ -62,7 +65,42 @@ def main() -> None:
             checked.add(signal_fn)
         assert checked, "没有可验证的策略函数"
         assert Path(strategy_src).is_dir(), strategy_src
-        print(f"SIGNAL_SCANNER_INTEGRATION_OK functions={len(checked)} src={strategy_src}")
+
+    # 相同 symbol/timeframe 的策略卡共享一次行情失败，避免告警和请求扇出。
+    with tempfile.TemporaryDirectory(prefix="mta-signal-cache-") as tmp:
+        root = Path(tmp)
+        (root / "strategy_cards.json").write_text(json.dumps({"cards": [
+            {"id": "a", "indicatorized": True, "signal_fn": "same",
+             "symbols": ["BTCUSDT"], "timeframes": ["1h"]},
+            {"id": "b", "indicatorized": True, "signal_fn": "same",
+             "symbols": ["BTCUSDT"], "timeframes": ["1h"]},
+        ]}), encoding="utf-8")
+        db = AuditDatabase(root / "audit.sqlite")
+        cache_scanner = SignalScanner(
+            knowledge_dir=root, strategy_lab_src="unused",
+            state_file=root / "state.json", db=db,
+        )
+        cache_scanner._registry = {"same": lambda *_args: None}
+        cache_scanner._features_mod = SimpleNamespace(clear_feature_cache=lambda: None)
+        calls = 0
+        original_fetch = scanner_module.fetch_klines
+
+        def fail_fetch(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("network down")
+
+        scanner_module.fetch_klines = fail_fetch
+        try:
+            cache_scanner.scan()
+        finally:
+            scanner_module.fetch_klines = original_fetch
+        errors = db.fetch_one(
+            "SELECT COUNT(*) count FROM risk_events WHERE event_type='signal_scan_error'"
+        )["count"]
+        assert calls == 1 and errors == 1, (calls, errors)
+        db.close()
+    print(f"SIGNAL_SCANNER_INTEGRATION_OK functions={len(checked)} src={strategy_src}")
 
 
 if __name__ == "__main__":

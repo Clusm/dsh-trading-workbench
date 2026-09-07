@@ -75,7 +75,16 @@ class OpenAICompatibleLLMClient(LLMClient):
                 last_error = e
                 if attempt >= self.max_retries or not _is_transient_error(e):
                     raise
-                time.sleep(self.retry_backoff_seconds * (attempt + 1))
+                delay = self.retry_backoff_seconds * (attempt + 1)
+                # SenseNova 429 若返回 Retry-After，应尊重供应商给出的冷却时间；
+                # 设置上限避免异常响应让交易决策线程无限等待。
+                if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 429:
+                    try:
+                        delay = max(delay, min(60.0, float(e.response.headers.get(
+                            "Retry-After", "0"))))
+                    except (TypeError, ValueError):
+                        pass
+                time.sleep(delay)
         assert last_error is not None
         raise last_error
 

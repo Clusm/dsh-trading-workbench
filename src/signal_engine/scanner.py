@@ -206,6 +206,9 @@ class SignalScanner:
         seen = dict(state.get("seen") or {})
         tickets: list[dict[str, Any]] = []
         cards = load_cards(self.knowledge_dir)
+        # 多张策略卡经常复用同一 symbol/timeframe。成功结果和失败结果都在本轮
+        # 记忆，避免一次 DNS 故障被“策略卡×交易对×周期”放大为数百次请求和告警。
+        cycle_klines: dict[tuple[str, str], pd.DataFrame | None] = {}
 
         for card in cards:
             if not card.get("indicatorized"):
@@ -231,9 +234,25 @@ class SignalScanner:
                 for tf in card.get("timeframes", []):
                     if tf not in TF_MINUTES:
                         continue
+                    market_key = (symbol, tf)
+                    if market_key not in cycle_klines:
+                        try:
+                            cycle_klines[market_key] = _completed(
+                                fetch_klines(symbol, tf, self.kline_limit), now
+                            )
+                        except Exception as e:
+                            cycle_klines[market_key] = None
+                            if self.db:
+                                self.db.log_risk_event(
+                                    event_type="signal_scan_error", severity="warn",
+                                    details=(f"market_data {symbol} {tf}: "
+                                             f"{type(e).__name__} {e}"),
+                                    action_taken="skip symbol/tf for this scan")
+                    cached_df = cycle_klines[market_key]
+                    if cached_df is None:
+                        continue
                     try:
-                        raw = fetch_klines(symbol, tf, self.kline_limit)
-                        df = _completed(raw, now)
+                        df = cached_df.copy()
                         if len(df) < 210:
                             continue
                         df = df[["open", "high", "low", "close", "volume"]].copy()
