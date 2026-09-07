@@ -85,8 +85,16 @@ def _broker_state_cached(service: TradingService, max_age: float = _BROKER_STATE
 # 2) 保护单（SL/TP 触发价）缓存：挂单后价格基本不变，30 秒刷新足够；
 #    旧逻辑每个持仓一次 openAlgoOrders 签名请求，是 /api/status 卡顿的主因之一
 _ALGOS_TTL = 30.0
+# 交易所暂时不可用时不要跟随页面轮询频率反复创建线程。这里仅限制展示层查询，
+# 不影响订单镜像、安全监控和交易执行链路的恢复节奏。
+_ALGOS_FAILURE_RETRY = 15.0
 _ALGOS_LOCK = threading.RLock()
-_ALGOS_CACHE: dict[str, Any] = {"ts": 0.0, "by_symbol": {}, "refreshing": False}
+_ALGOS_CACHE: dict[str, Any] = {
+    "ts": 0.0,
+    "attempt_ts": 0.0,
+    "by_symbol": {},
+    "refreshing": False,
+}
 
 # 3) 首轮未跑循环时的通道状态兜底缓存。
 #    决策循环首轮要跑 LLM + 特征工程，可能好几分钟才有结果；这段时间里页面
@@ -139,8 +147,16 @@ def _channel_fallback(service: TradingService) -> dict[str, Any]:
 
 def _fetch_algo_prices(service: TradingService) -> None:
     by_symbol: dict[str, dict[str, float]] = {}
+    with _ALGOS_LOCK:
+        # 预热线程也会直接调用本函数，因此尝试时间必须在这里统一登记。
+        _ALGOS_CACHE["attempt_ts"] = time.monotonic()
     try:
-        for algo in service.broker._open_algos():
+        algos = service.broker._open_algos()
+        # None 表示查询失败、远端状态未知；不能把它当作“当前无保护单”，否则会
+        # 清空页面上的最后有效止盈止损，也不能直接遍历导致后台线程异常。
+        if algos is None:
+            return
+        for algo in algos:
             otype = str(algo.get("orderType") or "")
             if otype in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
                 try:
@@ -151,6 +167,9 @@ def _fetch_algo_prices(service: TradingService) -> None:
         with _ALGOS_LOCK:
             _ALGOS_CACHE["ts"] = time.monotonic()
             _ALGOS_CACHE["by_symbol"] = by_symbol
+    except Exception:
+        # broker 已负责记录交易所错误；展示层保留旧缓存并静默等待下一次重试。
+        return
     finally:
         with _ALGOS_LOCK:
             _ALGOS_CACHE["refreshing"] = False
@@ -166,16 +185,23 @@ def _algo_prices_by_symbol(service: TradingService) -> dict[str, dict[str, float
         return {}
     now = time.monotonic()
     with _ALGOS_LOCK:
-        if _ALGOS_CACHE["ts"] <= 0:
+        cached = dict(_ALGOS_CACHE["by_symbol"])
+        last_success = float(_ALGOS_CACHE["ts"] or 0.0)
+        last_attempt = float(_ALGOS_CACHE["attempt_ts"] or 0.0)
+        if last_success > 0 and now - last_success < _ALGOS_TTL:
+            return cached
+        if _ALGOS_CACHE["refreshing"] or (
+            last_attempt > 0 and now - last_attempt < _ALGOS_FAILURE_RETRY
+        ):
+            return cached
+
+        _ALGOS_CACHE["refreshing"] = True
+        _ALGOS_CACHE["attempt_ts"] = now
+        if last_success <= 0 and last_attempt <= 0:
             # 冷启动：这一轮同步穿透，之后全部后台刷新
-            _ALGOS_CACHE["refreshing"] = True
             _fetch_algo_prices(service)
             return dict(_ALGOS_CACHE["by_symbol"])
-        cached = dict(_ALGOS_CACHE["by_symbol"])
-        fresh = now - _ALGOS_CACHE["ts"] < _ALGOS_TTL
-        if not fresh and not _ALGOS_CACHE["refreshing"]:
-            _ALGOS_CACHE["refreshing"] = True
-            threading.Thread(target=_fetch_algo_prices, args=(service,), daemon=True).start()
+        threading.Thread(target=_fetch_algo_prices, args=(service,), daemon=True).start()
         return cached
 
 

@@ -112,7 +112,15 @@ _set_env_mode(env2, "testnet")
 check("缺失时追加写入", "EXECUTION_MODE=testnet" in env2.read_text(encoding="utf-8"))
 
 print("\n[4] 事件中文化映射完整")
-from dashboard.app import _event_type_cn, _ago, _mode_cn, _price  # noqa: E402
+from dashboard.app import (  # noqa: E402
+    _ALGOS_CACHE,
+    _ALGOS_LOCK,
+    _ago,
+    _algo_prices_by_symbol,
+    _event_type_cn,
+    _mode_cn,
+    _price,
+)
 import re  # noqa: E402
 
 types: set[str] = set()
@@ -128,6 +136,26 @@ missing = sorted(t for t in types if _event_type_cn(t) == t)
 check("全部事件类型都有中文映射", not missing, f"缺映射：{missing}")
 
 check("_ago 中文化", "前" in _ago(datetime.now(timezone.utc).isoformat()))
+
+print("\n[4b] 保护单展示缓存：查询失败保留旧值并进入冷却")
+algo_service = MagicMock()
+algo_service.broker._open_algos.return_value = None
+with _ALGOS_LOCK:
+    _ALGOS_CACHE.update({
+        "ts": 0.0,
+        "attempt_ts": 0.0,
+        "by_symbol": {"BTCUSDT": {"STOP_MARKET": 60000.0}},
+        "refreshing": False,
+    })
+first_algos = _algo_prices_by_symbol(algo_service)
+second_algos = _algo_prices_by_symbol(algo_service)
+check("查询失败不清空最后有效保护价", first_algos == second_algos == {
+    "BTCUSDT": {"STOP_MARKET": 60000.0}
+}, str(first_algos))
+check("失败冷却期内不重复查询", algo_service.broker._open_algos.call_count == 1,
+      str(algo_service.broker._open_algos.call_count))
+with _ALGOS_LOCK:
+    _ALGOS_CACHE.update({"ts": 0.0, "attempt_ts": 0.0, "by_symbol": {}, "refreshing": False})
 check("live 模式标注", _mode_cn("live") == "实盘")
 check("价格保留五位有效数字", _price(744.53325581) == "744.53")
 check("价格删除无意义尾零", _price("38.00000000") == "38")
