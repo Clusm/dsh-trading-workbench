@@ -764,8 +764,10 @@ class BinanceFuturesBroker:
             self._signed("POST", "/fapi/v1/marginType", {"symbol": symbol, "marginType": margin_mode})
         except Exception:
             pass
+        leverage_ready = False
         try:
             self._signed("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": int(intent.leverage)})
+            leverage_ready = True
         except Exception as e:
             # 逐币种杠杆上限不同（BTC 125x，山寨常为 20x/50x），AI 的 25x 强信心档会撞上限：
             # 降档到交易所实际允许的最大杠杆重试；仍失败则放弃本单，避免以错误杠杆静默成交。
@@ -775,6 +777,7 @@ class BinanceFuturesBroker:
                 target = min(target, max_lev)
                 try:
                     self._signed("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": target})
+                    leverage_ready = True
                     if self.db:
                         self.db.log_risk_event(
                             event_type="futures_leverage_downgraded", severity="warn",
@@ -794,6 +797,8 @@ class BinanceFuturesBroker:
                         details=f"{symbol}: 设置杠杆失败且无法查询上限: {type(e).__name__} {e}",
                         action_taken="skip order")
                 return None
+        if leverage_ready and self.db:
+            self.db.resolve_risk_incidents_by_type("futures_leverage_error")
         total_qty = float(intent.qty)
         side = "BUY" if intent.side == "LONG" else "SELL"
 
@@ -1487,8 +1492,19 @@ class BinanceFuturesBroker:
     def sync_protections(self) -> None:
         """快循环：逐仓位核对 SL/TP Algo 单，缺失/数量不一致时自动重挂。"""
         try:
-            for p in self.positions():
-                self._resync_protection(str(p["symbol"]))
+            positions = self.positions()
+            all_ok = True
+            for position in positions:
+                # 即使前一个仓位失败，也必须继续核对后续仓位，不能被 all() 短路。
+                current_ok = self._resync_protection(str(position["symbol"]))
+                all_ok = current_ok and all_ok
+            if positions and all_ok and self.db:
+                self.db.resolve_risk_incidents_by_type(
+                    "futures_sync_error",
+                    "futures_sl_failed",
+                    "futures_tp_failed",
+                    "futures_protection_fallback",
+                )
         except Exception as e:
             if self.db:
                 self.db.log_risk_event(event_type="futures_sync_error", severity="warn",

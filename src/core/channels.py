@@ -151,20 +151,26 @@ class ChannelManager:
         except Exception:
             return None
 
-    def _reconcile_flat_session(self, session_equity: float | None) -> bool:
-        """空仓时修复通道合计与交易所会话权益之间的小幅历史残差。
+    def _reconcile_session_equity(self, session_equity: float | None) -> bool:
+        """修复通道合计与交易所会话权益之间的小幅历史残差。
 
         修复只移动两个虚拟通道的日初基准，不修改总资金、风险参数或成交记录；
-        当日各通道已经记录的盈亏保持不变。超过会话权益 10% 的差异不自动吸收，
-        避免把充值、测试网重置等大额外部变化误认成交易收益。
+        当日各通道已经记录的盈亏保持不变。有持仓时先从交易所权益扣除全部未实现
+        盈亏，再与通道已实现口径比较，因此不会把浮盈写进基准。超过会话权益 10%
+        的差异不自动吸收，避免把充值、测试网重置等大额外部变化误认成交易收益。
         """
         try:
             total = float(session_equity or 0.0)
             if total <= 0 or not hasattr(self.broker, "positions"):
                 return False
             positions = self.broker.positions()
-            if positions is None or len(positions) != 0:
+            if positions is None:
                 return False
+            unrealized = sum(
+                float(p.get("unRealizedProfit") or p.get("upnl") or 0.0)
+                for p in positions
+            )
+            realized_total = total - unrealized
         except Exception:
             return False
 
@@ -172,7 +178,7 @@ class ChannelManager:
         pnl_a = self._channel_pnl("ai")
         start_s = self._channel_day_start("strategy", total)
         start_a = self._channel_day_start("ai", total)
-        residual = total - (start_s + start_a + pnl_s + pnl_a)
+        residual = realized_total - (start_s + start_a + pnl_s + pnl_a)
         if abs(residual) < 0.01:
             return False
 
@@ -200,7 +206,7 @@ class ChannelManager:
         self.db.log_risk_event(
             event_type="channel_equity_reconciled",
             severity="info",
-            details=f"空仓对账修复通道历史残差 {residual:.4f} U",
+            details=f"交易所权益对账修复通道历史残差 {residual:.4f} U",
             action_taken="按既有通道权重调整日初虚拟基准",
         )
         return True
@@ -357,7 +363,7 @@ class ChannelManager:
                      read_only: bool) -> dict[str, Any]:
         prices = dict(prices or {})
         rebalanced = False if read_only else self._rebalance_if_needed(prices, session_equity)
-        reconciled = False if read_only else self._reconcile_flat_session(session_equity)
+        reconciled = False if read_only else self._reconcile_session_equity(session_equity)
         status: dict[str, Any] = {
             "date": utc_today(),
             "rebalanced": rebalanced,

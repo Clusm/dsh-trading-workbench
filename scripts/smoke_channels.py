@@ -21,6 +21,18 @@ class FlatBroker:
         return []
 
 
+class ActiveBroker:
+    """带一笔 AI 浮盈仓位，用于验证浮盈不会被固化进通道基准。"""
+
+    @staticmethod
+    def positions() -> list[dict]:
+        return [{"symbol": "BTCUSDT", "unRealizedProfit": 5.0}]
+
+    @staticmethod
+    def _load_ledger() -> dict:
+        return {"positions": {"BTCUSDT": {"source": "ai"}}}
+
+
 ok = fail = 0
 
 
@@ -38,7 +50,7 @@ tmp = Path(tempfile.mkdtemp())
 db = AuditDatabase(tmp / "audit.sqlite")
 state_file = tmp / "channel_state.json"
 
-print("\n[1] 空仓小幅残差自动修复")
+print("\n[1] 小幅残差自动修复")
 state_file.write_text(json.dumps({
     "date": utc_today(),
     "strategy_day_start_equity": 300.0,
@@ -59,6 +71,22 @@ events = db.fetch_all(
 )
 check("重复同步不重复调整或记事件",
       result_again["reconciled"] is False and len(events) == 1, str(len(events)))
+
+print("\n[1b] 持仓浮盈不写入日初基准")
+active_state = tmp / "channel_state_active.json"
+active_state.write_text(json.dumps({
+    "date": utc_today(),
+    "strategy_day_start_equity": 300.0,
+    "ai_day_start_equity": 200.0,
+    "ai_halted": False,
+    "pnl_reset_at": None,
+}), encoding="utf-8")
+active_manager = ChannelManager(active_state, ActiveBroker(), db)
+active = active_manager.sync(session_equity=525.0)
+active_total = active["strategy"]["equity"] + active["ai"]["equity"]
+check("持仓时通道合计仍对齐", abs(active_total - 525.0) < 1e-8, str(active_total))
+check("5U 浮盈只进入 AI 实时权益", abs(active["ai"]["day_start_equity"] - 208.0) < 1e-8
+      and abs(active["ai"]["equity"] - 213.0) < 1e-8, str(active["ai"]))
 
 print("\n[2] 跨日以交易所真实权益为总锚点")
 state_file_2 = tmp / "channel_state_rollover.json"
