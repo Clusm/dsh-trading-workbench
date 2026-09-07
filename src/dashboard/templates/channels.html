@@ -76,6 +76,25 @@
   </div>
 </div>
 
+<h2 style="margin-top:22px">信号扫描状态</h2>
+<div class="card">
+  {% set scan_errors = scanner.get('error_count', 0) or 0 %}
+  {% set scan_mode = scanner.get('mode') or scanner.get('configured_mode') %}
+  <div class="row" style="justify-content:space-between; align-items:flex-start">
+    <div>
+      <strong>{{ '已验证品种模式' if scan_mode == 'validated_card_symbols' else '通用品种轮转模式' }}</strong>
+      <div class="muted" style="margin-top:4px">本轮无 ticket 只表示最新已完成 K 线未满足策略条件，不等于扫描异常。</div>
+    </div>
+    <span class="badge {{ 'err' if scan_errors else 'ok' }}">{{ scan_errors ~ ' 项异常' if scan_errors else '扫描正常' }}</span>
+  </div>
+  <div class="grid cols-4" style="margin-top:14px">
+    <div><div class="muted">最近扫描</div><strong>{{ (scanner.get('at') or '尚未运行')[:19].replace('T',' ') }}</strong></div>
+    <div><div class="muted">扫描品种</div><strong>{{ (scanner.get('symbols') or [])|join(', ') or '—' }}</strong></div>
+    <div><div class="muted">行情组合</div><strong class="num">{{ scanner.get('successful_pairs', 0) }} / {{ scanner.get('market_pairs', 0) }}</strong></div>
+    <div><div class="muted">本轮 Ticket</div><strong class="num">{{ scanner.get('tickets', 0) }}</strong></div>
+  </div>
+</div>
+
 <h2 style="margin-top:22px">最近策略信号</h2>
 <div class="card">
 {% if signals %}

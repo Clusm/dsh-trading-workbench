@@ -988,6 +988,24 @@ def _baseline_just_reanchored(service: TradingService) -> bool:
         return False
 
 
+def _signal_scanner_status(service: TradingService) -> dict[str, Any]:
+    """读取扫描器最近一轮摘要；页面只读本地小文件，不额外请求交易所。"""
+    try:
+        cfg = service.settings.raw_settings.get("signal_scanner", {}) or {}
+        path = service.settings.project_root / str(
+            cfg.get("signal_state_file", "data/signal_scanner_state.json")
+        )
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        status = dict(data.get("last_scan") or {})
+        status["configured_mode"] = (
+            "universal_rotation" if bool(cfg.get("universal_cards", False))
+            else "validated_card_symbols"
+        )
+        return status
+    except Exception:
+        return {}
+
+
 def _maybe_snapshot(service: TradingService, equity: float,
                     unrealized_pnl: float, positions: list[dict[str, Any]]) -> None:
     global _last_snapshot_mono, _last_bad_snapshot_log_mono
@@ -1414,6 +1432,7 @@ def create_app(service: TradingService) -> FastAPI:
             "latest": latest,
             "signals": signals,
             "tickets": tickets,
+            "scanner": _signal_scanner_status(service),
             "console_token": _write_token,
         })
 

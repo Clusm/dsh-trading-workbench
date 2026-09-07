@@ -99,6 +99,11 @@ class MarketUniverse:
                 self.db.log_risk_event(event_type="market_universe_price_fail", severity="warn",
                                        details=f"{type(e).__name__}: {e}", action_taken="skip_short_anomaly")
             return []
+        # 动态异动只能在配置的加密合约白名单内产生。公开价格接口还会返回
+        # 黄金、白银、美股等代币化合约，若不先过滤，它们会绕过核心池进入策略扫描。
+        allowed = set(self.core_symbols)
+        if allowed:
+            prices = {symbol: price for symbol, price in prices.items() if symbol in allowed}
         prev = self.state.get("prev_prices") or {}
         resolver = getattr(self.db, "resolve_risk_incidents_by_type", None)
         if callable(resolver):
@@ -126,8 +131,12 @@ class MarketUniverse:
         resolver = getattr(self.db, "resolve_risk_incidents_by_type", None)
         if callable(resolver):
             resolver("market_universe_full_scan_fail")
+        allowed = set(self.core_symbols)
         sorted_by_vol = sorted(
-            [t for t in tickers if str(t.get("symbol", "")).endswith("USDT")],
+            [
+                t for t in tickers
+                if str(t.get("symbol", "")).upper() in allowed
+            ],
             key=lambda x: float(x.get("quoteVolume") or 0.0),
             reverse=True,
         )
@@ -166,8 +175,16 @@ class MarketUniverse:
         now = now or _utcnow()
         core = [s for s in self.core_symbols[:self.quick_core_top] if s]
         anomalies = self.detect_short_anomalies(now)
-        pool = core + [s for s in anomalies if s not in core]
-        return pool[: self.quick_core_top + self.quick_anomaly_top]
+        # 前部保留高优先级核心币和短时异动，后部补齐最近全扫结果及完整白名单。
+        # SignalScanner 自己按游标取窗口；这里若只返回前 3~5 个币，轮转永远看不到其余币。
+        candidates = core + anomalies + list(self.state.get("full_pool") or []) + self.core_symbols
+        pool: list[str] = []
+        allowed = set(self.core_symbols)
+        for symbol in candidates:
+            symbol = str(symbol).upper()
+            if symbol and symbol in allowed and symbol not in pool:
+                pool.append(symbol)
+        return pool
 
     def get_scan_pool(self, now: datetime | None = None) -> list[str]:
         now = now or _utcnow()

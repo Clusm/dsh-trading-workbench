@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -115,6 +116,18 @@ def _completed(df: pd.DataFrame, now: datetime) -> pd.DataFrame:
     return df.copy()
 
 
+def _is_market_transport_outage(exc: Exception) -> bool:
+    """判断是否为会影响整轮请求的基础设施故障，而非单一交易对参数错误。"""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {418, 429} or exc.response.status_code >= 500
+    text = str(exc).lower()
+    return any(marker in text for marker in (
+        "公开行情冷却", "rate limit", "temporary ip ban", "getaddrinfo failed",
+    ))
+
+
 class SignalScanner:
     """加载外部 strategy_lab 的 final 策略卡并生成有时效的 SignalTicket。
 
@@ -180,14 +193,35 @@ class SignalScanner:
     def _load_state(self) -> dict[str, Any]:
         if self.state_file.exists():
             try:
-                return json.loads(self.state_file.read_text(encoding="utf-8"))
+                state = json.loads(self.state_file.read_text(encoding="utf-8"))
+                state.setdefault("seen", {})
+                state.setdefault("scan_cursor", 0)
+                return state
             except Exception:
                 pass
-        return {"seen": {}}
+        return {"seen": {}, "scan_cursor": 0}
 
     def _save_state(self, state: dict[str, Any]) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        self.state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = self.state_file.with_suffix(f"{self.state_file.suffix}.tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, self.state_file)
+
+    def _select_cycle_symbols(self, scan_symbols: list[str] | None,
+                              state: dict[str, Any]) -> list[str]:
+        """从通用扫描池循环取本轮窗口，避免固定 ``[:N]`` 永久饿死尾部标的。"""
+        pool: list[str] = []
+        for raw in scan_symbols or []:
+            symbol = str(raw).upper().strip()
+            if symbol.endswith("USDT") and symbol not in pool:
+                pool.append(symbol)
+        if not self.universal_cards or not pool:
+            return []
+        count = min(len(pool), max(1, self.max_scan_symbols_per_cycle))
+        cursor = int(state.get("scan_cursor") or 0) % len(pool)
+        selected = [pool[(cursor + offset) % len(pool)] for offset in range(count)]
+        state["scan_cursor"] = (cursor + count) % len(pool)
+        return selected
 
     @staticmethod
     def _card_allows(card: dict[str, Any], side: str) -> bool:
@@ -206,11 +240,23 @@ class SignalScanner:
         seen = dict(state.get("seen") or {})
         tickets: list[dict[str, Any]] = []
         cards = load_cards(self.knowledge_dir)
+        cycle_symbols = self._select_cycle_symbols(scan_symbols, state)
+        allowed_symbols = {
+            str(symbol).upper().strip() for symbol in (scan_symbols or []) if symbol
+        }
+        scanned_symbols: list[str] = []
         # 多张策略卡经常复用同一 symbol/timeframe。成功结果和失败结果都在本轮
         # 记忆，避免一次 DNS 故障被“策略卡×交易对×周期”放大为数百次请求和告警。
         cycle_klines: dict[tuple[str, str], pd.DataFrame | None] = {}
         scan_had_error = False
         scan_had_success = False
+        scan_errors: list[str] = []
+        transport_outage: str | None = None
+
+        # 旧实现只在“本轮刚触发的 ticket”进入执行器时检查过期，导致从未再次
+        # 发射的 open ticket 永久滞留。扫描开始时统一收口历史过期票据。
+        expire = getattr(self.db, "expire_open_signal_tickets", None)
+        expired_tickets = int(expire(now.isoformat())) if callable(expire) else 0
 
         for card in cards:
             if not card.get("indicatorized"):
@@ -224,34 +270,45 @@ class SignalScanner:
                         action_taken="skip card")
                 continue
 
-            if self.universal_cards and scan_symbols:
-                symbols_to_scan = list(scan_symbols)[:self.max_scan_symbols_per_cycle]
+            if self.universal_cards and cycle_symbols:
+                symbols_to_scan = cycle_symbols
             else:
-                symbols_to_scan = list(card.get("symbols", []))
-                if scan_symbols:
-                    for _s in scan_symbols:
-                        if _s not in symbols_to_scan:
-                            symbols_to_scan.append(_s)
+                # 非通用模式严格执行策略卡的验证范围；scan_symbols 只充当交易品种
+                # 白名单，不能再追加到每张卡，否则 universal_cards 开关形同虚设。
+                symbols_to_scan = []
+                for raw in card.get("symbols", []):
+                    symbol = str(raw).upper().strip()
+                    if not symbol.endswith("USDT"):
+                        continue
+                    if allowed_symbols and symbol not in allowed_symbols:
+                        continue
+                    if symbol not in symbols_to_scan:
+                        symbols_to_scan.append(symbol)
             for symbol in symbols_to_scan:
+                if symbol not in scanned_symbols:
+                    scanned_symbols.append(symbol)
                 for tf in card.get("timeframes", []):
                     if tf not in TF_MINUTES:
                         continue
                     market_key = (symbol, tf)
                     if market_key not in cycle_klines:
-                        try:
-                            cycle_klines[market_key] = _completed(
-                                fetch_klines(symbol, tf, self.kline_limit), now
-                            )
-                            scan_had_success = True
-                        except Exception as e:
-                            scan_had_error = True
+                        if transport_outage is not None:
                             cycle_klines[market_key] = None
-                            if self.db:
-                                self.db.log_risk_event(
-                                    event_type="signal_scan_error", severity="warn",
-                                    details=(f"market_data {symbol} {tf}: "
-                                             f"{type(e).__name__} {e}"),
-                                    action_taken="skip symbol/tf for this scan")
+                        else:
+                            try:
+                                cycle_klines[market_key] = _completed(
+                                    fetch_klines(symbol, tf, self.kline_limit), now
+                                )
+                                scan_had_success = True
+                            except Exception as e:
+                                scan_had_error = True
+                                cycle_klines[market_key] = None
+                                detail = f"market_data {symbol} {tf}: {type(e).__name__} {e}"
+                                scan_errors.append(detail)
+                                if _is_market_transport_outage(e):
+                                    # DNS、TLS、限流冷却等故障会影响整轮。首次失败后立即
+                                    # 短路剩余 K 线请求，避免 8 组请求把慢循环拖住 1~2 分钟。
+                                    transport_outage = detail
                     cached_df = cycle_klines[market_key]
                     if cached_df is None:
                         continue
@@ -321,17 +378,16 @@ class SignalScanner:
                                     raw=ticket,
                                 )
                             seen[dedup_key] = {"signal_id": signal_id, "ts": utc_now().isoformat()}
+                            state["seen"] = seen
                             self._save_state(state)
                         else:
                             seen[dedup_key] = {"signal_id": signal_id, "ts": utc_now().isoformat()}
                         tickets.append(ticket)
                     except Exception as e:
                         scan_had_error = True
-                        if self.db:
-                            self.db.log_risk_event(
-                                event_type="signal_scan_error", severity="warn",
-                                details=f"{card.get('id')} {symbol} {tf}: {type(e).__name__} {e}",
-                                action_taken="skip card/symbol/tf")
+                        scan_errors.append(
+                            f"{card.get('id')} {symbol} {tf}: {type(e).__name__} {e}"
+                        )
 
         try:
             cutoff = (utc_now() - timedelta(days=14)).isoformat()
@@ -343,6 +399,17 @@ class SignalScanner:
             state["seen"] = cleaned
         except Exception:
             state["seen"] = seen
+        state["last_scan"] = {
+            "at": now.isoformat(),
+            "mode": "universal_rotation" if self.universal_cards else "validated_card_symbols",
+            "symbols": scanned_symbols,
+            "market_pairs": len(cycle_klines),
+            "successful_pairs": sum(1 for frame in cycle_klines.values() if frame is not None),
+            "failed_pairs": sum(1 for frame in cycle_klines.values() if frame is None),
+            "error_count": len(scan_errors),
+            "tickets": len(tickets),
+            "expired_tickets": expired_tickets,
+        }
         self._save_state(state)
         if self._features_mod is not None and hasattr(self._features_mod, "clear_feature_cache"):
             self._features_mod.clear_feature_cache()
@@ -351,6 +418,15 @@ class SignalScanner:
         resolver = getattr(self.db, "resolve_risk_incidents_by_type", None)
         if scan_had_success and not scan_had_error and callable(resolver):
             resolver("signal_scan_error")
+        elif scan_errors and self.db:
+            preview = " | ".join(scan_errors[:4])
+            if len(scan_errors) > 4:
+                preview += f" | 另有 {len(scan_errors) - 4} 项"
+            self.db.log_risk_event(
+                event_type="signal_scan_error", severity="warn",
+                details=f"本轮扫描异常 {len(scan_errors)} 项: {preview}",
+                action_taken="仅跳过异常 symbol/timeframe；本轮合并为一条告警",
+            )
         return tickets
 
     def _make_ticket(self, card: dict[str, Any], symbol: str, tf: str, side: str,

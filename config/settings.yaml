@@ -136,10 +136,11 @@ signal_scanner:
   strategy_risk_per_trade: 0.02
   # 去重状态文件（记录已发射的 signal id，防止同一根 K 线重复触发）
   signal_state_file: data/signal_scanner_state.json
-  # 是否把 final 策略卡应用到动态扫描池（核心+异动）
-  universal_cards: true
-  # 单轮最多扫描的 symbol 数，防止全量池+全策略卡一起扫导致循环卡死
-  max_scan_symbols_per_cycle: 2
+  # false=只在策略卡已经回测验证的 symbols 上生成可执行信号。
+  # 通用跨品种模式保留给后续影子验证，不允许未经验证直接进入生产执行。
+  universal_cards: false
+  # 通用模式启用时按持久化游标轮转；5 个/轮可在 40 分钟内覆盖 20 币白名单。
+  max_scan_symbols_per_cycle: 5
 
 decision_cycle:
   interval_minutes: 10

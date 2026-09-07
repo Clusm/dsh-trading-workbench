@@ -1293,6 +1293,18 @@ class AuditDatabase:
             (status, utc_now(), ticket_id),
         )
 
+    def expire_open_signal_tickets(self, now_iso: str | None = None) -> int:
+        """批量关闭已过有效期的策略票据，避免未再次发射的 ticket 永久保持 open。"""
+        now = str(now_iso or utc_now())
+        with self.lock:
+            cursor = self.conn.execute(
+                """UPDATE signal_tickets SET status='expired', updated_at=?
+                   WHERE status='open' AND expires_at < ?""",
+                (utc_now(), now),
+            )
+            self.conn.commit()
+        return int(cursor.rowcount)
+
     def update_order(self, *, client_order_id: str, status: str,
                      price: float | None = None) -> None:
         self._insert(
