@@ -27,6 +27,10 @@ def main() -> int:
     env = os.environ.copy()
     env["EXECUTION_MODE"] = "paper"
     env["MTA_NO_PROXY"] = "1"
+    # GitHub Windows runner 默认可能是 CP1252；冒烟脚本包含中文测试名，
+    # 强制 UTF-8，避免仅因控制台编码而把通过的逻辑误报为失败。
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     # 默认回归不得依赖本机凭据；测试服务全部指向临时 project_root。
     for name in tuple(env):
         upper = name.upper()
