@@ -110,6 +110,11 @@ env2 = tmp / ".env2"
 env2.write_text("OPENCODE_API_KEY=abc\n", encoding="utf-8")
 _set_env_mode(env2, "testnet")
 check("缺失时追加写入", "EXECUTION_MODE=testnet" in env2.read_text(encoding="utf-8"))
+from start_web_detached import build_env  # noqa: E402
+proxy_env = build_env("http://127.0.0.1:10808")
+check("代理启动显式覆盖直连开关", proxy_env.get("MTA_NO_PROXY") == "0")
+direct_env = build_env(None)
+check("直连启动显式设置直连开关", direct_env.get("MTA_NO_PROXY") == "1")
 
 print("\n[4] 事件中文化映射完整")
 from dashboard.app import (  # noqa: E402
@@ -119,6 +124,7 @@ from dashboard.app import (  # noqa: E402
     _algo_prices_by_symbol,
     _channel_state_for_display,
     _event_type_cn,
+    _freshness_health_reasons,
     _mode_cn,
     _price,
 )
@@ -176,6 +182,24 @@ check("价格删除无意义尾零", _price("38.00000000") == "38")
 check("极小价格不使用科学计数法", _price(0.000012345678) == "0.000012346")
 check("高价价格按五位有效数字舍入", _price(118234.5) == "118230")
 
+print("\n[4c] 健康检查识别循环和保护对账过期")
+freshness_cfg = {
+    "startup_grace_seconds": 120,
+    "fast_cycle_stale_seconds": 120,
+    "protection_reconcile_stale_seconds": 120,
+}
+check("新鲜运行无时效告警", not _freshness_health_reasons(
+    {"started_at": 900, "last_fast_cycle_at": 990, "last_fast_cycle_error": None},
+    {"enabled": True, "read_enabled": True, "last_reconcile_at": 995,
+     "last_error": None}, freshness_cfg, now=1000))
+stale_reasons = _freshness_health_reasons(
+    {"started_at": 1, "last_fast_cycle_at": 700, "last_fast_cycle_error": None},
+    {"enabled": True, "read_enabled": True, "last_reconcile_at": 700,
+     "last_error": None}, freshness_cfg, now=1000)
+check("快循环过期被识别", "fast_cycle_stale" in stale_reasons, str(stale_reasons))
+check("保护对账过期被识别", "protection_reconcile_stale" in stale_reasons,
+      str(stale_reasons))
+
 print("\n[5] 事件页路由（TestClient）")
 from fastapi.testclient import TestClient  # noqa: E402
 from core.config_loader import load_settings  # noqa: E402
@@ -200,6 +224,7 @@ check("首页 200", r_home.status_code == 200)
 check("首页含模式切换器", "mode-select" in r_home.text)
 check("paper 模式显示重置按钮", "重置资金" in r_home.text)
 check("首页不含旧文案", "亏完重启" not in r_home.text)
+check("非法Host被拒绝", client.get("/", headers={"host": "attacker.example"}).status_code == 400)
 db2 = real_svc.db
 db2.log_risk_event(event_type="manual_capital_reset", severity="warn",
                    details="手动重置：平掉全部仓位，资金回到 500U", action_taken="close_all + reset")

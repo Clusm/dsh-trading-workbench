@@ -211,6 +211,27 @@ else:
 print("\n[11] 白名单完整")
 check("四种合法模式", set(VALID_MODES) == {"paper", "demo", "testnet", "live"}, str(VALID_MODES))
 
+print("\n[11b] 非 paper 缺少凭证时拒绝静默降级")
+execution_cfg = settings.raw_settings.get("execution", {})
+key_name = execution_cfg.get("api_key_env_map", {}).get("demo") or "BINANCE_DEMO_API_KEY"
+secret_name = execution_cfg.get("api_secret_env_map", {}).get("demo") or "BINANCE_DEMO_API_SECRET"
+saved_env = {name: os.environ.get(name) for name in ("EXECUTION_MODE", key_name, secret_name)}
+os.environ["EXECUTION_MODE"] = "demo"
+os.environ.pop(key_name, None)
+os.environ.pop(secret_name, None)
+dbf3 = new_db(tmp, "t11b")
+try:
+    create_broker(settings, dbf3)
+    check("缺凭证拒绝启动", False, "不应回退 paper")
+except RuntimeError as e:
+    check("缺凭证拒绝启动", "拒绝静默回退" in str(e), str(e))
+check("记录 critical 凭证事件", len(events(dbf3, "broker_credentials_missing")) == 1)
+for name, value in saved_env.items():
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
+
 print("\n[12] 快照守卫：基线重锚造成的跳变必须放行")
 from unittest.mock import MagicMock  # noqa: E402
 

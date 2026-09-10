@@ -68,8 +68,15 @@ def create_broker(settings: Settings, db: AuditDatabase):
                               details=f"execution broker={mode} base_url={broker.base_url}",
                               action_taken="connected")
             return broker
-        db.log_risk_event(event_type="broker_fallback_paper", severity="warn",
-                          details=f"EXECUTION_MODE={mode} 但缺少 {key_env}/{secret_env}，回退纸面执行。"
-                                  f"纸面账本与 {mode} 账户相互独立，资金基线已按执行模式隔离，不会互相污染",
-                          action_taken="paper")
-    return _paper_broker(settings)
+        if bool(cfg.get("allow_paper_fallback", False)):
+            db.log_risk_event(event_type="broker_fallback_paper", severity="warn",
+                              details=f"EXECUTION_MODE={mode} 但缺少 {key_env}/{secret_env}；"
+                                      "配置显式允许回退纸面执行",
+                              action_taken="paper")
+            return _paper_broker(settings)
+        db.log_risk_event(event_type="broker_credentials_missing", severity="critical",
+                          details=f"EXECUTION_MODE={mode} 但缺少 {key_env}/{secret_env}，拒绝启动",
+                          action_taken="refuse to start")
+        raise RuntimeError(
+            f"EXECUTION_MODE={mode} 缺少 {key_env}/{secret_env}；已拒绝静默回退 paper。")
+    raise RuntimeError(f"无法创建 execution broker: {mode}")

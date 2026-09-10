@@ -47,6 +47,9 @@ def main() -> None:
     parser.add_argument("--no-autostart", action="store_true", help="不自动运行决策循环")
     args = parser.parse_args()
 
+    if args.host.strip().lower() not in {"127.0.0.1", "localhost", "::1"}:
+        parser.error("控制台当前没有用户认证，只允许绑定到本机回环地址")
+
     settings = load_settings(PROJECT_ROOT)
     service = TradingService(settings)
     if not args.no_autostart:

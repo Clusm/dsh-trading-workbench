@@ -35,17 +35,30 @@ class AccountRiskGuard:
             raise ValueError(f"未知账户风险守卫模式: {mode!r}")
         self.mode = normalized_mode
         self._lock = threading.RLock()
+        self._recovery_required = False
+        self._load_error: str | None = None
         self.state = self._load()
 
     def _load(self) -> dict[str, Any]:
+        if not self.state_file.exists():
+            return {}
         try:
-            if self.state_file.exists():
-                data = json.loads(self.state_file.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    return data
-        except Exception:
-            pass
+            data = json.loads(self.state_file.read_text(encoding="utf-8-sig"))
+            if not isinstance(data, dict) or not data:
+                raise ValueError("账户风险状态为空或格式非法")
+            return data
+        except Exception as exc:
+            self._recovery_required = True
+            self._load_error = f"{type(exc).__name__}: {exc}"
         return {}
+
+    @property
+    def recovery_required(self) -> bool:
+        return self._recovery_required
+
+    @property
+    def load_error(self) -> str | None:
+        return self._load_error
 
     def _save(self) -> None:
         tmp = self.state_file.with_name(
@@ -60,6 +73,18 @@ class AccountRiskGuard:
         日损失会在 UTC 日切重新计量；从会话峰值的回撤仅在资本锚点变更时重置。
         """
         with self._lock:
+            if self._recovery_required:
+                return {
+                    "allow_new": False,
+                    "would_allow_new": False,
+                    "reason": "账户风险状态文件损坏，需人工核验权益后恢复",
+                    "daily_loss_ratio": None,
+                    "drawdown_ratio": None,
+                    "latched": True,
+                    "mode": self.mode,
+                    "enforced": True,
+                    "recovery_required": True,
+                }
             day = _utc_day()
             anchor = str(anchor_id or "unknown")
             eq = max(0.0, float(equity or 0.0))
@@ -97,6 +122,7 @@ class AccountRiskGuard:
                     "latched": False,
                     "mode": self.mode,
                     "enforced": True,
+                    "recovery_required": False,
                 }
 
             day_start = float(self.state.get("day_start_equity") or 0.0)
@@ -147,4 +173,32 @@ class AccountRiskGuard:
                 "enforced": enforced,
                 "day_start_equity": day_start,
                 "peak_equity": peak,
+                "recovery_required": False,
             }
+
+    def recover_from_verified_equity(self, equity: float, *, anchor_id: str) -> None:
+        """用人工核验过的权益重建水位；绝不由普通启动或同步流程自动调用。"""
+        eq = float(equity)
+        if eq <= 0 or not str(anchor_id or "").strip():
+            raise ValueError("恢复账户风险状态需要正权益和明确资金锚点")
+        with self._lock:
+            previous = self.state
+            candidate = {
+                "version": 1,
+                "anchor_id": str(anchor_id),
+                "date": _utc_day(),
+                "day_start_equity": eq,
+                "peak_equity": eq,
+                "daily_loss_latched": False,
+                "drawdown_latched": False,
+                "recovered_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self.state = candidate
+            try:
+                self._save()
+            except Exception:
+                self.state = previous
+                raise
+            self._recovery_required = False
+            self._load_error = None

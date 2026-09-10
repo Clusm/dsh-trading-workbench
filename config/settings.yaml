@@ -13,6 +13,10 @@ paths:
 # 稳定性机制与风险档分开配置。账户级风险守卫先审计，不改变当前交易行为。
 stability:
   risk_guard_mode: audit_only
+  # 以下均为运维时效阈值，不改变仓位、杠杆或止损风险档。
+  startup_grace_seconds: 120
+  fast_cycle_stale_seconds: 120
+  protection_reconcile_stale_seconds: 120
 
 database_backup:
   enabled: true
@@ -71,6 +75,8 @@ llm:
 execution:
   default_mode: demo
   mode_env: EXECUTION_MODE
+  # 非 paper 模式缺少凭证时拒绝启动，避免真实/纸面资金口径静默切换。
+  allow_paper_fallback: false
   base_url_map:
     demo: https://demo-fapi.binance.com
     testnet: https://testnet.binancefuture.com

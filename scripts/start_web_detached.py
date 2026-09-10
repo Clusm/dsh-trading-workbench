@@ -44,7 +44,9 @@ def build_env(proxy: str | None) -> dict[str, str]:
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         env.pop(key, None)
     if proxy:
-        env.pop("MTA_NO_PROXY", None)
+        # 显式 0 覆盖 .env 中可能残留的 MTA_NO_PROXY=1；仅删除环境变量会让
+        # run_web 的早期加载再次读到文件值，造成“启动器说走代理、实际直连”。
+        env["MTA_NO_PROXY"] = "0"
         env["HTTP_PROXY"] = proxy
         env["HTTPS_PROXY"] = proxy
         env["http_proxy"] = proxy

@@ -55,6 +55,12 @@
 </div>
 {% endif %}
 
+{% set ar = latest.get('account_risk', {}) or {} %}
+<div class="card" id="risk-audit-warn" style="border-left:3px solid #e6a23c; padding:10px 14px; margin-bottom:14px; {{ '' if ar.get('mode') == 'audit_only' else 'display:none' }}">
+  <b>账户风险守卫：审计模式</b>（只记录，不自动改变现有风险档或阻断开仓）
+  <span id="risk-audit-detail">{% if ar.get('would_allow_new') is sameas false %}；当前指标按规则本应阻断，但尚未强制执行{% endif %}</span>
+</div>
+
 <div class="grid cols-4">
   <div class="card metric"><div class="label">会话权益</div><div class="value" id="eq">{{ "%.2f"|format(session_eq) }}</div><div class="sub">起始 {{ "%.0f"|format(initial_eq) }} U</div><svg class="spark" id="spark-eq" width="86" height="26" aria-hidden="true"></svg></div>
   <div class="card metric"><div class="label">总盈亏</div><div class="value {{ 'pos' if pnl >= 0 else 'neg' }}" id="pnl">{{ "%+.2f"|format(pnl) }}</div><div class="sub" id="pnl-pct">{{ "%+.2f%%"|format(pnl_pct) }} · 已实现 {{ "%+.2f"|format(realized_pnl) }}</div><svg class="spark" id="spark-pnl" width="86" height="26" aria-hidden="true"></svg></div>
@@ -327,6 +333,13 @@ async function refresh(){
       document.getElementById('ch-ai-ret').textContent = FMT.pct((ai.day_return || 0) * 100);
       document.getElementById('ch-ai-win').textContent = Number((ds.win_rate || 0) * 100).toFixed(0) + '%';
       document.getElementById('ch-ai-halt').textContent = ai.halted ? ' · 已熔断' : '';
+    }
+    const ar = d.account_risk || {}, auditWarn = document.getElementById('risk-audit-warn');
+    if (auditWarn){
+      auditWarn.style.display = ar.mode === 'audit_only' ? '' : 'none';
+      document.getElementById('risk-audit-detail').textContent =
+        ar.mode === 'audit_only' && ar.would_allow_new === false
+          ? '；当前指标按规则本应阻断，但尚未强制执行' : '';
     }
     touchUpdated();
   }catch(e){ console.error('[refresh]', e); } finally { _refreshBusy = false; }

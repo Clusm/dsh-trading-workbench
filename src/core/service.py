@@ -149,6 +149,20 @@ class TradingService:
             if not isinstance(client, MockLLMClient):
                 self.agent_llms[name] = (client, m)
         self.control = ControlState(settings.project_root / "data/control_state.json")
+        if self.control.recovery_required:
+            self.db.log_risk_event(
+                event_type="control_state_corrupt", severity="critical",
+                details=f"控制状态文件无法校验：{self.control.load_error}",
+                action_taken="fail closed to close_only; require explicit operator state")
+        if self.risk_guard.recovery_required:
+            # 风险水位不可证明时，无论配置是 audit_only 还是 enforce 都不能开新仓。
+            # close_only 不会平掉现有仓位，保护/减仓能力继续保留。
+            if self.control.state == "normal":
+                self.control.set_state("close_only")
+            self.db.log_risk_event(
+                event_type="account_risk_state_corrupt", severity="critical",
+                details=f"账户风险状态文件无法校验：{self.risk_guard.load_error}",
+                action_taken="set close_only; require verified recovery")
         self.execution_feedback: dict[str, Any] = {}
         self._latest: dict[str, Any] = {}
         self._lock = threading.RLock()
@@ -165,6 +179,7 @@ class TradingService:
             "ready": False, "reason": "尚未完成仓位/保护单核验", "checked_at": None,
         }
         self._account_risk_status: dict[str, Any] = {}
+        self._started_at = time.time()
         self._last_fast_cycle_at: float | None = None
         self._last_fast_cycle_error: str | None = None
         self._last_fast_cycle_duration_ms: float | None = None
@@ -360,6 +375,7 @@ class TradingService:
                 "last_slow_cycle_at": self._last_slow_cycle_at,
                 "last_slow_cycle_error": self._last_slow_cycle_error,
                 "last_slow_cycle_duration_ms": self._last_slow_cycle_duration_ms,
+                "started_at": self._started_at,
             }
 
     def _run_once_inner(self) -> dict[str, Any]:
@@ -518,7 +534,8 @@ class TradingService:
         )
         with self._lock:
             self._account_risk_status = dict(account_risk)
-        if (account_risk.get("latched") and account_risk.get("enforced")
+        if ((account_risk.get("latched") or account_risk.get("recovery_required"))
+                and account_risk.get("enforced")
                 and self.control.state == "normal"):
             self.control.set_state("close_only")
             self.db.log_risk_event(

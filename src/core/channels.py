@@ -36,17 +36,40 @@ class ChannelManager:
         self.channel_max_margin_usage = float(channel_max_margin_usage)
         self.ai_daily_loss_stop = float(ai_daily_loss_stop)
         self.lock = threading.RLock()
+        self._recovery_required = False
+        self._load_error: str | None = None
         self.state = self._load()
+        if self._recovery_required:
+            self.db.log_risk_event(
+                event_type="channel_state_corrupt", severity="critical",
+                details=f"通道状态文件无法校验：{self._load_error}",
+                action_taken="block new opens; require verified reset")
 
     def _load(self) -> dict[str, Any]:
         if self.state_file.exists():
             try:
-                return json.loads(self.state_file.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+                data = json.loads(self.state_file.read_text(encoding="utf-8-sig"))
+                required = {"date", "strategy_day_start_equity",
+                            "ai_day_start_equity", "ai_halted"}
+                if not isinstance(data, dict) or not required.issubset(data):
+                    raise ValueError("通道状态缺少必需字段")
+                return data
+            except Exception as exc:
+                self._recovery_required = True
+                self._load_error = f"{type(exc).__name__}: {exc}"
         return {"date": None, "strategy_day_start_equity": None,
-                "ai_day_start_equity": None, "ai_halted": False,
+                "ai_day_start_equity": None,
+                # 损坏时默认熔断 AI；首次启动由 sync 建立正常基准。
+                "ai_halted": bool(self._recovery_required),
                 "pnl_reset_at": None}
+
+    @property
+    def recovery_required(self) -> bool:
+        return self._recovery_required
+
+    @property
+    def load_error(self) -> str | None:
+        return self._load_error
 
     def _save(self) -> None:
         tmp = self.state_file.with_suffix(".tmp")
@@ -71,6 +94,8 @@ class ChannelManager:
                 "pnl_reset_at": datetime.now(timezone.utc).isoformat(),
             })
             self._save()
+            self._recovery_required = False
+            self._load_error = None
 
     def _channel_day_start(self, channel: str,
                            session_equity: float | None = None) -> float:
@@ -366,12 +391,37 @@ class ChannelManager:
                      session_equity: float | None,
                      read_only: bool) -> dict[str, Any]:
         prices = dict(prices or {})
+        if self._recovery_required:
+            total = max(0.0, float(session_equity or 0.0))
+            status: dict[str, Any] = {
+                "date": utc_today(),
+                "rebalanced": False,
+                "reconciled": False,
+                "recovery_required": True,
+                "reason": "通道状态文件损坏，需人工核验权益并重置通道基准",
+            }
+            for channel, weight in (("strategy", self.strategy_weight),
+                                    ("ai", self.ai_weight)):
+                eq = total * weight
+                status[channel] = {
+                    "equity": eq,
+                    "day_start_equity": None,
+                    "day_pnl": None,
+                    "day_return": None,
+                    "margin_used": self._margin_used(channel),
+                    "margin_cap": eq * self.channel_max_margin_usage,
+                    "allow_new": False,
+                    "halted": channel == "ai",
+                    "daily_stats": self.daily_trade_stats(channel),
+                }
+            return status
         rebalanced = False if read_only else self._rebalance_if_needed(prices, session_equity)
         reconciled = False if read_only else self._reconcile_session_equity(session_equity)
         status: dict[str, Any] = {
             "date": utc_today(),
             "rebalanced": rebalanced,
             "reconciled": reconciled,
+            "recovery_required": False,
         }
         for channel in ("strategy", "ai"):
             eq = self._channel_equity(prices, channel, session_equity)

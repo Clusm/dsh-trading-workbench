@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -46,6 +47,27 @@ check("非法状态被拒绝", cs.set_state("halt_and_sell_all") is False and cs
 leftover = list(cs_path.parent.glob("control_state.json.tmp*"))
 check("tmp 文件已清理", not leftover, str(leftover))
 check("allow_new_positions=False", cs.allow_new_positions is False)
+bad_path = tmp / "control_bad.json"
+bad_path.write_text('{"state":', encoding="utf-8")
+bad = ControlState(bad_path)
+check("损坏文件 fail-closed", bad.state == "close_only" and bad.recovery_required,
+      str((bad.state, bad.load_error)))
+invalid_path = tmp / "control_invalid.json"
+invalid_path.write_text('{"state":"go_fast"}', encoding="utf-8")
+invalid = ControlState(invalid_path)
+check("非法枚举 fail-closed", invalid.state == "close_only" and invalid.recovery_required)
+bom_path = tmp / "control_bom.json"
+bom_path.write_text('{"state":"normal"}', encoding="utf-8-sig")
+bom = ControlState(bom_path)
+check("合法UTF-8 BOM不误判损坏", bom.state == "normal" and not bom.recovery_required)
+before = cs_path.read_text(encoding="utf-8")
+with patch("core.control.os.replace", side_effect=OSError("disk fault")):
+    try:
+        cs.set_state("normal")
+    except OSError:
+        pass
+check("落盘失败不改变内存状态", cs.state == "emergency")
+check("落盘失败不改变原文件", cs_path.read_text(encoding="utf-8") == before)
 
 print("\n[P0-1] ledger 并发读写一致性")
 from unittest.mock import MagicMock  # noqa: E402

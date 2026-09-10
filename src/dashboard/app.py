@@ -17,6 +17,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from core.service import TradingService
 from data.market_query import get_live_prices
@@ -29,6 +30,35 @@ from exchange.user_stream import BinanceUserDataStream
 from intel.liquidation_stream import LiquidationStream
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+
+def _freshness_health_reasons(runtime: dict[str, Any], protection: dict[str, Any],
+                              stability: dict[str, Any], *, now: float | None = None) -> list[str]:
+    """计算运维时效异常；只影响健康/就绪呈现，不修改交易风险参数。"""
+    current = float(now if now is not None else time.time())
+    grace = max(1.0, float(stability.get("startup_grace_seconds", 120)))
+    fast_limit = max(1.0, float(stability.get("fast_cycle_stale_seconds", 120)))
+    protection_limit = max(
+        1.0, float(stability.get("protection_reconcile_stale_seconds", 120)))
+    started = float(runtime.get("started_at") or current)
+    beyond_grace = current - started > grace
+    reasons: list[str] = []
+    fast_at = runtime.get("last_fast_cycle_at")
+    if runtime.get("last_fast_cycle_error"):
+        reasons.append("fast_cycle_error")
+    if fast_at and current - float(fast_at) > fast_limit:
+        reasons.append("fast_cycle_stale")
+    elif not fast_at and beyond_grace:
+        reasons.append("fast_cycle_never_completed")
+    if protection.get("enabled") and protection.get("read_enabled"):
+        reconciled_at = protection.get("last_reconcile_at")
+        if reconciled_at and current - float(reconciled_at) > protection_limit:
+            reasons.append("protection_reconcile_stale")
+        elif not reconciled_at and beyond_grace:
+            reasons.append("protection_reconcile_never_completed")
+        if protection.get("last_error"):
+            reasons.append("protection_reconcile_error")
+    return reasons
 
 
 # ---- 看板读缓存：页面 5~15 秒轮询一次，不必每次都打交易所/扫库 ----
@@ -342,6 +372,9 @@ def _event_type_cn(value: Any) -> str:
         "capital_reset": "资金重启",
         "equity_unavailable": "账户权益不可用",
         "account_risk_stop": "账户级风险熔断",
+        "account_risk_state_corrupt": "账户风险状态损坏",
+        "control_state_corrupt": "控制状态损坏",
+        "channel_state_corrupt": "通道状态损坏",
         "exchange_margin_call": "交易所保证金告警",
         "startup_safety_block": "启动安全核验拦截",
         "manual_emergency_close": "手动紧急平仓",
@@ -363,6 +396,7 @@ def _event_type_cn(value: Any) -> str:
         "futures_protection_fallback": "仓位兕底挂保护",
         "futures_order_submit_lost": "下单请求丢失未对账",
         "futures_order_submit_reconciled": "下单请求丢失已对账",
+        "futures_algo_submit_reconciled": "保护单请求丢失已对账",
         "futures_close_reconciled": "外部平仓已补记",
         "futures_close_reconcile_error": "外部平仓补记失败",
         "control_block_open": "控制状态拦截开仓",
@@ -384,6 +418,7 @@ def _event_type_cn(value: Any) -> str:
         "broker_created": "交易通道创建",
         "broker_fallback_paper": "降级纸面交易",
         "broker_unknown_mode": "未知执行模式已拒绝启动",
+        "broker_credentials_missing": "交易凭证缺失已拒绝启动",
         "baseline_implausible": "资金基线失效已重锚",
         "baseline_reanchored": "资金基线手动重锚",
         "capital_reset_skipped": "破产重置已跳过",
@@ -1296,13 +1331,19 @@ def create_app(service: TradingService) -> FastAPI:
                 await user_stream.close()
 
     app = FastAPI(title="Multi-Agent Trader Console", lifespan=lifespan)
+    # 控制台没有账户认证，只接受本机 Host；结合 run_web 的回环绑定，避免 DNS
+    # rebinding 或误暴露到局域网。testserver 仅供 FastAPI TestClient 离线回归。
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=["127.0.0.1", "localhost", "testserver", "[::1]"],
+    )
 
     # ---- 写操作防 CSRF（P0-3）----
     # 控制台接口会真实平仓/重置资金/切模式，但本地 CSRF（恶意网页用
     # fetch(mode:'no-cors', text/plain) 打 127.0.0.1）可以无凭据触发。
     # 该模式下浏览器发不了自定义头，也无法携带 application/json Content-Type，
     # 因此「随机 token 头 + 强制 JSON Content-Type」即可可靠拦截。
-    # token 启动时生成，注入到页面模板（同源脚本可读），并打印到控制台。
+    # token 启动时生成，只注入同源页面；禁止写入控制台或日志。
     _write_token = secrets.token_urlsafe(24)
 
     @app.middleware("http")
@@ -1316,7 +1357,6 @@ def create_app(service: TradingService) -> FastAPI:
                                     status_code=415)
         return await call_next(request)
 
-    print(f"console write token: {_write_token}")
     app.state.console_token = _write_token
     threading.Thread(target=_warmup, args=(service,), daemon=True).start()
 
@@ -1679,9 +1719,19 @@ def create_app(service: TradingService) -> FastAPI:
             runtime[field.replace("_at", "_age_seconds")] = (
                 round(max(0.0, now_epoch - float(value)), 3) if value else None
             )
+        stability = service.settings.raw_settings.get("stability", {}) or {}
+        health_reasons: list[str] = []
+        if not safety.get("ready", False):
+            health_reasons.append("startup_safety_not_ready")
+        if broker_state.get("error"):
+            health_reasons.append("broker_state_unavailable")
+        if not db_readable:
+            health_reasons.append("database_unreadable")
+        health_reasons.extend(_freshness_health_reasons(
+            runtime, protection_mirror_status, stability, now=now_epoch))
         return {
-            "ok": (bool(safety.get("ready", False)) and
-                   not broker_state.get("error") and db_readable),
+            "ok": not health_reasons,
+            "reasons": list(dict.fromkeys(health_reasons)),
             "broker_mode": str(getattr(service.broker, "mode", "paper")),
             "control_state": service.control.state,
             "startup_safety": safety,
@@ -1728,6 +1778,20 @@ def create_app(service: TradingService) -> FastAPI:
             reasons.append(f"control_state_{service.control.state}")
         if not account_risk.get("allow_new", False):
             reasons.append("account_risk_blocks_new")
+        runtime = service.runtime_status() if hasattr(service, "runtime_status") else {}
+        protection_mirror = getattr(app.state, "protection_order_mirror", None)
+        try:
+            protection_status = (protection_mirror.status()
+                                 if protection_mirror is not None else {
+                                     "enabled": False, "read_enabled": False})
+        except Exception:
+            protection_status = {
+                "enabled": True, "read_enabled": True,
+                "last_error": "status_unavailable",
+            }
+        reasons.extend(_freshness_health_reasons(
+            runtime, protection_status,
+            service.settings.raw_settings.get("stability", {}) or {}))
         order_outbox = getattr(app.state, "order_outbox", None)
         if order_outbox is not None:
             try:
@@ -1740,7 +1804,7 @@ def create_app(service: TradingService) -> FastAPI:
                 reasons.append("order_outbox_unavailable")
         payload = {
             "ready": not reasons,
-            "reasons": reasons,
+            "reasons": list(dict.fromkeys(reasons)),
             "broker_mode": str(getattr(service.broker, "mode", "paper")),
             "control_state": service.control.state,
             "startup_safety": safety,

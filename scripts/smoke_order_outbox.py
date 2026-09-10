@@ -143,10 +143,72 @@ check("明确拒绝继续抛给调用方", rejected_raised)
 check("明确拒绝进入REJECTED终态", db.fetch_one(
     "SELECT status FROM order_outbox WHERE client_order_id='mta-reject-1'")["status"] == "REJECTED")
 
+print("\n[7] Algo保护单响应丢失后按clientAlgoId恢复且不重发")
+broker.environment = "demo"
+broker._format_price = lambda _symbol, value: str(value)
+broker._log_order = lambda **_kwargs: None
+algo_posts = []
+
+
+def algo_signed(method, path, params=None, attempts=2):
+    if method == "POST" and path == "/fapi/v1/algoOrder":
+        algo_posts.append(dict(params or {}))
+        raise TimeoutError("algo response lost")
+    if method == "GET" and path == "/fapi/v1/algoOrder":
+        return {"algoId": 901, "clientAlgoId": params["clientAlgoId"],
+                "algoStatus": "NEW"}
+    raise RuntimeError(f"unexpected {method} {path}")
+
+
+broker._signed = algo_signed
+broker._place_algo_protection("BTCUSDT", "SELL", "0.1", "STOP_MARKET",
+                              98000.0, "sl", "LONG")
+algo_row = db.fetch_one(
+    "SELECT * FROM order_outbox WHERE endpoint='/fapi/v1/algoOrder' ORDER BY created_at DESC")
+check("保护单POST携带clientAlgoId", bool(algo_posts[0].get("clientAlgoId")))
+check("Algo恢复流程只POST一次", len(algo_posts) == 1)
+check("Algo Outbox按algoId确认", algo_row["status"] == "NEW"
+      and algo_row["exchange_order_id"] == "901")
+
+print("\n[8] UNKNOWN查询限流、退避与人工证据收口")
+prepare(outbox, "mta-unknown-aged", purpose="EXIT", side="SELL")
+outbox.mark_unknown("mta-unknown-aged", TimeoutError("lost"))
+
+
+class FailingQueryBroker:
+    def query_order(self, _symbol, _client_order_id):
+        raise TimeoutError("query timeout")
+
+
+check("首次到期UNKNOWN执行一次查询", outbox.reconcile_unknown(FailingQueryBroker()) == 0)
+aged = db.fetch_one(
+    "SELECT * FROM order_outbox WHERE client_order_id='mta-unknown-aged'")
+check("失败后记录次数与下次退避", aged["query_attempt_count"] == 1
+      and bool(aged["next_retry_at"]) and bool(aged["last_query_error"]))
+before_attempts = aged["query_attempt_count"]
+outbox.reconcile_unknown(FailingQueryBroker())
+aged_again = db.fetch_one(
+    "SELECT * FROM order_outbox WHERE client_order_id='mta-unknown-aged'")
+check("退避期内不重复查询", aged_again["query_attempt_count"] == before_attempts)
+try:
+    outbox.manual_resolve_unknown("mta-unknown-aged", status="FILLED",
+                                  operator="tester", evidence="invalid")
+    invalid_manual = False
+except ValueError:
+    invalid_manual = True
+check("人工收口不能猜测为FILLED", invalid_manual)
+outbox.manual_resolve_unknown(
+    "mta-unknown-aged", status="CANCELED", operator="tester",
+    evidence="交易所订单历史与成交历史均已人工核验，无成交")
+manual = db.fetch_one(
+    "SELECT * FROM order_outbox WHERE client_order_id='mta-unknown-aged'")
+check("人工收口保留操作者与证据", manual["status"] == "CANCELED"
+      and manual["resolved_by"] == "tester" and bool(manual["resolution_note"]))
+
 status = outbox.status()
 check("健康状态暴露UNKNOWN数量", status["unknown_orders"] == 0)
 versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
-check("数据库迁移版本1到13完整", versions == list(range(1, 14)))
+check("数据库迁移版本1到14完整", versions == list(range(1, 15)))
 db.close()
 print(f"\n结果: {passed} 通过 / 0 失败")

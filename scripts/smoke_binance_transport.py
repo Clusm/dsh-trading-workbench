@@ -110,4 +110,19 @@ assert broker._signed("GET", "/signed", attempts=2) == {"ok": True}
 assert broken.closed is True and broker._client is healthy
 print("  PASS  旧连接池关闭且第二次请求使用新连接池")
 
-print("\n结果: 3 通过 / 0 失败")
+print("\n[4] Algo列表响应包装归一化且未知结构fail-closed")
+row = {"algoId": 1, "symbol": "BTCUSDT"}
+assert BinanceFuturesBroker._normalize_algo_orders_payload([row]) == [row]
+assert BinanceFuturesBroker._normalize_algo_orders_payload(
+    {"code": "200", "msg": "success", "data": [row]}) == [row]
+assert BinanceFuturesBroker._normalize_algo_orders_payload(
+    {"data": {"orders": [row]}}) == [row]
+try:
+    BinanceFuturesBroker._normalize_algo_orders_payload({"code": "200", "msg": "success"})
+    unknown_blocked = False
+except RuntimeError:
+    unknown_blocked = True
+assert unknown_blocked
+print("  PASS  裸列表和data包装均可读取，未知结构不会伪装为空列表")
+
+print("\n结果: 4 通过 / 0 失败")

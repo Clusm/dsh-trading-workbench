@@ -815,6 +815,34 @@ class AuditDatabase:
 
         self._apply_migration(13, "risk_incident_lifecycle", apply_risk_incident_lifecycle)
 
+        def apply_order_outbox_reconciliation_metadata() -> None:
+            """为 UNKNOWN 查询增加可观测、限流和人工证据收口字段。"""
+            existing = {
+                row["name"] for row in self.conn.execute(
+                    "PRAGMA table_info(order_outbox)").fetchall()
+            }
+            columns = {
+                "unknown_since": "TEXT",
+                "last_query_at": "TEXT",
+                "next_retry_at": "TEXT",
+                "query_attempt_count": "INTEGER NOT NULL DEFAULT 0",
+                "last_query_error": "TEXT",
+                "resolution_note": "TEXT",
+                "resolved_by": "TEXT",
+            }
+            for name, declaration in columns.items():
+                if name not in existing:
+                    self.conn.execute(
+                        f"ALTER TABLE order_outbox ADD COLUMN {name} {declaration}")
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_order_outbox_retry "
+                "ON order_outbox(environment,status,next_retry_at,unknown_since)"
+            )
+
+        self._apply_migration(
+            14, "order_outbox_reconciliation_metadata",
+            apply_order_outbox_reconciliation_metadata)
+
     def close(self) -> None:
         self.conn.close()
 

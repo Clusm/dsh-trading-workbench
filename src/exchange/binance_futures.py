@@ -353,6 +353,62 @@ class BinanceFuturesBroker:
         }, attempts=2)
         return dict(data or {}) if isinstance(data, dict) else {}
 
+    def query_algo_order(self, client_algo_id: str) -> dict[str, Any]:
+        """按 clientAlgoId 查询保护单，供响应丢失后的幂等恢复使用。"""
+        data = self._signed("GET", "/fapi/v1/algoOrder", {
+            "clientAlgoId": client_algo_id,
+        }, attempts=2)
+        return dict(data or {}) if isinstance(data, dict) else {}
+
+    def _submit_algo_order(self, params: dict[str, Any], *, purpose: str) -> dict[str, Any]:
+        """Algo保护单唯一POST入口：先落Outbox，结果未知时按clientAlgoId查询。"""
+        request = dict(params)
+        client_id = str(request.get("clientAlgoId") or "")
+        if not client_id:
+            raise ValueError("clientAlgoId is required for algo outbox submission")
+        symbol = str(request.get("symbol") or "").upper()
+        side = str(request.get("side") or "").upper()
+        outbox = getattr(self, "order_outbox", None)
+        if outbox is not None:
+            outbox.prepare(
+                client_order_id=client_id, symbol=symbol, side=side,
+                position_side=str(request.get("positionSide") or "BOTH"),
+                order_type=str(request.get("type") or "UNKNOWN"), purpose=purpose,
+                qty=float(request.get("quantity") or 0.0),
+                price=float(request["triggerprice"])
+                if request.get("triggerprice") is not None else None,
+                reduce_only=str(request.get("reduceonly", "false")).lower() == "true",
+                endpoint="/fapi/v1/algoOrder", request=request,
+            )
+        try:
+            data = self._signed("POST", "/fapi/v1/algoOrder", request)
+        except Exception as exc:
+            definite_rejection = str(exc).startswith("Binance ") and "HTTP 5" not in str(exc)
+            if outbox is not None:
+                if definite_rejection:
+                    outbox.reject(client_id, exc)
+                else:
+                    outbox.mark_unknown(client_id, exc)
+            if definite_rejection:
+                raise
+            try:
+                reconciled = self.query_algo_order(client_id)
+            except Exception:
+                reconciled = {}
+            if not reconciled.get("algoId"):
+                raise
+            data = reconciled
+            if self.db:
+                self.db.log_risk_event(
+                    event_type="futures_algo_submit_reconciled", severity="warn",
+                    details=(f"{symbol}: Algo POST异常后按clientAlgoId对账成功 "
+                             f"(algoId={data.get('algoId')})"),
+                    action_taken="outbox reconciled; no repost")
+        result = dict(data or {}) if isinstance(data, dict) else {}
+        if outbox is not None:
+            outbox.acknowledge(client_id, result)
+        return result
+
     def _submit_standard_order(self, params: dict[str, Any], *, purpose: str) -> dict[str, Any]:
         """普通USD-M订单的唯一POST入口：先写Outbox，异常后只查询不重发。"""
         request = dict(params)
@@ -478,10 +534,32 @@ class BinanceFuturesBroker:
         data = self._signed("GET", "/fapi/v1/openOrders")
         return list(data or []) if isinstance(data, list) else []
 
+    @staticmethod
+    def _normalize_algo_orders_payload(data: Any) -> list[dict[str, Any]]:
+        """兼容 Algo 列表的裸数组和 code/msg/data 包装，未知结构必须报错。"""
+        payload = data
+        if isinstance(payload, dict):
+            for key in ("data", "orders", "algoOrders"):
+                if key in payload:
+                    payload = payload[key]
+                    break
+        if isinstance(payload, dict):
+            for key in ("orders", "algoOrders", "rows"):
+                if key in payload:
+                    payload = payload[key]
+                    break
+        if payload is None:
+            return []
+        if not isinstance(payload, list):
+            raise RuntimeError("openAlgoOrders返回未知结构，拒绝解释为空保护单")
+        if any(not isinstance(row, dict) for row in payload):
+            raise RuntimeError("openAlgoOrders列表包含非法条目，拒绝继续保护对账")
+        return [dict(row) for row in payload]
+
     def open_algo_orders(self) -> list[dict[str, Any]]:
         """强制读取当前USD-M Algo保护单；失败必须向上抛，不能伪装为空。"""
         data = self._signed("GET", "/fapi/v1/openAlgoOrders", {})
-        return list(data or []) if isinstance(data, list) else []
+        return self._normalize_algo_orders_payload(data)
 
     def order_submission_ready(self) -> bool:
         """UNKNOWN/SUBMITTING存在时禁止新开仓；减仓和平仓不受此门禁影响。"""
@@ -975,8 +1053,9 @@ class BinanceFuturesBroker:
           triggerprice=触发价
         """
         cid = f"mta-{tag}-{uuid.uuid4().hex[:28]}"
-        data = self._signed("POST", "/fapi/v1/algoOrder", {
+        data = self._submit_algo_order({
             "symbol": symbol,
+            "clientAlgoId": cid,
             "side": close_side,
             "type": order_type,
             "quantity": qty,
@@ -986,7 +1065,7 @@ class BinanceFuturesBroker:
             "timeinforce": "GTC",
             "workingType": "MARK_PRICE",
             "priceProtect": "true",
-        })
+        }, purpose="PROTECTION")
         algo_id = str(data.get("algoId") or "")
         self._log_order(symbol=symbol, side=log_side, order_type=order_type,
                         qty=float(qty), price=float(trigger_price), status="NEW",
@@ -1005,9 +1084,13 @@ class BinanceFuturesBroker:
             data = self._signed("GET", "/fapi/v1/openAlgoOrders", {})
         except Exception:
             return None
+        try:
+            rows = self._normalize_algo_orders_payload(data)
+        except Exception:
+            return None
         if symbol is None:
-            return data or []
-        return [o for o in (data or []) if o.get("symbol") == symbol]
+            return rows
+        return [o for o in rows if o.get("symbol") == symbol]
 
     def _cancel_symbol_algos(self, symbol: str) -> None:
         algos = self._open_algos(symbol)
@@ -1015,12 +1098,17 @@ class BinanceFuturesBroker:
             return  # None=查询失败（无从撤单）或 [] =确实无挂单
         for algo in algos:
             algo_id = str(algo.get("algoId") or "")
+            client_algo_id = str(algo.get("clientAlgoId") or "")
             try:
                 self._signed("DELETE", "/fapi/v1/algoOrder", {"algoId": algo.get("algoId")})
                 # 撤单成功：把本地流水里对应的保护单收口成 CANCELED，
                 # 避免「移动止损反复重设」在 orders 表堆积一堆永远 NEW 的幽灵单。
                 if self.db and algo_id:
                     self.db.cancel_order_by_exchange_id(exchange_order_id=algo_id)
+                if client_algo_id and getattr(self, "order_outbox", None) is not None:
+                    self.order_outbox.acknowledge(client_algo_id, {
+                        "algoId": algo_id, "algoStatus": "CANCELED",
+                    })
             except Exception as e:
                 msg = str(e)
                 # 已经触发/已不存在的旧单无需处理，也不算错误
@@ -1028,6 +1116,10 @@ class BinanceFuturesBroker:
                     # 旧单已不在交易所（已触发或已被外部撤销），本地流水同样要收口。
                     if self.db and algo_id:
                         self.db.cancel_order_by_exchange_id(exchange_order_id=algo_id)
+                    if client_algo_id and getattr(self, "order_outbox", None) is not None:
+                        self.order_outbox.acknowledge(client_algo_id, {
+                            "algoId": algo_id, "algoStatus": "CANCELED",
+                        })
                     continue
                 if self.db:
                     self.db.log_risk_event(event_type="futures_adjust_error", severity="warn",

@@ -147,5 +147,21 @@ check("大额偏差产生待核对事件", len(db.fetch_all(
     "SELECT * FROM risk_events WHERE event_type='channel_equity_drift'"
 )) == 1)
 
+print("\n[4] 通道状态损坏时禁止推断并覆盖水位")
+corrupt_path = tmp / "channel_state_corrupt.json"
+corrupt_path.write_text('{"date":', encoding="utf-8")
+corrupt_before = corrupt_path.read_text(encoding="utf-8")
+corrupt_manager = ChannelManager(corrupt_path, FlatBroker(), db)
+corrupt_status = corrupt_manager.sync(session_equity=500.0)
+check("两个通道均 fail-closed",
+      not corrupt_status["strategy"]["allow_new"] and not corrupt_status["ai"]["allow_new"],
+      str(corrupt_status))
+check("普通同步不覆盖损坏文件", corrupt_path.read_text(encoding="utf-8") == corrupt_before)
+check("状态明确要求恢复", corrupt_status.get("recovery_required") is True)
+corrupt_manager.reset_day_start(500.0)
+restored = corrupt_manager.sync(session_equity=500.0)
+check("显式重置后恢复", not restored.get("recovery_required")
+      and restored["strategy"]["allow_new"] and restored["ai"]["allow_new"], str(restored))
+
 print(f"\n结果: {ok} 通过 / {fail} 失败")
 raise SystemExit(1 if fail else 0)

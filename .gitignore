@@ -4,11 +4,8 @@ __pycache__/
 /_*.py
 .env
 .env.local
-data/*.sqlite
-data/logs/
-data/artifacts/
-data/reviews/
-data/cache/
+# data/ 全部属于运行时状态、日志、缓存或备份；源码与测试夹具不得放在这里。
+/data/
 
 # 数据库运行时产物（WAL/SHM/自动备份）
 data/*.sqlite-shm

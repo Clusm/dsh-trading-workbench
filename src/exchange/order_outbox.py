@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from audit.database import AuditDatabase, utc_now
@@ -35,13 +36,15 @@ class OrderOutbox:
     ``UNKNOWN``，后续只按 ``clientOrderId`` 查询交易所，不允许重发。状态只能前进，
     终态不会被迟到的 WebSocket 事件回退。
     """
-    def __init__(self, db: AuditDatabase, *, environment: str) -> None:
+    def __init__(self, db: AuditDatabase, *, environment: str,
+                 max_reconcile_per_cycle: int = 5) -> None:
         self.db = db
         self.environment = str(environment)
         self.last_event_at: float | None = None
         self.last_reconcile_at: float | None = None
         self.last_error: str | None = None
         self.reconciled_unknown = 0
+        self.max_reconcile_per_cycle = max(1, int(max_reconcile_per_cycle))
 
     @staticmethod
     def business_key(*, symbol: str, side: str, position_side: str | None,
@@ -98,27 +101,37 @@ class OrderOutbox:
         with self.db.lock:
             cursor = self.db.conn.execute(
                 "UPDATE order_outbox SET status='UNKNOWN',error_type='ProcessRestart',"
-                "updated_at=? WHERE environment=? AND status='SUBMITTING'",
-                (utc_now(), self.environment),
+                "unknown_since=COALESCE(unknown_since,?),next_retry_at=?,updated_at=? "
+                "WHERE environment=? AND status='SUBMITTING'",
+                (utc_now(), utc_now(), utc_now(), self.environment),
             )
             self.db.conn.commit()
             return int(cursor.rowcount)
 
     def acknowledge(self, client_order_id: str, response: dict[str, Any]) -> None:
         """用交易所同步响应确认订单；响应终态会同时写入解决时间。"""
-        status = str(response.get("status") or "ACKNOWLEDGED").upper()
+        status = str(response.get("status") or response.get("algoStatus")
+                     or "ACKNOWLEDGED").upper()
         if status not in _ACTIVE | _TERMINAL:
             status = "ACKNOWLEDGED"
         resolved = utc_now() if status in _TERMINAL else None
         self._update(
             client_order_id, status=status,
-            exchange_order_id=str(response.get("orderId") or "") or None,
+            exchange_order_id=str(response.get("orderId") or response.get("algoId") or "") or None,
             response=response, error_type=None, resolved_at=resolved)
 
     def mark_unknown(self, client_order_id: str, exc: BaseException) -> None:
         """将无法确认提交结果的订单标为 UNKNOWN，等待查询或私有流收敛。"""
-        self._update(client_order_id, status="UNKNOWN",
-                     error_type=type(exc).__name__)
+        now = utc_now()
+        with self.db.lock:
+            self.db.conn.execute(
+                "UPDATE order_outbox SET status='UNKNOWN',error_type=?,"
+                "unknown_since=COALESCE(unknown_since,?),next_retry_at=?,updated_at=? "
+                "WHERE client_order_id=? AND status NOT IN "
+                "('FILLED','CANCELED','EXPIRED','REJECTED','EXPIRED_IN_MATCH')",
+                (type(exc).__name__, now, now, now, client_order_id),
+            )
+            self.db.conn.commit()
 
     def reject(self, client_order_id: str, exc: BaseException) -> None:
         """记录可确定未被交易所接受的订单失败。"""
@@ -146,12 +159,15 @@ class OrderOutbox:
                 """UPDATE order_outbox SET status=?,
                     exchange_order_id=COALESCE(?,exchange_order_id),
                     response_json=COALESCE(?,response_json),error_type=?,
-                    updated_at=?,resolved_at=COALESCE(?,resolved_at)
+                    updated_at=?,resolved_at=COALESCE(?,resolved_at),
+                    next_retry_at=CASE WHEN ? IS NOT NULL THEN NULL ELSE next_retry_at END,
+                    last_query_error=CASE WHEN ? IS NOT NULL THEN NULL ELSE last_query_error END
                     WHERE client_order_id=?""",
                 (status, exchange_order_id,
                  json.dumps(response, ensure_ascii=False, separators=(",", ":"))
                  if response is not None else None,
-                 error_type, utc_now(), resolved_at, client_order_id),
+                 error_type, utc_now(), resolved_at, resolved_at, resolved_at,
+                 client_order_id),
             )
             self.db.conn.commit()
 
@@ -181,33 +197,93 @@ class OrderOutbox:
         return True
 
     def reconcile_unknown(self, broker: Any) -> int:
-        """按 clientOrderId 查询 UNKNOWN 订单，返回本轮成功收敛的数量。"""
+        """限量查询到期 UNKNOWN；只查询、不重发，失败按指数退避。"""
+        now = utc_now()
         rows = self.db.fetch_all(
-            "SELECT client_order_id,symbol FROM order_outbox "
-            "WHERE environment=? AND status='UNKNOWN' ORDER BY updated_at",
-            (self.environment,),
+            "SELECT client_order_id,symbol,endpoint,query_attempt_count FROM order_outbox "
+            "WHERE environment=? AND status='UNKNOWN' "
+            "AND (next_retry_at IS NULL OR next_retry_at<=?) "
+            "ORDER BY COALESCE(unknown_since,updated_at) LIMIT ?",
+            (self.environment, now, self.max_reconcile_per_cycle),
         )
         resolved = 0
         for row in rows:
             try:
-                response = broker.query_order(
-                    str(row["symbol"]), str(row["client_order_id"]))
-                if isinstance(response, dict) and response.get("orderId"):
+                client_id = str(row["client_order_id"])
+                if str(row["endpoint"]).endswith("/algoOrder"):
+                    response = broker.query_algo_order(client_id)
+                    found = isinstance(response, dict) and response.get("algoId")
+                else:
+                    response = broker.query_order(str(row["symbol"]), client_id)
+                    found = isinstance(response, dict) and response.get("orderId")
+                if found:
                     self.acknowledge(str(row["client_order_id"]), response)
                     resolved += 1
+                else:
+                    raise LookupError("交易所查询未返回订单标识")
             except Exception as exc:
                 self.last_error = type(exc).__name__
+                attempts = int(row["query_attempt_count"] or 0) + 1
+                delay = min(1800, 30 * (2 ** min(attempts - 1, 6)))
+                retry_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+                with self.db.lock:
+                    self.db.conn.execute(
+                        "UPDATE order_outbox SET query_attempt_count=?,last_query_at=?,"
+                        "next_retry_at=?,last_query_error=?,updated_at=? "
+                        "WHERE client_order_id=? AND status='UNKNOWN'",
+                        (attempts, utc_now(), retry_at,
+                         f"{type(exc).__name__}: {str(exc)[:200]}", utc_now(),
+                         row["client_order_id"]),
+                    )
+                    self.db.conn.commit()
         self.reconciled_unknown += resolved
         self.last_reconcile_at = time.time()
         if not rows or resolved == len(rows):
             self.last_error = None
         return resolved
 
+    def manual_resolve_unknown(self, client_order_id: str, *, status: str,
+                               operator: str, evidence: str) -> None:
+        """以人工核验依据收口长期 UNKNOWN；禁止把不确定订单标成 FILLED。"""
+        terminal = str(status).upper()
+        if terminal not in {"CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}:
+            raise ValueError("人工收口只允许无成交类终态")
+        if not str(operator).strip() or not str(evidence).strip():
+            raise ValueError("人工收口必须记录操作者和交易所核验证据")
+        with self.db.lock:
+            row = self.db.conn.execute(
+                "SELECT status FROM order_outbox WHERE client_order_id=? AND environment=?",
+                (client_order_id, self.environment),
+            ).fetchone()
+            if not row or str(row["status"]) != "UNKNOWN":
+                raise ValueError("只能收口当前环境中的 UNKNOWN 订单")
+            self.db.conn.execute(
+                "UPDATE order_outbox SET status=?,resolution_note=?,resolved_by=?,"
+                "resolved_at=?,updated_at=?,next_retry_at=NULL WHERE client_order_id=?",
+                (terminal, str(evidence).strip(), str(operator).strip(), utc_now(),
+                 utc_now(), client_order_id),
+            )
+            self.db.conn.commit()
+
     def status(self) -> dict[str, Any]:
         """返回当前环境的状态计数和最近一次对账信息。"""
         counts = {str(row["status"]): int(row["count"]) for row in self.db.fetch_all(
             "SELECT status,COUNT(*) AS count FROM order_outbox "
             "WHERE environment=? GROUP BY status", (self.environment,))}
+        oldest = self.db.fetch_one(
+            "SELECT MIN(COALESCE(unknown_since,updated_at)) AS ts FROM order_outbox "
+            "WHERE environment=? AND status='UNKNOWN'", (self.environment,))
+        oldest_age = None
+        if oldest and oldest["ts"]:
+            try:
+                created = datetime.fromisoformat(str(oldest["ts"]).replace("Z", "+00:00"))
+                oldest_age = max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
+            except (TypeError, ValueError):
+                oldest_age = None
+        due = self.db.fetch_one(
+            "SELECT COUNT(*) AS count FROM order_outbox WHERE environment=? "
+            "AND status='UNKNOWN' AND (next_retry_at IS NULL OR next_retry_at<=?)",
+            (self.environment, utc_now()))
         return {
             "enabled": True,
             "environment": self.environment,
@@ -215,6 +291,8 @@ class OrderOutbox:
             "last_reconcile_at": self.last_reconcile_at,
             "last_error": self.last_error,
             "unknown_orders": int(counts.get("UNKNOWN", 0)),
+            "oldest_unknown_age_seconds": oldest_age,
+            "retry_due": int(due["count"] if due else 0),
             "submitting_orders": int(counts.get("SUBMITTING", 0)),
             "reconciled_unknown": self.reconciled_unknown,
             "status_counts": counts,

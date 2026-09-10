@@ -31,8 +31,8 @@ Copy-Item .env.example .env
 - `paper`：本地纸面成交；
 - `live`：真实账户，必须显式配置对应密钥并完成上线核验。
 
-缺少当前环境的密钥时，Broker 工厂会安全回退到 paper。不要把 `.env`、API 密钥、签名
-请求或 `data/` 运行状态提交到 Git。
+非 paper 环境缺少密钥时，Broker 工厂会拒绝启动，绝不静默切换资金口径。不要把
+`.env`、API 密钥、签名请求或 `data/` 运行状态提交到 Git。
 
 ## 运行模型
 
@@ -62,6 +62,7 @@ Copy-Item .env.example .env
 
 # 基础回归
 .venv\Scripts\python.exe scripts\check_quality.py
+.venv\Scripts\python.exe scripts\run_offline_regression.py
 .venv\Scripts\python.exe scripts\smoke_service_lifecycle.py
 .venv\Scripts\python.exe scripts\smoke_ui.py
 
@@ -87,6 +88,7 @@ Copy-Item .env.example .env
 
 - [项目说明书](docs/项目说明书.md)
 - [运行与故障恢复手册](docs/运行与故障恢复手册_2026-09-06.md)
+- [问题盘点与整改状态](docs/项目问题盘点与优化计划_2026-09-07.md)
 - [代码维护规范](docs/代码维护规范.md)
 - [稳定性与 AI 情报升级计划](docs/USD-M合约系统稳定性与AI情报升级开发计划_2026-09-05.md)
 

@@ -85,5 +85,19 @@ ra = audit.sync(470, equity_available=True, anchor_id="demo:audit")
 check("审计模式记录本应拦截", ra["latched"] and not ra["would_allow_new"], str(ra))
 check("审计模式不实际拦截", ra["allow_new"] and not ra["enforced"], str(ra))
 
+print("\n[8] 风险状态损坏必须 fail-closed，且只能显式恢复")
+corrupt_state = tmp / "corrupt_account_risk.json"
+corrupt_state.write_text('{"anchor_id":', encoding="utf-8")
+corrupt = AccountRiskGuard(corrupt_state, daily_loss_stop=0.05,
+                           max_drawdown=0.10, mode="audit_only")
+blocked = corrupt.sync(500, equity_available=True, anchor_id="demo:verified")
+check("审计模式下状态损坏仍阻断", not blocked["allow_new"] and blocked["enforced"],
+      str(blocked))
+check("普通 sync 不覆盖损坏文件", corrupt_state.read_text(encoding="utf-8") == '{"anchor_id":')
+corrupt.recover_from_verified_equity(500, anchor_id="demo:verified")
+recovered = corrupt.sync(500, equity_available=True, anchor_id="demo:verified")
+check("人工核验恢复后重新放行", recovered["allow_new"] and not corrupt.recovery_required,
+      str(recovered))
+
 print(f"\n结果: {ok} 通过 / {fail} 失败")
 sys.exit(1 if fail else 0)
