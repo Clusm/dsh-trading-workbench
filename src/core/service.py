@@ -476,6 +476,7 @@ class TradingService:
             "tickets": state.get("tickets"),
             "strategy_decision": state.get("strategy_decision"),
             "ai_decision": state.get("ai_decision"),
+            "guardian_decision": state.get("guardian_decision"),
             "execution": state.get("execution"),
             "paper_state": dict(broker_state),
             "capital_state": {

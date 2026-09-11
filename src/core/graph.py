@@ -19,6 +19,7 @@ from audit.database import AuditDatabase
 from audit.jsonl_logger import JsonlLogger
 from core.action_space import ActionSpace
 from core.agent_recorder import AgentRecorder
+from core.decision_pipeline import authorize_decision
 from core.position_guardian import evaluate_positions
 from data.market_query import get_live_prices
 from llm.base import LLMClient
@@ -475,7 +476,14 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
 
     def route_after_merge(state: AgentState) -> str:
         """未完成会合的分支就地结束，避免它继续调度 risk/execution。"""
-        return "risk" if state.get("channels_merged") else "end"
+        return "pipeline" if state.get("channels_merged") else "end"
+
+    def pipeline_node(state: AgentState) -> dict[str, Any]:
+        decision = state.get("decision") or TradeDecision(
+            decision="no_trade", channel="merged", reasoning="汇合节点未产出决策")
+        return {"decision": authorize_decision(
+            decision, db=db, run_id=state.get("run_id"),
+        )}
 
     def risk_node(state: AgentState) -> dict[str, Any]:
         # 会合屏障：未双通道合并完成前不评估（对应 merge 的首次空转触发）
@@ -501,7 +509,12 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                                         available_cash=cash,
                                         portfolio=portfolio_state if isinstance(portfolio_state, dict) else None)
         _log_intents(db, state.get("run_id"), state.get("decision_id"), decision, verdict)
-        return {"risk_verdict": verdict, "execution_prices": prices}
+        trace = list(decision.pipeline_trace)
+        for item in trace:
+            if item.get("stage") == "risk_guard":
+                item["status"] = "PASS" if verdict.verdict in ("approved", "reduced") else "BLOCK"
+        return {"decision": decision.model_copy(update={"pipeline_trace": trace}),
+                "risk_verdict": verdict, "execution_prices": prices}
 
     def execution_node(state: AgentState) -> dict[str, Any]:
         # 会合屏障：未双通道合并完成前不执行，防止决策链每轮跑两遍导致的重复下单风险。
@@ -570,6 +583,7 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
     g.add_node("strategy_trader", strategy_trader_node)
     g.add_node("ai_trader", ai_trader_node)
     g.add_node("merge", merge_node)
+    g.add_node("pipeline", pipeline_node)
     g.add_node("risk", risk_node)
     g.add_node("execution", execution_node)
     g.add_edge(START, "guardian")
@@ -583,7 +597,8 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
     g.add_edge("strategy", "ai_trader")
     g.add_edge("strategy_trader", "merge")
     g.add_edge("ai_trader", "merge")
-    g.add_conditional_edges("merge", route_after_merge, {"risk": "risk", "end": END})
+    g.add_conditional_edges("merge", route_after_merge, {"pipeline": "pipeline", "end": END})
+    g.add_edge("pipeline", "risk")
     g.add_edge("risk", "execution")
     g.add_edge("execution", END)
     return g.compile()

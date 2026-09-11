@@ -106,6 +106,7 @@ def run_one_cycle(settings, db, logger, recorder, broker, capital, quota, llm, m
         signal_scanner_config=signal_scanner_config(settings, universe),
         allow_new_positions=bool(control.allow_new_positions and equity_available),
         execution_feedback=dict(execution_feedback or {}),
+        execution_mode=str(getattr(broker, "mode", "paper") or "paper"),
     )
     state = graph.invoke({"run_id": run_id, "decision_id": decision_id})
     decision = state.get("decision")

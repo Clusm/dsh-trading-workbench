@@ -665,6 +665,9 @@ class BinanceFuturesBroker:
                 prices: dict[str, float], risk_config: dict[str, Any],
                 db: AuditDatabase) -> list[dict[str, Any]]:
         receipts: list[dict[str, Any]] = []
+        if getattr(self, "require_pipeline_authorization", False):
+            from core.decision_pipeline import filter_unauthorized_opens
+            decision, verdict = filter_unauthorized_opens(decision, verdict, db)
         # 每轮先同步本地 LIMIT 台账：成交→记来源+补挂SL/TP，过期→撤单。
         try:
             receipts.extend(self._sync_pending_limits())

@@ -24,10 +24,12 @@ VALID_MODES = ("paper", "demo", "testnet", "live")
 
 def _paper_broker(settings: Settings):
     cap_cfg = settings.raw_settings.get("capital", {}) or {}
-    return PaperBroker(
+    broker = PaperBroker(
         settings.project_root / "data/paper_portfolio.json",
         initial_equity=float(cap_cfg.get("initial_equity", 200)),
     )
+    broker.require_pipeline_authorization = True
+    return broker
 
 
 def create_broker(settings: Settings, db: AuditDatabase):
@@ -64,6 +66,7 @@ def create_broker(settings: Settings, db: AuditDatabase):
                     and (settings.raw_settings.get("protection_order_mirror", {}) or {}).get(
                         "read_enabled", False)),
             )
+            broker.require_pipeline_authorization = True
             db.log_risk_event(event_type="broker_created", severity="info",
                               details=f"execution broker={mode} base_url={broker.base_url}",
                               action_taken="connected")

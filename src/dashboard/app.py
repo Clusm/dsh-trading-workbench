@@ -411,6 +411,8 @@ def _event_type_cn(value: Any) -> str:
         "guardian_error": "持仓论点监督异常",
         "guardian_invalidation": "持仓论点已被证伪",
         "guardian_review_due": "持仓论点待人工复核",
+        "pipeline_open_blocked": "统一决策管线拦截开仓",
+        "pipeline_bypass_blocked": "开仓旁路已拦截",
         "strategy_ticket_expired": "策略ticket过期",
         "strategy_conflict_skip": "策略通道冲突跳过",
         "channel_daily_rebalance": "通道每日重算",

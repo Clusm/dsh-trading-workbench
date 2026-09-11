@@ -134,6 +134,9 @@ class TradeDecision(BaseModel):
     reasoning: str = ""
     strategy_refs: list[str] = Field(default_factory=list)
     policy_checks: list[dict[str, Any]] = Field(default_factory=list)
+    pipeline_trace: list[dict[str, Any]] = Field(default_factory=list)
+    # 仅由 core.decision_pipeline 在所有开仓检查汇合后置位；Broker 不信任调用方口头约定。
+    pipeline_authorized: bool = False
     channel: Literal["strategy", "ai", "merged"] = "ai"
 
 

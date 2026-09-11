@@ -247,6 +247,9 @@ class PaperBroker:
     def execute(self, decision: TradeDecision, verdict: RiskVerdict, prices: dict[str, float],
                 risk_config: dict[str, Any], db: AuditDatabase) -> list[dict[str, Any]]:
         receipts: list[dict[str, Any]] = []
+        if getattr(self, "require_pipeline_authorization", False):
+            from core.decision_pipeline import filter_unauthorized_opens
+            decision, verdict = filter_unauthorized_opens(decision, verdict, db)
         # 每轮先处理待成交限价单（成交/过期），即使本轮 no_trade 也要处理；
         # 市场快照里可能没有挂单 symbol，这里实时补齐。
         pending_symbols = []
