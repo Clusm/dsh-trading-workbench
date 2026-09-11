@@ -1,17 +1,15 @@
-"""SignalScanner：读取 final 策略卡，拉取 K 线，调用 strategy_lab 的 signal_fn。
+"""SignalScanner：读取 final 策略卡，拉取 K 线，调用内置策略运行时。
 
 关键约束：
 - 只扫描已完成 K 线（close_time <= now），不把正在形成的 bar 当信号；
 - 同一根 bar 只发射一次信号（持久化去重）；
 - 信号与 ticket 全部写审计库；
-- 不复制 strategy_lab 源码，通过配置的 src 路径动态 import。
+- 策略函数位于命名空间隔离的 ``strategy_runtime``，不依赖项目外路径。
 """
 from __future__ import annotations
 
-import importlib
 import json
 import os
-import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from audit.database import AuditDatabase
+import strategy_runtime
 from data.binance_public import _get_json
 
 PUBLIC_BASE = "https://fapi.binance.com"
@@ -35,7 +34,11 @@ _KLINES_TTL = 20.0
 
 
 def resolve_strategy_lab_src(project_root: Path, configured: str | Path | None) -> str:
-    """把策略研究目录稳定解析为绝对路径；空配置仍保留为空以触发安全降级。"""
+    """兼容旧调用方的路径规范化函数。
+
+    实时扫描已使用内置 ``strategy_runtime``，返回值只用于旧配置和调用方平滑迁移，
+    不再作为模块导入路径。
+    """
     raw = str(configured or "").strip()
     if not raw:
         return ""
@@ -129,10 +132,10 @@ def _is_market_transport_outage(exc: Exception) -> bool:
 
 
 class SignalScanner:
-    """加载外部 strategy_lab 的 final 策略卡并生成有时效的 SignalTicket。
+    """加载内置策略运行时的 final 策略卡并生成有时效的 SignalTicket。
 
     扫描器只计算确定性信号，不直接下单。外部模块来源、注册表和策略函数任一校验失败
-    时安全降级为空票据，避免导入同名错误模块后产生伪信号。
+    时安全降级为空票据，避免策略卡与注册表漂移后产生伪信号。
     """
     def __init__(self, knowledge_dir: Path, strategy_lab_src: str,
                  state_file: Path, db: AuditDatabase | None = None,
@@ -140,10 +143,9 @@ class SignalScanner:
                  universal_cards: bool = False,
                  max_scan_symbols_per_cycle: int = 8):
         self.knowledge_dir = Path(knowledge_dir)
-        # 保存原始字符串：Path('') 会规范化为 '.'，导致后续 exists() 恒 True、
-        # 空配置检测失效（实测每轮快循环重试 import signals → 16 次/轮误报）
-        self._strategy_lab_src_raw = str(strategy_lab_src or "").strip()
-        self.strategy_lab_src = Path(self._strategy_lab_src_raw)
+        # 参数保留至一次兼容发布结束，避免外部运行脚本的构造调用失效。运行时不再
+        # 从这个路径加载模块；策略研究仓库可以独立移动、归档或不存在。
+        self.strategy_lab_src = str(strategy_lab_src or "").strip()
         self.state_file = Path(state_file)
         self.db = db
         self.kline_limit = int(kline_limit)
@@ -156,29 +158,11 @@ class SignalScanner:
     def _load_strategy_lab(self) -> None:
         if self._registry is not None:
             return
-        if not self._strategy_lab_src_raw or not self.strategy_lab_src.exists():
-            # 未配置 strategy_lab（换机/路径不存在）：策略通道降级为无信号，
-            # 不再因硬编码绝对路径不存在而反复抛异常拖慢每轮决策。
-            raise RuntimeError("strategy_lab 未配置或路径不存在，策略信号扫描跳过")
-        src = str(self.strategy_lab_src.resolve())
-        if src not in sys.path:
-            sys.path.insert(0, src)
-        # 注意：本目录下的模块名不要叫 signals/features，避免遮蔽 strategy_lab。
-        signals_mod = importlib.import_module("signals")
-        features_mod = importlib.import_module("features")
-        expected_dir = self.strategy_lab_src.resolve()
-        for name, module in (("signals", signals_mod), ("features", features_mod)):
-            module_file = Path(str(getattr(module, "__file__", ""))).resolve()
-            if module_file.parent != expected_dir:
-                raise RuntimeError(
-                    f"strategy_lab 模块冲突：{name} 实际加载自 {module_file}，"
-                    f"预期目录 {expected_dir}"
-                )
-        registry = getattr(signals_mod, "REGISTRY", None)
+        registry = getattr(strategy_runtime, "REGISTRY", None)
         if not isinstance(registry, dict):
-            raise RuntimeError("strategy_lab signals.REGISTRY 缺失或类型错误")
-        if not callable(getattr(features_mod, "build_features", None)):
-            raise RuntimeError("strategy_lab features.build_features 缺失")
+            raise RuntimeError("strategy_runtime.REGISTRY 缺失或类型错误")
+        if not callable(getattr(strategy_runtime, "build_features", None)):
+            raise RuntimeError("strategy_runtime.build_features 缺失")
         required = {
             str(card.get("signal_fn") or "")
             for card in load_cards(self.knowledge_dir)
@@ -186,9 +170,9 @@ class SignalScanner:
         }
         missing = sorted(required - set(registry))
         if missing:
-            raise RuntimeError(f"strategy_lab 缺少策略卡所需 signal_fn: {', '.join(missing)}")
+            raise RuntimeError(f"strategy_runtime 缺少策略卡所需 signal_fn: {', '.join(missing)}")
         self._registry = registry
-        self._features_mod = features_mod
+        self._features_mod = strategy_runtime
 
     def _load_state(self) -> dict[str, Any]:
         if self.state_file.exists():

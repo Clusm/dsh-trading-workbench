@@ -33,7 +33,6 @@ from core.quotas import TradeQuotaManager
 from core.risk_guard import AccountRiskGuard
 from llm.base import LLMClient
 from llm.mock_client import MockLLMClient
-from signal_engine import resolve_strategy_lab_src
 from intel import ReadOnlyIntelService
 
 
@@ -215,9 +214,6 @@ class TradingService:
 
     def _signal_scanner_config(self) -> dict[str, Any]:
         cfg = dict(self.settings.raw_settings.get("signal_scanner", {}) or {})
-        cfg["strategy_lab_src"] = resolve_strategy_lab_src(
-            self.settings.project_root, cfg.get("strategy_lab_src")
-        )
         cfg["signal_state_file"] = str(
             self.settings.project_root / str(cfg.get("signal_state_file", "data/signal_scanner_state.json"))
         )

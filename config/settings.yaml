@@ -130,8 +130,7 @@ quotas:
   daily_hourly_target: 3
 
 signal_scanner:
-  # 相对项目根目录解析；策略源码保留在独立研究仓库，不复制进交易系统。
-  strategy_lab_src: ../../ai-trader/strategy_lab/src
+  # 已验证策略的最小运行时已内置在 src/strategy_runtime，不依赖研究仓库路径。
   kline_limit: 300
   # 信号触发后 ticket 的有效期（按 K 线根数）
   ticket_valid_bars: 2

@@ -38,7 +38,7 @@ Copy-Item .env.example .env
 
 - 慢循环每 10 分钟运行：行情与策略扫描、双通道决策、确定性风控和执行。
 - 快循环每 30 秒运行：账户/订单/保护单对账与存量仓位安全检查。
-- `strategy` 通道消费 strategy_lab 的确定性策略票据。
+- `strategy` 通道消费内置策略运行时生成的确定性策略票据；研究仓库不参与生产导入。
 - `ai` 通道使用 LLM 和白名单行情工具形成候选决策。
 - 当前所有实际 LLM 节点统一使用 `deepseek-v4-flash`；Risk/Execution 是确定性代码。
 - AI 决策节点使用 SenseNova 支持的最高 `xhigh` 推理档；其他节点按职责使用 low/high。

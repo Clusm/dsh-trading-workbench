@@ -1,6 +1,7 @@
 """策略研究模块接入冒烟测试：不访问网络、不写真实状态、不产生订单。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -21,8 +22,21 @@ sys.path.insert(0, str(ROOT / "src"))
 from audit.database import AuditDatabase  # noqa: E402
 from core.config_loader import load_settings  # noqa: E402
 from data.market_universe import MarketUniverse  # noqa: E402
-from signal_engine import SignalScanner, resolve_strategy_lab_src  # noqa: E402
+from signal_engine import SignalScanner  # noqa: E402
 import signal_engine.scanner as scanner_module  # noqa: E402
+
+
+# 来源研究运行时在 2026-09-11 纳入前后的合成 OHLCV 输出基线。哈希覆盖 signal/side
+# 的完整序列，防止包化或后续整理悄然改变已验证策略的触发时点和方向。
+EXPECTED_RUNTIME_SIGNATURES = {
+    "old_keltner_v3": "0abb8a05212d71ed1aa77bbdb292fe7c241eaedf755a464bb75a32a9e4fb8a6d",
+    "old_macd_rsi": "0abb8a05212d71ed1aa77bbdb292fe7c241eaedf755a464bb75a32a9e4fb8a6d",
+    "old_po3_any": "c0f858c4c106974cc27568ca45d25e879ab8bc73c6ec2e663bddfa0b3edf8e0c",
+    "s03_structure_ote": "0abb8a05212d71ed1aa77bbdb292fe7c241eaedf755a464bb75a32a9e4fb8a6d",
+    "s07_supply_demand_range_v3": "0abb8a05212d71ed1aa77bbdb292fe7c241eaedf755a464bb75a32a9e4fb8a6d",
+    "s08_volume_rsi_divergence_v3": "1efcbc69b143140daa894e03727268ebfd56e0b3f5f5663f32e73431e8e0ac50",
+    "s09_climax_rebound_long_v2": "0abb8a05212d71ed1aa77bbdb292fe7c241eaedf755a464bb75a32a9e4fb8a6d",
+}
 
 
 def synthetic_ohlcv(rows: int = 300) -> pd.DataFrame:
@@ -54,12 +68,11 @@ def no_signal(frame: pd.DataFrame, _params: dict) -> pd.DataFrame:
 
 def main() -> None:
     settings = load_settings(ROOT)
-    cfg = settings.raw_settings.get("signal_scanner", {}) or {}
-    strategy_src = resolve_strategy_lab_src(ROOT, cfg.get("strategy_lab_src"))
     with tempfile.TemporaryDirectory(prefix="mta-signal-smoke-") as tmp:
         scanner = SignalScanner(
             knowledge_dir=settings.knowledge_dir,
-            strategy_lab_src=strategy_src,
+            # 不存在的旧研究路径不得影响内置运行时加载。
+            strategy_lab_src="Z:/retired-strategy-lab/src",
             state_file=Path(tmp) / "signal_state.json",
         )
         scanner._load_strategy_lab()
@@ -68,6 +81,7 @@ def main() -> None:
         ).get("cards", [])
         frame = synthetic_ohlcv()
         checked: set[str] = set()
+        signatures: dict[str, str] = {}
         for card in cards:
             signal_fn = str(card.get("signal_fn") or "")
             if not card.get("indicatorized") or not signal_fn or signal_fn in checked:
@@ -76,9 +90,15 @@ def main() -> None:
             assert len(out) == len(frame), signal_fn
             assert {"side", "signal"}.issubset(out.columns), signal_fn
             assert set(out["side"].dropna().unique()).issubset({"", "LONG", "SHORT"}), signal_fn
+            signatures[signal_fn] = hashlib.sha256(
+                out[["signal", "side"]].to_csv().encode("utf-8")
+            ).hexdigest()
             checked.add(signal_fn)
         assert checked, "没有可验证的策略函数"
-        assert Path(strategy_src).is_dir(), strategy_src
+        assert signatures == EXPECTED_RUNTIME_SIGNATURES, signatures
+        runtime_file = Path(str(scanner._features_mod.__file__)).resolve()
+        assert runtime_file.parent.name == "strategy_runtime", runtime_file
+        assert "signals" not in sys.modules, "不得导入无命名空间的外部 signals 模块"
 
     # 相同 symbol/timeframe 的策略卡共享一次行情失败，避免告警和请求扇出。
     with tempfile.TemporaryDirectory(prefix="mta-signal-cache-") as tmp:
@@ -209,7 +229,7 @@ def main() -> None:
         row = db.fetch_one("SELECT status FROM signal_tickets WHERE ticket_id='old-ticket'")
         assert row["status"] == "expired"
         db.close()
-    print(f"SIGNAL_SCANNER_INTEGRATION_OK functions={len(checked)} src={strategy_src}")
+    print(f"SIGNAL_SCANNER_INTEGRATION_OK functions={len(checked)} runtime=bundled")
 
 
 if __name__ == "__main__":
