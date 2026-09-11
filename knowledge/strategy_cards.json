@@ -16,6 +16,12 @@
         "trend_down",
         "volatile"
       ],
+      "decision_policy": {
+        "absorption_family": "regime_momentum",
+        "required_evidence": ["closed_kline", "adx", "macd", "rsi", "higher_timeframe_not_up"],
+        "disabled_when": ["data_quality_failed", "higher_timeframe_trend_up"],
+        "entry_confirmation": "closed_bar"
+      },
       "tags": [
         "macd",
         "rsi",
@@ -75,6 +81,12 @@
         "trend_down",
         "volatile"
       ],
+      "decision_policy": {
+        "absorption_family": "regime_momentum",
+        "required_evidence": ["closed_kline", "adx", "macd", "rsi", "higher_timeframe_not_up"],
+        "disabled_when": ["data_quality_failed", "higher_timeframe_trend_up"],
+        "entry_confirmation": "closed_bar"
+      },
       "tags": [
         "macd",
         "rsi",
@@ -137,6 +149,12 @@
         "trend_down",
         "volatile"
       ],
+      "decision_policy": {
+        "absorption_family": "regime_momentum",
+        "required_evidence": ["closed_kline", "adx", "macd", "rsi", "higher_timeframe_not_up"],
+        "disabled_when": ["data_quality_failed", "higher_timeframe_trend_up"],
+        "entry_confirmation": "closed_bar"
+      },
       "tags": [
         "macd",
         "rsi",
@@ -200,6 +218,13 @@
         "trend_down",
         "choppy"
       ],
+      "decision_policy": {
+        "absorption_family": "liquidity_sweep_reversal",
+        "required_evidence": ["closed_kline", "liquidity_sweep", "reclaim_confirmation", "volume_or_orderflow"],
+        "disabled_when": ["data_quality_failed", "unconfirmed_sweep", "excessive_chase"],
+        "entry_confirmation": "sweep_then_reclaim_close",
+        "initial_mode": "shadow"
+      },
       "tags": [
         "po3",
         "liquidity_sweep"
@@ -257,6 +282,12 @@
         "trend_down",
         "choppy"
       ],
+      "decision_policy": {
+        "absorption_family": "breakout_retest",
+        "required_evidence": ["closed_kline", "bos", "ote_retest", "ob_or_fvg", "higher_timeframe_alignment"],
+        "disabled_when": ["data_quality_failed", "missing_retest", "excessive_chase"],
+        "entry_confirmation": "retest_close"
+      },
       "tags": [
         "structure",
         "OTE",
@@ -317,6 +348,13 @@
         "trend_up",
         "volatile"
       ],
+      "decision_policy": {
+        "absorption_family": "liquidity_sweep_reversal",
+        "required_evidence": ["closed_kline", "volume_climax", "prior_low", "reversal_close", "orderflow_confirmation"],
+        "disabled_when": ["data_quality_failed", "trend_down_without_reversal", "unconfirmed_rebound"],
+        "entry_confirmation": "reversal_close",
+        "initial_mode": "shadow"
+      },
       "tags": [
         "counter_trend",
         "volume_climax",
@@ -377,6 +415,12 @@
         "trend_down",
         "choppy"
       ],
+      "decision_policy": {
+        "absorption_family": "range_mean_reversion_or_retest",
+        "required_evidence": ["closed_kline", "supply_or_demand_zone", "range_filter", "breakout_close"],
+        "disabled_when": ["data_quality_failed", "range_filter_conflict", "zone_invalidated"],
+        "entry_confirmation": "closed_bar"
+      },
       "tags": [
         "supply_demand",
         "range_filter",
@@ -439,6 +483,12 @@
         "trend_down",
         "choppy"
       ],
+      "decision_policy": {
+        "absorption_family": "confirmed_divergence_reversal",
+        "required_evidence": ["closed_kline", "price_extreme", "rsi_divergence", "volume_divergence", "trendline_or_ma_break"],
+        "disabled_when": ["data_quality_failed", "divergence_unconfirmed", "higher_timeframe_acceleration"],
+        "entry_confirmation": "trendline_or_ma_close"
+      },
       "tags": [
         "RSI",
         "volume_divergence"
@@ -501,6 +551,12 @@
         "trend_down",
         "choppy"
       ],
+      "decision_policy": {
+        "absorption_family": "regime_momentum_breakout_retest",
+        "required_evidence": ["closed_kline", "keltner_breakout", "ema50_alignment", "volume_confirmation"],
+        "disabled_when": ["data_quality_failed", "higher_timeframe_conflict", "excessive_chase"],
+        "entry_confirmation": "breakout_or_retest_close"
+      },
       "tags": [
         "keltner",
         "mtf"

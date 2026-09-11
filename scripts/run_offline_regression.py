@@ -19,6 +19,7 @@ SCRIPTS = (
     "scripts/smoke_p0b.py",
     "scripts/smoke_p0b_loop.py",
     "scripts/smoke_p1.py",
+    "scripts/smoke_decision_policy.py",
     "scripts/smoke_db_migrations.py",
     "scripts/smoke_recovery_bundle.py",
     "scripts/smoke_risk_incidents.py",

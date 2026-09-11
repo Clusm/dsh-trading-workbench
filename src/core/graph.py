@@ -400,6 +400,7 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 decision="no_trade", channel="merged",
                 reasoning=f"[策略] {strategy_decision.reasoning} | [AI] {ai_decision.reasoning}",
                 strategy_refs=list(dict.fromkeys(strategy_decision.strategy_refs + ai_decision.strategy_refs)),
+                policy_checks=list(ai_decision.policy_checks),
             )
         else:
             actions = {getattr(i, "action", "open") for i in intents}
@@ -413,6 +414,7 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 decision=decision_type, channel="merged", intents=intents,
                 reasoning=f"[策略] {strategy_decision.reasoning} | [AI] {ai_decision.reasoning}",
                 strategy_refs=list(dict.fromkeys(strategy_decision.strategy_refs + ai_decision.strategy_refs)),
+                policy_checks=list(ai_decision.policy_checks),
             )
         return {"decision": merged, "conflicts": conflicts, "channels_merged": True}
 

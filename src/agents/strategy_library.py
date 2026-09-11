@@ -117,6 +117,7 @@ def run_strategy_agent(knowledge_dir: Path, market: MarketBrief | None = None,
             seen.add(strategy_id)
             card = card_by_id.get(strategy_id, {})
             side = str(ticket.get("side", ""))
+            policy = card.get("decision_policy") or {}
             refs.append(StrategyRef(
                 strategy_id=strategy_id,
                 name=_display_name(str(card.get("name") or strategy_id)),
@@ -124,7 +125,10 @@ def run_strategy_agent(knowledge_dir: Path, market: MarketBrief | None = None,
                 note=f"signal triggered: side={side} tf={ticket.get('timeframe','')} price={ticket.get('signal_price','')}",
                 detail=(f"ticket={ticket.get('ticket_id','')}; 方向={side}; "
                         f"入场区=[{ticket.get('entry_zone_low')},{ticket.get('entry_zone_high')}]; "
-                        f"过期={ticket.get('expires_at','')}"),
+                        f"过期={ticket.get('expires_at','')}; "
+                        f"适配族={policy.get('absorption_family', 'legacy')}; "
+                        f"必需证据={','.join(policy.get('required_evidence', []))}; "
+                        f"禁用条件={','.join(policy.get('disabled_when', []))}"),
             ))
         return StrategyRefs(
             refs=refs,
@@ -139,10 +143,14 @@ def run_strategy_agent(knowledge_dir: Path, market: MarketBrief | None = None,
 
     refs: list[StrategyRef] = []
     for score, reasons, c in scored[:3]:
+        policy = c.get("decision_policy") or {}
         detail = (
             f"方向={c.get('direction')}; 周期={','.join(c.get('timeframes', []))}; "
             f"入场={c.get('entry', '')} 止损={c.get('stop_loss', '')} "
-            f"止盈={c.get('take_profit', '')} 注意={c.get('risk_notes', '')}"
+            f"止盈={c.get('take_profit', '')} 注意={c.get('risk_notes', '')}; "
+            f"适配族={policy.get('absorption_family', 'legacy')}; "
+            f"必需证据={','.join(policy.get('required_evidence', []))}; "
+            f"禁用条件={','.join(policy.get('disabled_when', []))}"
         )
         refs.append(StrategyRef(
             strategy_id=str(c.get("id", "?")),

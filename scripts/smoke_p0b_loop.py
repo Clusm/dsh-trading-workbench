@@ -87,6 +87,23 @@ class ScriptedLLM:
         }
 
 
+class BareLLM:
+    """模拟供应商忽略 tool_choice、直接返回 JSON 文本。"""
+
+    def __init__(self, payload: dict):
+        self.payload = payload
+        self.calls = 0
+
+    def chat(self, messages, tools=None, tool_choice="auto"):
+        self.calls += 1
+        return {
+            "choices": [{"message": {"role": "assistant", "content": json.dumps(
+                self.payload, ensure_ascii=False,
+            )}, "finish_reason": "stop"}],
+            "usage": {},
+        }
+
+
 def _tc(name, args, cid="c1"):
     return {"id": cid, "type": "function",
             "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
@@ -122,6 +139,20 @@ def run(script, space, db, rec, prices=None, quality_ok: bool = True):
     return d, llm
 
 
+def run_bare(payload: dict, space: ActionSpace):
+    db, rec = ctx()
+    llm = BareLLM(payload)
+    decision = run_orchestrator(
+        llm=llm, model="bare", recorder=rec, db=db,
+        logger=JsonlLogger(Path(tempfile.mkdtemp()) / "logs"), run_id="bare-run",
+        market=MarketBrief(), macro=MacroBrief(), onchain=OnchainBrief(),
+        strategy=StrategyRefs(), risk_envelope={},
+        portfolio={"positions": [{"symbol": "BTCUSDT", "source": "ai"}]},
+        action_space=space, prices={"BTCUSDT": 60000.0},
+    )
+    return decision, db
+
+
 SPACE = ActionSpace.from_context(
     risk_config={"max_leverage": 20, "ai_max_leverage": 20, "strong_max_leverage": 50,
                  "max_open_positions": 8, "supported_symbols": ["BTCUSDT", "ETHUSDT"]},
@@ -153,6 +184,9 @@ d, llm = run(script, SPACE, *ctx())
 check("最终决策是 open 而非 no_trade", d.decision == "open", d.decision)
 check("采纳的是修正后的止损", d.intents and d.intents[0].stop_loss == 59000.0,
       str([i.stop_loss for i in d.intents]))
+check("shadow 决策质量结果随决策保存",
+      len(d.policy_checks) == 5 and all(item["mode"] == "shadow" for item in d.policy_checks),
+      str(d.policy_checks))
 check("错误以 tool result 回传了", len(llm.seen_tool_results) == 1, str(len(llm.seen_tool_results)))
 if llm.seen_tool_results:
     err = json.loads(llm.seen_tool_results[0])
@@ -285,6 +319,17 @@ d9, llm9 = run([[_tc("submit_decision", no_trade, cid="clean-no-trade")]], SPACE
 check("no_trade 首轮直接通过", d9.decision == "no_trade" and llm9.calls == 1,
       f"decision={d9.decision} calls={llm9.calls}")
 check("系统提示已移除催单语句", "不要轻易 no_trade" not in SYSTEM_PROMPT and "积极寻找" not in SYSTEM_PROMPT)
+
+print("\n[8] 裸 JSON 不能绕过证据与业务校验")
+bare_decision, bare_db = run_bare(valid_open, SPACE)
+check("裸 JSON open 因没有本轮 detail 查询而降级", bare_decision.decision == "no_trade",
+      bare_decision.reasoning)
+bare_events = bare_db.fetch_all(
+    "SELECT details FROM risk_events WHERE event_type='decision_downgraded'"
+)
+check("裸 JSON 降级已审计", bool(bare_events) and "query_symbol_detail" in bare_events[-1]["details"],
+      str([dict(row) for row in bare_events]))
+bare_db.close()
 
 print(f"\n{'=' * 46}\n通过 {ok} / 失败 {fail}\n{'=' * 46}")
 sys.exit(1 if fail else 0)

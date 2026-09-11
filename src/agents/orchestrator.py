@@ -14,6 +14,7 @@ from audit.database import AuditDatabase, utc_now
 from audit.jsonl_logger import JsonlLogger
 from core.action_space import ActionSpace, VALID_SIDES
 from core.agent_recorder import AgentRecorder
+from core.decision_policy import enforced_issues, evaluate_open_intent
 from data.market_query import TOOL_SPECS, execute_tool
 from llm.base import LLMClient
 
@@ -850,6 +851,19 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                                     hint="请先完成本轮 detail 查询并原样引用其数据时点；"
                                          "无法取得合格数据时提交 no_trade。",
                                 )
+                        if not issues:
+                            policy_checks = [
+                                check
+                                for intent in decision.intents
+                                for check in evaluate_open_intent(intent)
+                            ]
+                            decision = decision.model_copy(update={"policy_checks": policy_checks})
+                            issues = enforced_issues(policy_checks)
+                            if issues and strict:
+                                raise DecisionValidationError(
+                                    issues,
+                                    hint="决策质量检查未通过；可修正证据，或提交 no_trade。",
+                                )
                         # 业务规则校验：与动态 schema、risk.py 运行时闸门共用同一个谓词，
                         # 三者不会漂移。错误回传给模型重试，服从率远高于 prompt 禁令。
                         if not issues and action_space is not None:
@@ -874,9 +888,20 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                                          "content": _pack_tool_result(result)})
                         continue
                     except Exception as e:
-                        # 非校验类异常不再重试，直接降级，避免死循环烧 token
-                        decision, issues = _build_decision(args, strict=False)
+                        # 校验器自身异常时必须 fail-closed。过去这里重新宽松解析原 payload，
+                        # 反而可能把尚未经过业务校验的 open 放行。
+                        issues = [f"decision validation runtime error: {type(e).__name__}: {e}"]
+                        decision = TradeDecision(
+                            decision="no_trade",
+                            reasoning=(args.get("reasoning") or "")
+                                      + " （决策校验器异常，已安全降级不交易）",
+                        )
+                        db.log_risk_event(
+                            event_type="decision_downgraded", severity="critical",
+                            details=issues[0], action_taken="no_trade",
+                        )
                         last_error = e
+                        decision_was_downgraded = True
                         submitted = True
                         break
 
@@ -937,37 +962,41 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
         if content:
             candidate = _extract_decision_json(content)
             try:
-                decision = TradeDecision.model_validate_json(candidate)
+                payload = json.loads(candidate)
+                decision, issues = _build_decision(payload, strict=False)
                 last_error = None
+                if not issues:
+                    issues = _check_open_query_provenance(decision.intents, query_evidence)
+                if not issues:
+                    policy_checks = [
+                        check
+                        for intent in decision.intents
+                        for check in evaluate_open_intent(intent)
+                    ]
+                    decision = decision.model_copy(update={"policy_checks": policy_checks})
+                    issues = enforced_issues(policy_checks)
+                # 裸 JSON 同样要过业务规则与持仓必答校验；这里无法回传重试，
+                # 任何问题都只能 fail-closed 到 no_trade。
+                if not issues and action_space is not None:
+                    issues = action_space.check_decision(decision.intents, prices)
+                    if not issues:
+                        issues = action_space.check_position_reviews(
+                            decision.position_reviews, decision.intents)
+                if issues:
+                    decision_was_downgraded = True
+                    decision = TradeDecision(
+                        decision="no_trade",
+                        reasoning=(decision.reasoning or "")
+                                  + f" （裸输出未过业务校验，已降级不交易：{'；'.join(issues)}）",
+                        strategy_refs=list(decision.strategy_refs),
+                    )
+                    db.log_risk_event(
+                        event_type="decision_downgraded", severity="warn",
+                        details=f"裸 JSON 输出降级不交易：{'；'.join(issues)}",
+                        action_taken="no_trade")
             except Exception as e:
-                # 没走 submit_decision 而是裸输出 JSON 时，没有重试机会，只能宽松解析；
-                # 降级原因要写进 reasoning 并落库，不能静默变成 no_trade。
-                try:
-                    payload = json.loads(candidate)
-                    decision, issues = _build_decision(payload, strict=False)
-                    last_error = None
-                    # 裸 JSON 同样要过业务规则与持仓必答校验（否则会绕过杠杆/止损/
-                    # position_reviews 约束）；这里无法再向模型回传重试，只能降级。
-                    if not issues and action_space is not None:
-                        issues = action_space.check_decision(decision.intents, prices)
-                        if not issues:
-                            issues = action_space.check_position_reviews(
-                                decision.position_reviews, decision.intents)
-                    if issues:
-                        decision_was_downgraded = True
-                        decision = TradeDecision(
-                            decision="no_trade",
-                            reasoning=(decision.reasoning or "")
-                                      + f" （裸输出未过业务校验，已降级不交易：{'；'.join(issues)}）",
-                            strategy_refs=list(decision.strategy_refs),
-                        )
-                        db.log_risk_event(
-                            event_type="decision_downgraded", severity="warn",
-                            details=f"裸 JSON 输出降级不交易：{'；'.join(issues)}",
-                            action_taken="no_trade")
-                except Exception:
-                    decision = TradeDecision(decision="no_trade", reasoning=f"LLM输出解析失败，自动不交易: {e}")
-                    last_error = e
+                decision = TradeDecision(decision="no_trade", reasoning=f"LLM输出解析失败，自动不交易: {e}")
+                last_error = e
             break
         elif tool_calls:
             # 理论上前面的 if tool_calls 已经处理，这里兜底

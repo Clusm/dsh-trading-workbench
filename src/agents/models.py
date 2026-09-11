@@ -133,6 +133,7 @@ class TradeDecision(BaseModel):
     position_reviews: list[PositionReview] = Field(default_factory=list)
     reasoning: str = ""
     strategy_refs: list[str] = Field(default_factory=list)
+    policy_checks: list[dict[str, Any]] = Field(default_factory=list)
     channel: Literal["strategy", "ai", "merged"] = "ai"
 
 

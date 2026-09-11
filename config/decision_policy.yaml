@@ -1,0 +1,18 @@
+version: 1
+
+# 这些是“决策质量”检查，不是仓位风险参数。初始全部 shadow：只记录判断，
+# 不改变现有杠杆、仓位、白名单、止损、RiskGuard 或实际下单结果。
+checks:
+  trend_alignment:
+    mode: shadow
+  risk_reward:
+    mode: shadow
+    minimum: 1.5
+    report_tolerance: 0.15
+  entry_chase:
+    mode: shadow
+    maximum_pct: 0.75
+  evidence_conflict:
+    mode: shadow
+  invalidation_consistency:
+    mode: shadow
