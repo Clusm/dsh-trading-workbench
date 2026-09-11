@@ -18,6 +18,15 @@ from audit.database import AuditDatabase  # noqa: E402
 
 ok = fail = 0
 
+TEST_EVIDENCE = {
+    "market_regime": "trend_up", "higher_timeframe_trend": "up",
+    "supporting_evidence": ["闭合K线趋势向上"], "counter_evidence": [],
+    "trigger_price": 150.0, "invalidation_price": 100.0,
+    "invalidation_operator": "close_below", "confirmation_interval": "15m",
+    "risk_reward_ratio": 2.0, "chase_distance_pct": 0.1,
+    "data_observed_at_ms": 1_700_000_000_000, "confidence_basis": "测试证据",
+}
+
 
 def check(name: str, cond: bool, extra: str = "") -> None:
     global ok, fail
@@ -33,7 +42,9 @@ print("\n[1] 严格模式：qty=0 的 open 不再被静默吞掉")
 payload = {
     "decision": "open",
     "intents": [{"symbol": "BTCUSDT", "action": "open", "side": "LONG", "qty": 0.0,
-                 "stop_loss": 100.0, "take_profit": 200.0, "reasoning": "test"}],
+                 "stop_loss": 100.0, "take_profit": 200.0, "reasoning": "test",
+                 "strategy_id": "ai:trend_follow:v1", "evidence": TEST_EVIDENCE,
+                 "invalidation": "跌破 100 即证伪"}],
     "reasoning": "想开多",
 }
 try:
@@ -43,14 +54,15 @@ except DecisionValidationError as e:
     check("qty=0 open 抛 DecisionValidationError", True)
     check("错误信息点名了 intent 下标与 symbol",
           "intents[0]" in e.issues[0] and "BTCUSDT" in e.issues[0], str(e.issues))
-    check("hint 提示不要绕道 no_trade", "no_trade" in e.hint, e.hint)
+    check("hint 明确证据不足可 no_trade", "no_trade" in e.hint, e.hint)
 
 print("\n[2] 严格模式：合法 payload 正常通过")
 good = {
     "decision": "open",
     "intents": [{"symbol": "BTCUSDT", "action": "open", "side": "long", "qty": 0.01,
                  "leverage": 5, "stop_loss": 100.0, "take_profit": 200.0,
-                 "invalidation": "跌破 100 即证伪"}],
+                 "invalidation": "跌破 100 即证伪", "strategy_id": "ai:trend_follow:v1",
+                 "evidence": TEST_EVIDENCE}],
     "position_reviews": [],
     "reasoning": "ok",
 }

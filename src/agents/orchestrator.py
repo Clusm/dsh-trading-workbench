@@ -182,6 +182,46 @@ def _extract_query_symbols(fname: str, args: dict[str, Any]) -> list[str]:
         return [str(s).strip().upper() for s in (syms or []) if s]
     return []
 
+
+def _decision_evidence_schema() -> dict[str, Any]:
+    """AI 开仓证据契约；静态与动态 submit schema 必须共用同一份定义。"""
+    return {
+        "type": "object",
+        "description": "仅 open 必填。必须来自本轮 query_symbol_detail，不得凭空补时间或指标。",
+        "properties": {
+            "market_regime": {
+                "type": "string",
+                "enum": ["trend_up", "trend_down", "range", "volatile", "unknown"],
+            },
+            "higher_timeframe_trend": {
+                "type": "string", "enum": ["up", "down", "range", "unknown"],
+            },
+            "supporting_evidence": {
+                "type": "array", "minItems": 1, "items": {"type": "string"},
+            },
+            "counter_evidence": {"type": "array", "items": {"type": "string"}},
+            "trigger_price": {"type": "number", "exclusiveMinimum": 0},
+            "invalidation_price": {"type": "number", "exclusiveMinimum": 0},
+            "invalidation_operator": {
+                "type": "string", "enum": ["close_below", "close_above"],
+            },
+            "confirmation_interval": {
+                "type": "string", "enum": ["1m", "5m", "15m", "1h", "4h", "1d"],
+            },
+            "risk_reward_ratio": {"type": "number", "minimum": 0},
+            "chase_distance_pct": {"type": "number", "minimum": 0},
+            "data_observed_at_ms": {"type": "integer", "exclusiveMinimum": 0},
+            "confidence_basis": {"type": "string", "minLength": 1},
+        },
+        "required": [
+            "market_regime", "higher_timeframe_trend", "supporting_evidence",
+            "counter_evidence", "trigger_price", "invalidation_price",
+            "invalidation_operator", "confirmation_interval", "risk_reward_ratio",
+            "chase_distance_pct", "data_observed_at_ms", "confidence_basis",
+        ],
+    }
+
+
 SUBMIT_DECISION_TOOL_SPEC = {
     "type": "function",
     "function": {
@@ -212,8 +252,10 @@ SUBMIT_DECISION_TOOL_SPEC = {
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                         "reasoning": {"type": "string"},
                         "strategy_refs": {"type": "array", "items": {"type": "string"}},
+                        "strategy_id": {"type": "string"},
                         "invalidation": {"type": "string",
                                          "description": "（开仓必填）什么行情会证明本笔 thesis 错误，例如 '跌破前低 58000 即证伪'。复盘时据此判断是行情证伪还是拿错了。"},
+                        "evidence": _decision_evidence_schema(),
                     },
                     "required": ["symbol", "action", "side"],
                 }},
@@ -332,9 +374,11 @@ def build_submit_decision_spec(space: ActionSpace | None = None) -> dict[str, An
                             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                             "reasoning": {"type": "string"},
                             "strategy_refs": {"type": "array", "items": {"type": "string"}},
+                            "strategy_id": {"type": "string"},
                             "invalidation": {"type": "string",
                                              "description": "（开仓必填）什么行情会证明本笔 thesis 错误，"
                                                             "例如 '跌破前低 58000 即证伪'。复盘时据此判断是行情证伪还是拿错了。"},
+                            "evidence": _decision_evidence_schema(),
                         },
                         "required": ["symbol", "action", "side"],
                     }},
@@ -361,7 +405,7 @@ def build_submit_decision_spec(space: ActionSpace | None = None) -> dict[str, An
 
 SYSTEM_PROMPT = """你是多 Agent 交易系统的 AI 自决策交易 Agent，负责独立自主决策，输出 order_source=ai 的订单。
 你拥有按需行情查询工具，可以主动查询任意币安 USDT 永续合约的分钟级/小时级数据。
-当前为模拟盘交易，你可以在风险额度内尝试，但必须自己判断。
+当前为模拟盘交易，但不设置成交数量目标。证据不足时选择 no_trade 是正确且完整的决策，不需要补偿上一轮没有交易。
 
 工具使用规则：
 1. 想交易或需要确认某只币时，先用 query_symbol_detail 查询真实 K 线、ATR、量能、资金费率、OI，再决定。
@@ -371,7 +415,7 @@ SYSTEM_PROMPT = """你是多 Agent 交易系统的 AI 自决策交易 Agent，�
 5. 查询完成后，必须调用 submit_decision 工具提交最终决策；不要输出裸 JSON 文本。submit_decision 的参数结构等同下面的 JSON 格式：
 
 最终 JSON 格式：
-{"decision": "no_trade|open|close|reduce|adjust", "intents": [], "reasoning": "...", "strategy_refs": []}
+{"decision": "no_trade|open|close|reduce|adjust", "intents": [], "position_reviews": [], "reasoning": "...", "strategy_refs": []}
 decision 含义：
 - no_trade: 没有足够把握或没有符合条件的信号
 - open: 开新仓
@@ -383,7 +427,12 @@ intents 仅在 decision != no_trade 时填写。每个 intent 字段：
 "order_source":"ai","margin_mode":"ISOLATED","ai_reason_type":"trend_follow|range_fade|breakout|liquidity_sweep|news_event|macro",
 "limit_price":null,"limit_expires_at":null,
 "stop_loss":null,"take_profit":null,"expected_holding_minutes":60,"confidence":0.5,
-"reasoning":"...","strategy_refs":[],"trade_level":"short|hourly"}
+"reasoning":"...","strategy_refs":[],"strategy_id":"ai:trend_follow:v1","trade_level":"short|hourly",
+"invalidation":"15m收盘跌破结构低点即证伪",
+"evidence":{"market_regime":"trend_up|trend_down|range|volatile|unknown","higher_timeframe_trend":"up|down|range|unknown",
+"supporting_evidence":["..."],"counter_evidence":[],"trigger_price":0.0,"invalidation_price":0.0,
+"invalidation_operator":"close_below|close_above","confirmation_interval":"1m|5m|15m|1h|4h|1d",
+"risk_reward_ratio":0.0,"chase_distance_pct":0.0,"data_observed_at_ms":0,"confidence_basis":"..."}}
 每条 intent 可以独立指定 action；当你需要同时平仓、开仓、调整时，分别写不同 action 的 intent。qty 对 adjust 可以为 0，对 open/close/reduce 必须 >0。
 
 决策规则：
@@ -392,8 +441,8 @@ intents 仅在 decision != no_trade 时填写。每个 intent 字段：
 2.1 如果没有 strategy ticket / signal 被 SignalScanner 触发，就不允许说“策略库支持做多/做空”或“策略库匹配”。strategy_refs 只是背景资料，只有当本轮确实有 strategy ticket 进入策略通道时，才可以使用对应策略作为依据。
 3. 杠杆不得超过 risk_envelope.max_leverage，仓位数量不得超过 max_open_positions。
 4. trade_level: 15分钟及以上级别交易填 "short"，小时及以上级别交易填 "hourly"。系统不做 1 分钟级高频，不要试图开分钟级短线仓。
-5. trading_quota 只是已成交统计，不设上限；即使今天已经交易很多笔，仍然要每轮积极寻找新的可交易机会。是否开单、品种、多空、仓位都由你自主决定。
-6. 不要轻易 no_trade：每轮都要主动查询并寻找机会，只有当数据缺失、风险额度不允许、或检查后确实没有任何可尝试机会时，才可以 no_trade。
+5. trading_quota 只是已成交统计，不是目标、下限或催单信号；不得为了提高交易次数而降低证据标准。
+6. no_trade 与 open/close/reduce/adjust 同等有效。没有完整、相互一致且新鲜的证据时必须 no_trade；不得因连续空窗、模拟盘或查询预算尚有剩余而凑单。
 7. 强信心档：如果你对某个机会有强烈信心（confidence >= 0.75），可以使用更高杠杆和更高仓位（参考 risk_envelope 里的 strong_max_*），但必须同时设置止损 stop_loss；没有设置止损时只能按常规限制执行。
 8. 新开仓必须同时设置初始止损 stop_loss 和初始止盈 take_profit，且方向正确：LONG 需 stop_loss<入场价<take_profit，SHORT 需 take_profit<入场价<stop_loss。缺止盈或止损的单会被风控直接拒绝。
 8.1 止盈止损必须基于明确的技术分析理论给出，禁止拍脑袋填数字。可选依据（任选其一并在 reasoning 里写明）：ATR 波动止损（如 1.5~2 倍 ATR）、前高/前低结构位、关键支撑/阻力位、斐波那契回撤位、移动平均线、布林带上下轨、成交密集区/流动性区间。reasoning 必须写清「用什么理论 + 为什么这个价位」。
@@ -404,7 +453,8 @@ intents 仅在 decision != no_trade 时填写。每个 intent 字段：
 12. 如果 supported_symbols 列表非空，你只能交易该列表内的 symbol；列表为空时也以 query_top_symbols / 实际下单结果为准，不要使用无法成交的虚构 symbol。
 13. 每轮必须通过 submit_decision 的 position_reviews 字段对当前每个持仓明确表态
     （hold/reduce/close/adjust + 理由）；意图与表态必须一致，例如 position_reviews 声明 close 就必须有对应 close intent。
-    同时每个 open intent 必须写明 invalidation（什么行情会证伪这笔 thesis）。
+    同时每个 open intent 必须写明 strategy_id、invalidation 和 evidence。evidence 的 data_observed_at_ms
+    必须原样使用本轮 query_symbol_detail 返回值；不得伪造当前时间。支持证据至少一项，反证即使为空也要显式填 []。
 14. 输出语言：你的思考过程（思维链、工具调用前的分析）可以用英文；但 submit_decision 里最终提交的
     reasoning、每条 intent 的 reasoning、position_reviews 的 reason、invalidation 等所有面向用户的决策说明文字，
     一律用简体中文书写。数字、交易对、专业术语可保留英文。"""
@@ -450,11 +500,12 @@ def build_user_prompt(market: MarketBrief, macro: MacroBrief, onchain: OnchainBr
                    "如果 thesis 已被行情否定且你无法给出新的持有理由，就应主动平仓。"
                    "当前持仓的 stop_loss / take_profit 就是交易所里真实挂着的止损止盈价："
                    "除非有明确技术依据（突破关键位、ATR 变化、趋势结构反转等）需要移动，否则不要重复提交几乎相同的 adjust。"
-                   "每轮都要主动寻找新机会。当前为模拟盘交易。"
+                   "不设成交数量目标；没有完整且一致的证据时直接 no_trade，不要为了模拟盘或交易空窗凑单。"
                    f"查询预算每轮 {query_budget} 次：先用 query_symbol_cards 宽扫候选，"
                    "再对筛出的 2~3 只调 query_symbol_detail 深挖，不要逐只 detail。")
     if action_space is not None:
-        instruction += "若 submit_decision 返回校验错误，请严格按 issues 修正后重新提交，不要放弃、不要改填 no_trade 绕过。"
+        instruction += ("若 submit_decision 返回校验错误，请按 issues 修正；"
+                        "如果无法取得真实、完整证据，应提交有明确原因的 no_trade。")
     pressure = _holding_pressure_notes(portfolio)
     if pressure:
         instruction += "\n\n持仓超时提醒（必须逐条处理，不能无视）：\n" + "\n".join("⚠ " + n for n in pressure)
@@ -470,7 +521,8 @@ def build_user_prompt(market: MarketBrief, macro: MacroBrief, onchain: OnchainBr
         "onchain_brief": _slim_onchain(onchain),
         "strategy_refs": strategy.model_dump(),
         "portfolio": portfolio or {"cash": 0, "positions": []},
-        "trading_quota": trading_quota or {"short_done_today": 0, "hourly_done_today": 0, "enabled": False, "policy": "no_cap_active_search"},
+        "trading_quota": trading_quota or {"short_done_today": 0, "hourly_done_today": 0,
+                                             "enabled": False, "policy": "no_cap_evidence_based"},
         "risk_envelope": _slim_risk_envelope(risk_envelope),
         "supported_symbols": list(supported_symbols or []),
         "execution_feedback": execution_feedback or {},
@@ -496,6 +548,12 @@ class DecisionValidationError(ValueError):
 
 VALID_ACTIONS = ("open", "close", "reduce", "adjust")
 VALID_DECISIONS = ("no_trade",) + VALID_ACTIONS
+REQUIRED_OPEN_EVIDENCE = (
+    "market_regime", "higher_timeframe_trend", "supporting_evidence",
+    "counter_evidence", "trigger_price", "invalidation_price",
+    "invalidation_operator", "confirmation_interval", "risk_reward_ratio",
+    "chase_distance_pct", "data_observed_at_ms", "confidence_basis",
+)
 
 
 def _validate_decision_payload(payload: dict[str, Any]) -> list[str]:
@@ -522,9 +580,24 @@ def _validate_decision_payload(payload: dict[str, Any]) -> list[str]:
             continue
         if not str(it.get("symbol") or "").strip():
             issues.append(f"intents[{i}] 缺少 symbol")
-        if action == "open" and it.get("invalidation") is None:
-            issues.append(f"intents[{i}]（{it.get('symbol')} open）缺少 invalidation："
-                          f"必须写明什么行情会证伪这笔 thesis，例如 '跌破前低 58000 即证伪'")
+        if action == "open":
+            if not str(it.get("strategy_id") or "").strip():
+                issues.append(f"intents[{i}]（{it.get('symbol')} open）缺少 strategy_id")
+            if not str(it.get("invalidation") or "").strip():
+                issues.append(f"intents[{i}]（{it.get('symbol')} open）缺少 invalidation："
+                              f"必须写明什么行情会证伪这笔 thesis，例如 '跌破前低 58000 即证伪'")
+            evidence = it.get("evidence")
+            if not isinstance(evidence, dict):
+                issues.append(f"intents[{i}]（{it.get('symbol')} open）缺少结构化 evidence")
+            else:
+                missing = [key for key in REQUIRED_OPEN_EVIDENCE if key not in evidence]
+                if missing:
+                    issues.append(f"intents[{i}].evidence 缺少字段: {','.join(missing)}")
+                support = evidence.get("supporting_evidence")
+                if not isinstance(support, list) or not any(str(item).strip() for item in support):
+                    issues.append(f"intents[{i}].evidence.supporting_evidence 至少需要一项真实证据")
+                if not isinstance(evidence.get("counter_evidence"), list):
+                    issues.append(f"intents[{i}].evidence.counter_evidence 必须是数组，无反证时填 []")
         side = str(it.get("side") or "").upper()
         if side not in ("LONG", "SHORT"):
             issues.append(f"intents[{i}].side={it.get('side')!r} 非法，必须是 LONG 或 SHORT")
@@ -557,6 +630,31 @@ def _validate_decision_payload(payload: dict[str, Any]) -> list[str]:
     return issues
 
 
+def _check_open_query_provenance(intents: list[Any],
+                                 query_evidence: dict[str, dict[str, Any]]) -> list[str]:
+    """证明 AI 开仓证据确实来自本轮成功的 detail 查询，而不是模型自造时间戳。"""
+    issues: list[str] = []
+    for i, intent in enumerate(intents):
+        if getattr(intent, "action", None) != "open":
+            continue
+        symbol = str(getattr(intent, "symbol", "") or "").strip().upper()
+        quality = query_evidence.get(symbol)
+        if quality is None:
+            issues.append(f"intents[{i}] {symbol} 未完成本轮 query_symbol_detail，禁止开仓")
+            continue
+        if not quality.get("ok"):
+            issues.append(f"intents[{i}] {symbol} 行情质量未通过: {quality.get('issues') or ['unknown']}")
+            continue
+        evidence = getattr(intent, "evidence", None)
+        evidence_at = getattr(evidence, "data_observed_at_ms", None)
+        observed_at = quality.get("observed_at_ms")
+        if not evidence_at or not observed_at or int(evidence_at) != int(observed_at):
+            issues.append(
+                f"intents[{i}] {symbol} evidence.data_observed_at_ms 与本轮查询不一致"
+            )
+    return issues
+
+
 def _build_decision(payload: dict[str, Any], *, strict: bool) -> tuple[TradeDecision, list[str]]:
     """构建 TradeDecision。
 
@@ -571,7 +669,7 @@ def _build_decision(payload: dict[str, Any], *, strict: bool) -> tuple[TradeDeci
         if strict:
             raise DecisionValidationError(
                 issues,
-                hint="请修正上述问题后重新调用 submit_decision；不要改 decision=no_trade 来绕过校验。",
+                hint="请修正上述问题后重新调用 submit_decision；若无法取得真实证据，请提交 no_trade。",
             )
         return TradeDecision(
             decision="no_trade",
@@ -689,6 +787,7 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
     submit_attempts = 0
     query_used = 0
     queried: list[str] = []
+    query_evidence: dict[str, dict[str, Any]] = {}
     force_submit = False
     decision_was_downgraded = False
 
@@ -743,6 +842,14 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                     strict = submit_attempts <= MAX_STRICT_SUBMITS and not is_final_round
                     try:
                         decision, issues = _build_decision(args, strict=strict)
+                        if not issues:
+                            issues = _check_open_query_provenance(decision.intents, query_evidence)
+                            if issues and strict:
+                                raise DecisionValidationError(
+                                    issues,
+                                    hint="请先完成本轮 detail 查询并原样引用其数据时点；"
+                                         "无法取得合格数据时提交 no_trade。",
+                                )
                         # 业务规则校验：与动态 schema、risk.py 运行时闸门共用同一个谓词，
                         # 三者不会漂移。错误回传给模型重试，服从率远高于 prompt 禁令。
                         if not issues and action_space is not None:
@@ -755,7 +862,7 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                                 raise DecisionValidationError(
                                     issues,
                                     hint="以上是本轮硬性约束（不是建议）。请逐条修正后重新提交；"
-                                         "改填 no_trade 不算修正。")
+                                         "若没有满足约束的机会，请提交有明确原因的 no_trade。")
                     except DecisionValidationError as e:
                         result = {
                             "error": "submit_decision 未通过校验，请修正后重新提交",
@@ -802,6 +909,11 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                             if s and s not in queried:
                                 queried.append(s)
                         if isinstance(result, dict) and not result.get("error"):
+                            if fname == "query_symbol_detail":
+                                symbol = str(result.get("symbol") or "").strip().upper()
+                                quality = result.get("data_quality")
+                                if symbol and isinstance(quality, dict):
+                                    query_evidence[symbol] = dict(quality)
                             result["_budget"] = {
                                 "used": query_used,
                                 "limit": query_budget,

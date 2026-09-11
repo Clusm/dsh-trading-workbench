@@ -25,6 +25,15 @@ from core.agent_recorder import AgentRecorder  # noqa: E402
 
 ok = fail = 0
 
+TEST_EVIDENCE = {
+    "market_regime": "trend_up", "higher_timeframe_trend": "up",
+    "supporting_evidence": ["闭合K线趋势向上"], "counter_evidence": [],
+    "trigger_price": 60000.0, "invalidation_price": 59000.0,
+    "invalidation_operator": "close_below", "confirmation_interval": "15m",
+    "risk_reward_ratio": 2.0, "chase_distance_pct": 0.2,
+    "data_observed_at_ms": 1_700_000_000_000, "confidence_basis": "趋势与结构一致",
+}
+
 
 def check(name: str, cond: bool, extra: str = "") -> None:
     global ok, fail
@@ -152,7 +161,9 @@ check("最终成功提交", d.decision == "no_trade" and d.position_reviews[0].v
 print("\n[4] invalidation：开仓必填 + 落库")
 db2, rec2, _ = make_ctx()
 no_inv = {"decision": "open", "intents": [{"symbol": "BTCUSDT", "action": "open", "side": "LONG",
-                                          "qty": 0.01, "stop_loss": 59000.0, "take_profit": 62000.0}],
+                                          "qty": 0.01, "stop_loss": 59000.0, "take_profit": 62000.0,
+                                          "strategy_id": "ai:trend_follow:v1",
+                                          "evidence": TEST_EVIDENCE}],
           "position_reviews": [], "reasoning": "x"}
 try:
     _build_decision(no_inv, strict=True)

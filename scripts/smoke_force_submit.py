@@ -97,6 +97,9 @@ class FakeDB:
     def log_risk_event(self, **kw) -> None:
         self.risk_events.append(kw)
 
+    def resolve_risk_incidents_by_type(self, _event_type: str) -> None:
+        return None
+
 
 class FakeLogger:
     def __init__(self) -> None:

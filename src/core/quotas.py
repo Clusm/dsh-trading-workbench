@@ -1,4 +1,4 @@
-"""交易统计（仅做参考，不设上限）：持续鼓励 Agent 每轮积极寻找机会。"""
+"""交易统计仅供复盘展示；它不是成交目标，也不能降低 AI 的证据门槛。"""
 from __future__ import annotations
 
 import json
@@ -77,5 +77,5 @@ class TradeQuotaManager:
         c["enabled"] = self.enabled
         c["hourly_short_target"] = self.hourly_short_target
         c["daily_hourly_target"] = self.daily_hourly_target
-        c["policy"] = "no_cap_active_search"
+        c["policy"] = "no_cap_evidence_based"
         return c

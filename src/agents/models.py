@@ -66,6 +66,22 @@ class StrategyRefs(BaseModel):
     summary: str = ""
 
 
+class DecisionEvidence(BaseModel):
+    """AI 开仓依据的机器可验证快照；自然语言 reasoning 不能替代这些字段。"""
+    market_regime: Literal["trend_up", "trend_down", "range", "volatile", "unknown"]
+    higher_timeframe_trend: Literal["up", "down", "range", "unknown"]
+    supporting_evidence: list[str] = Field(min_length=1)
+    counter_evidence: list[str] = Field(default_factory=list)
+    trigger_price: float = Field(gt=0)
+    invalidation_price: float = Field(gt=0)
+    invalidation_operator: Literal["close_below", "close_above"]
+    confirmation_interval: Literal["1m", "5m", "15m", "1h", "4h", "1d"]
+    risk_reward_ratio: float = Field(ge=0)
+    chase_distance_pct: float = Field(ge=0)
+    data_observed_at_ms: int = Field(gt=0)
+    confidence_basis: str = Field(min_length=1)
+
+
 class TradeIntent(BaseModel):
     """单个结构化交易意图；仍需 ActionSpace 与确定性风控审批。"""
     symbol: str
@@ -99,6 +115,8 @@ class TradeIntent(BaseModel):
     margin_mode: Literal["ISOLATED", "CROSSED"] = "ISOLATED"
     # thesis 证伪条件：什么行情会证明这笔交易的判断错误。唯一能沉淀学习信号的字段。
     invalidation: str | None = None
+    # 仅 AI 新开仓强制要求；退出/减仓及确定性策略通道保持兼容。
+    evidence: DecisionEvidence | None = None
 
 
 class PositionReview(BaseModel):

@@ -60,9 +60,17 @@ check("no_trade 始终可用", "no_trade" in props["decision"]["enum"])
 check("description 说明了禁开仓原因", "不允许新开仓" in spec["function"]["description"])
 
 s_open = space_open()
-acts2 = build_submit_decision_spec(s_open)["function"]["parameters"]["properties"][
-    "intents"]["items"]["properties"]["action"]["enum"]
+open_spec = build_submit_decision_spec(s_open)
+intent_props = open_spec["function"]["parameters"]["properties"]["intents"]["items"]["properties"]
+acts2 = intent_props["action"]["enum"]
 check("允许开仓时 open 存在", "open" in acts2, str(acts2))
+check("动态 schema 暴露 strategy_id", "strategy_id" in intent_props)
+check("动态 schema 暴露完整 evidence 契约",
+      set(intent_props["evidence"]["required"]) == {
+          "market_regime", "higher_timeframe_trend", "supporting_evidence", "counter_evidence",
+          "trigger_price", "invalidation_price", "invalidation_operator", "confirmation_interval",
+          "risk_reward_ratio", "chase_distance_pct", "data_observed_at_ms", "confidence_basis",
+      })
 
 print("\n[2] 动态 schema：symbol 约束与杠杆上限")
 spec2 = build_submit_decision_spec(s_open)
