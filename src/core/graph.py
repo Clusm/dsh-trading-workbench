@@ -337,6 +337,7 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
             decision = ChannelDecision(
                 channel="ai", decision=raw.decision, intents=raw.intents,
                 reasoning=raw.reasoning, strategy_refs=raw.strategy_refs,
+                policy_checks=raw.policy_checks,
             )
             # AI 通道产出的 intent 必须归 ai 通道：LLM 自报 order_source="strategy"
             # 可以绕过 AI 熔断（-30%）与 AI 杠杆上限。以通道归属为准强制改写，
