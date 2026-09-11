@@ -81,7 +81,8 @@ def bootstrap_net_pnl(trades: list[dict[str, Any]], *, samples: int = 1000,
             total += value - adverse
         totals.append(total)
     totals.sort()
-    at = lambda q: totals[min(len(totals) - 1, int((len(totals) - 1) * q))]
+    def at(q: float) -> float:
+        return totals[min(len(totals) - 1, int((len(totals) - 1) * q))]
     return {
         "samples": samples, "seed": seed, "p05": round(at(0.05), 12),
         "median": round(at(0.5), 12), "p95": round(at(0.95), 12),

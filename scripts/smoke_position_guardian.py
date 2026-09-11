@@ -10,7 +10,15 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from agents.models import DecisionEvidence, TradeIntent  # noqa: E402
 from audit.database import AuditDatabase  # noqa: E402
-from core.position_guardian import evaluate_positions  # noqa: E402
+from core.position_guardian import evaluate_positions as _evaluate_positions  # noqa: E402
+from core.decision_policy import load_decision_policy  # noqa: E402
+
+
+def evaluate_positions(**kwargs):
+    """仅在隔离测试中显式开启退出，用例不能依赖生产配置提前晋级。"""
+    config = load_decision_policy()
+    config["position_guardian"]["mode"] = "enforce"
+    return _evaluate_positions(config=config, **kwargs)
 
 passed = failed = 0
 
