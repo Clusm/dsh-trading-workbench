@@ -15,6 +15,7 @@ from audit.jsonl_logger import JsonlLogger
 from core.action_space import ActionSpace, VALID_SIDES
 from core.agent_recorder import AgentRecorder
 from core.decision_policy import enforced_issues, evaluate_open_intent
+from core.portfolio_policy import evaluate_portfolio_intent
 from data.market_query import TOOL_SPECS, execute_tool
 from llm.base import LLMClient
 
@@ -789,6 +790,7 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
     query_used = 0
     queried: list[str] = []
     query_evidence: dict[str, dict[str, Any]] = {}
+    query_details: dict[str, dict[str, Any]] = {}
     force_submit = False
     decision_was_downgraded = False
 
@@ -855,7 +857,12 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                             policy_checks = [
                                 check
                                 for intent in decision.intents
-                                for check in evaluate_open_intent(intent)
+                                for check in (
+                                    evaluate_open_intent(intent)
+                                    + evaluate_portfolio_intent(
+                                        intent, portfolio, query_details, db,
+                                    )
+                                )
                             ]
                             decision = decision.model_copy(update={"policy_checks": policy_checks})
                             issues = enforced_issues(policy_checks)
@@ -939,6 +946,7 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                                 quality = result.get("data_quality")
                                 if symbol and isinstance(quality, dict):
                                     query_evidence[symbol] = dict(quality)
+                                    query_details[symbol] = dict(result)
                             result["_budget"] = {
                                 "used": query_used,
                                 "limit": query_budget,
@@ -971,7 +979,10 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                     policy_checks = [
                         check
                         for intent in decision.intents
-                        for check in evaluate_open_intent(intent)
+                        for check in (
+                            evaluate_open_intent(intent)
+                            + evaluate_portfolio_intent(intent, portfolio, query_details, db)
+                        )
                     ]
                     decision = decision.model_copy(update={"policy_checks": policy_checks})
                     issues = enforced_issues(policy_checks)

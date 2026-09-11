@@ -185,7 +185,7 @@ check("最终决策是 open 而非 no_trade", d.decision == "open", d.decision)
 check("采纳的是修正后的止损", d.intents and d.intents[0].stop_loss == 59000.0,
       str([i.stop_loss for i in d.intents]))
 check("shadow 决策质量结果随决策保存",
-      len(d.policy_checks) == 5 and all(item["mode"] == "shadow" for item in d.policy_checks),
+      len(d.policy_checks) == 7 and all(item["mode"] == "shadow" for item in d.policy_checks),
       str(d.policy_checks))
 check("错误以 tool result 回传了", len(llm.seen_tool_results) == 1, str(len(llm.seen_tool_results)))
 if llm.seen_tool_results:
