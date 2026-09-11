@@ -16,7 +16,7 @@ LLM 默认通过 SenseNova OpenAI 兼容网关调用 `deepseek-v4-flash`。本�
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\pip.exe install -r requirements.txt
+.venv\Scripts\pip.exe install -r requirements-lock.txt
 Copy-Item .env.example .env
 .venv\Scripts\python.exe scripts\verify_profile_lock.py
 .venv\Scripts\python.exe scripts\run_web.py
@@ -63,6 +63,9 @@ Copy-Item .env.example .env
 # 核心配置未漂移
 .venv\Scripts\python.exe scripts\verify_profile_lock.py
 
+# 当前环境与精确依赖锁一致
+.venv\Scripts\python.exe scripts\verify_dependency_lock.py
+
 # 基础回归
 .venv\Scripts\python.exe scripts\check_quality.py
 .venv\Scripts\python.exe scripts\run_offline_regression.py
@@ -73,9 +76,13 @@ Copy-Item .env.example .env
 # 显式联网验证 LLM 文本与 Function Calling（会产生一次小额 API 调用）
 .venv\Scripts\python.exe scripts\verify_llm_provider.py
 
-# 安装开发工具后执行静态检查
-.venv\Scripts\pip.exe install -r requirements-dev.txt
+# 安装精确锁定的运行依赖和开发工具
+.venv\Scripts\pip.exe install -r requirements-dev-lock.txt
 ```
+
+`requirements.txt`/`requirements-dev.txt` 表示允许升级范围；日常安装和 CI 使用对应的
+`*-lock.txt` 精确版本。依赖升级必须在隔离环境重新解析锁文件，并通过全量离线回归，
+禁止只改某个传递依赖后直接部署。
 
 ## 目录
 

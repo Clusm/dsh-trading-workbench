@@ -36,11 +36,12 @@ def _run(command: list[str]) -> None:
 
 
 def main() -> int:
-    """依次运行 Ruff、逐文件编译和风险档锁检查。"""
+    """依次运行 Ruff、逐文件编译、风险档锁和依赖锁检查。"""
     files = _tracked_python_files()
     _run([sys.executable, "-m", "ruff", "check", *files])
     _run([sys.executable, "-m", "py_compile", *files])
     _run([sys.executable, "scripts/verify_profile_lock.py"])
+    _run([sys.executable, "scripts/verify_dependency_lock.py"])
     print(f"QUALITY CHECK OK files={len(files)}")
     return 0
 
