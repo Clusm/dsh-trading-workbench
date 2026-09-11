@@ -13,7 +13,14 @@ import yaml
 
 # 警告：不要在本模块再定义名为 `_get_json` 的函数（会遮蔽这里的导入，
 # 使 query_symbol_detail 100% 抛 TypeError）。共享连接版请叫 `_shared_get`。
-from data.binance_public import _atr, _get_json, _trend_from_ema, get_all_24h_tickers, select_top_symbols
+from data.binance_public import (
+    _atr,
+    _get_json,
+    _trend_from_ema,
+    get_all_24h_tickers,
+    prepare_closed_klines,
+    select_top_symbols,
+)
 from data.rate_limit import cooldown_remaining
 
 BASE_URL = "https://fapi.binance.com"
@@ -122,13 +129,53 @@ def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
         except Exception:
             oi = {}
 
-    closes = [float(k[4]) for k in klines]
-    highs = [float(k[2]) for k in klines]
-    lows = [float(k[3]) for k in klines]
-    vols = [float(k[7]) for k in klines]
-    last = closes[-1]
+    observed_at_ms = int(time.time() * 1000)
+    closed_klines, live_bar, data_quality = prepare_closed_klines(
+        klines, interval, observed_at_ms=observed_at_ms, min_closed=20,
+    )
+    ticker_price = ticker.get("lastPrice")
+    mark_price = premium.get("markPrice")
+    live_price_available = bool(ticker_price or mark_price)
+    data_quality["sources"] = {
+        "ticker": {
+            "available": bool(ticker_price),
+            "source_at_ms": ticker.get("closeTime"),
+            "observed_at_ms": observed_at_ms,
+        },
+        "mark_funding": {
+            "available": bool(premium),
+            "source_at_ms": premium.get("time"),
+            "observed_at_ms": observed_at_ms,
+        },
+        "open_interest": {
+            "available": bool(oi),
+            "source_at_ms": oi.get("time"),
+            "observed_at_ms": observed_at_ms,
+        },
+    }
+    if not live_price_available:
+        data_quality["issues"].append("live_price_unavailable")
+        data_quality["ok"] = False
+    data_quality["optional_issues"] = [
+        name for name in ("mark_funding", "open_interest")
+        if not data_quality["sources"][name]["available"]
+    ]
+    if not data_quality["ok"]:
+        return {
+            "error": "closed kline data is stale or incomplete",
+            "symbol": symbol,
+            "interval": interval,
+            "data_quality": data_quality,
+        }
+
+    closes = [float(k[4]) for k in closed_klines]
+    highs = [float(k[2]) for k in closed_klines]
+    lows = [float(k[3]) for k in closed_klines]
+    vols = [float(k[7]) for k in closed_klines]
+    last_closed = closes[-1]
+    last = float(ticker_price or mark_price or last_closed)
     atr = _atr(highs, lows, closes)
-    atr_pct = (atr / last * 100) if atr and last else 0.0
+    atr_pct = (atr / last_closed * 100) if atr and last_closed else 0.0
     recent_vol = vols[-1]
     base_vol = statistics.fmean(vols[-21:-1]) if len(vols) >= 21 else 0.0
     volume_ratio = recent_vol / base_vol if base_vol > 0 else 0.0
@@ -142,6 +189,7 @@ def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
         "interval": interval,
         "limit": limit,
         "last_price": last,
+        "last_closed_price": last_closed,
         "pct_24h": float(ticker.get("priceChangePercent") or 0.0),
         "quote_volume_24h": float(ticker.get("quoteVolume") or 0.0),
         "trend": _trend_from_ema(closes, 20 if interval not in ("1m",) else 50),
@@ -156,7 +204,11 @@ def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
         "funding_rate": funding_rate,
         "mark_price": float(premium.get("markPrice") or 0.0),
         "open_interest_usd": oi_usd,
-        "candles": _pack_candles(klines, interval) if include_candles else {"n": 0, "interval": interval},
+        "candles": (_pack_candles(closed_klines, interval)
+                    if include_candles else {"n": 0, "interval": interval}),
+        "live_bar": (_pack_candles([live_bar], interval, max_candles=1)
+                     if live_bar is not None else {"n": 0, "interval": interval}),
+        "data_quality": data_quality,
     }
     _cache_set(cache_key, result)
     return result

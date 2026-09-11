@@ -17,6 +17,7 @@ no_trade（reasoning 里那句"主Agent连续多轮未输出最终JSON"）。
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,7 @@ from data.market_query import (  # noqa: E402
     query_symbol_detail,
     query_top_symbols,
 )
+from data.binance_public import prepare_closed_klines  # noqa: E402
 
 PASS, FAIL = 0, 0
 
@@ -59,19 +61,25 @@ def safe_call(fn, *args, **kwargs) -> dict:
 
 
 # ---------------------------------------------------------------- 合成行情数据
-def _candles(n: int = 30, base: float = 60000.0) -> list[list]:
+def _candles(n: int = 30, base: float = 60000.0,
+             observed_at_ms: int | None = None, interval: str = "15m") -> list[list]:
     """缓慢上涨 + 固定振幅的合成 K 线，保证 ATR / 量比 / 趋势都算得出来。"""
     out = []
+    interval_ms = binance_public.INTERVAL_SECONDS[interval] * 1000
+    observed = observed_at_ms or int(time.time() * 1000)
+    current_open = observed // interval_ms * interval_ms
+    first_open = current_open - n * interval_ms
     for i in range(n):
         o = base + i * 10.0
+        open_time = first_open + i * interval_ms
         out.append([
-            1_700_000_000_000 + i * 900_000,  # 0 open_time
+            open_time,                         # 0 open_time
             f"{o:.2f}",                        # 1 open
             f"{o + 120:.2f}",                  # 2 high
             f"{o - 120:.2f}",                  # 3 low
             f"{o + 60:.2f}",                   # 4 close
             "100.0",                           # 5 volume
-            1_700_000_000_000 + i * 900_000 + 899_000,  # 6 close_time
+            open_time + interval_ms - 1,        # 6 close_time
             f"{o * 100:.2f}",                  # 7 quote_volume
             500,                               # 8 trades
         ])
@@ -126,7 +134,7 @@ class _FakeClient:
         url = str(url)
         SEEN.append(url)
         if url.endswith("/fapi/v1/klines"):
-            return _FakeResponse(_candles())
+            return _FakeResponse(_candles(interval=str((params or {}).get("interval") or "15m")))
         if url.endswith("/fapi/v1/ticker/24hr"):
             if params and params.get("symbol"):
                 return _FakeResponse(dict(_TICKER_24H, symbol=params["symbol"]))
@@ -211,6 +219,51 @@ def main() -> int:
     check("TOOL_HANDLERS 覆盖全部声明的工具",
           set(TOOL_HANDLERS) == {"query_symbol_detail", "query_symbol_cards", "query_top_symbols"},
           str(set(TOOL_HANDLERS)))
+
+    print("\n[6] 未完成 K 线绝不参与指标")
+    interval_ms = 15 * 60 * 1000
+    observed_at_ms = 1_700_000_000_000 + 30 * interval_ms
+    rows = _candles(30, observed_at_ms=observed_at_ms)
+    live = list(rows[-1])
+    live[0] = observed_at_ms - 60_000
+    live[4] = "999999.0"
+    live[7] = "999999999999.0"
+    live[6] = observed_at_ms + interval_ms - 60_001
+    closed, live_bar, quality = prepare_closed_klines(
+        rows[:-1] + [live], "15m", observed_at_ms=observed_at_ms, min_closed=20,
+    )
+    check("当前 bar 被单独识别", live_bar is not None and quality["live_bar_present"])
+    check("当前 bar 未进入闭合集合", len(closed) == 29 and float(closed[-1][4]) != 999999.0)
+    check("闭合数据质量完整", quality["complete"] and "insufficient_closed_klines" not in quality["issues"],
+          str(quality))
+
+    stale_rows = _candles(30, observed_at_ms=observed_at_ms)
+    _, _, stale_quality = prepare_closed_klines(
+        stale_rows, "15m", observed_at_ms=observed_at_ms + 10 * interval_ms,
+        min_closed=20,
+    )
+    check("陈旧闭合 K 线有稳定原因码",
+          not stale_quality["fresh"] and "stale_last_closed_kline" in stale_quality["issues"],
+          str(stale_quality))
+
+    unordered = _candles(30, observed_at_ms=observed_at_ms)
+    unordered[-1], unordered[-2] = unordered[-2], unordered[-1]
+    _, _, unordered_quality = prepare_closed_klines(
+        unordered, "15m", observed_at_ms=observed_at_ms, min_closed=20,
+    )
+    check("乱序 K 线不能通过质量检查",
+          not unordered_quality["ok"] and "non_monotonic_klines" in unordered_quality["issues"],
+          str(unordered_quality))
+
+    print("\n[7] 全市场简报链同样使用闭合 K 线口径")
+    analyzed = safe_call(
+        binance_public.analyze_symbol, _FakeClient(), "BTCUSDT", dict(_TICKER_24H, lastPrice="60100.5"),
+    )
+    check("analyze_symbol 无 error", "error" not in analyzed, str(analyzed)[:200])
+    check("各周期数据质量均通过", bool((analyzed.get("data_quality") or {}).get("ok")),
+          str(analyzed.get("data_quality"))[:300])
+    check("简报最新价与实时 ticker 一致", analyzed.get("last_price") == 60100.5,
+          str(analyzed.get("last_price")))
 
     print(f"\n{'=' * 68}")
     print(f"结果：PASS {PASS} / FAIL {FAIL}")

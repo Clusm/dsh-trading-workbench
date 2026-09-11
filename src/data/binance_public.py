@@ -16,6 +16,15 @@ from data.rate_limit import backoff_seconds, cooldown_remaining, note_418, throt
 BASE_URL = "https://fapi.binance.com"
 CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "cache"
 
+INTERVAL_SECONDS = {
+    "1m": 60,
+    "5m": 5 * 60,
+    "15m": 15 * 60,
+    "1h": 60 * 60,
+    "4h": 4 * 60 * 60,
+    "1d": 24 * 60 * 60,
+}
+
 # ticker 全量接口失败时的兜底采集列表。
 # 必须与 config/settings.yaml 的 market_universe.core_symbols 保持一致，
 # 顺序按 24h 成交额从高到低 —— 上层会 [:analyze_top] 截断，顺序错了会先砍掉活跃品种。
@@ -134,6 +143,96 @@ def _trend_from_ema(closes: list[float], period: int = 20) -> str:
     return "range"
 
 
+def prepare_closed_klines(rows: list[list[Any]], interval: str,
+                           observed_at_ms: int | None = None,
+                           min_closed: int = 20) -> tuple[list[list[Any]], list[Any] | None, dict[str, Any]]:
+    """隔离未完成 K 线并生成可审计的数据质量信息。
+
+    Binance 的 kline 响应通常把当前正在形成的 bar 放在最后。它的 close、high、low
+    和成交量仍会持续变化，不能用于 EMA、ATR、量比、突破或背离确认。过去两条行情链
+    都直接使用最后一项，导致刚开盘几分钟的低量被解释为“缩量健康”，也可能把瞬时价格
+    当成收盘突破。本函数是按需查询与全市场简报的共同口径：指标只读 ``closed``，当前
+    bar 仅作为显式 ``live_bar`` 返回给展示/上下文层。
+
+    ``fresh`` 允许最近闭合时间距采样时刻最多 1.5 个周期；再久通常意味着接口缓存、
+    网络恢复后旧响应或缺 bar。质量信息本阶段先随数据传播，执行层据此 fail-closed。
+    """
+    now_ms = int(observed_at_ms if observed_at_ms is not None else time.time() * 1000)
+    interval_seconds = INTERVAL_SECONDS.get(interval)
+    if interval_seconds is None:
+        raise ValueError(f"unsupported kline interval: {interval}")
+
+    closed: list[list[Any]] = []
+    live_bar: list[Any] | None = None
+    invalid_rows = 0
+    live_rows = 0
+    for row in rows or []:
+        if not isinstance(row, (list, tuple)) or len(row) <= 6:
+            invalid_rows += 1
+            continue
+        try:
+            close_time = int(row[6])
+        except (TypeError, ValueError):
+            invalid_rows += 1
+            continue
+        if close_time <= now_ms:
+            closed.append(list(row))
+        else:
+            live_rows += 1
+            live_bar = list(row)
+
+    latest_closed_at_ms = int(closed[-1][6]) if closed else None
+    age_seconds = ((now_ms - latest_closed_at_ms) / 1000.0
+                   if latest_closed_at_ms is not None else None)
+    fresh = bool(age_seconds is not None and
+                 age_seconds <= interval_seconds * 1.5 + 5)
+
+    recent_gap = False
+    non_monotonic = False
+    recent = closed[-10:]
+    if len(recent) >= 2:
+        close_times = [int(row[6]) for row in recent]
+        recent_gap = any(
+            later - earlier > interval_seconds * 1000 * 1.5
+            for earlier, later in zip(close_times, close_times[1:])
+        )
+        non_monotonic = any(
+            later <= earlier for earlier, later in zip(close_times, close_times[1:])
+        )
+
+    issues: list[str] = []
+    if invalid_rows:
+        issues.append("invalid_kline_rows")
+    if len(closed) < min_closed:
+        issues.append("insufficient_closed_klines")
+    if not fresh:
+        issues.append("stale_last_closed_kline")
+    if recent_gap:
+        issues.append("recent_kline_gap")
+    if non_monotonic:
+        issues.append("non_monotonic_klines")
+    if live_rows > 1:
+        issues.append("multiple_live_klines")
+
+    quality = {
+        "interval": interval,
+        "observed_at_ms": now_ms,
+        "latest_closed_at_ms": latest_closed_at_ms,
+        "age_seconds": round(age_seconds, 3) if age_seconds is not None else None,
+        "closed_count": len(closed),
+        "live_bar_present": live_bar is not None,
+        "invalid_rows": invalid_rows,
+        "recent_gap": recent_gap,
+        "non_monotonic": non_monotonic,
+        "fresh": fresh,
+        "complete": (len(closed) >= min_closed and invalid_rows == 0
+                     and not recent_gap and not non_monotonic),
+        "ok": not issues,
+        "issues": issues,
+    }
+    return closed, live_bar, quality
+
+
 def analyze_symbol(client: httpx.Client, symbol: str,
                    ticker: dict[str, Any] | None = None) -> dict[str, Any]:
     """对单个交易对做一次轻量分析。异常向上抛，由调用方收集。"""
@@ -149,6 +248,22 @@ def analyze_symbol(client: httpx.Client, symbol: str,
     k1h = _get_json(client, "/fapi/v1/klines", {"symbol": symbol, "interval": "1h", "limit": 60})
     k4h = _get_json(client, "/fapi/v1/klines", {"symbol": symbol, "interval": "4h", "limit": 60})
     k1d = _get_json(client, "/fapi/v1/klines", {"symbol": symbol, "interval": "1d", "limit": 30})
+    observed_at_ms = int(time.time() * 1000)
+    k1m, _, quality1m = prepare_closed_klines(k1m, "1m", observed_at_ms)
+    k15, _, quality15 = prepare_closed_klines(k15, "15m", observed_at_ms)
+    k1h, _, quality1h = prepare_closed_klines(k1h, "1h", observed_at_ms)
+    k4h, _, quality4h = prepare_closed_klines(k4h, "4h", observed_at_ms)
+    k1d, _, quality1d = prepare_closed_klines(k1d, "1d", observed_at_ms)
+    qualities = {
+        "1m": quality1m,
+        "15m": quality15,
+        "1h": quality1h,
+        "4h": quality4h,
+        "1d": quality1d,
+    }
+    unusable = [tf for tf, quality in qualities.items() if not quality["ok"]]
+    if unusable:
+        raise ValueError(f"closed kline data incomplete for {symbol}: {','.join(unusable)}")
     closes1m = [float(k[4]) for k in k1m]
     highs1m = [float(k[2]) for k in k1m]
     lows1m = [float(k[3]) for k in k1m]
@@ -166,7 +281,7 @@ def analyze_symbol(client: httpx.Client, symbol: str,
     highs1d = [float(k[2]) for k in k1d]
     lows1d = [float(k[3]) for k in k1d]
 
-    # 15m 量能比：最近一根 vs 前 20 根均值
+    # 15m 量能比：最近一根已闭合 K 线 vs 此前 20 根均值。
     recent_vol = quote_vols15[-1] if quote_vols15 else 0.0
     base_vol = statistics.fmean(quote_vols15[-21:-1]) if len(quote_vols15) >= 21 else 0.0
     volume_ratio = (recent_vol / base_vol) if base_vol > 0 else 0.0
@@ -236,7 +351,7 @@ def analyze_symbol(client: httpx.Client, symbol: str,
 
     return {
         "symbol": symbol,
-        "last_price": closes15[-1],
+        "last_price": float(ticker.get("lastPrice") or closes15[-1]),
         "pct_24h": pct_24h,
         "trend_15m": _trend_from_ema(closes15, 20),
         "trend_1h": _trend_from_ema(closes1h, 20),
@@ -260,6 +375,13 @@ def analyze_symbol(client: httpx.Client, symbol: str,
         "taker_buy_sell_ratio": taker_ratio,
         "funding_rate": funding_rate,
         "oi_usd": oi_usd,
+        "data_quality": {
+            "observed_at_ms": observed_at_ms,
+            "ok": all(quality["ok"] for quality in qualities.values()),
+            "issues": [f"{tf}:{issue}"
+                       for tf, quality in qualities.items() for issue in quality["issues"]],
+            "timeframes": qualities,
+        },
     }
 
 
