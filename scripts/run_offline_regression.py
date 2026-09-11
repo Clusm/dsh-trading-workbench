@@ -22,6 +22,7 @@ SCRIPTS = (
     "scripts/smoke_decision_policy.py",
     "scripts/smoke_portfolio_policy.py",
     "scripts/smoke_position_guardian.py",
+    "scripts/smoke_usdm_replay.py",
     "scripts/smoke_db_migrations.py",
     "scripts/smoke_recovery_bundle.py",
     "scripts/smoke_risk_incidents.py",

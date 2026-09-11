@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "fixture_id": "deidentified-incidents-2026-09-v1",
+  "market": "BINANCE_USDM",
+  "description": "去敏代表性路径：逆势多单、未闭合K线误读、模型链路中断。价格为合成比例值，不含账户凭据。",
+  "instruments": {
+    "ARBUSDT": {"tick_size": 0.0001, "step_size": 0.1, "min_qty": 0.1},
+    "AVAXUSDT": {"tick_size": 0.001, "step_size": 0.01, "min_qty": 0.01},
+    "LINKUSDT": {"tick_size": 0.001, "step_size": 0.01, "min_qty": 0.01}
+  },
+  "costs": {"maker_fee_bps": 2, "taker_fee_bps": 5, "slippage_bps": 4},
+  "events": [
+    {"type": "kline", "symbol": "ARBUSDT", "timestamp_ms": 1000, "source_at_ms": 900, "closed": true, "trend_1h": "down"},
+    {"type": "order", "variant": "baseline", "incident": "counter_trend_long", "strategy_id": "ai:trend:v1", "symbol": "ARBUSDT", "side": "LONG", "action": "open", "qty": 100, "reference_price": 1.0, "order_type": "TAKER", "timestamp_ms": 1100, "observed_at_ms": 1100, "available_qty": 100},
+    {"type": "funding", "symbol": "ARBUSDT", "rate": 0.0001, "timestamp_ms": 1500},
+    {"type": "order", "variant": "baseline", "incident": "counter_trend_long", "symbol": "ARBUSDT", "side": "LONG", "action": "close", "qty": 100, "reference_price": 0.96, "order_type": "TAKER", "timestamp_ms": 2000, "available_qty": 100},
+    {"type": "kline", "symbol": "AVAXUSDT", "timestamp_ms": 3000, "source_at_ms": 3000, "closed": false, "volume_ratio": 4.2},
+    {"type": "order", "variant": "baseline", "incident": "live_bar_volume", "strategy_id": "ai:breakout:v1", "symbol": "AVAXUSDT", "side": "LONG", "action": "open", "qty": 2, "reference_price": 25, "order_type": "TAKER", "timestamp_ms": 3100, "available_qty": 1},
+    {"type": "order", "variant": "baseline", "incident": "live_bar_volume", "symbol": "AVAXUSDT", "side": "LONG", "action": "close", "qty": 1, "reference_price": 24.5, "order_type": "TAKER", "timestamp_ms": 4000, "available_qty": 1},
+    {"type": "kline", "symbol": "LINKUSDT", "timestamp_ms": 5000, "source_at_ms": 5000, "closed": true, "trend_1h": "down"},
+    {"type": "order", "variant": "baseline", "incident": "model_chain_interruption", "strategy_id": "ai:trend:v1", "symbol": "LINKUSDT", "side": "LONG", "action": "open", "qty": 3, "reference_price": 15, "order_type": "TAKER", "timestamp_ms": 5100, "declared_fill_ratio": 1},
+    {"type": "order", "variant": "baseline", "incident": "model_chain_interruption", "symbol": "LINKUSDT", "side": "LONG", "action": "close", "qty": 3, "reference_price": 14.7, "order_type": "TAKER", "timestamp_ms": 6000, "declared_fill_ratio": 1}
+  ]
+}
