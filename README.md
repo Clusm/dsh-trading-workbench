@@ -42,7 +42,10 @@ Copy-Item .env.example .env
 - `ai` 通道使用 LLM 和白名单行情工具形成候选决策。
 - 当前所有实际 LLM 节点统一使用 `deepseek-v4-flash`；Risk/Execution 是确定性代码。
 - AI 决策节点使用 SenseNova 支持的最高 `xhigh` 推理档；其他节点按职责使用 low/high。
-- 所有新开仓必须携带初始止损和止盈，并经过 ActionSpace、Risk Agent 与 Outbox。
+- 所有新开仓必须携带初始止损和止盈，并依次经过证据契约、影子决策质量、
+  组合状态、ActionSpace、RiskGuard、运行时签名和 Outbox。Broker 会拒绝未签名开仓。
+- Position Guardian 独立复核已有 AI 仓位的结构无效点，当前保持 `shadow`；
+  数据不可验证时显示 `REVIEW_DUE`，不会猜测退出。
 - 市场情报覆盖 20 个明确配置的 USD-M 合约；AI 单轮行情查询预算为 4 次。
 
 ## 核心安全边界
@@ -63,6 +66,7 @@ Copy-Item .env.example .env
 # 基础回归
 .venv\Scripts\python.exe scripts\check_quality.py
 .venv\Scripts\python.exe scripts\run_offline_regression.py
+.venv\Scripts\python.exe scripts\check_execution_boundaries.py
 .venv\Scripts\python.exe scripts\smoke_service_lifecycle.py
 .venv\Scripts\python.exe scripts\smoke_ui.py
 
@@ -83,6 +87,10 @@ Copy-Item .env.example .env
 - `src/dashboard`：FastAPI 控制台；
 - `scripts`：启动、冒烟、诊断与显式在线核验脚本；
 - `docs`：架构、运行恢复、维护规范和历史设计记录。
+
+USD-M 回放原型位于 `src/core/usdm_replay.py` 和 `src/core/strategy_evaluation.py`。
+事故夹具必须去敏、带内容哈希并显式声明数据覆盖；当前仓库夹具是合成回归样本，
+不能代替真实事故快照或 200 候选、30 笔 Demo 闭合交易、7 天观察门槛。
 
 进一步阅读：
 
