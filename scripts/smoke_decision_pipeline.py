@@ -11,7 +11,9 @@ sys.path.insert(0, str(ROOT / "src"))
 from agents.execution import PaperBroker  # noqa: E402
 from agents.models import DecisionEvidence, RiskVerdict, TradeDecision, TradeIntent  # noqa: E402
 from audit.database import AuditDatabase  # noqa: E402
-from core.decision_pipeline import authorize_decision, normalize_checks, filter_unauthorized_opens  # noqa: E402
+from core.decision_pipeline import (  # noqa: E402
+    authorize_decision, filter_unauthorized_opens, normalize_checks, sign_execution,
+)
 from core.decision_policy import evaluate_open_intent  # noqa: E402
 from core.portfolio_policy import evaluate_portfolio_intent  # noqa: E402
 
@@ -92,6 +94,28 @@ print("\n[4] 非法检查值不能静默变成 PASS")
 normalized = normalize_checks([{"check_id": "bad", "mode": "typo", "status": "OK"}])[0]
 check("非法模式/状态 fail-closed", normalized["mode"] == "enforce"
       and normalized["status"] == "NOT_EVALUATED")
+
+print("\n[5] 运行时签名覆盖 RiskGuard 实际执行集合")
+approved_verdict = RiskVerdict(verdict="approved", adjusted_intents=[intent])
+forged, forged_verdict = filter_unauthorized_opens(
+    TradeDecision(decision="open", intents=[intent], pipeline_authorized=True),
+    approved_verdict, db, "runtime-secret",
+)
+check("仅伪造布尔授权仍被拦截", not forged.intents and not forged_verdict.adjusted_intents)
+signed = sign_execution(authorized, approved_verdict, "runtime-secret")
+verified, verified_verdict = filter_unauthorized_opens(
+    signed, approved_verdict, db, "runtime-secret",
+)
+check("正确签名的实际集合获准", verified.intents == [intent]
+      and verified_verdict.adjusted_intents == [intent])
+tampered_verdict = approved_verdict.model_copy(update={
+    "adjusted_intents": [intent.model_copy(update={"qty": 0.02})],
+})
+tampered, tampered_result = filter_unauthorized_opens(
+    signed, tampered_verdict, db, "runtime-secret",
+)
+check("风控后篡改数量使签名失效", not tampered.intents
+      and not tampered_result.adjusted_intents)
 
 mixed, mixed_verdict = filter_unauthorized_opens(
     TradeDecision(decision="open", intents=[intent, close]),

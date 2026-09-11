@@ -9,6 +9,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = (
+    "scripts/check_execution_boundaries.py",
     "scripts/test_precheck_fixes.py",
     "scripts/smoke_p0_account_safety.py",
     "scripts/smoke_channels.py",

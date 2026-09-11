@@ -60,10 +60,11 @@ def snapshot(price: float, *, ok: bool = True, closed_at: int = 1_700_000_900_00
 
 
 db = AuditDatabase(Path(tempfile.mkdtemp()) / "guardian.sqlite")
-intent = open_intent()
+intent = open_intent().model_copy(update={"client_order_id": "open-cid-1"})
 db.log_trade_intent(intent_id="open-1", decision_id="d-1", run_id="r-1",
                     intent=intent, status="approved")
-position = {"symbol": "BTCUSDT", "side": "LONG", "qty": 0.01, "source": "ai"}
+position = {"symbol": "BTCUSDT", "side": "LONG", "qty": 0.01, "source": "ai",
+            "open_client_order_id": "open-cid-1"}
 
 print("\n[1] 正常闭合K线保持 ACTIVE；当前形成K线不参与")
 active = evaluate_positions(positions=[position], db=db, execution_mode="demo",
@@ -76,11 +77,11 @@ print("\n[2] Demo闭合K线失效产生唯一、可重复的全量退出")
 invalid = evaluate_positions(positions=[position], db=db, execution_mode="demo",
                              snapshot_provider=snapshot(94))
 repeat = evaluate_positions(positions=[position], db=db, execution_mode="demo",
-                            snapshot_provider=snapshot(94))
+                            snapshot_provider=snapshot(94, closed_at=1_700_001_800_000))
 check("失效产生一笔close", invalid.decision == "close" and len(invalid.intents) == 1
       and invalid.intents[0].action == "close")
 check("退出数量等于持仓数量", invalid.intents[0].qty == position["qty"])
-check("同一开仓和闭合bar得到稳定订单ID",
+check("同一开仓跨闭合bar得到稳定订单ID",
       invalid.intents[0].client_order_id == repeat.intents[0].client_order_id)
 check("订单ID适合交易所长度", len(invalid.intents[0].client_order_id or "") <= 36)
 
@@ -106,10 +107,12 @@ check("缺开仓论点不产生退出", not missing.intents
 
 print("\n[5] SHORT 使用 close_above；策略通道仓位不被 Guardian 越权")
 short = open_intent("ETHUSDT", "SHORT")
+short = short.model_copy(update={"client_order_id": "open-cid-2"})
 db.log_trade_intent(intent_id="open-2", decision_id="d-2", run_id="r-2",
                     intent=short, status="approved")
 short_result = evaluate_positions(
-    positions=[{"symbol": "ETHUSDT", "side": "SHORT", "qty": 0.2, "source": "ai"}],
+    positions=[{"symbol": "ETHUSDT", "side": "SHORT", "qty": 0.2, "source": "ai",
+                "open_client_order_id": "open-cid-2"}],
     db=db, execution_mode="paper", snapshot_provider=snapshot(106),
 )
 check("SHORT收盘高于无效点触发退出", len(short_result.intents) == 1)
@@ -118,6 +121,14 @@ strategy = evaluate_positions(
     db=db, execution_mode="demo", snapshot_provider=snapshot(1),
 )
 check("策略通道仓位保持原执行链", not strategy.intents and not strategy.policy_checks)
+
+print("\n[6] 生产配置保持影子，快循环独立于模型链路")
+production = load_decision_policy()
+service_source = (PROJECT_ROOT / "src/core/service.py").read_text(encoding="utf-8")
+check("生产Guardian仍为shadow", production["position_guardian"]["mode"] == "shadow")
+fast_body = service_source.split("def run_fast_once", 1)[1].split("def _build_feedback", 1)[0]
+check("30秒快循环调用Guardian", "evaluate_positions(" in fast_body)
+check("快循环Guardian仍经过RiskGuard", "risk.evaluate_risk(" in fast_body)
 
 db.close()
 print(f"\n结果：PASS {passed} / FAIL {failed}")

@@ -137,6 +137,8 @@ class TradeDecision(BaseModel):
     pipeline_trace: list[dict[str, Any]] = Field(default_factory=list)
     # 仅由 core.decision_pipeline 在所有开仓检查汇合后置位；Broker 不信任调用方口头约定。
     pipeline_authorized: bool = False
+    # 风控调整完成后由运行时密钥签发；排除审计序列化，防止日志成为旁路凭据。
+    pipeline_signature: str | None = Field(default=None, exclude=True)
     channel: Literal["strategy", "ai", "merged"] = "ai"
 
 

@@ -229,7 +229,8 @@ class BinanceFuturesBroker:
                                 strategy_id: str | None, ticket_id: str | None,
                                 margin_mode: str = "ISOLATED",
                                 qty: float | None = None,
-                                entry: float | None = None) -> dict[str, Any]:
+                                entry: float | None = None,
+                                open_client_order_id: str | None = None) -> dict[str, Any]:
         """把交易所真实仓位快照写入来源台账（纯本地写，全程持台账锁）。
 
         qty/entry 由调用方提供（多数调用点手上已有仓位快照）。之前这里内部
@@ -248,6 +249,8 @@ class BinanceFuturesBroker:
                     "source": source,
                     "strategy_id": strategy_id or old.get("strategy_id"),
                     "ticket_id": ticket_id or old.get("ticket_id"),
+                    "open_client_order_id": (open_client_order_id
+                                             or old.get("open_client_order_id")),
                     "qty": float(qty if qty is not None else (old.get("qty") or 0.0)),
                     "entry_price": float(entry if entry is not None else (old.get("entry_price") or 0.0)),
                     "margin_mode": margin_mode,
@@ -650,6 +653,7 @@ class BinanceFuturesBroker:
                             "source": str(ledger.get("positions", {}).get(p["symbol"], {}).get("source", "ai") or "ai"),
                             "strategy_id": ledger.get("positions", {}).get(p["symbol"], {}).get("strategy_id"),
                             "ticket_id": ledger.get("positions", {}).get(p["symbol"], {}).get("ticket_id"),
+                            "open_client_order_id": ledger.get("positions", {}).get(p["symbol"], {}).get("open_client_order_id"),
                             "margin_mode": str(ledger.get("positions", {}).get(p["symbol"], {}).get("margin_mode", "ISOLATED") or "ISOLATED"),
                         }
                         for p in pos
@@ -667,7 +671,8 @@ class BinanceFuturesBroker:
         receipts: list[dict[str, Any]] = []
         if getattr(self, "require_pipeline_authorization", False):
             from core.decision_pipeline import filter_unauthorized_opens
-            decision, verdict = filter_unauthorized_opens(decision, verdict, db)
+            decision, verdict = filter_unauthorized_opens(
+                decision, verdict, db, getattr(self, "_pipeline_secret", None))
         # 每轮先同步本地 LIMIT 台账：成交→记来源+补挂SL/TP，过期→撤单。
         try:
             receipts.extend(self._sync_pending_limits())
@@ -783,6 +788,7 @@ class BinanceFuturesBroker:
                     str(order.get("margin_mode", "ISOLATED") or "ISOLATED"),
                     qty=abs(float((ex_pos or {}).get("positionAmt") or 0.0)),
                     entry=float((ex_pos or {}).get("entryPrice") or 0.0),
+                    open_client_order_id=cid,
                 )
                 if order.get("ticket_id") and self.db:
                     self.db.update_signal_ticket(ticket_id=str(order["ticket_id"]), status="filled")
@@ -987,6 +993,7 @@ class BinanceFuturesBroker:
                 str(getattr(intent, "margin_mode", "ISOLATED") or "ISOLATED"),
                 qty=float(total_qty),
                 entry=price if price > 0 else None,
+                open_client_order_id=first_cid,
             )
             if self.db and getattr(intent, "ticket_id", None):
                 self.db.update_signal_ticket(ticket_id=str(intent.ticket_id), status="filled")

@@ -76,6 +76,31 @@
 
 <div class="card chain">
 
+  {# ---- G. 独立持仓监督 ---- #}
+  {% set gd = latest.guardian_decision %}
+  <div class="chain-step {{ 'is-empty' if not gd else '' }}" id="step-guardian">
+    <div class="chain-num">G</div>
+    <div class="chain-head">
+      <span class="chain-title">Position Guardian</span>
+      <span class="badge muted">影子监督</span>
+      {% if gd %}<span class="badge {{ 'warn' if gd.policy_checks|selectattr('status','equalto','BLOCK')|list else 'ok' }}">{{ gd.decision|decision_cn }}</span>{% endif %}
+    </div>
+    <div class="chain-note reasoning" id="guardian-reason">
+      {{ gd.reasoning if gd else '等待首轮持仓论点复核' }}
+    </div>
+    {% if gd and gd.policy_checks %}
+    <div class="table-wrap" style="margin-top:9px"><table>
+      <thead><tr><th>仓位</th><th>状态</th><th>模式</th><th>原因</th><th>证据时间</th></tr></thead>
+      <tbody>{% for item in gd.policy_checks %}<tr>
+        <td>{{ (item.evidence or {}).symbol or '—' }}</td>
+        <td><span class="badge {{ 'err' if item.status == 'BLOCK' else ('warn' if item.status == 'NOT_EVALUATED' else 'ok') }}">{{ item.state or item.status }}</span></td>
+        <td>{{ item.mode }}</td><td class="muted">{{ item.reason }}</td>
+        <td class="muted">{{ item.evidence_at or '—' }}</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    {% endif %}
+  </div>
+
   {# ---- 1. 最新情报 ---- #}
   <div class="chain-step {{ 'is-empty' if not latest.market else '' }}" id="step-1">
     <div class="chain-num">1</div>
@@ -285,6 +310,26 @@
     <div class="chain-note reasoning" id="final-reason" style="margin-top:9px">
       {{ dec.reasoning if dec else '等待首轮决策' }}
     </div>
+    {% if latest.decision and latest.decision.pipeline_trace %}
+    <div class="table-wrap" style="margin-top:10px"><table>
+      <thead><tr><th>统一管线阶段</th><th>结果</th></tr></thead>
+      <tbody>{% for item in latest.decision.pipeline_trace %}<tr>
+        <td>{{ item.stage }}</td>
+        <td><span class="badge {{ 'err' if item.status == 'BLOCK' else ('warn' if item.status in ['WARN','NOT_EVALUATED','PENDING'] else 'ok') }}">{{ item.status }}</span></td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    {% endif %}
+    {% if latest.decision and latest.decision.policy_checks %}
+    <div class="table-wrap" style="margin-top:10px"><table>
+      <thead><tr><th>检查项</th><th>结果</th><th>作用</th><th>原因</th><th>证据时间</th></tr></thead>
+      <tbody>{% for item in latest.decision.policy_checks %}<tr>
+        <td>{{ item.check_id }} v{{ item.version }}</td>
+        <td><span class="badge {{ 'err' if item.status == 'BLOCK' else ('warn' if item.status in ['WARN','NOT_EVALUATED'] else 'ok') }}">{{ item.status }}</span></td>
+        <td>{{ '强制' if item.mode == 'enforce' else ('影子' if item.mode == 'shadow' else '关闭') }}</td>
+        <td class="muted">{{ item.reason }}</td><td class="muted">{{ item.evidence_at or '—' }}</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    {% endif %}
     <details class="chain-raw">
       <summary>查看最终决策与风控裁决原始输出</summary>
       <div class="raw-label">decision</div>
@@ -294,6 +339,19 @@
     </details>
   </div>
 
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h3>决策链观测</h3>
+  <div class="stats-grid">
+    <div><span class="muted">近样本决策</span><strong>{{ observability.sampled_decisions }}</strong></div>
+    <div><span class="muted">模型可用率</span><strong>{{ '%.1f%%'|format(observability.llm_availability * 100) if observability.llm_availability is not none else '—' }}</strong></div>
+    <div><span class="muted">扫描事件 / 错误</span><strong>{{ observability.signal_events }} / {{ observability.scan_errors }}</strong></div>
+    <div><span class="muted">开仓成交转化</span><strong>{{ '%.1f%%'|format(observability.execution_conversion * 100) if observability.execution_conversion is not none else '—' }}</strong></div>
+    <div><span class="muted">最新证据年龄</span><strong>{{ observability.data_age_seconds|string + 's' if observability.data_age_seconds is not none else '—' }}</strong></div>
+    <div><span class="muted">Guardian复核年龄</span><strong>{{ observability.guardian_review_age_seconds|string + 's' if observability.guardian_review_age_seconds is not none else '—' }}</strong></div>
+  </div>
+  {% if observability.checks %}<details class="chain-raw"><summary>查看检查原因码分布</summary><pre>{{ observability.checks|tojson(indent=2) }}</pre></details>{% endif %}
 </div>
 
 <div class="card" style="margin-top:16px">
@@ -338,6 +396,7 @@ async function refreshChain(){
     if (d.onchain) setText('onchain-summary', d.onchain.summary);
     if (d.strategy_decision) setText('strategy-decision-reason', d.strategy_decision.reasoning || '—');
     if (d.ai_decision) setText('ai-decision-reason', d.ai_decision.reasoning || '—');
+    if (d.guardian_decision) setText('guardian-reason', d.guardian_decision.reasoning || '—');
     if (d.decision){
       setText('final-reason', d.decision.reasoning || '—');
       const fd = document.getElementById('final-decision');

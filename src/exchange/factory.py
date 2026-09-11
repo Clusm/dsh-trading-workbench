@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 
 from agents.execution import PaperBroker
 from audit.database import AuditDatabase
@@ -29,6 +30,7 @@ def _paper_broker(settings: Settings):
         initial_equity=float(cap_cfg.get("initial_equity", 200)),
     )
     broker.require_pipeline_authorization = True
+    broker._pipeline_secret = secrets.token_urlsafe(32)
     return broker
 
 
@@ -67,6 +69,7 @@ def create_broker(settings: Settings, db: AuditDatabase):
                         "read_enabled", False)),
             )
             broker.require_pipeline_authorization = True
+            broker._pipeline_secret = secrets.token_urlsafe(32)
             db.log_risk_event(event_type="broker_created", severity="info",
                               details=f"execution broker={mode} base_url={broker.base_url}",
                               action_taken="connected")

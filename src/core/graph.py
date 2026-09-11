@@ -19,7 +19,7 @@ from audit.database import AuditDatabase
 from audit.jsonl_logger import JsonlLogger
 from core.action_space import ActionSpace
 from core.agent_recorder import AgentRecorder
-from core.decision_pipeline import authorize_decision
+from core.decision_pipeline import authorize_decision, sign_execution
 from core.position_guardian import evaluate_positions
 from data.market_query import get_live_prices
 from llm.base import LLMClient
@@ -513,7 +513,10 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
         for item in trace:
             if item.get("stage") == "risk_guard":
                 item["status"] = "PASS" if verdict.verdict in ("approved", "reduced") else "BLOCK"
-        return {"decision": decision.model_copy(update={"pipeline_trace": trace}),
+        checked_decision = decision.model_copy(update={"pipeline_trace": trace})
+        checked_decision = sign_execution(
+            checked_decision, verdict, getattr(broker, "_pipeline_secret", None))
+        return {"decision": checked_decision,
                 "risk_verdict": verdict, "execution_prices": prices}
 
     def execution_node(state: AgentState) -> dict[str, Any]:

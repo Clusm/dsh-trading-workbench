@@ -29,8 +29,9 @@ def _check(state: str, mode: str, reason: str, evidence: dict[str, Any]) -> dict
     }
 
 
-def _stable_close_id(intent_id: str, closed_at_ms: int | None) -> str:
-    digest = hashlib.sha256(f"{intent_id}|{closed_at_ms}".encode("utf-8")).hexdigest()[:24]
+def _stable_close_id(intent_id: str) -> str:
+    """一条开仓论点只允许一个 Guardian 退出命令，跨 K 线和重启仍稳定。"""
+    digest = hashlib.sha256(intent_id.encode("utf-8")).hexdigest()[:24]
     return f"mta-g-{digest}"
 
 
@@ -55,7 +56,10 @@ def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
         symbol = str(position.get("symbol") or "").upper()
         side = str(position.get("side") or "").upper()
         qty = abs(float(position.get("qty") or position.get("positionAmt") or 0.0))
-        row = db.fetch_latest_open_intent(symbol, side, source)
+        open_client_order_id = str(position.get("open_client_order_id") or "")
+        row = (db.fetch_open_intent_by_client_order_id(open_client_order_id)
+               if open_client_order_id else None)
+        # legacy/人工接管仓位没有精确开仓命令，不能用同标的旧记录猜测论点。
         if row is None:
             item = _check("REVIEW_DUE", effective_mode, "缺少可归因的 approved 开仓论点", {
                 "symbol": symbol, "side": side, "source": source,
@@ -119,7 +123,7 @@ def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
         if effective_mode == "enforce" and qty > 0:
             intents.append(TradeIntent(
                 symbol=symbol, action="close", side=side, qty=qty, leverage=1,
-                client_order_id=_stable_close_id(str(row["intent_id"]), snapshot.get("closed_at_ms")),
+                client_order_id=_stable_close_id(str(row["intent_id"])),
                 order_source=source, strategy_id=raw.get("strategy_id"),
                 reasoning="Position Guardian：闭合K线确认原开仓论点失效",
                 invalidation=raw.get("invalidation"),

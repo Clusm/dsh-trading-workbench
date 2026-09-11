@@ -588,7 +588,8 @@ def _latest_or_empty(service: TradingService) -> dict[str, Any]:
     latest = service.latest()
     empty = {
         "market": None, "macro": None, "onchain": None, "strategy": None,
-        "decision": None, "risk_verdict": None, "execution": [],
+        "decision": None, "guardian_decision": None,
+        "risk_verdict": None, "execution": [],
         # 页面切换时不在这里实时请求币安账户，避免每次导航都卡一下
         "paper_state": latest.get("paper_state") or {},
         "control_state": service.control.state,
@@ -616,6 +617,65 @@ def _latest_or_empty(service: TradingService) -> dict[str, Any]:
             merged["decision_from_db"] = row
             merged["ts"] = _ts_from_iso(row.get("created_at")) or merged["ts"]
     return merged
+
+
+def _decision_observability(service: TradingService) -> dict[str, Any]:
+    """从审计库汇总最近决策质量；展示统计不参与交易判断。"""
+    rows = service.db.fetch_all(
+        "SELECT raw_json FROM trade_decisions ORDER BY id DESC LIMIT 200")
+    check_counts: dict[str, dict[str, int]] = {}
+    latest_evidence_at: int | None = None
+    guardian_evidence_at: int | None = None
+    for row in rows:
+        try:
+            raw = json.loads(row["raw_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        for item in raw.get("policy_checks") or []:
+            check_id = str(item.get("check_id") or "unknown")
+            status = str(item.get("status") or "NOT_EVALUATED")
+            bucket = check_counts.setdefault(check_id, {})
+            bucket[status] = bucket.get(status, 0) + 1
+            try:
+                evidence_at = int(item.get("evidence_at") or 0) or None
+            except (TypeError, ValueError):
+                evidence_at = None
+            if evidence_at:
+                latest_evidence_at = max(latest_evidence_at or 0, evidence_at)
+                if check_id == "position_guardian":
+                    guardian_evidence_at = max(guardian_evidence_at or 0, evidence_at)
+    llm = service.db.fetch_one(
+        """SELECT COUNT(*) total,
+                  SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) ok
+           FROM llm_calls""")
+    scan_errors = service.db.fetch_one(
+        """SELECT COUNT(*) n FROM risk_events
+           WHERE event_type IN ('signal_scan_error','signal_scanner_error')""")
+    signals = service.db.fetch_one("SELECT COUNT(*) n FROM signal_events")
+    approved_opens = service.db.fetch_one(
+        "SELECT COUNT(*) n FROM trade_intents WHERE action='open' AND status='approved'")
+    filled_opens = service.db.fetch_one(
+        """SELECT COUNT(DISTINCT i.intent_id) n FROM trade_intents i
+           JOIN orders o ON o.client_order_id=i.client_order_id
+           WHERE i.action='open' AND i.status='approved' AND o.status='FILLED'""")
+    total_llm = int(llm["total"] or 0) if llm else 0
+    ok_llm = int(llm["ok"] or 0) if llm else 0
+    approved = int(approved_opens["n"] or 0) if approved_opens else 0
+    filled = int(filled_opens["n"] or 0) if filled_opens else 0
+    now_ms = int(time.time() * 1000)
+    return {
+        "sampled_decisions": len(rows), "checks": check_counts,
+        "llm_availability": round(ok_llm / total_llm, 4) if total_llm else None,
+        "llm_calls": total_llm,
+        "signal_events": int(signals["n"] or 0) if signals else 0,
+        "scan_errors": int(scan_errors["n"] or 0) if scan_errors else 0,
+        "execution_conversion": round(filled / approved, 4) if approved else None,
+        "approved_opens": approved, "filled_opens": filled,
+        "data_age_seconds": round((now_ms - latest_evidence_at) / 1000, 1)
+                            if latest_evidence_at else None,
+        "guardian_review_age_seconds": round((now_ms - guardian_evidence_at) / 1000, 1)
+                                       if guardian_evidence_at else None,
+    }
 
 
 def _session_equity_from_state(service: TradingService, broker_state: dict[str, Any]) -> float:
@@ -1431,6 +1491,7 @@ def create_app(service: TradingService) -> FastAPI:
         return templates.TemplateResponse(request, "decisions.html", {
             "latest": latest,
             "decisions": decisions,
+            "observability": _decision_observability(service),
             "now_ts": time.time(),
             "console_token": _write_token,
         })
@@ -1573,6 +1634,9 @@ def create_app(service: TradingService) -> FastAPI:
             "risk_verdict": latest["risk_verdict"].model_dump() if latest["risk_verdict"] else None,
             "strategy_decision": latest.get("strategy_decision").model_dump() if latest.get("strategy_decision") else None,
             "ai_decision": latest.get("ai_decision").model_dump() if latest.get("ai_decision") else None,
+            "guardian_decision": (latest.get("guardian_decision").model_dump()
+                                  if latest.get("guardian_decision") else None),
+            "decision_observability": _decision_observability(service),
             "strategy_refs": latest["strategy"].model_dump() if latest["strategy"] else {"refs": []},
             # generated_at 一并返回：交易页要靠它算「情报新鲜度」，
             # 用户需要知道这份情报是刚跑出来的还是半小时前的。

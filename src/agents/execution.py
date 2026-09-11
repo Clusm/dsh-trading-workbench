@@ -249,7 +249,8 @@ class PaperBroker:
         receipts: list[dict[str, Any]] = []
         if getattr(self, "require_pipeline_authorization", False):
             from core.decision_pipeline import filter_unauthorized_opens
-            decision, verdict = filter_unauthorized_opens(decision, verdict, db)
+            decision, verdict = filter_unauthorized_opens(
+                decision, verdict, db, getattr(self, "_pipeline_secret", None))
         # 每轮先处理待成交限价单（成交/过期），即使本轮 no_trade 也要处理；
         # 市场快照里可能没有挂单 symbol，这里实时补齐。
         pending_symbols = []
@@ -356,6 +357,7 @@ class PaperBroker:
                 old_pos["margin"] = float(old_pos.get("margin", 0.0)) + margin
                 old_pos["stop_loss"] = intent.stop_loss
                 old_pos["take_profit"] = intent.take_profit
+                old_pos["open_client_order_id"] = getattr(intent, "client_order_id", None)
                 old_pos["margin_mode"] = str(getattr(intent, "margin_mode", "ISOLATED"))
             else:
                 db.log_risk_event(event_type="paper_reject_conflict", severity="warn",
@@ -369,6 +371,7 @@ class PaperBroker:
                 "source": source,
                 "strategy_id": getattr(intent, "strategy_id", None),
                 "ticket_id": getattr(intent, "ticket_id", None),
+                "open_client_order_id": getattr(intent, "client_order_id", None),
                 "margin_mode": str(getattr(intent, "margin_mode", "ISOLATED")),
                 "opened_at": utc_now(),
                 "expected_holding_minutes": int(getattr(intent, "expected_holding_minutes", 60) or 60),
@@ -481,6 +484,7 @@ class PaperBroker:
             "stop_loss": order.get("stop_loss"), "take_profit": order.get("take_profit"),
             "source": source, "strategy_id": order.get("strategy_id"),
             "ticket_id": order.get("ticket_id"),
+            "open_client_order_id": order.get("order_id"),
             "margin_mode": order.get("margin_mode", "ISOLATED"),
             "opened_at": utc_now(),
         })

@@ -12,11 +12,14 @@ from typing import Any
 
 from audit.database import AuditDatabase
 from audit.jsonl_logger import JsonlLogger
-from agents.models import RiskVerdict, TradeDecision
+from agents.models import RiskVerdict
+from agents import risk
 from core.agent_recorder import AgentRecorder
 from core.config_loader import Settings
 from core.control import ControlState
 from core.graph import build_graph
+from core.decision_pipeline import authorize_decision, sign_execution
+from core.position_guardian import evaluate_positions
 from llm.factory import build_llm_for_agent
 from exchange.factory import create_broker
 from core.capital import CapitalManager
@@ -297,8 +300,23 @@ class TradingService:
             state = self.broker.state if isinstance(self.broker.state, dict) else {}
             symbols = [str(p.get("symbol")) for p in state.get("positions", [])]
             prices = get_live_prices(symbols) if symbols else {}
-            decision = TradeDecision(decision="no_trade", channel="merged")
-            verdict = RiskVerdict(verdict="approved", reasons=["fast cycle"], adjusted_intents=[])
+            guardian = evaluate_positions(
+                positions=list(state.get("positions") or []), db=self.db,
+                execution_mode=str(getattr(self.broker, "mode", "paper") or "paper"),
+            )
+            decision = authorize_decision(
+                guardian, db=self.db, run_id=f"fast-guardian-{uuid.uuid4()}")
+            if decision.intents:
+                verdict = risk.evaluate_risk(
+                    decision, dict(self.settings.raw_risk), self.db, self.recorder,
+                    f"fast-guardian-{uuid.uuid4()}", allow_new_positions=False,
+                    prices=prices, available_cash=session_equity, portfolio=state,
+                )
+                decision = sign_execution(
+                    decision, verdict, getattr(self.broker, "_pipeline_secret", None))
+            else:
+                verdict = RiskVerdict(
+                    verdict="approved", reasons=["fast guardian cycle"], adjusted_intents=[])
             receipts = []
             try:
                 receipts = self.broker.execute(decision, verdict, prices,
@@ -316,8 +334,12 @@ class TradingService:
                                            action_taken="continue")
             # 快循环也刷新通道/会话权益快照，让页面数值接近实时（慢循环 10 分钟太长）
             self._refresh_latest_channels(state, prices)
+            with self._lock:
+                if self._latest:
+                    self._latest["guardian_decision"] = guardian
             result = {"ts": time.time(), "receipts": receipts, "prices": prices,
-                      "account_risk": account_risk}
+                      "account_risk": account_risk,
+                      "guardian_decision": guardian.model_dump()}
             with self._lock:
                 self._last_fast_cycle_at = result["ts"]
                 self._last_fast_cycle_error = None

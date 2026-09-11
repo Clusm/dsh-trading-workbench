@@ -235,6 +235,13 @@ check("事件页中文显示类型", "手动重置资金" in r_events.text)
 check("事件页显示处理列", "处理" in r_events.text)
 r_filter = client.get("/events?severity=warn")
 check("级别过滤生效", r_filter.status_code == 200 and "手动重置资金" in r_filter.text)
+r_decisions = client.get("/decisions")
+check("决策页展示Guardian与统一管线", r_decisions.status_code == 200
+      and "Position Guardian" in r_decisions.text and "决策链观测" in r_decisions.text)
+r_status = client.get("/api/status")
+check("状态API暴露Guardian与决策观测", r_status.status_code == 200
+      and "guardian_decision" in r_status.json()
+      and "decision_observability" in r_status.json())
 r_api = client.get("/api/mode")
 check("/api/mode 返回当前模式", r_api.json().get("current") == "paper", r_api.text[:120])
 r_noauth = client.post("/api/capital/reset", headers={"Content-Type": "application/json"})

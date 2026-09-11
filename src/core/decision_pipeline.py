@@ -1,14 +1,43 @@
 """新开仓的单一确定性入口与命名决策轨迹。"""
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 from typing import Any
 
 from agents.models import TradeDecision
 
 
-def filter_unauthorized_opens(decision: Any, verdict: Any, db: Any) -> tuple[Any, Any]:
+def _execution_payload(decision: Any, verdict: Any) -> bytes:
+    intents = verdict.adjusted_intents if verdict.adjusted_intents else decision.intents
+    opens = [item.model_dump(mode="json") for item in intents if item.action == "open"]
+    return json.dumps(opens, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def sign_execution(decision: Any, verdict: Any, secret: str | None) -> Any:
+    """在 RiskGuard 之后签署实际开仓集合；无开仓不需要签名。"""
+    if not secret or not any(item.action == "open" for item in
+                             (verdict.adjusted_intents or decision.intents)):
+        return decision
+    signature = hmac.new(secret.encode("utf-8"), _execution_payload(decision, verdict),
+                         hashlib.sha256).hexdigest()
+    return decision.model_copy(update={"pipeline_signature": signature})
+
+
+def _has_valid_signature(decision: Any, verdict: Any, secret: str | None) -> bool:
+    if not secret or not decision.pipeline_signature:
+        return False
+    expected = hmac.new(secret.encode("utf-8"), _execution_payload(decision, verdict),
+                        hashlib.sha256).hexdigest()
+    return hmac.compare_digest(str(decision.pipeline_signature), expected)
+
+
+def filter_unauthorized_opens(decision: Any, verdict: Any, db: Any,
+                              secret: str | None = None) -> tuple[Any, Any]:
     """同时检查原始与风控调整集合；拦截开仓后仍让退出及挂单维护继续。"""
-    if decision.pipeline_authorized:
+    if decision.pipeline_authorized and _has_valid_signature(decision, verdict, secret):
         return decision, verdict
     raw = list(decision.intents)
     adjusted = list(verdict.adjusted_intents)

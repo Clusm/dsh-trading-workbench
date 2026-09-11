@@ -1154,6 +1154,17 @@ class AuditDatabase:
             (symbol, side, source),
         )
 
+    def fetch_open_intent_by_client_order_id(self, client_order_id: str) -> sqlite3.Row | None:
+        """按真实开仓命令精确绑定论点，避免同标的历史 intent 被误用于当前仓位。"""
+        return self.fetch_one(
+            """SELECT intent_id, decision_id, invalidation, client_order_id,
+                      created_at, raw_json
+               FROM trade_intents
+               WHERE client_order_id=? AND action='open' AND status='approved'
+               ORDER BY id DESC LIMIT 1""",
+            (client_order_id,),
+        )
+
     def log_trade_outcome(self, *, outcome_id: str, intent_id: str | None,
                           decision_id: str | None, symbol: str, side: str | None,
                           source: str = "ai", strategy_id: str | None = None,
