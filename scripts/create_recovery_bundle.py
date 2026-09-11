@@ -116,7 +116,7 @@ def create_recovery_bundle(project_root: Path, output_dir: Path) -> Path:
             }
         capital = json.loads((data_dir / "capital_state.json").read_text(encoding="utf-8"))
         manifest = {
-            "bundle_schema": 1,
+            "bundle_schema": 2,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "git_commit": _git_commit(root),
             "environment": capital.get("mode"),
@@ -125,8 +125,10 @@ def create_recovery_bundle(project_root: Path, output_dir: Path) -> Path:
             "files": files,
         }
         manifest_path = stage / "manifest.json"
-        manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        manifest_path.write_bytes(manifest_bytes)
+        (stage / "manifest.sha256").write_text(
+            _sha256(manifest_bytes) + "  manifest.json\n", encoding="ascii", newline="\n")
         os.replace(stage, final)
         return final
     except Exception:
