@@ -19,6 +19,7 @@ from audit.database import AuditDatabase
 from audit.jsonl_logger import JsonlLogger
 from core.action_space import ActionSpace
 from core.agent_recorder import AgentRecorder
+from core.position_guardian import evaluate_positions
 from data.market_query import get_live_prices
 from llm.base import LLMClient
 
@@ -34,6 +35,7 @@ class AgentState(TypedDict, total=False):
     tickets: list[dict[str, Any]]
     strategy_decision: ChannelDecision
     ai_decision: ChannelDecision
+    guardian_decision: TradeDecision
     # 会合屏障：merge 有两个上游分支（strategy_trader 2 跳 / ai_trader 3 跳），
     # LangGraph 的扇入屏障只在同一超级步内有效，跨步完成时 merge 会被触发两次，
     # 导致下游 risk/execution 各跑两遍（adjust 意图重复撤旧挂新）。该标记确保
@@ -113,7 +115,7 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 quota_manager: Any = None,
                 signal_scanner_config: dict[str, Any] | None = None,
                 execution_feedback: dict[str, Any] | None = None,
-                query_budget: int = 8) -> Any:
+                query_budget: int = 8, execution_mode: str = "paper") -> Any:
     def market_node(state: AgentState) -> dict[str, Any]:
         pair = (agent_llms or {}).get("market_agent")
 
@@ -161,6 +163,35 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
         else:
             brief = refresh_market()
         return {"market": brief}
+
+    def guardian_node(state: AgentState) -> dict[str, Any]:
+        """模型链路之前先复核既有 AI 仓位；失败不影响后续情报与保护同步。"""
+        try:
+            portfolio = portfolio_state if isinstance(portfolio_state, dict) else (
+                broker.state if broker is not None and isinstance(broker.state, dict) else {})
+            decision = evaluate_positions(
+                positions=list(portfolio.get("positions") or []), db=db,
+                execution_mode=execution_mode,
+            )
+            error = ""
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            decision = TradeDecision(
+                decision="no_trade", channel="merged",
+                reasoning=f"Position Guardian 异常：{error}；不推断退出，保留交易所保护",
+                policy_checks=[{
+                    "check_id": "position_guardian", "version": 1, "mode": "enforce",
+                    "status": "NOT_EVALUATED", "state": "UNKNOWN", "reason": error,
+                    "evidence_at": None, "evidence": {},
+                }],
+            )
+            db.log_risk_event(event_type="guardian_error", severity="critical",
+                              details=error, action_taken="do not infer exit; continue protections")
+        recorder.record(agent_name="position_guardian", model=None,
+                        role="deterministic_position_supervision",
+                        input_summary=f"positions={len((portfolio_state or {}).get('positions') or [])}",
+                        output=decision, error=error or None, run_id=state["run_id"])
+        return {"guardian_decision": decision}
 
     def macro_node(state: AgentState) -> dict[str, Any]:
         pair = (agent_llms or {}).get("macro_agent")
@@ -373,15 +404,31 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
             channel="strategy", decision="no_trade", reasoning="策略通道无决策")
         ai_decision = state.get("ai_decision") or ChannelDecision(
             channel="ai", decision="no_trade", reasoning="AI通道无决策")
-        intents = list(strategy_decision.intents)
+        guardian_decision = state.get("guardian_decision") or TradeDecision(
+            decision="no_trade", channel="merged", reasoning="Guardian 未产生任务")
+        # Guardian 退出优先级最高。相同 symbol 的新开、调整或重复退出全部丢弃，
+        # 这样模型断链时退出仍可执行，模型正常时也不能覆盖原论点失效事实。
+        intents = list(guardian_decision.intents)
         # 幂等 clientOrderId：decision_id + intent index，重启/重试不会重复下单
         decision_id = state.get("decision_id") or ""
         base_cid = "mta-" + str(decision_id).replace("-", "")[:24] if decision_id else ""
         for idx, intent in enumerate(intents):
             if base_cid and not getattr(intent, "client_order_id", None):
                 intents[idx] = intent.model_copy(update={"client_order_id": f"{base_cid}-{idx}"})
-        protected = {it.symbol for it in intents}
+        guardian_symbols = {it.symbol for it in guardian_decision.intents}
+        protected = set(guardian_symbols)
         conflicts: list[dict[str, Any]] = []
+        for intent in strategy_decision.intents:
+            if intent.symbol in protected:
+                conflict = {"symbol": intent.symbol, "source": "strategy",
+                            "reason": "Guardian退出优先，已丢弃策略通道同标的意图"}
+                conflicts.append(conflict)
+                db.log_decision_conflict(
+                    run_id=state.get("run_id"), decision_id=state.get("decision_id"),
+                    symbol=conflict["symbol"], source=conflict["source"], reason=conflict["reason"])
+                continue
+            intents.append(intent)
+            protected.add(intent.symbol)
         for intent in ai_decision.intents:
             if intent.symbol in protected:
                 conflict = {"symbol": intent.symbol, "source": "ai",
@@ -396,12 +443,18 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 intent = intent.model_copy(update={"client_order_id": f"{base_cid}-{len(intents)}"})
             intents.append(intent)
 
+        # Guardian 已自带跨轮稳定 ID；其余通道在这里统一补齐本轮幂等 ID。
+        for idx, intent in enumerate(intents):
+            if base_cid and not getattr(intent, "client_order_id", None):
+                intents[idx] = intent.model_copy(update={"client_order_id": f"{base_cid}-{idx}"})
+
         if not intents:
             merged = TradeDecision(
                 decision="no_trade", channel="merged",
-                reasoning=f"[策略] {strategy_decision.reasoning} | [AI] {ai_decision.reasoning}",
+                reasoning=(f"[Guardian] {guardian_decision.reasoning} | "
+                           f"[策略] {strategy_decision.reasoning} | [AI] {ai_decision.reasoning}"),
                 strategy_refs=list(dict.fromkeys(strategy_decision.strategy_refs + ai_decision.strategy_refs)),
-                policy_checks=list(ai_decision.policy_checks),
+                policy_checks=list(guardian_decision.policy_checks) + list(ai_decision.policy_checks),
             )
         else:
             actions = {getattr(i, "action", "open") for i in intents}
@@ -413,9 +466,10 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 decision_type = "adjust"
             merged = TradeDecision(
                 decision=decision_type, channel="merged", intents=intents,
-                reasoning=f"[策略] {strategy_decision.reasoning} | [AI] {ai_decision.reasoning}",
+                reasoning=(f"[Guardian] {guardian_decision.reasoning} | "
+                           f"[策略] {strategy_decision.reasoning} | [AI] {ai_decision.reasoning}"),
                 strategy_refs=list(dict.fromkeys(strategy_decision.strategy_refs + ai_decision.strategy_refs)),
-                policy_checks=list(ai_decision.policy_checks),
+                policy_checks=list(guardian_decision.policy_checks) + list(ai_decision.policy_checks),
             )
         return {"decision": merged, "conflicts": conflicts, "channels_merged": True}
 
@@ -508,6 +562,7 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
 
     g = StateGraph(AgentState)
     g.add_node("market", market_node)
+    g.add_node("guardian", guardian_node)
     g.add_node("macro", macro_node)
     g.add_node("onchain", onchain_node)
     g.add_node("strategy", strategy_node)
@@ -517,7 +572,8 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
     g.add_node("merge", merge_node)
     g.add_node("risk", risk_node)
     g.add_node("execution", execution_node)
-    g.add_edge(START, "market")
+    g.add_edge(START, "guardian")
+    g.add_edge("guardian", "market")
     g.add_edge("market", "macro")
     g.add_edge("macro", "onchain")
     g.add_edge("onchain", "signal_scanner")

@@ -214,6 +214,47 @@ def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
     return result
 
 
+def query_guardian_closed_bar(symbol: str, interval: str = "15m") -> dict[str, Any]:
+    """只取 Guardian 所需的最新闭合 K 线，避免持仓复核触发整套行情查询。
+
+    当前形成中的 K 线永远单独隔离；缺失、断档或陈旧时返回不可评估，调用方不得
+    用 ticker/mark price 猜测“收盘已突破”。
+    """
+    symbol = _fmt_symbol(symbol)
+    interval = interval if interval in VALID_INTERVALS else "15m"
+    cache_key = ("guardian_closed_bar", symbol, interval)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    observed_at_ms = int(time.time() * 1000)
+    try:
+        with httpx.Client(timeout=12.0) as client:
+            rows = _get_json(client, "/fapi/v1/klines", {
+                "symbol": symbol, "interval": interval, "limit": 24,
+            })
+        closed, live_bar, quality = prepare_closed_klines(
+            rows, interval, observed_at_ms=observed_at_ms, min_closed=3,
+        )
+    except Exception as exc:
+        return {
+            "symbol": symbol, "interval": interval, "ok": False,
+            "state": "REVIEW_DUE", "error": f"{type(exc).__name__}: {exc}",
+            "observed_at_ms": observed_at_ms,
+        }
+    result = {
+        "symbol": symbol, "interval": interval, "ok": bool(quality.get("ok")),
+        "state": "ACTIVE" if quality.get("ok") else "REVIEW_DUE",
+        "closed_price": float(closed[-1][4]) if closed else None,
+        "closed_open_time_ms": int(closed[-1][0]) if closed else None,
+        "closed_at_ms": int(closed[-1][6]) if closed else None,
+        "has_live_bar": live_bar is not None,
+        "observed_at_ms": observed_at_ms,
+        "data_quality": quality,
+    }
+    _cache_set(cache_key, result)
+    return result
+
+
 def query_symbol_cards(symbols: list[str], top_n: int = 20) -> dict[str, Any]:
     """批量轻量指标卡：无 K 线，一次最多 20 个，适合先宽扫再深挖。"""
     syms = [_fmt_symbol(s) for s in (symbols or [])]

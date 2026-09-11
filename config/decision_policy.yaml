@@ -1,5 +1,12 @@
 version: 1
 
+# Position Guardian 只管理既有 AI 仓位，不创建新仓。实盘保持影子，避免未经
+# Demo 观察就改变真实退出行为；paper/demo/testnet 可执行机器可验证的结构失效退出。
+position_guardian:
+  mode: enforce
+  enforce_modes: [paper, demo, testnet]
+  sources: [ai]
+
 # 这些是“决策质量”检查，不是仓位风险参数。初始全部 shadow：只记录判断，
 # 不改变现有杠杆、仓位、白名单、止损、RiskGuard 或实际下单结果。
 checks:

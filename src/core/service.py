@@ -447,6 +447,7 @@ class TradingService:
             control=self.control,
             query_budget=int((self.settings.raw_settings.get("decision_cycle", {})
                               or {}).get("query_budget", 8)),
+            execution_mode=str(getattr(self.broker, "mode", "paper") or "paper"),
         )
         state = graph.invoke({"run_id": run_id, "decision_id": decision_id})
         decision = state.get("decision")

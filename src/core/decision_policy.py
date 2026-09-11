@@ -27,6 +27,10 @@ def load_decision_policy(path: Path | None = None) -> dict[str, Any]:
         mode = str((config or {}).get("mode") or "off")
         if mode not in VALID_MODES:
             raise ValueError(f"decision_policy {check_id}.mode={mode!r} is invalid")
+    guardian = raw.get("position_guardian") or {}
+    guardian_mode = str(guardian.get("mode") or "off")
+    if guardian_mode not in VALID_MODES:
+        raise ValueError(f"decision_policy position_guardian.mode={guardian_mode!r} is invalid")
     return raw
 
 
