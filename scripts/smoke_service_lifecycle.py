@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,24 @@ service._run_thread = None
 service._run_thread_lock = threading.Lock()
 service._stop_event = threading.Event()
 service._thread = None
+service._lock = threading.RLock()
+service._latest = {"channel_state": {"previous": True}}
+service._last_fast_cycle_at = None
+service._last_fast_cycle_error = None
+service._last_fast_cycle_duration_ms = None
+service._last_slow_cycle_started_at = None
+service._last_slow_cycle_at = None
+service._last_slow_cycle_error = None
+service._last_slow_cycle_duration_ms = None
+service._last_latest_refresh_at = None
+service._last_latest_refresh_error = None
+service._started_at = time.time()
+service.broker = SimpleNamespace(state={"positions": []})
+service.capital = SimpleNamespace(
+    initial_equity=500.0, baseline=1000.0, last_reset=None,
+    session_equity=lambda: 520.0,
+)
+service.channels = SimpleNamespace(sync=lambda *_args, **_kwargs: {"fresh": True})
 
 entered = threading.Event()
 release = threading.Event()
@@ -77,4 +96,17 @@ service._thread.start()
 check("安全停止返回True", service.stop_background(wait_seconds=1.0))
 check("停止事件已设置", service._stop_event.is_set())
 
-print("\n结果: 5 通过 / 0 失败")
+print("\n[3] 展示快照失败必须可观测且保留最后有效值")
+service._refresh_latest_channels(state={"positions": []}, prices={})
+check("成功刷新记录时间", service._last_latest_refresh_at is not None)
+check("成功刷新清除错误", service._last_latest_refresh_error is None)
+check("成功刷新更新通道", service._latest["channel_state"] == {"fresh": True})
+service.channels = SimpleNamespace(
+    sync=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
+service._refresh_latest_channels(state={"positions": []}, prices={})
+check("刷新失败记录错误类型", service._last_latest_refresh_error == "RuntimeError")
+check("刷新失败保留上次有效通道", service._latest["channel_state"] == {"fresh": True})
+status = service.runtime_status()
+check("运行状态暴露快照刷新错误", status["last_latest_refresh_error"] == "RuntimeError")
+
+print("\n结果: 11 通过 / 0 失败")

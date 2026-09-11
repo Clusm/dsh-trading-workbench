@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -242,6 +243,14 @@ r_status = client.get("/api/status")
 check("状态API暴露Guardian与决策观测", r_status.status_code == 200
       and "guardian_decision" in r_status.json()
       and "decision_observability" in r_status.json())
+real_svc._last_latest_refresh_error = "RuntimeError"
+real_svc._last_latest_refresh_at = time.time() - 10.0
+r_health = client.get("/api/health")
+check("快照刷新失败在健康接口明确降级", r_health.status_code == 200
+      and "latest_snapshot_refresh_error" in r_health.json().get("reasons", [])
+      and r_health.json().get("runtime", {}).get("last_latest_refresh_error") == "RuntimeError",
+      r_health.text[:200])
+real_svc._last_latest_refresh_error = None
 r_api = client.get("/api/mode")
 check("/api/mode 返回当前模式", r_api.json().get("current") == "paper", r_api.text[:120])
 r_noauth = client.post("/api/capital/reset", headers={"Content-Type": "application/json"})

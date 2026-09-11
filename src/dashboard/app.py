@@ -1783,7 +1783,10 @@ def create_app(service: TradingService) -> FastAPI:
                         getattr(service, "_account_risk_status", {}) or {})
         runtime = service.runtime_status() if hasattr(service, "runtime_status") else {}
         now_epoch = time.time()
-        for field in ("last_fast_cycle_at", "last_slow_cycle_started_at", "last_slow_cycle_at"):
+        for field in (
+            "last_fast_cycle_at", "last_slow_cycle_started_at", "last_slow_cycle_at",
+            "last_latest_refresh_at",
+        ):
             value = runtime.get(field)
             runtime[field.replace("_at", "_age_seconds")] = (
                 round(max(0.0, now_epoch - float(value)), 3) if value else None
@@ -1796,6 +1799,9 @@ def create_app(service: TradingService) -> FastAPI:
             health_reasons.append("broker_state_unavailable")
         if not db_readable:
             health_reasons.append("database_unreadable")
+        # 仅标记控制台展示已降级；这不是新的交易闸门，不能改变 /api/ready 语义。
+        if runtime.get("last_latest_refresh_error"):
+            health_reasons.append("latest_snapshot_refresh_error")
         health_reasons.extend(_freshness_health_reasons(
             runtime, protection_mirror_status, stability, now=now_epoch))
         return {

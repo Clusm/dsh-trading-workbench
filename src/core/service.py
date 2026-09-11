@@ -189,6 +189,10 @@ class TradingService:
         self._last_slow_cycle_at: float | None = None
         self._last_slow_cycle_error: str | None = None
         self._last_slow_cycle_duration_ms: float | None = None
+        # 看板资金/通道快照允许保留上一次有效值，但不能把刷新失败伪装成实时数据。
+        # 这些字段仅供健康接口展示，不参与风控阈值或开仓授权。
+        self._last_latest_refresh_at: float | None = None
+        self._last_latest_refresh_error: str | None = None
         self._purge_old_logs()
 
     def _purge_old_logs(self, keep_days: int = 7) -> None:
@@ -275,8 +279,13 @@ class TradingService:
                     }
                     self._latest["channel_state"] = channel_status
                     self._latest["paper_state"] = dict(state)
-        except Exception:
-            pass
+                self._last_latest_refresh_at = time.time()
+                self._last_latest_refresh_error = None
+        except Exception as exc:
+            # 保留最后有效展示值，但把失败原因显式暴露给 /api/health。这里不能
+            # 静默吞掉异常，否则页面会把旧权益误标为刚刷新。
+            with self._lock:
+                self._last_latest_refresh_error = type(exc).__name__
 
     def run_fast_once(self) -> dict[str, Any]:
         """快循环：无 LLM。只处理挂单、保护单、来源台账对账。
@@ -393,6 +402,8 @@ class TradingService:
                 "last_slow_cycle_at": self._last_slow_cycle_at,
                 "last_slow_cycle_error": self._last_slow_cycle_error,
                 "last_slow_cycle_duration_ms": self._last_slow_cycle_duration_ms,
+                "last_latest_refresh_at": self._last_latest_refresh_at,
+                "last_latest_refresh_error": self._last_latest_refresh_error,
                 "started_at": self._started_at,
             }
 
