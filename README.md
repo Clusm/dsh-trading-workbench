@@ -92,7 +92,8 @@ Copy-Item .env.example .env
 - `src/intel`：只读 USD-M/Web3 情报与 A/B/C 影子评估；
 - `src/audit`：SQLite 迁移、审计查询和 JSONL 日志；
 - `src/dashboard`：FastAPI 控制台；
-- `scripts`：启动、冒烟、诊断与显式在线核验脚本；
+- `scripts`：启动、离线回归、恢复、诊断与显式在线核验脚本；其中 `probe_*`、
+  `diag_*`、`verify_*_live` 不进入默认 CI，`cleanup_*`/`repair_*` 必须先预览并做后置核验；
 - `docs`：架构、运行恢复、维护规范和历史设计记录。
 
 USD-M 回放位于 `src/core/usdm_replay.py` 和 `src/core/strategy_evaluation.py`，支持重复
