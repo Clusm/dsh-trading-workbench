@@ -49,6 +49,9 @@ def _ordered_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         source_at = int(event.get("source_at_ms") or timestamp)
         if observed > timestamp or source_at > timestamp:
             raise ValueError("future_data_leakage")
+        submitted = int(event.get("submitted_at_ms") or timestamp)
+        if submitted > timestamp:
+            raise ValueError("order_submission_after_fill")
         previous = timestamp
     return events
 
@@ -114,25 +117,48 @@ def replay_fixture(fixture: dict[str, Any], *, fees_enabled: bool = True,
                             float(spec.get("tick_size") or 0.0))
         fee_bps = maker_bps if order_type == "MAKER" else taker_bps
         fee = price * qty * fee_bps / 10_000.0 if fees_enabled else 0.0
+        signal_price = float(event.get("signal_price") or reference)
+        latency_ms = max(0, int(event["timestamp_ms"]) - int(
+            event.get("submitted_at_ms") or event["timestamp_ms"]))
+        buy = (action == "open" and side == "LONG") or (action == "close" and side == "SHORT")
+        latency_cost = max(0.0, (reference - signal_price) * qty * (1 if buy else -1))
         key = (variant, symbol, side)
         if action == "open":
-            open_positions[key] = {
-                "variant": variant, "symbol": symbol, "side": side, "qty": qty,
-                "entry_price": price, "opened_at_ms": int(event["timestamp_ms"]),
-                "entry_fee": fee, "funding": 0.0,
-                "strategy_id": event.get("strategy_id"),
-                "incident": event.get("incident"),
-                "partial_fill_open": fill_ratio < 1.0,
-            }
+            existing = open_positions.get(key)
+            if existing:
+                # 同方向重复开仓按真实持仓语义合并，避免静默覆盖首笔成本与数量。
+                combined_qty = float(existing["qty"]) + qty
+                existing["entry_price"] = (
+                    float(existing["entry_price"]) * float(existing["qty"]) + price * qty
+                ) / combined_qty
+                existing["qty"] = combined_qty
+                existing["entry_fee"] += fee
+                existing["entry_latency_cost"] += latency_cost
+                existing["max_entry_latency_ms"] = max(
+                    int(existing["max_entry_latency_ms"]), latency_ms)
+                existing["partial_fill_open"] = bool(
+                    existing.get("partial_fill_open")) or fill_ratio < 1.0
+            else:
+                open_positions[key] = {
+                    "variant": variant, "symbol": symbol, "side": side, "qty": qty,
+                    "entry_price": price, "opened_at_ms": int(event["timestamp_ms"]),
+                    "entry_fee": fee, "funding": 0.0,
+                    "entry_latency_cost": latency_cost,
+                    "max_entry_latency_ms": latency_ms,
+                    "strategy_id": event.get("strategy_id"),
+                    "incident": event.get("incident"),
+                    "partial_fill_open": fill_ratio < 1.0,
+                }
             continue
         if action != "close" or key not in open_positions:
             continue
-        position = open_positions.pop(key)
+        position = open_positions[key]
         close_qty = min(qty, float(position["qty"]))
         gross = ((price - position["entry_price"]) * close_qty
                  if side == "LONG" else (position["entry_price"] - price) * close_qty)
         allocated_entry_fee = position["entry_fee"] * close_qty / position["qty"]
         allocated_funding = position["funding"] * close_qty / position["qty"]
+        allocated_entry_latency = position["entry_latency_cost"] * close_qty / position["qty"]
         net = gross - allocated_entry_fee - fee + allocated_funding
         trades.append({
             **{k: position.get(k) for k in ("variant", "symbol", "side", "strategy_id", "incident")},
@@ -140,8 +166,20 @@ def replay_fixture(fixture: dict[str, Any], *, fees_enabled: bool = True,
             "opened_at_ms": position["opened_at_ms"], "closed_at_ms": int(event["timestamp_ms"]),
             "gross_pnl": round(gross, 12), "fees": round(allocated_entry_fee + fee, 12),
             "funding_pnl": round(allocated_funding, 12), "net_pnl": round(net, 12),
+            "latency_cost": round(allocated_entry_latency + latency_cost, 12),
+            "entry_latency_ms": int(position["max_entry_latency_ms"]),
+            "exit_latency_ms": latency_ms,
             "partial_fill": bool(position.get("partial_fill_open")) or fill_ratio < 1.0,
         })
+        remaining = float(position["qty"]) - close_qty
+        if remaining < float(spec.get("min_qty") or 0.0):
+            open_positions.pop(key)
+        else:
+            # 部分平仓后只扣除按比例分摊的入场费用、资金费和延迟成本。
+            position["qty"] = remaining
+            position["entry_fee"] -= allocated_entry_fee
+            position["funding"] -= allocated_funding
+            position["entry_latency_cost"] -= allocated_entry_latency
 
     return {
         "schema_version": SCHEMA_VERSION,
