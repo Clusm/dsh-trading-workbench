@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -55,7 +56,8 @@ assert sqlite3.connect(bundle / "agent_trader.sqlite").execute(
 print("  PASS  数据库与关键状态进入同一恢复包并通过校验")
 print("  PASS  .env及凭据未进入恢复包")
 
-(data / "trading_service.lock").write_text("running", encoding="utf-8")
+(data / "trading_service.lock").write_text(
+    json.dumps({"pid": os.getpid(), "started_at": "test"}), encoding="utf-8")
 try:
     create_recovery_bundle(project, tmp / "bundles")
     blocked = False
@@ -66,6 +68,15 @@ print("  PASS  运行实例存在时拒绝创建伪一致恢复包")
 
 print("\n[2] 独立介质复制、dry-run与全新目录恢复")
 (data / "trading_service.lock").unlink()
+
+# 服务异常退出会留下有效格式的旧 PID 锁；恢复工具必须先确认进程已死亡，再以同一把锁
+# 保护整个备份窗口。这样不会要求操作者手工删除安全锁，也不会放过活动实例。
+(data / "trading_service.lock").write_text(
+    json.dumps({"pid": 2_147_483_647, "started_at": "stale"}), encoding="utf-8")
+stale_bundle = create_recovery_bundle(project, tmp / "bundles")
+assert stale_bundle.is_dir() and not (data / "trading_service.lock").exists()
+print("  PASS  确认死亡的陈旧PID锁可安全接管且完成后释放")
+
 media = tmp / "independent_media" / bundle.name
 media.parent.mkdir()
 shutil.copytree(bundle, media)

@@ -8,12 +8,17 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from core.instance_lock import InstanceLock  # noqa: E402
+
 REQUIRED_STATE_FILES = (
     "capital_state.json",
     "channel_state.json",
@@ -56,12 +61,29 @@ def _copy_verified_json(source: Path, destination: Path) -> dict[str, Any]:
 
 
 def create_recovery_bundle(project_root: Path, output_dir: Path) -> Path:
-    """创建恢复包；检测到运行实例锁时拒绝，避免拼接不同时点的状态。"""
+    """在持有服务单实例锁期间创建恢复包。
+
+    与交易服务竞争同一把锁，可同时满足三件事：活动实例必定拒绝、确认死亡的 PID 锁可
+    接管、备份过程中服务不能恰好启动。仅检查锁文件是否存在既会被陈旧锁永久阻塞，也
+    存在检查通过后服务立即启动的竞态。
+    """
     root = Path(project_root).resolve()
     data_dir = root / "data"
     instance_lock = data_dir / "trading_service.lock"
-    if instance_lock.exists():
-        raise RuntimeError("交易服务仍在运行；请先正常停机，再创建一致恢复包")
+    guard = InstanceLock(instance_lock)
+    try:
+        guard.acquire()
+    except RuntimeError as exc:
+        raise RuntimeError("交易服务仍在运行；请先正常停机，再创建一致恢复包") from exc
+    try:
+        return _create_locked_bundle(root, output_dir)
+    finally:
+        guard.release()
+
+
+def _create_locked_bundle(root: Path, output_dir: Path) -> Path:
+    """调用方持有服务锁后的复制实现；异常时由外层保证释放锁。"""
+    data_dir = root / "data"
     db_source = data_dir / "agent_trader.sqlite"
     if not db_source.is_file():
         raise FileNotFoundError(f"数据库不存在: {db_source}")

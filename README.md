@@ -81,6 +81,9 @@ Copy-Item .env.example .env
 # 只读查看 Demo 候选、闭合归因交易和观察天数门槛
 .venv\Scripts\python.exe scripts\report_demo_acceptance.py
 
+# 服务运行时只读采样本地 API；可显式追加 --include-binance-public 测公共网络
+.venv\Scripts\python.exe scripts\benchmark_demo_endpoints.py --samples 20
+
 # 显式联网验证 LLM 文本与 Function Calling（会产生一次小额 API 调用）
 .venv\Scripts\python.exe scripts\verify_llm_provider.py
 
