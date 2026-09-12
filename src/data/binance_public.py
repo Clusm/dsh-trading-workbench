@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import statistics
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -11,7 +12,13 @@ import httpx
 
 from agents.models import MarketBrief
 from data.cache import SnapshotCache
-from data.rate_limit import backoff_seconds, cooldown_remaining, note_418, throttle
+from data.rate_limit import (
+    backoff_seconds,
+    cooldown_remaining,
+    note_418,
+    note_rate_limit,
+    throttle,
+)
 
 BASE_URL = "https://fapi.binance.com"
 CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "cache"
@@ -38,6 +45,12 @@ FALLBACK_SYMBOLS = [
 
 STABLE_BASES = {"USDC", "TUSD", "BUSD", "FDUSD", "USDP", "DAI", "EUR", "AEUR"}
 
+# 全量 24h ticker 权重明显高于单 symbol 请求。市场池与市场简报可能在启动时并发读取，
+# 用进程内单飞 + 短 TTL 确保同一时刻只打一次，避免共享代理 IP 被重复权重推入 429/418。
+_ALL_TICKERS_LOCK = threading.Lock()
+_ALL_TICKERS_CACHE: tuple[float, list[dict[str, Any]]] = (0.0, [])
+_ALL_TICKERS_TTL_SECONDS = 30.0
+
 
 def _get_json(client: httpx.Client, path: str, params: dict[str, Any] | None = None,
               timeout: float = 15.0, attempts: int = 4) -> Any:
@@ -55,23 +68,42 @@ def _get_json(client: httpx.Client, path: str, params: dict[str, Any] | None = N
             if status == 418:
                 note_418()
                 raise RuntimeError("HTTP 418: Binance rate limit / temporary IP ban")
+            if status == 429:
+                # 429 后继续快速重试会升级成 418 长封禁。尊重 Retry-After，缺失时至少
+                # 冷却 60 秒，并立即结束本次调用；上层只能使用带年龄标记的缓存或 no_trade。
+                try:
+                    retry_after = float(r.headers.get("Retry-After") or 60.0)
+                except (TypeError, ValueError):
+                    retry_after = 60.0
+                note_rate_limit(min(300.0, max(5.0, retry_after)))
+                raise RuntimeError(f"HTTP 429: Binance rate limit; retry after {retry_after:g}s")
             r.raise_for_status()
             return r.json()
         except Exception as e:
             last_err = e
+            if status in {418, 429}:
+                break
             if i < attempts - 1:
                 time.sleep(backoff_seconds(i, status))
     raise last_err if last_err else RuntimeError("request failed")
 
 
 def get_all_24h_tickers(client: httpx.Client | None = None) -> list[dict[str, Any]]:
-    own = client is None
-    c = client or httpx.Client(timeout=20.0)
-    try:
-        return _get_json(c, "/fapi/v1/ticker/24hr")
-    finally:
-        if own:
-            c.close()
+    global _ALL_TICKERS_CACHE
+    with _ALL_TICKERS_LOCK:
+        cached_at, cached_rows = _ALL_TICKERS_CACHE
+        if cached_rows and time.monotonic() - cached_at < _ALL_TICKERS_TTL_SECONDS:
+            return [dict(row) for row in cached_rows]
+        own = client is None
+        c = client or httpx.Client(timeout=20.0)
+        try:
+            rows = _get_json(c, "/fapi/v1/ticker/24hr")
+            normalized = [dict(row) for row in rows if isinstance(row, dict)]
+            _ALL_TICKERS_CACHE = (time.monotonic(), normalized)
+            return [dict(row) for row in normalized]
+        finally:
+            if own:
+                c.close()
 
 
 def select_top_symbols(tickers: list[dict[str, Any]], top_n: int = 40,

@@ -6,6 +6,7 @@
    冷却期内所有公开行情请求立即短路失败（不再发请求），由上层走缓存/降级。
    这比"逐请求退避后继续撞墙"更能保护 IP 额度。
 """
+
 from __future__ import annotations
 
 import threading
@@ -27,11 +28,16 @@ def throttle(min_interval: float = 0.20) -> None:
         _LAST_REQUEST_TS = time.monotonic()
 
 
-def note_418(cooldown_seconds: float = 480.0) -> None:
-    """记录一次 HTTP 418，触发全局冷却（默认 8 分钟）。"""
+def note_rate_limit(cooldown_seconds: float) -> None:
+    """按服务端建议记录公开行情全局冷却，保护共享出口 IP。"""
     global _COOLDOWN_UNTIL
     with _LOCK:
-        _COOLDOWN_UNTIL = max(_COOLDOWN_UNTIL, time.monotonic() + cooldown_seconds)
+        _COOLDOWN_UNTIL = max(_COOLDOWN_UNTIL, time.monotonic() + max(0.0, float(cooldown_seconds)))
+
+
+def note_418(cooldown_seconds: float = 480.0) -> None:
+    """记录一次 HTTP 418，触发全局冷却（默认 8 分钟）。"""
+    note_rate_limit(cooldown_seconds)
 
 
 def cooldown_remaining() -> float:
@@ -39,6 +45,14 @@ def cooldown_remaining() -> float:
     global _COOLDOWN_UNTIL
     with _LOCK:
         return max(0.0, _COOLDOWN_UNTIL - time.monotonic())
+
+
+def _reset_for_test() -> None:
+    """仅供隔离回归清空进程内时钟；生产代码不得调用。"""
+    global _LAST_REQUEST_TS, _COOLDOWN_UNTIL
+    with _LOCK:
+        _LAST_REQUEST_TS = 0.0
+        _COOLDOWN_UNTIL = 0.0
 
 
 def backoff_seconds(attempt: int, status: int | None = None) -> float:
