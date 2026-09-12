@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from audit.normalization import clean_price, risk_incident_identity, strongest_severity
+from audit.migrations import apply_migration
 
 
 def utc_now() -> str:
@@ -349,21 +350,9 @@ class AuditDatabase:
         self.conn.commit()
 
     def _apply_migration(self, version: int, name: str, action: Any) -> None:
-        exists = self.conn.execute(
-            "SELECT version FROM schema_migrations WHERE version=?", (version,)
-        ).fetchone()
-        if exists:
-            return
-        try:
-            action()
-            self.conn.execute(
-                "INSERT INTO schema_migrations(version, name, applied_at) VALUES(?,?,?)",
-                (version, name, utc_now()),
-            )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        apply_migration(
+            self.conn, version, name, action, applied_at=utc_now()
+        )
 
     def _migrate(self) -> None:
         """按版本为旧库补列；每个迁移只执行一次并可安全重启。"""

@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from audit.database import AuditDatabase  # noqa: E402
+from audit.migrations import apply_migration  # noqa: E402
 
 
 def check(name: str, condition: bool) -> None:
@@ -53,4 +54,26 @@ check("旧B组名称已归一", again.fetch_one(
     "SELECT source FROM shadow_decisions WHERE decision_id='legacy-b'")["source"] == "B_contract_market")
 again.close()
 
-print("\n结果: 5 通过 / 0 失败")
+print("\n[3] 迁移执行器失败回滚且不写版本")
+rollback_path = db_path.with_name("rollback.sqlite")
+raw = sqlite3.connect(rollback_path)
+raw.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT, applied_at TEXT)")
+raw.execute("CREATE TABLE probe (value TEXT)")
+raw.commit()
+
+def failing_action() -> None:
+    raw.execute("INSERT INTO probe(value) VALUES('must_rollback')")
+    raise RuntimeError("injected")
+
+try:
+    apply_migration(raw, 99, "failing", failing_action, applied_at="2026-09-12T00:00:00Z")
+    failed = False
+except RuntimeError:
+    failed = True
+check("注入失败向上抛出", failed)
+check("迁移写入完整回滚", raw.execute("SELECT COUNT(*) FROM probe").fetchone()[0] == 0)
+check("失败版本没有登记", raw.execute(
+    "SELECT COUNT(*) FROM schema_migrations WHERE version=99").fetchone()[0] == 0)
+raw.close()
+
+print("\n结果: 8 通过 / 0 失败")
