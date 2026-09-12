@@ -9,7 +9,6 @@ import threading
 import time
 import urllib.parse
 import uuid
-from datetime import datetime, timezone
 from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
 from typing import Any
@@ -20,20 +19,8 @@ from agents.models import RiskVerdict, TradeDecision, TradeIntent
 from audit.database import AuditDatabase, utc_now
 from exchange.order_outbox import OrderOutbox
 from exchange.protection_mirror import ProtectionOrderMirror
+from exchange.protocol import normalize_algo_orders_payload, parse_iso as _parse_iso, parse_iso_ms
 from concurrent.futures import ThreadPoolExecutor
-
-
-def _parse_iso(value: Any) -> Any:
-    if not value:
-        return None
-    try:
-        from datetime import datetime, timezone
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
 
 
 class BinanceFuturesBroker:
@@ -540,24 +527,7 @@ class BinanceFuturesBroker:
     @staticmethod
     def _normalize_algo_orders_payload(data: Any) -> list[dict[str, Any]]:
         """兼容 Algo 列表的裸数组和 code/msg/data 包装，未知结构必须报错。"""
-        payload = data
-        if isinstance(payload, dict):
-            for key in ("data", "orders", "algoOrders"):
-                if key in payload:
-                    payload = payload[key]
-                    break
-        if isinstance(payload, dict):
-            for key in ("orders", "algoOrders", "rows"):
-                if key in payload:
-                    payload = payload[key]
-                    break
-        if payload is None:
-            return []
-        if not isinstance(payload, list):
-            raise RuntimeError("openAlgoOrders返回未知结构，拒绝解释为空保护单")
-        if any(not isinstance(row, dict) for row in payload):
-            raise RuntimeError("openAlgoOrders列表包含非法条目，拒绝继续保护对账")
-        return [dict(row) for row in payload]
+        return normalize_algo_orders_payload(data)
 
     def open_algo_orders(self) -> list[dict[str, Any]]:
         """强制读取当前USD-M Algo保护单；失败必须向上抛，不能伪装为空。"""
@@ -1797,18 +1767,7 @@ class BinanceFuturesBroker:
         SQLite 里可能存 '2026-09-02T09:36:06.958+00:00'（带时区）、
         也可能存 '2026-09-02 09:36:06'（datetime('now') 的空格格式），都要能吃下。
         """
-        text = str(value or "").strip()
-        if not text:
-            return None
-        try:
-            norm = text.replace("Z", "+00:00").replace(" ", "T", 1) if "T" not in text \
-                else text.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(norm)
-        except ValueError:
-            return None
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return int(dt.timestamp() * 1000)
+        return parse_iso_ms(value)
 
     def _reconcile_one_close(self, symbol: str) -> None:
         """补记单个 symbol 最近一笔未被记录的平仓成交。

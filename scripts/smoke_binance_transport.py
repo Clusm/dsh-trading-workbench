@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from exchange.binance_futures import BinanceFuturesBroker  # noqa: E402
+from exchange.protocol import normalize_algo_orders_payload, parse_iso, parse_iso_ms  # noqa: E402
 
 
 class Response:
@@ -125,4 +126,15 @@ except RuntimeError:
 assert unknown_blocked
 print("  PASS  裸列表和data包装均可读取，未知结构不会伪装为空列表")
 
-print("\n结果: 4 通过 / 0 失败")
+print("\n[5] 协议纯解析函数与Broker兼容入口一致")
+assert normalize_algo_orders_payload({"data": {"rows": [row]}}) == [row]
+assert BinanceFuturesBroker._normalize_algo_orders_payload([row]) == \
+    normalize_algo_orders_payload([row])
+assert parse_iso("2026-09-12T01:02:03Z") is not None
+assert parse_iso("invalid") is None
+assert parse_iso_ms("2026-09-12 01:02:03") == \
+    BinanceFuturesBroker._parse_iso_ms("2026-09-12 01:02:03")
+assert parse_iso_ms("invalid") is None
+print("  PASS  时间和Algo响应解析保持兼容且无效输入fail-closed")
+
+print("\n结果: 5 通过 / 0 失败")
