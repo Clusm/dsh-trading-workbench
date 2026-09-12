@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import html
 import json
-import math
 import os
 import secrets
 import threading
@@ -29,6 +28,14 @@ from exchange.safety_monitor import ExchangeSafetyMonitor
 from exchange.user_stream import BinanceUserDataStream
 from intel.liquidation_stream import LiquidationStream
 from dashboard.health import freshness_health_reasons as _freshness_health_reasons
+from dashboard.formatting import (
+    format_age as _ago,
+    format_number as _fmt,
+    format_percent as _pct,
+    format_price as _price,
+    format_signed as _signed,
+    pnl_class as _pnl_cls,
+)
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -205,76 +212,6 @@ def _algo_prices_by_symbol(service: TradingService) -> dict[str, dict[str, float
             return dict(_ALGOS_CACHE["by_symbol"])
         threading.Thread(target=_fetch_algo_prices, args=(service,), daemon=True).start()
         return cached
-
-
-def _fmt(value: Any, digits: int = 2) -> str:
-    try:
-        return f"{float(value):,.{digits}f}"
-    except Exception:
-        return str(value)
-
-
-def _signed(value: Any, digits: int = 2) -> str:
-    try:
-        v = float(value)
-        return f"{v:+,.{digits}f}"
-    except Exception:
-        return str(value)
-
-
-def _pct(value: Any, digits: int = 2) -> str:
-    try:
-        return f"{float(value) * 100:+.2f}%"
-    except Exception:
-        return "n/a"
-
-
-def _price(value: Any) -> str:
-    """把价格显示为五位有效数字，去掉尾零且不使用科学计数法。
-
-    这里只改变 Web 展示字符串；数据库、风控、下单和盈亏计算继续使用原始精度。
-    """
-    if value is None or value == "":
-        return "-"
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    if not math.isfinite(f):
-        return "-"
-    if f == 0:
-        return "0"
-    decimal_places = 4 - math.floor(math.log10(abs(f)))
-    rounded = round(f, decimal_places)
-    s = f"{rounded:.{max(0, decimal_places)}f}"
-    if "." in s:
-        s = s.rstrip("0").rstrip(".")
-    return s or "0"
-
-
-def _ago(value: Any) -> str:
-    try:
-        if isinstance(value, str):
-            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        else:
-            dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
-        sec = max(0, int(time.time() - dt.timestamp()))
-        if sec < 60:
-            return f"{sec}秒前"
-        if sec < 3600:
-            return f"{sec // 60}分钟前"
-        if sec < 86400:
-            return f"{sec // 3600}小时前"
-        return f"{sec // 86400}天前"
-    except Exception:
-        return str(value)
-
-
-def _pnl_cls(value: Any) -> str:
-    try:
-        return "pos" if float(value) >= 0 else "neg"
-    except Exception:
-        return ""
 
 
 templates.env.filters["fmt"] = _fmt

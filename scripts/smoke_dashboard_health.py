@@ -9,6 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from dashboard.health import freshness_health_reasons  # noqa: E402
+from dashboard.formatting import (  # noqa: E402
+    format_age,
+    format_number,
+    format_percent,
+    format_price,
+    format_signed,
+    pnl_class,
+)
 
 
 def main() -> None:
@@ -54,7 +62,14 @@ def main() -> None:
         now=1000,
     )
     assert grace == [], grace
-    print("DASHBOARD_HEALTH_OK cases=4")
+    assert format_number(1234.5) == "1,234.50"
+    assert format_signed(-2.5) == "-2.50"
+    assert format_percent(0.1234) == "+12.34%"
+    assert format_price(744.53325581) == "744.53"
+    assert format_price(0.000012345678) == "0.000012346"
+    assert format_age(940.0, now=1000.0) == "1分钟前"
+    assert pnl_class(-0.1) == "neg" and pnl_class("bad") == ""
+    print("DASHBOARD_HEALTH_OK health_cases=4 formatting_cases=7")
 
 
 if __name__ == "__main__":
