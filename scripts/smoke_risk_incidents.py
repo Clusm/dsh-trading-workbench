@@ -44,6 +44,9 @@ resolved = db.resolve_risk_incidents_by_type("equity_unavailable", "startup_safe
 summary = db.risk_incident_summary()
 check("两类运行故障已收口", resolved == 2)
 check("自动收口不影响仍在复发的其他事件", summary["resolved"] == 2 and summary["open"] == 1)
+db.log_risk_event(event_type="control_state_corrupt", severity="critical", details="old")
+check("有效状态可收口历史损坏事故",
+      db.resolve_risk_incidents_by_type("control_state_corrupt") == 1)
 
 print("\n[4] 写入延迟指标")
 db.log_portfolio_snapshot(
@@ -67,4 +70,4 @@ check("不同风险范围独立聚合", btc_key != eth_key and (btc_scope, eth_s
 check("严重度只升不降", strongest_severity("critical", "warn") == "critical"
       and strongest_severity("warn", "error") == "error")
 db.close()
-print("\n结果: 16 通过 / 0 失败")
+print("\n结果: 17 通过 / 0 失败")

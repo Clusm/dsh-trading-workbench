@@ -156,6 +156,9 @@ class TradingService:
                 event_type="control_state_corrupt", severity="critical",
                 details=f"控制状态文件无法校验：{self.control.load_error}",
                 action_taken="fail closed to close_only; require explicit operator state")
+        else:
+            # 成功加载并校验当前控制文件就是恢复证据；只收口 incident，不改变状态。
+            self.db.resolve_risk_incidents_by_type("control_state_corrupt")
         if self.risk_guard.recovery_required:
             # 风险水位不可证明时，无论配置是 audit_only 还是 enforce 都不能开新仓。
             # close_only 不会平掉现有仓位，保护/减仓能力继续保留。
@@ -165,6 +168,8 @@ class TradingService:
                 event_type="account_risk_state_corrupt", severity="critical",
                 details=f"账户风险状态文件无法校验：{self.risk_guard.load_error}",
                 action_taken="set close_only; require verified recovery")
+        else:
+            self.db.resolve_risk_incidents_by_type("account_risk_state_corrupt")
         self.execution_feedback: dict[str, Any] = {}
         self._latest: dict[str, Any] = {}
         self._lock = threading.RLock()
