@@ -1,7 +1,6 @@
 """审计数据库：阶段 0 先建核心表并记录 agent_runs / llm_calls / artifacts / 决策链路。"""
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 import threading
@@ -10,6 +9,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+from audit.normalization import clean_price, risk_incident_identity, strongest_severity
 
 
 def utc_now() -> str:
@@ -1216,13 +1217,10 @@ class AuditDatabase:
             )
             # info 只是审计流水；只有需处置的风险才进入 incident 生命周期。
             if severity in {"warn", "error", "critical"}:
-                scope = str(raw_data.get("symbol") or raw_data.get("environment") or "")[:80]
-                incident_key = hashlib.sha256(
-                    f"{event_type}|{scope}".encode("utf-8")).hexdigest()
+                incident_key, scope = risk_incident_identity(event_type, raw_data)
                 row = self.conn.execute(
                     "SELECT severity,status FROM risk_incidents WHERE incident_key=?", (incident_key,)
                 ).fetchone()
-                ranks = {"warn": 1, "error": 2, "critical": 3}
                 if row is None:
                     self.conn.execute(
                         """INSERT INTO risk_incidents(incident_key,event_type,scope,severity,status,
@@ -1232,9 +1230,7 @@ class AuditDatabase:
                          details, action_taken, raw_json),
                     )
                 else:
-                    next_severity = (severity if ranks.get(severity, 0) >=
-                                     ranks.get(str(row["severity"]), 0)
-                                     else str(row["severity"]))
+                    next_severity = strongest_severity(str(row["severity"]), severity)
                     next_status = "OPEN" if str(row["status"]) == "RESOLVED" else str(row["status"])
                     self.conn.execute(
                         """UPDATE risk_incidents SET severity=?,status=?,last_seen_at=?,
@@ -1367,15 +1363,7 @@ class AuditDatabase:
     @staticmethod
     def _clean_price(value: float | None) -> float | None:
         """去掉浮点尾巴（102.10000000000001 -> 102.1），保留 8 位有效数字不损失真实精度。"""
-        if value is None:
-            return None
-        try:
-            f = float(value)
-            if f == 0:
-                return 0.0
-            return float(f"{f:.8g}")
-        except (TypeError, ValueError):
-            return value
+        return clean_price(value)
 
     def log_position(self, *, symbol: str, side: str, qty: float,
                      entry_price: float | None, leverage: int, stop_loss: float | None,

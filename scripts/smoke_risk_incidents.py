@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from audit.database import AuditDatabase  # noqa: E402
+from audit.normalization import clean_price, risk_incident_identity, strongest_severity  # noqa: E402
 
 
 def check(name: str, value: bool) -> None:
@@ -55,5 +56,15 @@ db.log_portfolio_snapshot(
 metrics = db.write_metrics()
 check("写入次数可观测", metrics["writes"] >= 1)
 check("写入延迟非负", metrics["last_write_ms"] >= 0.0 and metrics["avg_write_ms"] >= 0.0)
+
+print("\n[5] 审计纯规范化保持稳定")
+check("价格尾差清理", clean_price(102.10000000000001) == 102.1)
+check("空价格保持为空", clean_price(None) is None)
+btc_key, btc_scope = risk_incident_identity("futures_sync_error", {"symbol": "BTCUSDT"})
+eth_key, eth_scope = risk_incident_identity("futures_sync_error", {"symbol": "ETHUSDT"})
+check("不同风险范围独立聚合", btc_key != eth_key and (btc_scope, eth_scope) == (
+    "BTCUSDT", "ETHUSDT"))
+check("严重度只升不降", strongest_severity("critical", "warn") == "critical"
+      and strongest_severity("warn", "error") == "error")
 db.close()
-print("\n结果: 12 通过 / 0 失败")
+print("\n结果: 16 通过 / 0 失败")
