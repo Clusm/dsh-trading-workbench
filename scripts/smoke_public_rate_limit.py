@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,9 @@ class Client:
 
 print("\n[1] 429 立即停止重试并尊重 Retry-After")
 rate_limit._reset_for_test()
+state_dir = Path(tempfile.mkdtemp(prefix="mta-rate-limit-"))
+state_file = state_dir / "state.json"
+rate_limit.configure_rate_limit_state(state_file)
 client_429 = Client(Response(429, retry_after="12"))
 try:
     binance_public._get_json(client_429, "/fapi/v1/ticker/24hr", attempts=4)
@@ -51,10 +55,17 @@ assert 10 <= remaining <= 12.1, remaining
 status = rate_limit.rate_limit_status()
 assert status["active"] is True and status["last_status"] == 429
 assert status["event_count"] == 1
+assert state_file.is_file()
+rate_limit._reset_for_test()
+rate_limit.configure_rate_limit_state(state_file)
+restored = rate_limit.rate_limit_status()
+assert restored["active"] is True and restored["last_status"] == 429
 print("  PASS  只请求一次，未把429重试升级为418")
+print("  PASS  重启后仍保留未到期冷却")
 
 print("\n[2] 418 同样立即停止并进入长冷却")
 rate_limit._reset_for_test()
+rate_limit.configure_rate_limit_state(state_dir / "state-418.json")
 client_418 = Client(Response(418))
 try:
     binance_public._get_json(client_418, "/fapi/v1/ticker/24hr", attempts=4)

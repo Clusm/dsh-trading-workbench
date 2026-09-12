@@ -21,6 +21,7 @@ EXPECTED_PATHS = {
     "account_risk_state.json": "state/account_risk_state.json",
     "futures_source_ledger.json": "state/futures_source_ledger.json",
     "market_universe_state.json": "state/market_universe_state.json",
+    "public_rate_limit_state.json": "state/public_rate_limit_state.json",
     "risk_profile_lock": "risk_profile.lock.json",
 }
 REQUIRED_KEYS = {

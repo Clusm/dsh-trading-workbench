@@ -54,6 +54,8 @@ Copy-Item .env.example .env
   避免市场池与简报并发重复消耗权重。冷却期间不会用陈旧证据开新仓。
 - `/api/health` 的 `public_market_rate_limit` 会显示当前冷却状态和最近限流码，便于区分
   “策略没有信号”与“公共行情暂时不可用”。
+- 公共行情冷却保存在 `data/public_rate_limit_state.json`，服务重启仍会遵守未到期封禁；
+  该无凭据状态随完整恢复包保存，但不会进入 Git。
 
 ## 核心安全边界
 

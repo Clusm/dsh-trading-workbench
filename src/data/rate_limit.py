@@ -9,8 +9,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
+from pathlib import Path
 
 _LOCK = threading.Lock()
 _LAST_REQUEST_TS = 0.0
@@ -18,6 +21,47 @@ _COOLDOWN_UNTIL = 0.0  # 单调时钟（time.monotonic）下的冷却截止时�
 _LAST_LIMIT_STATUS: int | None = None
 _LAST_LIMITED_AT: float | None = None
 _LIMIT_EVENT_COUNT = 0
+_STATE_FILE: Path | None = None
+
+
+def _save_state_locked() -> None:
+    """调用方持锁时原子保存跨重启冷却截止时间；未配置状态路径则只使用内存。"""
+    if _STATE_FILE is None:
+        return
+    _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    remaining = max(0.0, _COOLDOWN_UNTIL - time.monotonic())
+    payload = {
+        "cooldown_until": time.time() + remaining,
+        "last_status": _LAST_LIMIT_STATUS,
+        "last_limited_at": _LAST_LIMITED_AT,
+        "event_count": _LIMIT_EVENT_COUNT,
+    }
+    temp = _STATE_FILE.with_name(
+        f"{_STATE_FILE.stem}.tmp-{os.getpid()}-{threading.get_ident()}"
+    )
+    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temp, _STATE_FILE)
+
+
+def configure_rate_limit_state(path: Path) -> None:
+    """绑定项目运行状态文件，并恢复尚未到期的公共行情冷却。"""
+    global _STATE_FILE, _COOLDOWN_UNTIL
+    global _LAST_LIMIT_STATUS, _LAST_LIMITED_AT, _LIMIT_EVENT_COUNT
+    state_path = Path(path)
+    with _LOCK:
+        _STATE_FILE = state_path
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8-sig"))
+            remaining = max(0.0, float(payload.get("cooldown_until") or 0.0) - time.time())
+            _COOLDOWN_UNTIL = max(_COOLDOWN_UNTIL, time.monotonic() + remaining)
+            status = payload.get("last_status")
+            _LAST_LIMIT_STATUS = int(status) if status is not None else None
+            limited_at = payload.get("last_limited_at")
+            _LAST_LIMITED_AT = float(limited_at) if limited_at is not None else None
+            _LIMIT_EVENT_COUNT = max(_LIMIT_EVENT_COUNT, int(payload.get("event_count") or 0))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            # 公共行情状态损坏不能影响交易保护；下一次真实限流会覆盖为合法原子文件。
+            return
 
 
 def throttle(min_interval: float = 0.20) -> None:
@@ -39,6 +83,11 @@ def note_rate_limit(cooldown_seconds: float, *, status: int | None = None) -> No
         _LAST_LIMIT_STATUS = int(status) if status is not None else None
         _LAST_LIMITED_AT = time.time()
         _LIMIT_EVENT_COUNT += 1
+        try:
+            _save_state_locked()
+        except OSError:
+            # 状态文件只是跨重启保护；磁盘异常不能吞掉内存冷却或改变原HTTP错误语义。
+            pass
 
 
 def note_418(cooldown_seconds: float = 480.0) -> None:
@@ -69,13 +118,14 @@ def rate_limit_status() -> dict[str, float | int | bool | None]:
 def _reset_for_test() -> None:
     """仅供隔离回归清空进程内时钟；生产代码不得调用。"""
     global _LAST_REQUEST_TS, _COOLDOWN_UNTIL
-    global _LAST_LIMIT_STATUS, _LAST_LIMITED_AT, _LIMIT_EVENT_COUNT
+    global _LAST_LIMIT_STATUS, _LAST_LIMITED_AT, _LIMIT_EVENT_COUNT, _STATE_FILE
     with _LOCK:
         _LAST_REQUEST_TS = 0.0
         _COOLDOWN_UNTIL = 0.0
         _LAST_LIMIT_STATUS = None
         _LAST_LIMITED_AT = None
         _LIMIT_EVENT_COUNT = 0
+        _STATE_FILE = None
 
 
 def backoff_seconds(attempt: int, status: int | None = None) -> float:

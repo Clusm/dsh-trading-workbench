@@ -36,6 +36,7 @@ states = {
     "control_state.json": {"state": "close_only"},
     "account_risk_state.json": {"anchor_id": "demo:test"},
     "futures_source_ledger.json": {"positions": {}},
+    "public_rate_limit_state.json": {"cooldown_until": 0, "last_status": None},
 }
 for name, payload in states.items():
     encoding = "utf-8-sig" if name == "channel_state.json" else "utf-8"

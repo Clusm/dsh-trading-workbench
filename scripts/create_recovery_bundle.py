@@ -28,6 +28,7 @@ REQUIRED_STATE_FILES = (
 OPTIONAL_STATE_FILES = (
     "futures_source_ledger.json",
     "market_universe_state.json",
+    "public_rate_limit_state.json",
 )
 
 
