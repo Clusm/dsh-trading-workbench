@@ -29,6 +29,7 @@ SCRIPTS = (
     "scripts/smoke_db_migrations.py",
     "scripts/smoke_recovery_bundle.py",
     "scripts/smoke_risk_incidents.py",
+    "scripts/smoke_dashboard_health.py",
     "scripts/smoke_service_lifecycle.py",
     "scripts/smoke_ui.py",
 )

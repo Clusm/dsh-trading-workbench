@@ -22,6 +22,9 @@ Copy-Item .env.example .env
 .venv\Scripts\python.exe scripts\run_web.py
 ```
 
+维护重构前后可用 `scripts/benchmark_runtime_baseline.py` 做同机离线性能对照；结果不代表
+交易所网络性能，也不会改变风险或执行阈值。
+
 控制台地址：`http://127.0.0.1:8000`。
 
 执行环境由 `.env` 中的 `EXECUTION_MODE` 决定：

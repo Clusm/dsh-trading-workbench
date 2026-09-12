@@ -28,37 +28,9 @@ from exchange.order_mirror import OrderMirror
 from exchange.safety_monitor import ExchangeSafetyMonitor
 from exchange.user_stream import BinanceUserDataStream
 from intel.liquidation_stream import LiquidationStream
+from dashboard.health import freshness_health_reasons as _freshness_health_reasons
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
-
-
-def _freshness_health_reasons(runtime: dict[str, Any], protection: dict[str, Any],
-                              stability: dict[str, Any], *, now: float | None = None) -> list[str]:
-    """计算运维时效异常；只影响健康/就绪呈现，不修改交易风险参数。"""
-    current = float(now if now is not None else time.time())
-    grace = max(1.0, float(stability.get("startup_grace_seconds", 120)))
-    fast_limit = max(1.0, float(stability.get("fast_cycle_stale_seconds", 120)))
-    protection_limit = max(
-        1.0, float(stability.get("protection_reconcile_stale_seconds", 120)))
-    started = float(runtime.get("started_at") or current)
-    beyond_grace = current - started > grace
-    reasons: list[str] = []
-    fast_at = runtime.get("last_fast_cycle_at")
-    if runtime.get("last_fast_cycle_error"):
-        reasons.append("fast_cycle_error")
-    if fast_at and current - float(fast_at) > fast_limit:
-        reasons.append("fast_cycle_stale")
-    elif not fast_at and beyond_grace:
-        reasons.append("fast_cycle_never_completed")
-    if protection.get("enabled") and protection.get("read_enabled"):
-        reconciled_at = protection.get("last_reconcile_at")
-        if reconciled_at and current - float(reconciled_at) > protection_limit:
-            reasons.append("protection_reconcile_stale")
-        elif not reconciled_at and beyond_grace:
-            reasons.append("protection_reconcile_never_completed")
-        if protection.get("last_error"):
-            reasons.append("protection_reconcile_error")
-    return reasons
 
 
 # ---- 看板读缓存：页面 5~15 秒轮询一次，不必每次都打交易所/扫库 ----
