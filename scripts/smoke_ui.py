@@ -250,6 +250,10 @@ check("快照刷新失败在健康接口明确降级", r_health.status_code == 2
       and "latest_snapshot_refresh_error" in r_health.json().get("reasons", [])
       and r_health.json().get("runtime", {}).get("last_latest_refresh_error") == "RuntimeError",
       r_health.text[:200])
+check("健康接口暴露公共行情限流状态",
+      set(r_health.json().get("public_market_rate_limit", {})) >= {
+          "active", "remaining_seconds", "last_status", "event_count",
+      }, r_health.text[:200])
 real_svc._last_latest_refresh_error = None
 r_api = client.get("/api/mode")
 check("/api/mode 返回当前模式", r_api.json().get("current") == "paper", r_api.text[:120])

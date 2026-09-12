@@ -15,6 +15,9 @@ import time
 _LOCK = threading.Lock()
 _LAST_REQUEST_TS = 0.0
 _COOLDOWN_UNTIL = 0.0  # 单调时钟（time.monotonic）下的冷却截止时刻
+_LAST_LIMIT_STATUS: int | None = None
+_LAST_LIMITED_AT: float | None = None
+_LIMIT_EVENT_COUNT = 0
 
 
 def throttle(min_interval: float = 0.20) -> None:
@@ -28,16 +31,19 @@ def throttle(min_interval: float = 0.20) -> None:
         _LAST_REQUEST_TS = time.monotonic()
 
 
-def note_rate_limit(cooldown_seconds: float) -> None:
+def note_rate_limit(cooldown_seconds: float, *, status: int | None = None) -> None:
     """按服务端建议记录公开行情全局冷却，保护共享出口 IP。"""
-    global _COOLDOWN_UNTIL
+    global _COOLDOWN_UNTIL, _LAST_LIMIT_STATUS, _LAST_LIMITED_AT, _LIMIT_EVENT_COUNT
     with _LOCK:
         _COOLDOWN_UNTIL = max(_COOLDOWN_UNTIL, time.monotonic() + max(0.0, float(cooldown_seconds)))
+        _LAST_LIMIT_STATUS = int(status) if status is not None else None
+        _LAST_LIMITED_AT = time.time()
+        _LIMIT_EVENT_COUNT += 1
 
 
 def note_418(cooldown_seconds: float = 480.0) -> None:
     """记录一次 HTTP 418，触发全局冷却（默认 8 分钟）。"""
-    note_rate_limit(cooldown_seconds)
+    note_rate_limit(cooldown_seconds, status=418)
 
 
 def cooldown_remaining() -> float:
@@ -47,12 +53,29 @@ def cooldown_remaining() -> float:
         return max(0.0, _COOLDOWN_UNTIL - time.monotonic())
 
 
+def rate_limit_status() -> dict[str, float | int | bool | None]:
+    """返回脱敏的进程内限流状态，供健康页解释扫描降级。"""
+    with _LOCK:
+        remaining = max(0.0, _COOLDOWN_UNTIL - time.monotonic())
+        return {
+            "active": remaining > 0,
+            "remaining_seconds": round(remaining, 3),
+            "last_status": _LAST_LIMIT_STATUS,
+            "last_limited_at": _LAST_LIMITED_AT,
+            "event_count": _LIMIT_EVENT_COUNT,
+        }
+
+
 def _reset_for_test() -> None:
     """仅供隔离回归清空进程内时钟；生产代码不得调用。"""
     global _LAST_REQUEST_TS, _COOLDOWN_UNTIL
+    global _LAST_LIMIT_STATUS, _LAST_LIMITED_AT, _LIMIT_EVENT_COUNT
     with _LOCK:
         _LAST_REQUEST_TS = 0.0
         _COOLDOWN_UNTIL = 0.0
+        _LAST_LIMIT_STATUS = None
+        _LAST_LIMITED_AT = None
+        _LIMIT_EVENT_COUNT = 0
 
 
 def backoff_seconds(attempt: int, status: int | None = None) -> float:

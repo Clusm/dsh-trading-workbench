@@ -75,7 +75,7 @@ def _get_json(client: httpx.Client, path: str, params: dict[str, Any] | None = N
                     retry_after = float(r.headers.get("Retry-After") or 60.0)
                 except (TypeError, ValueError):
                     retry_after = 60.0
-                note_rate_limit(min(300.0, max(5.0, retry_after)))
+                note_rate_limit(min(300.0, max(5.0, retry_after)), status=429)
                 raise RuntimeError(f"HTTP 429: Binance rate limit; retry after {retry_after:g}s")
             r.raise_for_status()
             return r.json()

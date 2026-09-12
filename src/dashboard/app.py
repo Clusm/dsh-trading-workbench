@@ -21,6 +21,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from core.service import TradingService
 from data.market_query import get_live_prices
 from data.price_stream import PriceStream
+from data.rate_limit import rate_limit_status
 from exchange.event_inbox import ExchangeEventInbox
 from exchange.account_mirror import AccountMirror
 from exchange.order_mirror import OrderMirror
@@ -1695,6 +1696,8 @@ def create_app(service: TradingService) -> FastAPI:
             "db_readable": db_readable,
             "database_writes": service.db.write_metrics(),
             "runtime": runtime,
+            # 只解释策略/AI 行情为何降级，不改变总健康或交易闸门语义。
+            "public_market_rate_limit": rate_limit_status(),
             "database_backup": (service.db_backup.status()
                                 if hasattr(service, "db_backup") else {"enabled": False}),
             "risk_incidents": service.db.risk_incident_summary(),

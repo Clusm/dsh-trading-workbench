@@ -48,6 +48,9 @@ except RuntimeError as exc:
 assert client_429.calls == 1, client_429.calls
 remaining = rate_limit.cooldown_remaining()
 assert 10 <= remaining <= 12.1, remaining
+status = rate_limit.rate_limit_status()
+assert status["active"] is True and status["last_status"] == 429
+assert status["event_count"] == 1
 print("  PASS  只请求一次，未把429重试升级为418")
 
 print("\n[2] 418 同样立即停止并进入长冷却")
@@ -60,6 +63,7 @@ except RuntimeError as exc:
     assert "418" in str(exc)
 assert client_418.calls == 1, client_418.calls
 assert rate_limit.cooldown_remaining() > 470
+assert rate_limit.rate_limit_status()["last_status"] == 418
 print("  PASS  418不再重复撞限流出口")
 
 print("\n[3] 全量 ticker 在短窗口内单飞复用")
