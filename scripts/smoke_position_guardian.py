@@ -84,6 +84,11 @@ check("退出数量等于持仓数量", invalid.intents[0].qty == position["qty"
 check("同一开仓跨闭合bar得到稳定订单ID",
       invalid.intents[0].client_order_id == repeat.intents[0].client_order_id)
 check("订单ID适合交易所长度", len(invalid.intents[0].client_order_id or "") <= 36)
+guardian_events = db.fetch_all(
+    "SELECT event_type FROM risk_events WHERE event_type='guardian_invalidation'"
+)
+check("持续失效状态不每30秒重复写事件", len(guardian_events) == 1,
+      f"实际 {len(guardian_events)}")
 
 print("\n[3] 实盘默认影子，不改变当前风险档或真实退出行为")
 live = evaluate_positions(positions=[position], db=db, execution_mode="live",
@@ -121,6 +126,23 @@ strategy = evaluate_positions(
     db=db, execution_mode="demo", snapshot_provider=snapshot(1),
 )
 check("策略通道仓位保持原执行链", not strategy.intents and not strategy.policy_checks)
+
+print("\n[5b] 状态恢复后收口 incident，再次复发可重新记录")
+recovered = evaluate_positions(positions=[position], db=db, execution_mode="demo",
+                               snapshot_provider=snapshot(96))
+incident = db.fetch_one(
+    "SELECT status FROM risk_incidents WHERE event_type='guardian_invalidation' AND scope='BTCUSDT'"
+)
+check("恢复为ACTIVE会解决原失效incident",
+      recovered.policy_checks[0]["state"] == "ACTIVE" and incident["status"] == "RESOLVED")
+evaluate_positions(positions=[position], db=db, execution_mode="demo",
+                   snapshot_provider=snapshot(94))
+incident = db.fetch_one(
+    "SELECT status,occurrence_count FROM risk_incidents "
+    "WHERE event_type='guardian_invalidation' AND scope='BTCUSDT'"
+)
+check("再次失效会重开并新增一次事件",
+      incident["status"] == "OPEN" and incident["occurrence_count"] == 2)
 
 print("\n[6] 生产配置保持影子，快循环独立于模型链路")
 production = load_decision_policy()

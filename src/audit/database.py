@@ -1233,6 +1233,42 @@ class AuditDatabase:
                     )
             self.conn.commit()
 
+    def log_risk_event_once_while_open(
+        self, *, event_type: str, severity: str, details: str,
+        action_taken: str = "", raw: dict[str, Any] | None = None,
+    ) -> bool:
+        """同一范围的 incident 持续 OPEN/ACK 时只保留首次状态转换事件。
+
+        轮询型守卫可能每几十秒观察到同一问题；重复事实无需无限扩张 risk_events。
+        incident 被解决后再次出现仍会正常重开并写一条新事件。返回本次是否实际写入。
+        """
+        raw_data = raw if isinstance(raw, dict) else {}
+        incident_key, _ = risk_incident_identity(event_type, raw_data)
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT status FROM risk_incidents WHERE incident_key=?", (incident_key,)
+            ).fetchone()
+            if row is not None and str(row["status"]) in {"OPEN", "ACKNOWLEDGED"}:
+                return False
+            self.log_risk_event(
+                event_type=event_type, severity=severity, details=details,
+                action_taken=action_taken, raw=raw_data,
+            )
+        return True
+
+    def resolve_risk_incident(self, event_type: str, raw: dict[str, Any] | None = None) -> bool:
+        """只解决同事件类型、同脱敏范围的一条 incident，不误收口其他 symbol。"""
+        incident_key, _ = risk_incident_identity(event_type, raw)
+        now = utc_now()
+        with self.lock:
+            cursor = self.conn.execute(
+                """UPDATE risk_incidents SET status='RESOLVED',resolved_at=?
+                   WHERE incident_key=? AND status!='RESOLVED'""",
+                (now, incident_key),
+            )
+            self.conn.commit()
+        return cursor.rowcount > 0
+
     def risk_incident_summary(self) -> dict[str, int]:
         with self.lock:
             rows = self.conn.execute(

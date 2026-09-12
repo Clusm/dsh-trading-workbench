@@ -35,6 +35,26 @@ def _stable_close_id(intent_id: str) -> str:
     return f"mta-g-{digest}"
 
 
+def _log_state_once(db: Any, *, event_type: str, details: str,
+                    action_taken: str, symbol: str, state: str) -> None:
+    """轮询状态只在首次进入时记事件；兼容测试替身与旧审计实现。"""
+    payload = {"symbol": symbol, "state": state}
+    method = getattr(db, "log_risk_event_once_while_open", None)
+    if callable(method):
+        method(event_type=event_type, severity="critical", details=details,
+               action_taken=action_taken, raw=payload)
+    else:
+        db.log_risk_event(event_type=event_type, severity="critical", details=details,
+                          action_taken=action_taken, raw=payload)
+
+
+def _resolve_state(db: Any, event_type: str, symbol: str) -> None:
+    """只收口当前 symbol 的旧 Guardian 状态，不影响其他仓位。"""
+    method = getattr(db, "resolve_risk_incident", None)
+    if callable(method):
+        method(event_type, {"symbol": symbol})
+
+
 def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
                        execution_mode: str, config: dict[str, Any] | None = None,
                        snapshot_provider: SnapshotProvider = query_guardian_closed_bar) -> TradeDecision:
@@ -65,10 +85,13 @@ def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
                 "symbol": symbol, "side": side, "source": source,
             })
             checks.append(item)
-            db.log_risk_event(event_type="guardian_review_due", severity="critical",
-                              details=f"{symbol} {side}: {item['reason']}",
-                              action_taken="keep exchange protection; require operator review",
-                              raw={"symbol": symbol, "state": "REVIEW_DUE"})
+            _resolve_state(db, "guardian_invalidation", symbol)
+            _log_state_once(
+                db, event_type="guardian_review_due",
+                details=f"{symbol} {side}: {item['reason']}",
+                action_taken="keep exchange protection; require operator review",
+                symbol=symbol, state="REVIEW_DUE",
+            )
             continue
         try:
             raw = json.loads(row["raw_json"] or "{}")
@@ -81,10 +104,13 @@ def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
                 "symbol": symbol, "side": side, "intent_id": row["intent_id"],
             })
             checks.append(item)
-            db.log_risk_event(event_type="guardian_review_due", severity="critical",
-                              details=f"{symbol} {side}: {item['reason']}",
-                              action_taken="keep exchange protection; require operator review",
-                              raw={"symbol": symbol, "state": "REVIEW_DUE"})
+            _resolve_state(db, "guardian_invalidation", symbol)
+            _log_state_once(
+                db, event_type="guardian_review_due",
+                details=f"{symbol} {side}: {item['reason']}",
+                action_taken="keep exchange protection; require operator review",
+                symbol=symbol, state="REVIEW_DUE",
+            )
             continue
         interval = str(thesis.get("confirmation_interval") or "")
         operator = str(thesis.get("invalidation_operator") or "")
@@ -104,22 +130,30 @@ def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
                 or invalidation_price <= 0 or operator not in {"close_below", "close_above"}):
             item = _check("REVIEW_DUE", effective_mode, "闭合K线或结构无效点不可验证", evidence)
             checks.append(item)
-            db.log_risk_event(event_type="guardian_review_due", severity="critical",
-                              details=f"{symbol} {side}: {item['reason']}",
-                              action_taken="do not infer exit; keep protection",
-                              raw={"symbol": symbol, "state": "REVIEW_DUE"})
+            _resolve_state(db, "guardian_invalidation", symbol)
+            _log_state_once(
+                db, event_type="guardian_review_due",
+                details=f"{symbol} {side}: {item['reason']}",
+                action_taken="do not infer exit; keep protection",
+                symbol=symbol, state="REVIEW_DUE",
+            )
             continue
         closed_price = float(snapshot["closed_price"])
         invalidated = ((side == "LONG" and operator == "close_below" and closed_price < invalidation_price)
                        or (side == "SHORT" and operator == "close_above" and closed_price > invalidation_price))
         if not invalidated:
+            _resolve_state(db, "guardian_review_due", symbol)
+            _resolve_state(db, "guardian_invalidation", symbol)
             checks.append(_check("ACTIVE", effective_mode, "最新闭合K线未证伪原论点", evidence))
             continue
         checks.append(_check("INVALIDATED", effective_mode, "最新闭合K线已证伪原论点", evidence))
-        db.log_risk_event(event_type="guardian_invalidation", severity="critical",
-                          details=f"{symbol} {side}: close={closed_price}, {operator} {invalidation_price}",
-                          action_taken="create close intent" if effective_mode == "enforce" else "shadow only",
-                          raw={"symbol": symbol, "state": "INVALIDATED", "mode": effective_mode})
+        _resolve_state(db, "guardian_review_due", symbol)
+        _log_state_once(
+            db, event_type="guardian_invalidation",
+            details=f"{symbol} {side}: close={closed_price}, {operator} {invalidation_price}",
+            action_taken="create close intent" if effective_mode == "enforce" else "shadow only",
+            symbol=symbol, state="INVALIDATED",
+        )
         if effective_mode == "enforce" and qty > 0:
             intents.append(TradeIntent(
                 symbol=symbol, action="close", side=side, qty=qty, leverage=1,
