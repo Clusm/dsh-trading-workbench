@@ -36,6 +36,7 @@ from dashboard.formatting import (
     format_signed as _signed,
     pnl_class as _pnl_cls,
 )
+from dashboard.env_config import read_env_file as _read_env_file, set_env_mode as _set_env_mode
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -389,39 +390,6 @@ VISIBLE_MODES = ("demo", "live")
 def _env_file(service: TradingService) -> Path:
     return Path(service.settings.project_root) / ".env"
 
-
-def _read_env_file(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            values[key.strip()] = val.strip().strip('"').strip("'")
-    except Exception:
-        pass
-    return values
-
-
-def _set_env_mode(path: Path, mode: str) -> None:
-    """把 EXECUTION_MODE 写回 .env（保留其它行与注释）。重启后生效。"""
-    lines: list[str] = []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        lines = []
-    replaced = False
-    for i, line in enumerate(lines):
-        if line.strip().startswith("EXECUTION_MODE="):
-            lines[i] = f"EXECUTION_MODE={mode}"
-            replaced = True
-            break
-    if not replaced:
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines.append(f"EXECUTION_MODE={mode}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 templates.env.filters["decision_cn"] = _decision_cn
 templates.env.filters["side_cn"] = _side_cn
