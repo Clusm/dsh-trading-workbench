@@ -16,6 +16,7 @@ SCRIPTS = (
     "scripts/smoke_baseline_guard.py",
     "scripts/smoke_order_outbox.py",
     "scripts/smoke_binance_transport.py",
+    "scripts/smoke_close_reconcile.py",
     "scripts/smoke_market_query_tools.py",
     "scripts/smoke_p0b.py",
     "scripts/smoke_p0b_loop.py",

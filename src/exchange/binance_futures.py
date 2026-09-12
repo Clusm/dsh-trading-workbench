@@ -480,6 +480,72 @@ class BinanceFuturesBroker:
         except Exception:
             return None, None
 
+    def _record_trade_outcome(
+        self, *, outcome_id: str, symbol: str, side: str, source: str,
+        entry_price: float, exit_price: float, qty: float, net_pnl: float,
+        exit_reason: str, status: str = "CLOSED", ledger_meta: dict[str, Any] | None = None,
+        opened_at: str | None = None,
+    ) -> None:
+        """把币安已确认的平仓成交连回原始开仓论点。
+
+        只由确认成交路径调用；网络结果不确定时宁可等待后续交易所流水对账，也不把
+        估算结果写入策略评价。优先使用来源台账保存的开仓 clientOrderId 精确绑定，
+        旧仓位缺少该字段时才退回同标的、同方向、同来源的最近开仓意图。
+        """
+        if not self.db or qty <= 0 or entry_price <= 0 or exit_price <= 0:
+            return
+        meta = dict(ledger_meta or {})
+        try:
+            open_client_id = str(meta.get("open_client_order_id") or "")
+            row = (self.db.fetch_open_intent_by_client_order_id(open_client_id)
+                   if open_client_id else None)
+            if row is None:
+                row = self.db.fetch_latest_open_intent(symbol, side, source)
+
+            raw: dict[str, Any] = {}
+            if row is not None and row["raw_json"]:
+                try:
+                    parsed = json.loads(row["raw_json"])
+                    raw = parsed if isinstance(parsed, dict) else {}
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    raw = {}
+            opened = opened_at or (str(row["created_at"]) if row is not None else None)
+            holding_minutes = None
+            opened_dt = _parse_iso(opened)
+            closed_dt = _parse_iso(utc_now())
+            if opened_dt is not None and closed_dt is not None:
+                holding_minutes = max(0, int((closed_dt - opened_dt).total_seconds() // 60))
+            notional = entry_price * qty
+            self.db.log_trade_outcome(
+                outcome_id=outcome_id,
+                intent_id=row["intent_id"] if row is not None else None,
+                decision_id=row["decision_id"] if row is not None else None,
+                symbol=symbol,
+                side=side,
+                source=source,
+                strategy_id=raw.get("strategy_id") or meta.get("strategy_id"),
+                ticket_id=raw.get("ticket_id") or meta.get("ticket_id"),
+                confidence=raw.get("confidence"),
+                entry_price=entry_price,
+                exit_price=exit_price,
+                qty=qty,
+                pnl=net_pnl,
+                pnl_pct=(net_pnl / notional * 100.0) if notional else None,
+                holding_minutes=holding_minutes,
+                expected_holding_minutes=raw.get("expected_holding_minutes"),
+                invalidation=row["invalidation"] if row is not None else None,
+                exit_reason=exit_reason,
+                status=status,
+                opened_at=opened,
+                closed_at=utc_now(),
+            )
+        except Exception as exc:
+            self.db.log_risk_event(
+                event_type="outcome_log_error", severity="warn",
+                details=f"{symbol}: {type(exc).__name__}: {exc}",
+                action_taken="skip outcome; retry through reconciliation",
+            )
+
     def _position_margin(self, symbol: str) -> float:
         try:
             pos = next((p for p in self.positions() if p["symbol"] == symbol), None)
@@ -1344,6 +1410,8 @@ class BinanceFuturesBroker:
         first_cid = None
         total_pnl = 0.0
         total_filled = 0.0
+        total_net_pnl = 0.0
+        exit_notional = 0.0
         order_count = 0
         close_unconfirmed = False
         base_cid = getattr(intent, "client_order_id", None) or f"mta-{uuid.uuid4().hex[:28]}"
@@ -1372,7 +1440,10 @@ class BinanceFuturesBroker:
             fee = commission if commission is not None else 0.0
             if pnl is not None:
                 total_pnl += pnl
-            total_filled += chunk
+            if chunk_confirmed and pnl is not None and close_price > 0:
+                total_filled += float(qty)
+                total_net_pnl += pnl + fee
+                exit_notional += float(qty) * close_price
             order_count += 1
             if first_cid is None:
                 first_cid = cid
@@ -1405,6 +1476,15 @@ class BinanceFuturesBroker:
         # 同步来源台账：剩余仓位继续保留来源；清仓则移除
         remaining_pos = next((x for x in self.positions(force=True) if x["symbol"] == symbol), None)
         remaining_qty = abs(float(remaining_pos.get("positionAmt") or 0)) if remaining_pos else 0.0
+        if not close_unconfirmed and total_filled > 0 and exit_notional > 0:
+            self._record_trade_outcome(
+                outcome_id=f"bn-{first_cid}", symbol=symbol, side=pos_side, source=source,
+                entry_price=entry, exit_price=exit_notional / total_filled,
+                qty=total_filled, net_pnl=total_net_pnl,
+                exit_reason="ai_decision",
+                status="CLOSED" if remaining_qty <= 0 else "REDUCED",
+                ledger_meta=ledger_meta,
+            )
         if remaining_qty <= 0:
             self._remove_ledger_position(symbol)
         else:
@@ -1464,6 +1544,9 @@ class BinanceFuturesBroker:
                     remaining -= chunk
                 first_cid = None
                 total_pnl = 0.0
+                total_net_pnl = 0.0
+                total_filled = 0.0
+                exit_notional = 0.0
                 order_count = 0
                 close_all_unconfirmed = False
                 for chunk in chunks:
@@ -1489,6 +1572,10 @@ class BinanceFuturesBroker:
                     fee = commission if commission is not None else 0.0
                     if pnl is not None:
                         total_pnl += pnl
+                    if chunk_confirmed and pnl is not None and close_price > 0:
+                        total_filled += float(qty)
+                        total_net_pnl += pnl + fee
+                        exit_notional += float(qty) * close_price
                     order_count += 1
                     if first_cid is None:
                         first_cid = cid
@@ -1506,6 +1593,16 @@ class BinanceFuturesBroker:
                                     strategy_id=meta.get("strategy_id"),
                                     ticket_id=meta.get("ticket_id"),
                                     margin_mode=str(meta.get("margin_mode", "ISOLATED") or "ISOLATED"))
+                if (not close_all_unconfirmed and total_filled > 0
+                        and exit_notional > 0 and first_cid):
+                    pos_side = "LONG" if float(pos.get("positionAmt") or 0) > 0 else "SHORT"
+                    self._record_trade_outcome(
+                        outcome_id=f"bn-{first_cid}", symbol=symbol, side=pos_side,
+                        source=source, entry_price=entry,
+                        exit_price=exit_notional / total_filled, qty=total_filled,
+                        net_pnl=total_net_pnl, exit_reason="risk_close_all",
+                        status="CLOSED", ledger_meta=meta,
+                    )
                 self._cancel_symbol_algos(symbol)
                 closed_symbols.append(symbol)
                 receipts.append({"order_id": first_cid, "action": "close_all", "symbol": symbol,
@@ -1787,7 +1884,8 @@ class BinanceFuturesBroker:
         → 校验时间晚于开仓、数量能覆盖持仓量，任一不过就放弃（宁缺毋滥）。
         """
         rows = self.db.fetch_all(
-            "SELECT id, side, qty, leverage, entry_price, opened_at, source FROM positions "
+            "SELECT id, side, qty, leverage, entry_price, opened_at, source, "
+            "strategy_id, ticket_id FROM positions "
             "WHERE symbol=? AND status='OPEN' ORDER BY id DESC LIMIT 1", (symbol,))
         if not rows:
             return
@@ -1900,6 +1998,17 @@ class BinanceFuturesBroker:
                 },
                 order_source=origin_source,
                 margin_mode="ISOLATED",
+            )
+            self._record_trade_outcome(
+                outcome_id=f"bn-sync-{symbol}-{oid}", symbol=symbol, side=open_side,
+                source=origin_source, entry_price=entry_price, exit_price=price, qty=qty,
+                net_pnl=realized - commission, exit_reason="exchange_sync",
+                status="REDUCED" if partial else "CLOSED",
+                ledger_meta={
+                    "strategy_id": prev.get("strategy_id"),
+                    "ticket_id": prev.get("ticket_id"),
+                },
+                opened_at=str(prev.get("opened_at") or "") or None,
             )
             self.db.log_risk_event(
                 event_type="futures_close_reconciled", severity="info",

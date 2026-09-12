@@ -59,6 +59,8 @@ Copy-Item .env.example .env
 - Outbox 对不确定提交进行隔离，避免网络超时后重复下单。
 - 保护单镜像检查缺失、孤儿、方向和数量不一致。
 - SQLite 保存决策、意图、风控、订单、快照、事件、incident 和影子评估结果。
+- Binance 已确认的普通平仓、风险退出及交易所侧 SL/TP/人工平仓会以稳定成交键写入
+  `trade_outcomes`，并连回原始开仓论点；未确认成交不会用估算值污染策略评价。
 
 ## 常用检查
 
@@ -75,6 +77,9 @@ Copy-Item .env.example .env
 .venv\Scripts\python.exe scripts\check_execution_boundaries.py
 .venv\Scripts\python.exe scripts\smoke_service_lifecycle.py
 .venv\Scripts\python.exe scripts\smoke_ui.py
+
+# 只读查看 Demo 候选、闭合归因交易和观察天数门槛
+.venv\Scripts\python.exe scripts\report_demo_acceptance.py
 
 # 显式联网验证 LLM 文本与 Function Calling（会产生一次小额 API 调用）
 .venv\Scripts\python.exe scripts\verify_llm_provider.py

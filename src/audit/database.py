@@ -1172,8 +1172,10 @@ class AuditDatabase:
         这是复盘的核心地基：没有它，复盘只能看"赚/亏"，
         无法知道"当初的 thesis 是不是被行情证伪"。
         """
+        # outcome_id 由成交命令/交易所订单号稳定派生。同步循环可能重复看到同一笔
+        # 成交，使用 INSERT OR IGNORE 让补记天然幂等，避免重启或重试制造双份盈亏。
         self._insert(
-            """INSERT INTO trade_outcomes(outcome_id, intent_id, decision_id, symbol, side,
+            """INSERT OR IGNORE INTO trade_outcomes(outcome_id, intent_id, decision_id, symbol, side,
                source, strategy_id, ticket_id, confidence, entry_price, exit_price, qty, pnl,
                pnl_pct, holding_minutes, expected_holding_minutes, invalidation, exit_reason,
                status, opened_at, closed_at)
