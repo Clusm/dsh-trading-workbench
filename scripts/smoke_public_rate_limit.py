@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +90,31 @@ second[0]["symbol"] = "MUTATED"
 assert binance_public.get_all_24h_tickers(ok)[0]["symbol"] == "BTCUSDT"
 print("  PASS  多消费者共享一次高权重请求且返回副本")
 
+print("\n[4] 并发请求排队期间触发429 → 后续线程发HTTP前短路")
+rate_limit._reset_for_test()
+rate_limit.configure_rate_limit_state(state_dir / "state-concurrent.json")
+concurrent_client = Client(Response(429, retry_after="30"))
+with ThreadPoolExecutor(max_workers=8) as pool:
+    futures = [
+        pool.submit(
+            binance_public._get_json,
+            concurrent_client,
+            "/fapi/v1/klines",
+            {"symbol": f"TEST{i}USDT"},
+            1.0,
+            1,
+        )
+        for i in range(8)
+    ]
+    for future in futures:
+        try:
+            future.result()
+        except RuntimeError:
+            pass
+assert concurrent_client.calls == 1, concurrent_client.calls
+assert rate_limit.rate_limit_status()["event_count"] == 1
+print("  PASS  八个并发调用只有首个到达交易所")
+
 rate_limit._reset_for_test()
 binance_public._ALL_TICKERS_CACHE = (0.0, [])
-print("\n结果：PASS 3 / FAIL 0")
+print("\n结果：PASS 4 / FAIL 0")

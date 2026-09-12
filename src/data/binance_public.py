@@ -61,6 +61,11 @@ def _get_json(client: httpx.Client, path: str, params: dict[str, Any] | None = N
     last_err: Exception | None = None
     for i in range(attempts):
         throttle(0.20)
+        # 多线程可能同时通过函数入口检查后排队等待 throttle。前一个请求若已触发
+        # 429/418，后续排队线程必须在真正发 HTTP 前再次短路，避免同批请求继续撞额度。
+        cool = cooldown_remaining()
+        if cool > 0:
+            raise RuntimeError(f"Binance 公开行情冷却中（剩余 {cool:.0f}s），本轮跳过请求")
         status: int | None = None
         try:
             r = client.get(f"{BASE_URL}{path}", params=params, timeout=timeout)
