@@ -66,8 +66,15 @@ def _get_json(client: httpx.Client, path: str, params: dict[str, Any] | None = N
             r = client.get(f"{BASE_URL}{path}", params=params, timeout=timeout)
             status = r.status_code
             if status == 418:
-                note_418()
-                raise RuntimeError("HTTP 418: Binance rate limit / temporary IP ban")
+                try:
+                    retry_after = float(r.headers.get("Retry-After") or 480.0)
+                except (TypeError, ValueError):
+                    retry_after = 480.0
+                retry_after = min(604800.0, max(60.0, retry_after))
+                note_418(retry_after)
+                raise RuntimeError(
+                    f"HTTP 418: Binance temporary IP ban; retry after {retry_after:g}s"
+                )
             if status == 429:
                 # 429 后继续快速重试会升级成 418 长封禁。尊重 Retry-After，缺失时至少
                 # 冷却 60 秒，并立即结束本次调用；上层只能使用带年龄标记的缓存或 no_trade。
@@ -75,7 +82,8 @@ def _get_json(client: httpx.Client, path: str, params: dict[str, Any] | None = N
                     retry_after = float(r.headers.get("Retry-After") or 60.0)
                 except (TypeError, ValueError):
                     retry_after = 60.0
-                note_rate_limit(min(300.0, max(5.0, retry_after)), status=429)
+                retry_after = min(3600.0, max(5.0, retry_after))
+                note_rate_limit(retry_after, status=429)
                 raise RuntimeError(f"HTTP 429: Binance rate limit; retry after {retry_after:g}s")
             r.raise_for_status()
             return r.json()

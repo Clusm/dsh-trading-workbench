@@ -66,16 +66,16 @@ print("  PASS  重启后仍保留未到期冷却")
 print("\n[2] 418 同样立即停止并进入长冷却")
 rate_limit._reset_for_test()
 rate_limit.configure_rate_limit_state(state_dir / "state-418.json")
-client_418 = Client(Response(418))
+client_418 = Client(Response(418, retry_after="900"))
 try:
     binance_public._get_json(client_418, "/fapi/v1/ticker/24hr", attempts=4)
     raise AssertionError("418 应抛出")
 except RuntimeError as exc:
     assert "418" in str(exc)
 assert client_418.calls == 1, client_418.calls
-assert rate_limit.cooldown_remaining() > 470
+assert rate_limit.cooldown_remaining() > 890
 assert rate_limit.rate_limit_status()["last_status"] == 418
-print("  PASS  418不再重复撞限流出口")
+print("  PASS  418不再重复撞限流出口且遵守服务端更长封禁")
 
 print("\n[3] 全量 ticker 在短窗口内单飞复用")
 rate_limit._reset_for_test()
