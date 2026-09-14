@@ -17,6 +17,7 @@ from data.rate_limit import (
     note_418,
     note_rate_limit,
     observe_response,
+    reserve_request,
     throttle,
 )
 
@@ -56,6 +57,14 @@ def endpoint_weight(path: str, params: Mapping[str, Any] | None = None) -> int:
     return 1
 
 
+def endpoint_group(path: str) -> str:
+    """返回限流治理分组；futures/data 使用独立的五分钟请求预算。"""
+    normalized = str(path or "").split("?", 1)[0]
+    if normalized.startswith("/futures/data/"):
+        return "futures_data_5m"
+    return "general"
+
+
 def _retry_after(headers: Mapping[str, Any] | None, default: float,
                  maximum: float) -> float:
     raw: Any = None
@@ -83,14 +92,19 @@ def request_json(client: Any, path: str, params: dict[str, Any] | None = None,
             with _HTTP_SEND_LOCK:
                 check_available(priority)
                 throttle(0.05, weight=weight, priority=priority)
-                check_available(priority)
+                request_id = reserve_request(
+                    path, weight=weight, priority=priority,
+                    endpoint_group=endpoint_group(path), source="public_rest",
+                    environment="public",
+                )
                 response = client.get(
                     f"{base_url}{path}", params=params, timeout=timeout,
                 )
+                status = int(getattr(response, "status_code", 0) or 0)
                 observe_response(
                     getattr(response, "headers", None), path=path, weight=weight,
+                    request_id=request_id, status=status,
                 )
-                status = int(getattr(response, "status_code", 0) or 0)
                 if status == 418:
                     retry_after = _retry_after(response.headers, 480.0, 604800.0)
                     note_418(retry_after)

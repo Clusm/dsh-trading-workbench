@@ -166,9 +166,40 @@ class OrderMirror:
         return applied
 
     def reconcile_broker(self, broker: Any) -> dict[str, Any]:
-        """比较普通挂单REST真值与事件镜像，并用当前REST挂单补齐镜像。"""
+        """比较普通挂单REST真值与事件镜像，并确认消失挂单的最终状态。
+
+        ``openOrders`` 只返回活动订单；某个镜像订单消失可能代表成交、撤销，也可能
+        是短暂的 REST 视图延迟。这里仅按 clientOrderId 做只读查询并把已确认的状态
+        写入镜像，查询失败则保留 mismatch，绝不猜测为 CANCELED，也不执行撤单。
+        """
         try:
-            result = self.reconcile_snapshot(broker.open_orders())
+            orders = broker.open_orders()
+            result = self.reconcile_snapshot(orders)
+            missing = list(result.get("missing_exchange") or [])
+            if missing:
+                placeholders = ",".join("?" for _ in missing)
+                rows = self.db.fetch_all(
+                    "SELECT exchange_order_id,client_order_id,symbol FROM exchange_order_mirror "
+                    "WHERE environment=? AND exchange_order_id IN (" + placeholders + ") "
+                    "AND status NOT IN ('FILLED','CANCELED','EXPIRED','REJECTED','EXPIRED_IN_MATCH') "
+                    "LIMIT 20",
+                    (self.environment, *missing),
+                )
+                recovered: list[dict[str, Any]] = []
+                for row in rows:
+                    client_id = str(row["client_order_id"] or "")
+                    symbol = str(row["symbol"] or "").upper()
+                    if not client_id or not symbol:
+                        continue
+                    try:
+                        found = broker.query_order(symbol, client_id)
+                    except Exception:
+                        continue
+                    if isinstance(found, dict) and found.get("orderId"):
+                        recovered.append(dict(found))
+                if recovered:
+                    result = self.reconcile_snapshot(list(orders or []) + recovered)
+                    result["recovered_missing"] = len(recovered)
             self.last_error = None
             return result
         except Exception as exc:

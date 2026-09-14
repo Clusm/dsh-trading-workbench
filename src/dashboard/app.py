@@ -1748,6 +1748,15 @@ def create_app(service: TradingService) -> FastAPI:
                         getattr(service, "_account_risk_status", {}) or {})
         broker_state = _broker_state_cached(service)
         reasons: list[str] = []
+        market_rate = rate_limit_status()
+        # 418/429 是共享出口状态，不代表保护链路停止；但没有可靠公共行情时，
+        # 必须禁止新开仓，close/reduce/adjust 仍由原有执行链处理。
+        if market_rate.get("active"):
+            reasons.append("public_market_cooldown")
+        data_window = market_rate.get("data_endpoint_window") or {}
+        if (int(data_window.get("requests", 0) or 0)
+                >= int(data_window.get("budget", 1) or 1)):
+            reasons.append("public_market_data_budget")
         if broker_state.get("error"):
             reasons.append("broker_state_unavailable")
         if not safety.get("ready", False):
@@ -1767,9 +1776,24 @@ def create_app(service: TradingService) -> FastAPI:
                 "enabled": True, "read_enabled": True,
                 "last_error": "status_unavailable",
             }
+        order_mirror_obj = getattr(app.state, "order_mirror", None)
+        try:
+            order_mirror_status = (order_mirror_obj.status()
+                                   if order_mirror_obj is not None else {})
+        except Exception:
+            order_mirror_status = {"last_error": "status_unavailable"}
         reasons.extend(_freshness_health_reasons(
             runtime, protection_status,
             service.settings.raw_settings.get("stability", {}) or {}))
+        latest_order_reconcile = order_mirror_status.get("last_reconciliation")
+        if isinstance(latest_order_reconcile, dict) and not bool(
+                latest_order_reconcile.get("matched") or
+                latest_order_reconcile.get("initialized")):
+            reasons.append("order_mirror_mismatch")
+        latest_protection_reconcile = protection_status.get("last_reconciliation")
+        if isinstance(latest_protection_reconcile, dict) and not bool(
+                latest_protection_reconcile.get("matched")):
+            reasons.append("protection_mirror_mismatch")
         order_outbox = getattr(app.state, "order_outbox", None)
         if order_outbox is not None:
             try:
@@ -1787,6 +1811,13 @@ def create_app(service: TradingService) -> FastAPI:
             "control_state": service.control.state,
             "startup_safety": safety,
             "account_risk": account_risk,
+            "order_mirror": order_mirror_status,
+            "protection_order_mirror": protection_status,
+            "public_market_rate_limit": market_rate,
+            "new_entry_gate": {
+                "allowed": not reasons,
+                "reason": "；".join(dict.fromkeys(reasons)) or "",
+            },
             "server_time": time.time(),
         }
         return JSONResponse(payload, status_code=200 if payload["ready"] else 503)

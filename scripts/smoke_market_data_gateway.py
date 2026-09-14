@@ -76,6 +76,23 @@ check("首次完整回补20根", len(first) == 20 and calls[0]["limit"] == 20)
 check("当前bar仍新鲜时第二次零REST", len(second) == 20 and len(calls) == 1)
 check("K线快照已原子持久化", (cache_dir / "BTCUSDT_1m.json").is_file())
 
+# 模拟服务重启后缓存里的当前bar已陈旧：增量请求必须回到最后一根 open，
+# 这样才能刷新形成中的bar，而不是从下一根开始导致旧值永久残留。
+with kline_store._LOCK:
+    kline_store._UPDATED_AT[("BTCUSDT", "1m")] = time.time() - 120
+before_refresh = len(calls)
+kline_store.get_klines(object(), "BTCUSDT", "1m", 20, fetcher=fake_fetch)
+refresh_calls = [item for item in calls[before_refresh:] if item["interval"] == "1m"]
+check("陈旧缓存增量会刷新最后一根形成中bar",
+      refresh_calls and refresh_calls[0].get("startTime") == last_open)
+
+gap_rows = [list(row) for row in first]
+gap_rows.pop(5)
+gap_quality = kline_store.validate_kline_rows(
+    gap_rows, "1m", observed_at_ms=int(time.time() * 1000), min_rows=2,
+)
+check("缓存中间断档被识别", gap_quality["ok"] is False and "kline_gap" in gap_quality["issues"])
+
 # 预热15m聚合底座；生产中市场简报首次读取会完成同一步。
 kline_store.get_klines(object(), "BTCUSDT", "15m", 80, fetcher=fake_fetch)
 
@@ -124,4 +141,4 @@ check("目标高周期与15m底座各回补一次",
 check("原高周期结果不受底座建立影响", len(high) == 20)
 check("15m底座已产生本地高周期更新", seeded["aggregated_updates"] >= 1)
 
-print("\n结果：PASS 16 / FAIL 0")
+print("\n结果：PASS 18 / FAIL 0")

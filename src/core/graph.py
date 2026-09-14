@@ -109,6 +109,7 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 cache_dir: Any = None, enable_live_data: bool = True,
                 intel_cache: Any = None, intel_cache_ttl: float = 3600,
                 broker: Any = None, allow_new_positions: bool = True,
+                allow_new_reason: str = "",
                 control: Any = None,
                 agent_llms: dict[str, tuple[LLMClient, str]] | None = None,
                 portfolio_state: dict[str, Any] | None = None,
@@ -338,6 +339,7 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
             action_space = ActionSpace.from_context(
                 risk_config=risk_config,
                 allow_new_positions=allow_new_positions,
+                allow_new_reason=allow_new_reason,
                 portfolio=ai_portfolio if isinstance(ai_portfolio, dict) else None,
                 channel="ai",
                 tradeable_symbols=tradeable,

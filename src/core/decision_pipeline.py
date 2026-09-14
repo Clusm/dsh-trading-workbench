@@ -79,6 +79,7 @@ def normalize_checks(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "check_id": str(item.get("check_id") or "unknown_check"),
             "version": int(item.get("version") or 1), "mode": mode,
             "status": status, "reason": str(item.get("reason") or "未提供原因"),
+            "reason_code": str(item.get("reason_code") or evidence.get("reason_code") or "UNKNOWN"),
             "evidence_at": item.get("evidence_at") or evidence.get("observed_at_ms")
                            or evidence.get("data_observed_at_ms"),
             "evidence": evidence,

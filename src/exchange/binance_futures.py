@@ -17,8 +17,15 @@ import httpx
 
 from agents.models import RiskVerdict, TradeDecision, TradeIntent
 from audit.database import AuditDatabase, utc_now
-from data.binance_transport import endpoint_weight
-from data.rate_limit import note_418, note_rate_limit, observe_response
+from data.binance_transport import endpoint_group, endpoint_weight
+from data.rate_limit import (
+    ExecutionRateLimited,
+    PublicMarketCooldown,
+    note_418,
+    note_rate_limit,
+    observe_response,
+    reserve_request,
+)
 from exchange.order_outbox import OrderOutbox
 from exchange.protection_mirror import ProtectionOrderMirror
 from exchange.protocol import normalize_algo_orders_payload, parse_iso as _parse_iso, parse_iso_ms
@@ -104,16 +111,27 @@ class BinanceFuturesBroker:
         """
         with self._client_lock:
             try:
-                response = self._client.request(method, url, **kwargs)
                 parsed = urllib.parse.urlparse(url)
+                request_id: str | None = None
+                params = kwargs.get("params") if isinstance(kwargs.get("params"), dict) else {}
+                # 只有生产 fapi 与公共行情共用出口 IP，必须在发送前加入同一预算/冷却
+                # 临界区。Demo/Testnet 走独立主机，保持原有模拟盘行为不受公共池影响。
+                if parsed.hostname == "fapi.binance.com":
+                    request_id = reserve_request(
+                        parsed.path, weight=endpoint_weight(parsed.path, params),
+                        priority="critical", endpoint_group=endpoint_group(parsed.path),
+                        source="signed_execution",
+                        environment=str(getattr(self, "environment", "live") or "live"),
+                    )
+                response = self._client.request(method, url, **kwargs)
                 # 只有生产 USD-M 执行与公开行情共享 fapi.binance.com 的 IP 权重池；
                 # demo/testnet 属于独立环境，不能用它们的响应头覆盖生产公开预算。
                 if parsed.hostname == "fapi.binance.com":
                     path = parsed.path
-                    params = kwargs.get("params") if isinstance(kwargs.get("params"), dict) else {}
                     observe_response(
                         response.headers, path=path,
-                        weight=endpoint_weight(path, params),
+                        weight=endpoint_weight(path, params), request_id=request_id,
+                        status=response.status_code,
                     )
                     if response.status_code == 418:
                         try:
@@ -127,6 +145,10 @@ class BinanceFuturesBroker:
                         except (TypeError, ValueError):
                             retry_after = 60.0
                         note_rate_limit(min(3600.0, max(5.0, retry_after)), status=429)
+                if response.status_code in {418, 429}:
+                    raise ExecutionRateLimited(
+                        f"HTTP {response.status_code}: signed Binance request rate limited"
+                    )
                 return response
             except httpx.TransportError:
                 old_client = self._client
@@ -185,6 +207,8 @@ class BinanceFuturesBroker:
                 return data
             except Exception as e:
                 last_err = e
+                if isinstance(e, (PublicMarketCooldown, ExecutionRateLimited)):
+                    raise
                 msg = str(e)
                 # -1021(时间戳超窗)/-1022(签名无效，多由时间戳过期引起)：
                 # 重校准服务器时间偏移后重试（仅 GET 会进入第二次循环；

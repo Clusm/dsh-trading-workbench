@@ -28,7 +28,11 @@ from core.db_backup import DatabaseBackupManager
 from data.market_universe import MarketUniverse
 from data.market_query import get_live_prices
 from data.kline_store import configure_kline_store
-from data.rate_limit import configure_rate_limit_budget, configure_rate_limit_state
+from data.rate_limit import (
+    configure_rate_limit_budget,
+    configure_rate_limit_state,
+    rate_limit_status,
+)
 from core.intel_cache import IntelCache
 from core.instance_lock import InstanceLock
 from core.quotas import TradeQuotaManager
@@ -80,6 +84,8 @@ class TradingService:
             local_budget_1m=int(market_data_cfg.get("local_weight_budget_1m", 600)),
             background_defer_ratio=float(market_data_cfg.get("background_defer_ratio", 0.75)),
             normal_defer_ratio=float(market_data_cfg.get("normal_defer_ratio", 0.90)),
+            data_window_seconds=int(market_data_cfg.get("data_endpoint_window_seconds", 300)),
+            data_request_budget_5m=int(market_data_cfg.get("data_endpoint_budget_5m", 800)),
         )
         # Binance 429/418 冷却必须跨服务重启保留；否则重启会立即再次撞被封禁的共享出口。
         configure_rate_limit_state(settings.project_root / "data" / "public_rate_limit_state.json")
@@ -445,6 +451,34 @@ class TradingService:
             and startup_safety.get("ready", False)
             and order_submission_ready
         )
+        market_rate = rate_limit_status()
+        data_window = market_rate.get("data_endpoint_window") or {}
+        allow_new_reason = ""
+        if market_rate.get("active"):
+            allow_new = False
+            allow_new_reason = (
+                f"公共行情处于 Binance {market_rate.get('last_status') or '限流'} 冷却，"
+                "仅允许继续管理已有仓位"
+            )
+        if (int(data_window.get("requests", 0) or 0)
+                >= int(data_window.get("budget", 1) or 1)):
+            allow_new = False
+            allow_new_reason = "公共 futures/data 五分钟预算已用尽，仅允许继续管理已有仓位"
+        # 私有流/REST 对账发现未知订单或保护覆盖不一致时，禁止新增风险敞口；
+        # 这些都是数据库中的交易所事实，不改变既有风险档，也不触碰当前仓位。
+        environment = str(getattr(self.broker, "environment", "demo") or "demo")
+        latest_order = self.db.fetch_one(
+            "SELECT initialized,matched FROM order_mirror_reconciliations "
+            "WHERE environment=? ORDER BY id DESC LIMIT 1", (environment,))
+        if (latest_order and not bool(latest_order["matched"] or latest_order["initialized"])):
+            allow_new = False
+            allow_new_reason = "订单镜像与交易所挂单不一致，仅允许继续管理已有仓位"
+        latest_protection = self.db.fetch_one(
+            "SELECT matched FROM protection_reconciliations "
+            "WHERE environment=? ORDER BY id DESC LIMIT 1", (environment,))
+        if latest_protection and not bool(latest_protection["matched"]):
+            allow_new = False
+            allow_new_reason = "保护单镜像与持仓不一致，仅允许继续管理已有仓位"
         # 先同步双通道资金状态（60/40 日切重算、AI 熔断、通道保证金上限）
         broker_state = self.broker.state if isinstance(self.broker.state, dict) else {}
         position_symbols = [str(p.get("symbol")) for p in broker_state.get("positions", [])]
@@ -484,6 +518,7 @@ class TradingService:
             intel_cache_ttl=self.intel_cache.default_ttl_seconds,
             broker=self.broker,
             allow_new_positions=allow_new,
+            allow_new_reason=allow_new_reason,
             agent_llms=self.agent_llms,
             portfolio_state=self.capital.portfolio(),
             available_cash=session_equity if equity_available else None,

@@ -179,6 +179,7 @@ def prepare_closed_klines(rows: list[list[Any]], interval: str,
             invalid_rows += 1
             continue
         try:
+            int(row[0])
             close_time = int(row[6])
         except (TypeError, ValueError):
             invalid_rows += 1
@@ -187,7 +188,13 @@ def prepare_closed_klines(rows: list[list[Any]], interval: str,
             closed.append(list(row))
         else:
             live_rows += 1
-            live_bar = list(row)
+            if live_bar is None or int(row[0]) > int(live_bar[0]):
+                live_bar = list(row)
+
+    # 先记录原始顺序，再按开盘时间排序交给指标层；否则接口/缓存偶发乱序会把
+    # “最后一项”当成最新闭合 bar，造成方向和突破判断反转。
+    original_open_order = [int(row[0]) for row in closed]
+    closed.sort(key=lambda row: int(row[0]))
 
     latest_closed_at_ms = int(closed[-1][6]) if closed else None
     age_seconds = ((now_ms - latest_closed_at_ms) / 1000.0
@@ -197,15 +204,19 @@ def prepare_closed_klines(rows: list[list[Any]], interval: str,
 
     recent_gap = False
     non_monotonic = False
-    recent = closed[-10:]
-    if len(recent) >= 2:
-        close_times = [int(row[6]) for row in recent]
+    exact_gap = False
+    all_rows = closed
+    if len(all_rows) >= 2:
+        opens = [int(row[0]) for row in all_rows]
+        close_times = [int(row[6]) for row in all_rows]
+        non_monotonic = any(later <= earlier for earlier, later in
+                            zip(original_open_order, original_open_order[1:]))
+        exact_gap = any(later - earlier != interval_seconds * 1000
+                        for earlier, later in zip(sorted(opens), sorted(opens)[1:]))
+        recent = close_times[-10:]
         recent_gap = any(
             later - earlier > interval_seconds * 1000 * 1.5
-            for earlier, later in zip(close_times, close_times[1:])
-        )
-        non_monotonic = any(
-            later <= earlier for earlier, later in zip(close_times, close_times[1:])
+            for earlier, later in zip(recent, recent[1:])
         )
 
     issues: list[str] = []
@@ -217,6 +228,8 @@ def prepare_closed_klines(rows: list[list[Any]], interval: str,
         issues.append("stale_last_closed_kline")
     if recent_gap:
         issues.append("recent_kline_gap")
+    if exact_gap:
+        issues.append("kline_gap")
     if non_monotonic:
         issues.append("non_monotonic_klines")
     if live_rows > 1:
@@ -234,10 +247,21 @@ def prepare_closed_klines(rows: list[list[Any]], interval: str,
         "non_monotonic": non_monotonic,
         "fresh": fresh,
         "complete": (len(closed) >= min_closed and invalid_rows == 0
-                     and not recent_gap and not non_monotonic),
+                     and not recent_gap and not exact_gap and not non_monotonic),
         "ok": not issues,
         "issues": issues,
     }
+    if not quality["ok"]:
+        if any(issue in issues for issue in
+               ("invalid_kline_rows", "kline_gap", "recent_kline_gap",
+                "non_monotonic_klines", "multiple_live_klines")):
+            quality["reason_code"] = "KLINE_STRUCTURE_INVALID"
+        elif "stale_last_closed_kline" in issues:
+            quality["reason_code"] = "KLINE_STALE"
+        else:
+            quality["reason_code"] = "KLINE_INSUFFICIENT"
+    else:
+        quality["reason_code"] = "OK"
     return closed, live_bar, quality
 
 

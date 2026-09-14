@@ -140,6 +140,40 @@ status = rate_limit.rate_limit_status()
 assert status["observed_weight_1m"] == 1900 and status["blocked_requests"] >= 1
 print("  PASS  大请求按权重排队，后台流量在高水位发送前被拦截")
 
+print("\n[6] futures/data五分钟窗口与发送前遥测预留")
+rate_limit._reset_for_test()
+rate_limit.configure_rate_limit_budget(
+    weight_limit_1m=2400, local_budget_1m=60000,
+    background_defer_ratio=0.75, normal_defer_ratio=0.90,
+    data_window_seconds=300, data_request_budget_5m=2,
+)
+telemetry_state = state_dir / "state-data-window.json"
+rate_limit.configure_rate_limit_state(telemetry_state)
+data_client = Client(Response(200, {"ok": True}))
+for _ in range(2):
+    assert request_json(
+        data_client, "/futures/data/topLongShortAccountRatio",
+        {"symbol": "BTCUSDT"}, priority="background",
+    ) == {"ok": True}
+try:
+    request_json(
+        data_client, "/futures/data/topLongShortAccountRatio",
+        {"symbol": "BTCUSDT"}, priority="background",
+    )
+    raise AssertionError("futures/data五分钟预算应阻断")
+except rate_limit.PublicMarketBudgetDeferred:
+    pass
+assert data_client.calls == 2
+status = rate_limit.rate_limit_status()
+assert status["data_endpoint_window"]["requests"] == 2
+assert status["data_endpoint_window"]["blocked_requests"] >= 1
+payload = __import__("json").loads(telemetry_state.read_text(encoding="utf-8"))
+events = payload.get("request_events") or []
+assert len(events) == 2 and all("symbol" not in event and event["status"] == 200
+                                for event in events)
+print("  PASS  futures/data达到本地安全预算后不再发HTTP")
+print("  PASS  发送前预留和响应状态写入有界脱敏遥测")
+
 rate_limit._reset_for_test()
 binance_public._ALL_TICKERS_CACHE = (0.0, [])
-print("\n结果：PASS 5 / FAIL 0")
+print("\n结果：PASS 7 / FAIL 0")

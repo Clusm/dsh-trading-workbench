@@ -296,6 +296,7 @@ class ActionSpace:
     @classmethod
     def from_context(cls, *, risk_config: dict[str, Any],
                      allow_new_positions: bool = True,
+                     allow_new_reason: str | None = None,
                      portfolio: dict[str, Any] | None = None,
                      channel: str = "ai",
                      tradeable_symbols: list[str] | None = None) -> "ActionSpace":
@@ -317,7 +318,7 @@ class ActionSpace:
         reason = ""
         if not allow_new_positions:
             allow_new = False
-            reason = "控制面运行状态已禁止新开仓"
+            reason = str(allow_new_reason or "控制面运行状态已禁止新开仓")
         elif isinstance(ch, dict) and not ch.get("allow_new", True):
             allow_new = False
             margin_used = float(ch.get("margin_used") or 0.0)

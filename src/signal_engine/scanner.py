@@ -22,7 +22,7 @@ import pandas as pd
 from audit.database import AuditDatabase
 import strategy_runtime
 from data.binance_public import _get_json
-from data.kline_store import get_klines
+from data.kline_store import KlineDataQualityError, get_klines, validate_kline_rows
 from data.rate_limit import PublicMarketBudgetDeferred, PublicMarketCooldown
 
 PUBLIC_BASE = "https://fapi.binance.com"
@@ -97,6 +97,12 @@ def fetch_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
         )
     if not isinstance(rows, list) or not rows:
         raise RuntimeError(f"{symbol} {interval} K线为空或格式错误")
+    quality = validate_kline_rows(rows, interval, min_rows=210)
+    if not quality["ok"]:
+        raise KlineDataQualityError(
+            f"{symbol} {interval} K线质量不合格: {','.join(quality['issues'])}",
+            quality,
+        )
 
     idx = pd.to_datetime([int(r[0]) for r in rows], unit="ms", utc=True)
     df = pd.DataFrame(index=idx)
@@ -115,10 +121,10 @@ def fetch_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
 def _completed(df: pd.DataFrame, now: datetime) -> pd.DataFrame:
     if df.empty:
         return df
-    last_close = int(df["close_time"].iloc[-1])
-    if last_close > int(now.timestamp() * 1000):
-        return df.iloc[:-1].copy()
-    return df.copy()
+    # 不假设未完成 bar 一定在最后：代理重排或恢复缓存时可能出现多个 live bar；
+    # 逐行按 close_time 过滤，保证指标只消费已经收盘的数据。
+    completed = df[df["close_time"] <= int(now.timestamp() * 1000)].copy()
+    return completed.sort_index()
 
 
 def _is_market_transport_outage(exc: Exception) -> bool:

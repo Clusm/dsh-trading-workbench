@@ -14,13 +14,16 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from exchange.binance_futures import BinanceFuturesBroker  # noqa: E402
 from exchange.protocol import normalize_algo_orders_payload, parse_iso, parse_iso_ms  # noqa: E402
+from data import rate_limit  # noqa: E402
+from data.rate_limit import ExecutionRateLimited  # noqa: E402
 
 
 class Response:
-    status_code = 200
-
-    def __init__(self, payload: dict[str, Any]):
+    def __init__(self, payload: dict[str, Any], status: int = 200,
+                 headers: dict[str, Any] | None = None):
         self.payload = payload
+        self.status_code = status
+        self.headers = dict(headers or {})
 
     def json(self) -> dict[str, Any]:
         return self.payload
@@ -111,7 +114,36 @@ assert broker._signed("GET", "/signed", attempts=2) == {"ok": True}
 assert broken.closed is True and broker._client is healthy
 print("  PASS  旧连接池关闭且第二次请求使用新连接池")
 
-print("\n[4] Algo列表响应包装归一化且未知结构fail-closed")
+print("\n[4] 生产签名请求遇到418只记录一次且不重试")
+rate_limit._reset_for_test()
+
+
+class LimitedClient:
+    calls = 0
+
+    def request(self, _method: str, _url: str, **_kwargs: Any) -> Response:
+        self.calls += 1
+        return Response({}, status=418, headers={"Retry-After": "900"})
+
+    def close(self) -> None:
+        return None
+
+
+limited_client = LimitedClient()
+limited_broker = broker_with(limited_client)
+limited_broker.base_url = "https://fapi.binance.com"
+try:
+    limited_broker._signed("GET", "/signed", {}, attempts=3)
+    raise AssertionError("418 应抛出")
+except ExecutionRateLimited:
+    pass
+assert limited_client.calls == 1
+assert rate_limit.rate_limit_status()["last_status"] == 418
+assert rate_limit.rate_limit_status()["event_count"] == 1
+print("  PASS  生产私有请求的418不重试且只计一次")
+rate_limit._reset_for_test()
+
+print("\n[5] Algo列表响应包装归一化且未知结构fail-closed")
 row = {"algoId": 1, "symbol": "BTCUSDT"}
 assert BinanceFuturesBroker._normalize_algo_orders_payload([row]) == [row]
 assert BinanceFuturesBroker._normalize_algo_orders_payload(
@@ -126,7 +158,7 @@ except RuntimeError:
 assert unknown_blocked
 print("  PASS  裸列表和data包装均可读取，未知结构不会伪装为空列表")
 
-print("\n[5] 协议纯解析函数与Broker兼容入口一致")
+print("\n[6] 协议纯解析函数与Broker兼容入口一致")
 assert normalize_algo_orders_payload({"data": {"rows": [row]}}) == [row]
 assert BinanceFuturesBroker._normalize_algo_orders_payload([row]) == \
     normalize_algo_orders_payload([row])
@@ -137,4 +169,4 @@ assert parse_iso_ms("2026-09-12 01:02:03") == \
 assert parse_iso_ms("invalid") is None
 print("  PASS  时间和Algo响应解析保持兼容且无效输入fail-closed")
 
-print("\n结果: 5 通过 / 0 失败")
+print("\n结果: 6 通过 / 0 失败")

@@ -18,13 +18,15 @@ from data.market_query import query_guardian_closed_bar
 SnapshotProvider = Callable[[str, str], dict[str, Any]]
 
 
-def _check(state: str, mode: str, reason: str, evidence: dict[str, Any]) -> dict[str, Any]:
+def _check(state: str, mode: str, reason: str, evidence: dict[str, Any],
+           reason_code: str | None = None) -> dict[str, Any]:
     status = "BLOCK" if state == "INVALIDATED" else (
         "NOT_EVALUATED" if state in {"REVIEW_DUE", "UNKNOWN"} else "PASS"
     )
     return {
         "check_id": "position_guardian", "version": 1, "mode": mode,
         "status": status, "state": state, "reason": reason,
+        "reason_code": reason_code or str(evidence.get("reason_code") or "OK"),
         "evidence_at": evidence.get("observed_at_ms"), "evidence": evidence,
     }
 
@@ -36,9 +38,10 @@ def _stable_close_id(intent_id: str) -> str:
 
 
 def _log_state_once(db: Any, *, event_type: str, details: str,
-                    action_taken: str, symbol: str, state: str) -> None:
+                    action_taken: str, symbol: str, state: str,
+                    reason_code: str = "UNKNOWN") -> None:
     """轮询状态只在首次进入时记事件；兼容测试替身与旧审计实现。"""
-    payload = {"symbol": symbol, "state": state}
+    payload = {"symbol": symbol, "state": state, "reason_code": reason_code}
     method = getattr(db, "log_risk_event_once_while_open", None)
     if callable(method):
         method(event_type=event_type, severity="critical", details=details,
@@ -68,6 +71,24 @@ def _resolve_absent_position_states(db: Any, active_symbols: set[str]) -> None:
         if (event_type in {"guardian_review_due", "guardian_invalidation"}
                 and status != "RESOLVED" and symbol and symbol not in active_symbols):
             resolve_method(event_type, {"symbol": symbol})
+
+
+def _review_reason_code(snapshot: dict[str, Any], interval: str,
+                        invalidation_price: float, operator: str) -> str:
+    """把 Guardian 的复核失败归类，便于值守区分网络/数据/证据问题。"""
+    quality = snapshot.get("data_quality")
+    if isinstance(quality, dict) and quality.get("reason_code"):
+        return str(quality["reason_code"])
+    if interval not in {"1m", "5m", "15m", "1h", "4h", "1d"}:
+        return "EVIDENCE_INVALID_INTERVAL"
+    if invalidation_price <= 0 or operator not in {"close_below", "close_above"}:
+        return "EVIDENCE_INVALID_RULE"
+    error = str(snapshot.get("error") or "")
+    if any(marker in error for marker in ("Cooldown", "BudgetDeferred", "418", "429", "rate limit")):
+        return "MARKET_DATA_UNAVAILABLE"
+    if error:
+        return "MARKET_DATA_UNAVAILABLE"
+    return "KLINE_UNAVAILABLE"
 
 
 def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
@@ -102,16 +123,19 @@ def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
                if open_client_order_id else None)
         # legacy/人工接管仓位没有精确开仓命令，不能用同标的旧记录猜测论点。
         if row is None:
-            item = _check("REVIEW_DUE", effective_mode, "缺少可归因的 approved 开仓论点", {
+            evidence = {
                 "symbol": symbol, "side": side, "source": source,
-            })
+                "reason_code": "EVIDENCE_MISSING",
+            }
+            item = _check("REVIEW_DUE", effective_mode, "缺少可归因的 approved 开仓论点",
+                          evidence, "EVIDENCE_MISSING")
             checks.append(item)
             _resolve_state(db, "guardian_invalidation", symbol)
             _log_state_once(
                 db, event_type="guardian_review_due",
                 details=f"{symbol} {side}: {item['reason']}",
                 action_taken="keep exchange protection; require operator review",
-                symbol=symbol, state="REVIEW_DUE",
+                symbol=symbol, state="REVIEW_DUE", reason_code="EVIDENCE_MISSING",
             )
             continue
         try:
@@ -121,16 +145,19 @@ def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
             thesis = None
             raw = {}
         if not thesis:
-            item = _check("REVIEW_DUE", effective_mode, "开仓记录缺少结构化 evidence", {
+            evidence = {
                 "symbol": symbol, "side": side, "intent_id": row["intent_id"],
-            })
+                "reason_code": "EVIDENCE_MISSING",
+            }
+            item = _check("REVIEW_DUE", effective_mode, "开仓记录缺少结构化 evidence",
+                          evidence, "EVIDENCE_MISSING")
             checks.append(item)
             _resolve_state(db, "guardian_invalidation", symbol)
             _log_state_once(
                 db, event_type="guardian_review_due",
                 details=f"{symbol} {side}: {item['reason']}",
                 action_taken="keep exchange protection; require operator review",
-                symbol=symbol, state="REVIEW_DUE",
+                symbol=symbol, state="REVIEW_DUE", reason_code="EVIDENCE_MISSING",
             )
             continue
         interval = str(thesis.get("confirmation_interval") or "")
@@ -149,14 +176,19 @@ def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
         }
         if (not snapshot.get("ok") or interval not in {"1m", "5m", "15m", "1h", "4h", "1d"}
                 or invalidation_price <= 0 or operator not in {"close_below", "close_above"}):
-            item = _check("REVIEW_DUE", effective_mode, "闭合K线或结构无效点不可验证", evidence)
+            reason_code = _review_reason_code(
+                snapshot, interval, invalidation_price, operator,
+            )
+            evidence["reason_code"] = reason_code
+            item = _check("REVIEW_DUE", effective_mode, "闭合K线或结构无效点不可验证",
+                          evidence, reason_code)
             checks.append(item)
             _resolve_state(db, "guardian_invalidation", symbol)
             _log_state_once(
                 db, event_type="guardian_review_due",
                 details=f"{symbol} {side}: {item['reason']}",
                 action_taken="do not infer exit; keep protection",
-                symbol=symbol, state="REVIEW_DUE",
+                symbol=symbol, state="REVIEW_DUE", reason_code=reason_code,
             )
             continue
         closed_price = float(snapshot["closed_price"])
@@ -165,15 +197,19 @@ def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
         if not invalidated:
             _resolve_state(db, "guardian_review_due", symbol)
             _resolve_state(db, "guardian_invalidation", symbol)
-            checks.append(_check("ACTIVE", effective_mode, "最新闭合K线未证伪原论点", evidence))
+            evidence["reason_code"] = "OK"
+            checks.append(_check("ACTIVE", effective_mode, "最新闭合K线未证伪原论点",
+                                 evidence, "OK"))
             continue
-        checks.append(_check("INVALIDATED", effective_mode, "最新闭合K线已证伪原论点", evidence))
+        evidence["reason_code"] = "THESIS_INVALIDATED"
+        checks.append(_check("INVALIDATED", effective_mode, "最新闭合K线已证伪原论点",
+                             evidence, "THESIS_INVALIDATED"))
         _resolve_state(db, "guardian_review_due", symbol)
         _log_state_once(
             db, event_type="guardian_invalidation",
             details=f"{symbol} {side}: close={closed_price}, {operator} {invalidation_price}",
             action_taken="create close intent" if effective_mode == "enforce" else "shadow only",
-            symbol=symbol, state="INVALIDATED",
+            symbol=symbol, state="INVALIDATED", reason_code="THESIS_INVALIDATED",
         )
         if effective_mode == "enforce" and qty > 0:
             intents.append(TradeIntent(

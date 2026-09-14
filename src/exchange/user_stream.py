@@ -13,7 +13,13 @@ from typing import Any, Callable
 import httpx
 
 from data.binance_transport import endpoint_weight
-from data.rate_limit import note_418, note_rate_limit, observe_response
+from data.rate_limit import (
+    ExecutionRateLimited,
+    note_418,
+    note_rate_limit,
+    observe_response,
+    reserve_request,
+)
 from exchange.event_inbox import ExchangeEventInbox
 from exchange.event_models import ExchangeEvent
 
@@ -184,16 +190,21 @@ class BinanceUserDataStream:
         # 非生产环境当前仍使用各自流主机的listenKey原始流格式。
         return f"{base}/ws/{listen_key}"
 
-    def _observe_rest_response(self, response: httpx.Response) -> None:
+    def _observe_rest_response(self, response: httpx.Response,
+                               request_id: str | None = None) -> None:
         """把生产 listenKey 的权重/限流反馈并入共享出口状态。
 
-        私有流是账户真值通道，不能因为公共行情冷却而停止续期；这里只做响应后观测。
-        Demo/Testnet 使用独立主机，严禁拿其响应头覆盖生产 IP 的权重水位。
+        私有流是账户真值通道，critical 请求只绕过软预算；遇到同一出口的硬冷却时
+        不再盲目重试，交由 REST 对账恢复。Demo/Testnet 使用独立主机，严禁拿其
+        响应头覆盖生产 IP 的权重水位。
         """
         if self.environment != "live":
             return
         path = "/fapi/v1/listenKey"
-        observe_response(response.headers, path=path, weight=endpoint_weight(path))
+        observe_response(
+            response.headers, path=path, weight=endpoint_weight(path),
+            request_id=request_id, status=response.status_code,
+        )
         if response.status_code not in {418, 429}:
             return
         default = 480.0 if response.status_code == 418 else 60.0
@@ -209,11 +220,23 @@ class BinanceUserDataStream:
             note_rate_limit(retry_after, status=429)
 
     async def _listen_key(self, method: str) -> str | None:
+        path = "/fapi/v1/listenKey"
+        request_id: str | None = None
+        if self.environment == "live":
+            request_id = reserve_request(
+                path, weight=endpoint_weight(path), priority="critical",
+                endpoint_group="signed_execution", source="user_stream",
+                environment=self.environment,
+            )
         response = await self._client.request(
-            method, f"{self.rest_base_url}/fapi/v1/listenKey",
+            method, f"{self.rest_base_url}{path}",
             headers={"X-MBX-APIKEY": self.api_key},
         )
-        self._observe_rest_response(response)
+        self._observe_rest_response(response, request_id=request_id)
+        if response.status_code in {418, 429}:
+            raise ExecutionRateLimited(
+                f"HTTP {response.status_code}: user stream request rate limited"
+            )
         response.raise_for_status()
         if method == "DELETE":
             return None
@@ -260,9 +283,21 @@ class BinanceUserDataStream:
                 while not self._stop:
                     if time.monotonic() - started >= self.planned_reconnect_seconds:
                         return
+                    if keepalive.done() and not keepalive.cancelled():
+                        error = keepalive.exception()
+                        if error is not None:
+                            raise RuntimeError(
+                                f"listenKey_keepalive_failed:{type(error).__name__}"
+                            ) from error
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
                     except asyncio.TimeoutError:
+                        if keepalive.done() and not keepalive.cancelled():
+                            error = keepalive.exception()
+                            if error is not None:
+                                raise RuntimeError(
+                                    f"listenKey_keepalive_failed:{type(error).__name__}"
+                                ) from error
                         continue
                     payload = json.loads(raw)
                     self._enqueue_payload(payload)

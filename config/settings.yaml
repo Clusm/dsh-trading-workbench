@@ -169,6 +169,9 @@ binance_market_data:
   local_weight_budget_1m: 600
   background_defer_ratio: 0.75
   normal_defer_ratio: 0.90
+  # futures/data 系列按交易所公开的 IP 5 分钟窗口治理；800 留出20%运维余量。
+  data_endpoint_window_seconds: 300
+  data_endpoint_budget_5m: 800
   websocket_first: true
   stream_all_core_symbols: true
   # 只订阅基础周期；1h/2h/4h/8h/1d由本地聚合，避免数百帧/秒。

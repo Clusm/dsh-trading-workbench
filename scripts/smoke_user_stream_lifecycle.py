@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from audit.database import AuditDatabase  # noqa: E402
 from core.config_loader import load_settings  # noqa: E402
+from data import rate_limit  # noqa: E402
 import dashboard.app as dashboard_app  # noqa: E402
 
 
@@ -137,6 +138,15 @@ with TestClient(app) as client:
     ready = client.get("/api/ready")
     check("全部现有开仓前置条件满足时ready=200", ready.status_code == 200 and
           ready.json()["ready"] is True)
+    rate_limit._reset_for_test()
+    rate_limit.note_418(30)
+    cooldown_ready = client.get("/api/ready")
+    check("公共行情418冷却时ready禁止新开仓",
+          cooldown_ready.status_code == 503 and
+          "public_market_cooldown" in cooldown_ready.json()["reasons"])
+    check("冷却只影响新开仓门，不影响健康接口",
+          client.get("/api/health").json()["ok"] is True)
+    rate_limit._reset_for_test()
     service.control.state = "close_only"
     blocked_ready = client.get("/api/ready")
     check("控制状态非normal时ready=503", blocked_ready.status_code == 503 and
@@ -156,4 +166,4 @@ with TestClient(blocked_app) as client:
     check("阻断原因明确", blocked["reason"] == "observe_only_required")
 blocked_service.db.close()
 
-print("\n结果: 10 通过 / 0 失败")
+print("\n结果: 12 通过 / 0 失败")

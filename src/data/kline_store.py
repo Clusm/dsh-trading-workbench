@@ -35,6 +35,16 @@ _REST_INCREMENTAL_LOADS = 0
 _WS_UPDATES = 0
 _AGGREGATED_UPDATES = 0
 _AGGREGATED_INTERVALS = {"1h", "2h", "4h", "8h", "1d"}
+_FRESHNESS_TTL_CAP_SECONDS = 300.0
+
+
+class KlineDataQualityError(RuntimeError):
+    """K线已返回但结构/连续性/覆盖范围不足，调用方应跳过本轮。"""
+
+    def __init__(self, message: str, quality: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.quality = dict(quality or {})
+        self.reason_code = str(self.quality.get("reason_code") or "KLINE_INVALID")
 
 
 def configure_kline_store(cache_dir: Path) -> None:
@@ -66,6 +76,9 @@ def _load_locked(key: tuple[str, str]) -> list[list[Any]]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             rows = [list(row) for row in payload.get("rows", []) if isinstance(row, list)]
+            updated_at = payload.get("updated_at")
+            if updated_at is not None:
+                _UPDATED_AT[key] = float(updated_at)
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             rows = []
     rows = _normalize(rows)
@@ -95,11 +108,109 @@ def _save_locked(key: tuple[str, str]) -> None:
     path = _path(key)
     if path is None:
         return
-    payload = {"symbol": key[0], "interval": key[1], "updated_at": time.time(),
+    payload = {"symbol": key[0], "interval": key[1],
+               "updated_at": _UPDATED_AT.get(key, time.time()),
                "rows": _ROWS.get(key, [])}
     temp = path.with_name(f"{path.stem}.tmp-{os.getpid()}-{threading.get_ident()}")
     temp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     os.replace(temp, path)
+
+
+def validate_kline_rows(rows: list[list[Any]] | None, interval: str, *,
+                        observed_at_ms: int | None = None,
+                        received_at_ms: int | None = None,
+                        min_rows: int = 2,
+                        require_fresh: bool = False) -> dict[str, Any]:
+    """校验 K 线结构、连续性、覆盖范围和缓存接收时效。
+
+    ``close_time`` 只能说明一根 bar 的理论结束时间，不能说明缓存何时收到最后
+    一次更新。因此缓存命中必须同时检查 ``received_at_ms``；这会淘汰服务重启后
+    留在磁盘里的陈旧“当前 bar”，避免它被误当成新鲜行情。
+    """
+    step = INTERVAL_MS.get(str(interval))
+    if step is None:
+        raise ValueError(f"不支持的K线周期: {interval}")
+    now_ms = int(observed_at_ms if observed_at_ms is not None else time.time() * 1000)
+    valid: list[list[Any]] = []
+    invalid_rows = 0
+    opens: list[int] = []
+    for row in rows or []:
+        if not isinstance(row, (list, tuple)) or len(row) < 7:
+            invalid_rows += 1
+            continue
+        try:
+            open_ms = int(row[0])
+            int(row[6])
+            for index in (1, 2, 3, 4, 5):
+                float(row[index])
+        except (TypeError, ValueError, IndexError):
+            invalid_rows += 1
+            continue
+        valid.append(list(row))
+        opens.append(open_ms)
+
+    non_monotonic = any(later <= earlier for earlier, later in zip(opens, opens[1:]))
+    duplicate = len(set(opens)) != len(opens)
+    sorted_opens = sorted(set(opens))
+    gap = any(later - earlier != step
+              for earlier, later in zip(sorted_opens, sorted_opens[1:]))
+    latest_open = opens[-1] if opens else None
+    latest_close = None
+    if valid:
+        try:
+            latest_close = int(valid[-1][6])
+        except (TypeError, ValueError):
+            latest_close = None
+    current_open = (now_ms // step) * step
+    coverage_ok = bool(latest_open is not None and latest_open >= current_open - step)
+    receive_age_seconds = None
+    if received_at_ms is not None:
+        receive_age_seconds = max(0.0, (now_ms - int(received_at_ms)) / 1000.0)
+    interval_seconds = step / 1000.0
+    freshness_ttl = max(10.0, min(_FRESHNESS_TTL_CAP_SECONDS, interval_seconds))
+    fresh = bool(
+        received_at_ms is not None
+        and receive_age_seconds is not None
+        and receive_age_seconds <= freshness_ttl
+        and coverage_ok
+        and latest_close is not None
+        and latest_close >= now_ms - step - 5_000
+    )
+    issues: list[str] = []
+    if invalid_rows:
+        issues.append("invalid_kline_rows")
+    if duplicate:
+        issues.append("duplicate_kline_open")
+    if non_monotonic:
+        issues.append("non_monotonic_klines")
+    if gap:
+        issues.append("kline_gap")
+    if len(valid) < max(1, int(min_rows)):
+        issues.append("insufficient_klines")
+    if not coverage_ok:
+        issues.append("kline_coverage_gap")
+    if require_fresh and not fresh:
+        issues.append("stale_kline_cache")
+    return {
+        "interval": str(interval),
+        "observed_at_ms": now_ms,
+        "received_at_ms": int(received_at_ms) if received_at_ms is not None else None,
+        "receive_age_seconds": round(receive_age_seconds, 3)
+        if receive_age_seconds is not None else None,
+        "latest_open_ms": latest_open,
+        "latest_close_ms": latest_close,
+        "current_open_ms": current_open,
+        "count": len(valid),
+        "invalid_rows": invalid_rows,
+        "duplicate_open": duplicate,
+        "non_monotonic": non_monotonic,
+        "gap": gap,
+        "coverage_ok": coverage_ok,
+        "fresh": fresh,
+        "continuity_ok": not (invalid_rows or duplicate or non_monotonic or gap),
+        "ok": not issues,
+        "issues": issues,
+    }
 
 
 def get_klines(client: Any, symbol: str, interval: str, limit: int,
@@ -113,8 +224,14 @@ def get_klines(client: Any, symbol: str, interval: str, limit: int,
         cached = list(_load_locked(key))
 
     now_ms = int(time.time() * 1000)
-    fresh = bool(cached and int(cached[-1][6]) >= now_ms - 2_000)
-    if len(cached) >= wanted and fresh:
+    with _LOCK:
+        received_at_ms = (int(_UPDATED_AT[key] * 1000)
+                          if key in _UPDATED_AT else None)
+    quality = validate_kline_rows(
+        cached, key[1], observed_at_ms=now_ms,
+        received_at_ms=received_at_ms, min_rows=wanted, require_fresh=True,
+    )
+    if len(cached) >= wanted and quality["ok"]:
         result = [list(row) for row in cached[-wanted:]]
         if key[1] in _AGGREGATED_INTERVALS:
             _ensure_aggregation_base(
@@ -123,7 +240,7 @@ def get_klines(client: Any, symbol: str, interval: str, limit: int,
         return result
 
     params: dict[str, Any] = {"symbol": key[0], "interval": key[1]}
-    full = len(cached) < wanted
+    full = len(cached) < wanted or not quality["continuity_ok"]
     if full:
         # 15m是所有高周期的聚合底座；至少保留200根，覆盖完整日线组件并允许
         # 服务在任意时刻启动后立即续算1h/2h/4h/8h/1d。
@@ -133,7 +250,15 @@ def get_klines(client: Any, symbol: str, interval: str, limit: int,
         interval_ms = INTERVAL_MS[key[1]]
         last_open = int(cached[-1][0])
         missing = max(2, min(100, int((now_ms - last_open) / interval_ms) + 2))
-        params.update({"startTime": last_open + interval_ms, "limit": missing})
+        # 必须从最后一根 open 开始，刷新正在形成的 bar；跳到下一根会永久保留
+        # 旧 close/high/low/volume，扫描器随后只能看到陈旧的当前 bar。
+        if int((now_ms - last_open) / interval_ms) + 2 > 100:
+            full = True
+            bootstrap = max(wanted, 200) if key[1] == "15m" else wanted
+            params = {"symbol": key[0], "interval": key[1],
+                      "limit": min(1500, bootstrap)}
+        else:
+            params.update({"startTime": last_open, "limit": missing})
 
     if fetcher is None:
         rows = request_json(client, "/fapi/v1/klines", params, priority=priority)
@@ -143,11 +268,12 @@ def get_klines(client: Any, symbol: str, interval: str, limit: int,
     with _LOCK:
         current = _load_locked(key)
         _ROWS[key] = _normalize(current + fetched, keep=max(1200, wanted))
-        _UPDATED_AT[key] = time.time()
-        if full:
-            _REST_FULL_LOADS += 1
-        else:
-            _REST_INCREMENTAL_LOADS += 1
+        if fetched:
+            _UPDATED_AT[key] = time.time()
+            if full:
+                _REST_FULL_LOADS += 1
+            else:
+                _REST_INCREMENTAL_LOADS += 1
         _save_locked(key)
         result = [list(row) for row in _ROWS[key][-wanted:]]
 
