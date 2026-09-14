@@ -18,19 +18,23 @@ def main() -> int:
     symbol = sys.argv[1] if len(sys.argv) > 1 else "BTCUSDT"
     interval = sys.argv[2] if len(sys.argv) > 2 else "15m"
 
-    # 先做一步最基础的网络探测，避免把"断网"误判成"代码 bug"
+    # 基础探测也必须走共享网关。维护脚本绕过全局418冷却会让排障行为本身
+    # 延长出口封禁，进而把网络问题误判成业务代码故障。
     import httpx
+    from data.binance_transport import request_json
+    from data.rate_limit import configure_rate_limit_state
+    configure_rate_limit_state(ROOT / "data" / "public_rate_limit_state.json")
     print("=" * 78)
     print("【0】基础网络探测")
     print("=" * 78)
-    for url in ("https://fapi.binance.com/fapi/v1/time",
-                "https://api.binance.com/api/v3/time"):
-        t0 = time.time()
-        try:
-            r = httpx.get(url, timeout=8.0)
-            print(f"  {url}  ->  HTTP {r.status_code}  ({time.time()-t0:.2f}s)")
-        except Exception as e:
-            print(f"  {url}  ->  {type(e).__name__}: {str(e)[:110]}  ({time.time()-t0:.2f}s)")
+    t0 = time.time()
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            request_json(client, "/fapi/v1/time", attempts=1, priority="background")
+        print(f"  Binance USD-M 公共网关  ->  HTTP 200  ({time.time()-t0:.2f}s)")
+    except Exception as e:
+        print(f"  Binance USD-M 公共网关  ->  {type(e).__name__}: "
+              f"{str(e)[:110]}  ({time.time()-t0:.2f}s)")
 
     print()
     print("=" * 78)

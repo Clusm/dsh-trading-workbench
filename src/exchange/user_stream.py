@@ -12,6 +12,8 @@ from typing import Any, Callable
 
 import httpx
 
+from data.binance_transport import endpoint_weight
+from data.rate_limit import note_418, note_rate_limit, observe_response
 from exchange.event_inbox import ExchangeEventInbox
 from exchange.event_models import ExchangeEvent
 
@@ -182,11 +184,36 @@ class BinanceUserDataStream:
         # 非生产环境当前仍使用各自流主机的listenKey原始流格式。
         return f"{base}/ws/{listen_key}"
 
+    def _observe_rest_response(self, response: httpx.Response) -> None:
+        """把生产 listenKey 的权重/限流反馈并入共享出口状态。
+
+        私有流是账户真值通道，不能因为公共行情冷却而停止续期；这里只做响应后观测。
+        Demo/Testnet 使用独立主机，严禁拿其响应头覆盖生产 IP 的权重水位。
+        """
+        if self.environment != "live":
+            return
+        path = "/fapi/v1/listenKey"
+        observe_response(response.headers, path=path, weight=endpoint_weight(path))
+        if response.status_code not in {418, 429}:
+            return
+        default = 480.0 if response.status_code == 418 else 60.0
+        maximum = 604800.0 if response.status_code == 418 else 3600.0
+        try:
+            retry_after = float(response.headers.get("Retry-After") or default)
+        except (TypeError, ValueError):
+            retry_after = default
+        retry_after = min(maximum, max(5.0, retry_after))
+        if response.status_code == 418:
+            note_418(retry_after)
+        else:
+            note_rate_limit(retry_after, status=429)
+
     async def _listen_key(self, method: str) -> str | None:
         response = await self._client.request(
             method, f"{self.rest_base_url}/fapi/v1/listenKey",
             headers={"X-MBX-APIKEY": self.api_key},
         )
+        self._observe_rest_response(response)
         response.raise_for_status()
         if method == "DELETE":
             return None

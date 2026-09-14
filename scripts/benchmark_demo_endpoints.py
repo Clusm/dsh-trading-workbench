@@ -8,10 +8,18 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from data.binance_transport import request_json
+from data.rate_limit import configure_rate_limit_state
 
 
 def percentile(values: list[float], quantile: float) -> float | None:
@@ -53,6 +61,31 @@ def measure(client: httpx.Client, url: str, samples: int) -> dict[str, Any]:
     }
 
 
+def measure_binance_public(client: httpx.Client, samples: int) -> dict[str, Any]:
+    """通过统一网关测量公共接口，避免诊断工具绕过全局418熔断。"""
+    url = "https://fapi.binance.com/fapi/v1/time"
+    latencies: list[float] = []
+    errors: list[str] = []
+    for _ in range(samples):
+        started = time.perf_counter()
+        try:
+            request_json(client, "/fapi/v1/time", attempts=1, priority="background")
+            latencies.append((time.perf_counter() - started) * 1000.0)
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+    return {
+        "url": url,
+        "transport": "governed_public_gateway",
+        "samples_requested": samples,
+        "samples_ok": len(latencies),
+        "failures": len(errors),
+        "error_types": sorted(set(errors)),
+        "p50_ms": round(percentile(latencies, 0.50) or 0.0, 3) if latencies else None,
+        "p95_ms": round(percentile(latencies, 0.95) or 0.0, 3) if latencies else None,
+        "max_ms": round(max(latencies), 3) if latencies else None,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="只读测量 Demo 控制台接口 P95")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
@@ -64,11 +97,13 @@ def main() -> int:
         parser.error("--samples 必须在 2 到 200 之间")
 
     base = str(args.base_url).rstrip("/")
+    # 独立维护进程也读取服务的跨重启冷却文件，不能成为第二个无状态出口。
+    configure_rate_limit_state(ROOT / "data" / "public_rate_limit_state.json")
     urls = [f"{base}/api/health", f"{base}/api/status", f"{base}/api/intel"]
-    if args.include_binance_public:
-        urls.append("https://fapi.binance.com/fapi/v1/time")
     with httpx.Client(timeout=args.timeout, follow_redirects=False) as client:
         results = [measure(client, url, args.samples) for url in urls]
+        if args.include_binance_public:
+            results.append(measure_binance_public(client, args.samples))
     report = {
         "read_only": True,
         "samples_per_endpoint": args.samples,
