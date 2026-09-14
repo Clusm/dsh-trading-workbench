@@ -96,4 +96,32 @@ check("15m同步聚合全部高周期", status["aggregated_updates"] == 5)
 check("行情流状态统计完整", stream.status()["messages"] == 4 and
       stream.status()["book_ticker_active"] is True)
 
-print("\n结果：PASS 13 / FAIL 0")
+print("\n[3] 首次高周期查询会惰性建立15m聚合底座")
+kline_store._reset_for_test()
+layered_calls: list[tuple[str, int]] = []
+
+
+def layered_fetcher(_client, _path, params):
+    interval = str(params["interval"])
+    count = int(params["limit"])
+    layered_calls.append((interval, count))
+    step = kline_store.INTERVAL_MS[interval]
+    current_open = int(time.time() * 1000) // step * step
+    first_open = current_open - (count - 1) * step
+    return [
+        [open_ms, "1", "2", "0.5", "1.5", "10", open_ms + step - 1,
+         "15", 1, "5", "7", "0"]
+        for open_ms in range(first_open, current_open + 1, step)
+    ]
+
+
+high = kline_store.get_klines(
+    object(), "ETHUSDT", "4h", 20, fetcher=layered_fetcher,
+)
+seeded = kline_store.kline_store_status()
+check("目标高周期与15m底座各回补一次",
+      layered_calls == [("4h", 20), ("15m", 200)])
+check("原高周期结果不受底座建立影响", len(high) == 20)
+check("15m底座已产生本地高周期更新", seeded["aggregated_updates"] >= 1)
+
+print("\n结果：PASS 16 / FAIL 0")

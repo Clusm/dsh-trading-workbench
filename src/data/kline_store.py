@@ -34,6 +34,7 @@ _REST_FULL_LOADS = 0
 _REST_INCREMENTAL_LOADS = 0
 _WS_UPDATES = 0
 _AGGREGATED_UPDATES = 0
+_AGGREGATED_INTERVALS = {"1h", "2h", "4h", "8h", "1d"}
 
 
 def configure_kline_store(cache_dir: Path) -> None:
@@ -83,6 +84,13 @@ def _normalize(rows: list[list[Any]], keep: int = 1200) -> list[list[Any]]:
     return [by_open[k] for k in sorted(by_open)[-max(1, keep):]]
 
 
+def _cell(row: list[Any], index: int, default: Any = 0) -> Any:
+    """兼容只含标准OHLCV字段的历史夹具；生产响应通常包含完整12列。"""
+    if index >= len(row) or row[index] in (None, ""):
+        return default
+    return row[index]
+
+
 def _save_locked(key: tuple[str, str]) -> None:
     path = _path(key)
     if path is None:
@@ -107,7 +115,12 @@ def get_klines(client: Any, symbol: str, interval: str, limit: int,
     now_ms = int(time.time() * 1000)
     fresh = bool(cached and int(cached[-1][6]) >= now_ms - 2_000)
     if len(cached) >= wanted and fresh:
-        return [list(row) for row in cached[-wanted:]]
+        result = [list(row) for row in cached[-wanted:]]
+        if key[1] in _AGGREGATED_INTERVALS:
+            _ensure_aggregation_base(
+                client, key[0], priority=priority, fetcher=fetcher,
+            )
+        return result
 
     params: dict[str, Any] = {"symbol": key[0], "interval": key[1]}
     full = len(cached) < wanted
@@ -136,7 +149,30 @@ def get_klines(client: Any, symbol: str, interval: str, limit: int,
         else:
             _REST_INCREMENTAL_LOADS += 1
         _save_locked(key)
-        return [list(row) for row in _ROWS[key][-wanted:]]
+        result = [list(row) for row in _ROWS[key][-wanted:]]
+
+    # 高周期首次回补成功后，再用一笔受预算控制的15m请求建立增量聚合底座。
+    # 底座失败不能推翻已经取得的目标周期数据；429/418 已由统一网关登记熔断。
+    if key[1] in _AGGREGATED_INTERVALS:
+        _ensure_aggregation_base(
+            client, key[0], priority=priority, fetcher=fetcher,
+        )
+    return result
+
+
+def _ensure_aggregation_base(client: Any, symbol: str, *, priority: str,
+                             fetcher: Callable[..., Any] | None) -> None:
+    """惰性建立15m历史底座，并立即生成当前高周期bar。"""
+    try:
+        base_rows = get_klines(
+            client, symbol, "15m", 200, priority=priority, fetcher=fetcher,
+        )
+    except Exception:
+        return
+    if not base_rows:
+        return
+    with _LOCK:
+        _aggregate_higher_timeframes_locked(symbol, base_rows[-1])
 
 
 def push_kline_event(payload: dict[str, Any]) -> None:
@@ -192,10 +228,10 @@ def _aggregate_higher_timeframes_locked(symbol: str, latest: list[Any]) -> None:
             last[4],
             str(sum(float(row[5]) for row in components)),
             bucket_close,
-            str(sum(float(row[7] or 0) for row in components)),
-            sum(int(row[8] or 0) for row in components),
-            str(sum(float(row[9] or 0) for row in components)),
-            str(sum(float(row[10] or 0) for row in components)),
+            str(sum(float(_cell(row, 7)) for row in components)),
+            sum(int(_cell(row, 8)) for row in components),
+            str(sum(float(_cell(row, 9)) for row in components)),
+            str(sum(float(_cell(row, 10)) for row in components)),
             "0",
         ]
         target_key = _key(symbol, interval)
