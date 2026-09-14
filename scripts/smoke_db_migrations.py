@@ -51,7 +51,7 @@ check("核心审计表含发布上下文", all(
     for table in ("trade_decisions", "trade_intents", "orders", "positions",
                   "shadow_decisions", "risk_events", "portfolio_snapshots",
                   "signal_events", "signal_tickets", "execution_fills",
-                  "position_lifecycles", "trade_reconciliation_jobs")))
+                  "position_lifecycles", "trade_reconciliation_jobs", "order_outbox")))
 check("发布观察表按分钟建立", db.fetch_one(
     "SELECT name FROM sqlite_master WHERE type='table' AND name='release_observations'")
       is not None)

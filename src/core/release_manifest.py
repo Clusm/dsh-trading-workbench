@@ -17,6 +17,7 @@ SAFE_CONFIG_FILES = (
     "config/agents.yaml",
     "config/risk_learning.yaml",
     "config/risk_profile.lock.json",
+    "config/windows_service.json",
 )
 DEPENDENCY_FILES = (
     "requirements.txt",
