@@ -51,6 +51,9 @@ SCRIPTS = (
     "scripts/smoke_risk_incidents.py",
     "scripts/smoke_dashboard_health.py",
     "scripts/smoke_service_lifecycle.py",
+    "scripts/smoke_windows_service_plan.py",
+    "scripts/smoke_windows_service_lifecycle.py",
+    "scripts/smoke_release_package.py",
     "scripts/smoke_ui.py",
 )
 

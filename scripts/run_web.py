@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import warnings
 from pathlib import Path
 
@@ -39,6 +40,40 @@ from core.service import TradingService  # noqa: E402
 from dashboard.app import create_app  # noqa: E402
 
 
+def run_web_app(
+    *, host: str, port: int, interval_minutes: float | None = None,
+    no_autostart: bool = False, stop_event: threading.Event | None = None,
+) -> None:
+    """运行统一 Web 入口；可由控制台或 Windows SCM 托管入口复用。
+
+    ``stop_event`` 只由托管层设置，服务本身仍通过 Uvicorn 的有界关闭流程退出，
+    从而让 TradingService 的 ``finally`` 执行资源排空、数据库关闭和实例锁释放。
+    """
+    settings = load_settings(PROJECT_ROOT)
+    service = TradingService(settings)
+    if not no_autostart:
+        interval = interval_minutes or float(
+            settings.raw_settings.get("decision_cycle", {}).get("interval_minutes", 10))
+        service.start_background(interval)
+    app = create_app(service)
+    server = uvicorn.Server(uvicorn.Config(
+        app, host=host, port=port, log_level="warning",
+    ))
+    if stop_event is not None:
+        def request_shutdown() -> None:
+            stop_event.wait()
+            server.should_exit = True
+
+        threading.Thread(
+            target=request_shutdown, name="windows-service-stop-watcher", daemon=True,
+        ).start()
+    print(f"console: http://{host}:{port}")
+    try:
+        server.run()
+    finally:
+        service.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
@@ -50,18 +85,10 @@ def main() -> None:
     if args.host.strip().lower() not in {"127.0.0.1", "localhost", "::1"}:
         parser.error("控制台当前没有用户认证，只允许绑定到本机回环地址")
 
-    settings = load_settings(PROJECT_ROOT)
-    service = TradingService(settings)
-    if not args.no_autostart:
-        interval = args.interval_minutes or float(settings.raw_settings.get("decision_cycle", {}).get("interval_minutes", 10))
-        service.start_background(interval)
-    app = create_app(service)
-
-    print(f"console: http://{args.host}:{args.port}")
-    try:
-        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
-    finally:
-        service.close()
+    run_web_app(
+        host=args.host, port=args.port, interval_minutes=args.interval_minutes,
+        no_autostart=args.no_autostart,
+    )
 
 
 if __name__ == "__main__":
