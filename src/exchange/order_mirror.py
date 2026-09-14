@@ -198,7 +198,11 @@ class OrderMirror:
                     if isinstance(found, dict) and found.get("orderId"):
                         recovered.append(dict(found))
                 if recovered:
-                    result = self.reconcile_snapshot(list(orders or []) + recovered)
+                    # 先把按 clientOrderId 找到的终态写入镜像；终态订单不属于
+                    # openOrders 的活动快照，因此再用原始活动列表重做一次确认，
+                    # 避免把“已成功恢复”继续报告为本轮 mismatch。
+                    self.reconcile_snapshot(list(orders or []) + recovered)
+                    result = self.reconcile_snapshot(list(orders or []))
                     result["recovered_missing"] = len(recovered)
             self.last_error = None
             return result

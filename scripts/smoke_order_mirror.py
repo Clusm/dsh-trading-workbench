@@ -146,8 +146,45 @@ check("对账状态和报告可观测", recon.status()["last_reconciliation"] is
       recon.status()["last_reconcile_at"] is not None)
 recon_db.close()
 
+recovery_db = AuditDatabase(
+    Path(tempfile.mkdtemp(prefix="mta-order-recovery-")) / "orders.sqlite")
+recovery = OrderMirror(recovery_db, environment="demo", allowed_symbols=["BTCUSDT"])
+recovery.apply_event(normalize_user_event(order_event(
+    event_ms=8000, status="NEW", execution="NEW", cumulative="0", order_id=206)))
+
+
+class FakeRecoveryBroker:
+    query_calls = 0
+
+    def open_orders(self):
+        # 模拟 openOrders 暂时看不到订单；不能据此猜测为已取消。
+        return []
+
+    def query_order(self, symbol: str, client_order_id: str):
+        self.query_calls += 1
+        check("恢复查询使用原订单身份", symbol == "BTCUSDT" and
+              client_order_id == "mta-206")
+        return {
+            "symbol": "BTCUSDT", "orderId": 206, "clientOrderId": "mta-206",
+            "side": "BUY", "positionSide": "LONG", "type": "LIMIT",
+            "status": "CANCELED", "origQty": "0.2", "executedQty": "0",
+            "avgPrice": "0", "reduceOnly": "false", "closePosition": False,
+            "updateTime": 9000,
+        }
+
+
+recovery_broker = FakeRecoveryBroker()
+recovered = recovery.reconcile_broker(recovery_broker)
+check("消失挂单按clientOrderId只读找回", recovered["recovered_missing"] == 1)
+check("找回终态后对账通过", recovered["matched"] is True)
+check("找回终态写入影子镜像", recovery_db.fetch_one(
+    "SELECT status FROM exchange_order_mirror WHERE exchange_order_id='206'"
+)["status"] == "CANCELED")
+check("恢复路径未调用撤单接口", recovery_broker.query_calls == 1)
+recovery_db.close()
+
 versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
 check("数据库迁移版本1到14完整", versions == list(range(1, 15)))
 db.close()
-print("\n结果: 22 通过 / 0 失败")
+print("\n结果: 26 通过 / 0 失败")

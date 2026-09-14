@@ -15,6 +15,8 @@ import httpx
 from data.binance_transport import endpoint_weight
 from data.rate_limit import (
     ExecutionRateLimited,
+    PublicMarketCooldown,
+    cooldown_remaining,
     note_418,
     note_rate_limit,
     observe_response,
@@ -326,6 +328,13 @@ class BinanceUserDataStream:
                         self.reconnects += 1
                 except asyncio.CancelledError:
                     raise
+                except PublicMarketCooldown:
+                    # 同一出口硬冷却时不按固定5秒重建，避免只在本地循环制造噪声；
+                    # 冷却到期后再做一次 listenKey/WS 恢复尝试。
+                    self.last_error = "PublicMarketCooldown"
+                    self.state = "degraded"
+                    self.reconnects += 1
+                    await asyncio.sleep(min(300.0, max(5.0, cooldown_remaining())))
                 except Exception as exc:
                     # 异常文本可能带连接URL，绝不把listenKey写入状态或日志。
                     self.last_error = type(exc).__name__
