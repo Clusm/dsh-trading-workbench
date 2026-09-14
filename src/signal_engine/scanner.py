@@ -22,7 +22,12 @@ import pandas as pd
 from audit.database import AuditDatabase
 import strategy_runtime
 from data.binance_public import _get_json
-from data.kline_store import KlineDataQualityError, get_klines, validate_kline_rows
+from data.kline_store import (
+    KlineDataQualityError,
+    get_bar_metadata,
+    get_klines,
+    validate_kline_rows,
+)
 from data.rate_limit import PublicMarketBudgetDeferred, PublicMarketCooldown
 
 PUBLIC_BASE = "https://fapi.binance.com"
@@ -97,7 +102,11 @@ def fetch_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
         )
     if not isinstance(rows, list) or not rows:
         raise RuntimeError(f"{symbol} {interval} K线为空或格式错误")
-    quality = validate_kline_rows(rows, interval, min_rows=210)
+    bar_metadata = get_bar_metadata(symbol, interval, rows)
+    quality = validate_kline_rows(
+        rows, interval, min_rows=210, bar_metadata=bar_metadata,
+        require_finality=True,
+    )
     if not quality["ok"]:
         raise KlineDataQualityError(
             f"{symbol} {interval} K线质量不合格: {','.join(quality['issues'])}",
@@ -112,6 +121,23 @@ def fetch_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
     df["close"] = [float(r[4]) for r in rows]
     df["volume"] = [float(r[5]) for r in rows]
     df["close_time"] = [int(r[6]) for r in rows]
+    # 保留逐bar证据列，_completed 不会在墙钟跨过 close_time 后自动升级旧缓存。
+    df["_bar_final"] = [
+        bool(bar_metadata.get(int(r[0])).final is True)
+        for r in rows
+    ]
+    df["_bar_complete"] = [
+        bool(bar_metadata.get(int(r[0])).complete)
+        for r in rows
+    ]
+    df["_bar_revision"] = [
+        int(bar_metadata.get(int(r[0])).revision)
+        for r in rows
+    ]
+    df["_bar_source"] = [
+        str(bar_metadata.get(int(r[0])).source)
+        for r in rows
+    ]
     df.index.name = "timestamp"
     df = df[~df.index.duplicated(keep="first")].sort_index()
     _cache_set(key, df)
@@ -124,6 +150,11 @@ def _completed(df: pd.DataFrame, now: datetime) -> pd.DataFrame:
     # 不假设未完成 bar 一定在最后：代理重排或恢复缓存时可能出现多个 live bar；
     # 逐行按 close_time 过滤，保证指标只消费已经收盘的数据。
     completed = df[df["close_time"] <= int(now.timestamp() * 1000)].copy()
+    if "_bar_final" in completed.columns:
+        completed = completed[
+            completed["_bar_final"].eq(True)
+            & completed["_bar_complete"].eq(True)
+        ]
     return completed.sort_index()
 
 

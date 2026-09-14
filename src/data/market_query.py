@@ -22,7 +22,7 @@ from data.binance_public import (
     select_top_symbols,
 )
 from data.binance_transport import request_json
-from data.kline_store import get_klines
+from data.kline_store import get_bar_metadata, get_klines
 from data.market_stream_cache import get_marks, get_tickers
 from data.rate_limit import cooldown_remaining
 from core.trading_scope import TradingScope
@@ -156,6 +156,7 @@ def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
     observed_at_ms = int(time.time() * 1000)
     closed_klines, live_bar, data_quality = prepare_closed_klines(
         klines, interval, observed_at_ms=observed_at_ms, min_closed=20,
+        bar_metadata=get_bar_metadata(symbol, interval, klines),
     )
     ticker_price = ticker.get("lastPrice")
     mark_price = premium.get("markPrice")
@@ -256,6 +257,7 @@ def query_guardian_closed_bar(symbol: str, interval: str = "15m") -> dict[str, A
             rows = get_klines(client, symbol, interval, 24, fetcher=_get_json)
         closed, live_bar, quality = prepare_closed_klines(
             rows, interval, observed_at_ms=observed_at_ms, min_closed=3,
+            bar_metadata=get_bar_metadata(symbol, interval, rows),
         )
     except Exception as exc:
         return {

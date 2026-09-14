@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import time
 from typing import Awaitable, Callable, Iterable
 
@@ -51,6 +52,13 @@ SLOW_RETRY_SECONDS = 120.0
 RESUBSCRIBE_INTERVAL = 15.0
 # 只订阅两个基础周期，避免20币×7周期形成数百帧/秒；高周期由kline_store聚合。
 KLINE_INTERVALS = ("1m", "15m")
+# 公共组合流按有界周期主动轮换，避免连接长期存活后服务端/中间代理状态漂移。
+# 轮换窗口小幅随机化，多个实例不会在同一秒同时重连。
+PUBLIC_STREAM_ROTATION_SECONDS = 20 * 60 * 60
+PUBLIC_STREAM_ROTATION_JITTER_SECONDS = 5 * 60
+PUBLIC_STREAM_RETRY_JITTER_SECONDS = (1.0, 5.0)
+# 组合流通常包含ticker和K线；超过此时间没有任何有效业务帧就视为stale，主动重连。
+STREAM_STALE_SECONDS = 45.0
 
 
 def _proxy() -> str | None:
@@ -84,12 +92,16 @@ class PriceStream:
         self._last_frame_at = 0.0
         self._messages = 0
         self._reconnects = 0
+        self._rotations = 0
         self._book_subscribed: set[str] = set()
         self._book_active = False
         self._book_last_frame_at = 0.0
         self._book_failures = 0
+        self._book_rotations = 0
         self._state = "init"  # init | live | blocked | disabled
         self._stop = False
+        self._market_rotated = False
+        self._book_rotated = False
 
     # ---- 对外状态 ----
     @property
@@ -122,6 +134,7 @@ class PriceStream:
             "subscribed_streams": len(self._subscribed),
             "messages": self._messages,
             "reconnects": self._reconnects,
+            "rotations": self._rotations,
             "failures": self._failures,
             "last_frame_at": self._last_frame_at or None,
             "last_frame_age_seconds": (round(now - self._last_frame_at, 3)
@@ -131,6 +144,14 @@ class PriceStream:
                                    now - self._book_last_frame_at < 15.0),
             "book_ticker_streams": len(self._book_subscribed),
             "book_ticker_failures": self._book_failures,
+            "book_ticker_rotations": self._book_rotations,
+            "market_stale": bool(
+                self._last_frame_at and now - self._last_frame_at > STREAM_STALE_SECONDS
+            ),
+            "book_ticker_stale": bool(
+                self._book_last_frame_at
+                and now - self._book_last_frame_at > STREAM_STALE_SECONDS
+            ),
         }
 
     def stop(self) -> None:
@@ -158,6 +179,7 @@ class PriceStream:
             return
 
         while not self._stop:
+            self._market_rotated = False
             try:
                 await self._session()
             except asyncio.CancelledError:
@@ -166,7 +188,11 @@ class PriceStream:
                 await self._note_failure()
             if self._stop:
                 return
-            delay = SLOW_RETRY_SECONDS if self._failures >= FAILURES_BEFORE_BACKOFF else FAST_RETRY_SECONDS
+            if self._market_rotated:
+                delay = random.uniform(*PUBLIC_STREAM_RETRY_JITTER_SECONDS)
+            else:
+                delay = (SLOW_RETRY_SECONDS if self._failures >= FAILURES_BEFORE_BACKOFF
+                         else FAST_RETRY_SECONDS)
             await asyncio.sleep(delay)
 
     async def _serve_books(self) -> None:
@@ -176,6 +202,7 @@ class PriceStream:
         except ImportError:
             return
         while not self._stop:
+            self._book_rotated = False
             try:
                 await self._book_session()
             except asyncio.CancelledError:
@@ -185,8 +212,11 @@ class PriceStream:
                 self._book_active = False
                 self._book_subscribed.clear()
             if not self._stop:
-                delay = (SLOW_RETRY_SECONDS if self._book_failures >= FAILURES_BEFORE_BACKOFF
-                         else FAST_RETRY_SECONDS)
+                if self._book_rotated:
+                    delay = random.uniform(*PUBLIC_STREAM_RETRY_JITTER_SECONDS)
+                else:
+                    delay = (SLOW_RETRY_SECONDS if self._book_failures >= FAILURES_BEFORE_BACKOFF
+                             else FAST_RETRY_SECONDS)
                 await asyncio.sleep(delay)
 
     async def _book_session(self) -> None:
@@ -209,8 +239,24 @@ class PriceStream:
             self._handle_book_frame(first)
             self._book_failures = 0
             self._book_active = True
+            rotation_deadline = time.monotonic() + self._rotation_seconds()
             while not self._stop:
-                raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                remaining = rotation_deadline - time.monotonic()
+                if remaining <= 0:
+                    self._book_rotated = True
+                    self._book_rotations += 1
+                    return
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=min(30.0, remaining))
+                except asyncio.TimeoutError:
+                    if time.monotonic() >= rotation_deadline:
+                        self._book_rotated = True
+                        self._book_rotations += 1
+                        return
+                    if (self._book_last_frame_at
+                            and time.time() - self._book_last_frame_at > STREAM_STALE_SECONDS):
+                        raise RuntimeError("public_book_stream_stale")
+                    continue
                 self._handle_book_frame(raw)
 
     async def _session(self) -> None:
@@ -240,20 +286,46 @@ class PriceStream:
             self._failures = 0
             self._state = "live"
             await self._emit()
-            await self._consume(ws)
+            await self._consume(
+                ws, rotation_deadline=time.monotonic() + self._rotation_seconds(),
+            )
 
     @staticmethod
     def connection_url(streams: list[str]) -> str:
         """构造币安USD-M常规行情组合流地址。"""
         return FSTREAM_BASE + MARKET_COMBINED_PATH.format(streams="/".join(streams))
 
-    async def _consume(self, ws) -> None:
+    @staticmethod
+    def _rotation_seconds() -> float:
+        return max(
+            60.0,
+            PUBLIC_STREAM_ROTATION_SECONDS
+            + random.uniform(-PUBLIC_STREAM_ROTATION_JITTER_SECONDS,
+                              PUBLIC_STREAM_ROTATION_JITTER_SECONDS),
+        )
+
+    async def _consume(self, ws, *, rotation_deadline: float | None = None) -> None:
         """收帧循环；订阅列表变化时增量调整。"""
         last_check = time.monotonic()
         while not self._stop:
+            remaining = ((rotation_deadline - time.monotonic())
+                         if rotation_deadline is not None else RESUBSCRIBE_INTERVAL)
+            if remaining <= 0:
+                self._market_rotated = True
+                self._rotations += 1
+                return
             try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=RESUBSCRIBE_INTERVAL)
+                raw = await asyncio.wait_for(
+                    ws.recv(), timeout=min(RESUBSCRIBE_INTERVAL, remaining),
+                )
             except asyncio.TimeoutError:
+                if rotation_deadline is not None and time.monotonic() >= rotation_deadline:
+                    self._market_rotated = True
+                    self._rotations += 1
+                    return
+                if (self._last_frame_at
+                        and time.time() - self._last_frame_at > STREAM_STALE_SECONDS):
+                    raise RuntimeError("public_market_stream_stale")
                 # 没有帧不代表断了，正好利用这个间隙核对订阅列表
                 await self._sync_subscriptions(ws)
                 last_check = time.monotonic()

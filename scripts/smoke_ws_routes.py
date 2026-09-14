@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 
@@ -40,5 +41,12 @@ finally:
     module.push_stream_price = original
 check("成功解析symbol与最新价", received == [("BTCUSDT", 62000.5)])
 check("收到业务帧后状态为live", stream.state == "live")
+rotation = stream._rotation_seconds()
+check("公共流轮换窗口有界",
+      module.PUBLIC_STREAM_ROTATION_SECONDS - module.PUBLIC_STREAM_ROTATION_JITTER_SECONDS
+      <= rotation <=
+      module.PUBLIC_STREAM_ROTATION_SECONDS + module.PUBLIC_STREAM_ROTATION_JITTER_SECONDS)
+stream._last_frame_at = time.time() - module.STREAM_STALE_SECONDS - 1
+check("无业务帧超过阈值标记stale", stream.status()["market_stale"] is True)
 
-print("\n结果: 5 通过 / 0 失败")
+print("\n结果: 7 通过 / 0 失败")

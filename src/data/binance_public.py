@@ -6,14 +6,14 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
 
 from agents.models import MarketBrief
 from data.binance_transport import request_json
 from data.cache import SnapshotCache
-from data.kline_store import get_klines
+from data.kline_store import BarMeta, get_bar_metadata, get_klines
 from data.market_stream_cache import get_books, get_marks, get_tickers
 
 BASE_URL = "https://fapi.binance.com"
@@ -153,7 +153,9 @@ def _trend_from_ema(closes: list[float], period: int = 20) -> str:
 
 def prepare_closed_klines(rows: list[list[Any]], interval: str,
                            observed_at_ms: int | None = None,
-                           min_closed: int = 20) -> tuple[list[list[Any]], list[Any] | None, dict[str, Any]]:
+                           min_closed: int = 20,
+                           bar_metadata: Mapping[Any, Any] | None = None
+                           ) -> tuple[list[list[Any]], list[Any] | None, dict[str, Any]]:
     """隔离未完成 K 线并生成可审计的数据质量信息。
 
     Binance 的 kline 响应通常把当前正在形成的 bar 放在最后。它的 close、high、low
@@ -161,6 +163,9 @@ def prepare_closed_klines(rows: list[list[Any]], interval: str,
     都直接使用最后一项，导致刚开盘几分钟的低量被解释为“缩量健康”，也可能把瞬时价格
     当成收盘突破。本函数是按需查询与全市场简报的共同口径：指标只读 ``closed``，当前
     bar 仅作为显式 ``live_bar`` 返回给展示/上下文层。
+
+    ``bar_metadata`` 非空时，最终性以逐bar证据为准，而不是以墙钟跨过 ``close_time``
+    自动推断。旧缓存、丢失的 ``x=true`` 帧和字段不全的bar会返回结构化数据错误。
 
     ``fresh`` 允许最近闭合时间距采样时刻最多 1.5 个周期；再久通常意味着接口缓存、
     网络恢复后旧响应或缺 bar。质量信息本阶段先随数据传播，执行层据此 fail-closed。
@@ -174,6 +179,23 @@ def prepare_closed_klines(rows: list[list[Any]], interval: str,
     live_bar: list[Any] | None = None
     invalid_rows = 0
     live_rows = 0
+    unknown_finality_rows = 0
+    nonfinal_closed_rows = 0
+    incomplete_rows = 0
+    finality_clock_conflicts = 0
+
+    def metadata_for(open_ms: int) -> BarMeta | None:
+        if bar_metadata is None:
+            return None
+        value = bar_metadata.get(open_ms)
+        if value is None:
+            value = bar_metadata.get(str(open_ms))
+        if isinstance(value, BarMeta):
+            return value
+        if isinstance(value, Mapping):
+            return BarMeta.from_dict(value, fallback_received_at_ms=0)
+        return None
+
     for row in rows or []:
         if not isinstance(row, (list, tuple)) or len(row) <= 6:
             invalid_rows += 1
@@ -184,11 +206,35 @@ def prepare_closed_klines(rows: list[list[Any]], interval: str,
         except (TypeError, ValueError):
             invalid_rows += 1
             continue
-        if close_time <= now_ms:
+        open_ms = int(row[0])
+        meta = metadata_for(open_ms)
+        if bar_metadata is not None:
+            if meta is None or meta.final is None:
+                unknown_finality_rows += 1
+                if close_time > now_ms:
+                    live_rows += 1
+                    if live_bar is None or open_ms > int(live_bar[0]):
+                        live_bar = list(row)
+                continue
+            if meta.final is not True:
+                live_rows += 1
+                if close_time <= now_ms:
+                    nonfinal_closed_rows += 1
+                if live_bar is None or open_ms > int(live_bar[0]):
+                    live_bar = list(row)
+                continue
+            if close_time > now_ms:
+                finality_clock_conflicts += 1
+                continue
+            if not meta.complete:
+                incomplete_rows += 1
+                continue
+            closed.append(list(row))
+        elif close_time <= now_ms:
             closed.append(list(row))
         else:
             live_rows += 1
-            if live_bar is None or int(row[0]) > int(live_bar[0]):
+            if live_bar is None or open_ms > int(live_bar[0]):
                 live_bar = list(row)
 
     # 先记录原始顺序，再按开盘时间排序交给指标层；否则接口/缓存偶发乱序会把
@@ -234,6 +280,15 @@ def prepare_closed_klines(rows: list[list[Any]], interval: str,
         issues.append("non_monotonic_klines")
     if live_rows > 1:
         issues.append("multiple_live_klines")
+    if bar_metadata is not None:
+        if unknown_finality_rows:
+            issues.append("kline_finality_unknown")
+        if nonfinal_closed_rows:
+            issues.append("nonfinal_closed_kline")
+        if incomplete_rows:
+            issues.append("incomplete_closed_kline")
+        if finality_clock_conflicts:
+            issues.append("finality_clock_conflict")
 
     quality = {
         "interval": interval,
@@ -243,19 +298,33 @@ def prepare_closed_klines(rows: list[list[Any]], interval: str,
         "closed_count": len(closed),
         "live_bar_present": live_bar is not None,
         "invalid_rows": invalid_rows,
+        "finality_metadata_present": bar_metadata is not None,
+        "unknown_finality_rows": unknown_finality_rows,
+        "nonfinal_closed_rows": nonfinal_closed_rows,
+        "incomplete_rows": incomplete_rows,
+        "finality_clock_conflicts": finality_clock_conflicts,
         "recent_gap": recent_gap,
         "non_monotonic": non_monotonic,
         "fresh": fresh,
         "complete": (len(closed) >= min_closed and invalid_rows == 0
-                     and not recent_gap and not exact_gap and not non_monotonic),
+                     and not recent_gap and not exact_gap and not non_monotonic
+                     and not unknown_finality_rows and not nonfinal_closed_rows
+                     and not incomplete_rows and not finality_clock_conflicts),
         "ok": not issues,
         "issues": issues,
     }
     if not quality["ok"]:
         if any(issue in issues for issue in
                ("invalid_kline_rows", "kline_gap", "recent_kline_gap",
-                "non_monotonic_klines", "multiple_live_klines")):
+                "non_monotonic_klines", "multiple_live_klines",
+                "finality_clock_conflict")):
             quality["reason_code"] = "KLINE_STRUCTURE_INVALID"
+        elif "kline_finality_unknown" in issues:
+            quality["reason_code"] = "KLINE_FINALITY_UNKNOWN"
+        elif "nonfinal_closed_kline" in issues:
+            quality["reason_code"] = "KLINE_NOT_FINAL"
+        elif "incomplete_closed_kline" in issues:
+            quality["reason_code"] = "KLINE_FIELDS_INCOMPLETE"
         elif "stale_last_closed_kline" in issues:
             quality["reason_code"] = "KLINE_STALE"
         else:
@@ -281,11 +350,21 @@ def analyze_symbol(client: httpx.Client, symbol: str,
     k4h = get_klines(client, symbol, "4h", 60, fetcher=_get_json)
     k1d = get_klines(client, symbol, "1d", 30, fetcher=_get_json)
     observed_at_ms = int(time.time() * 1000)
-    k1m, _, quality1m = prepare_closed_klines(k1m, "1m", observed_at_ms)
-    k15, _, quality15 = prepare_closed_klines(k15, "15m", observed_at_ms)
-    k1h, _, quality1h = prepare_closed_klines(k1h, "1h", observed_at_ms)
-    k4h, _, quality4h = prepare_closed_klines(k4h, "4h", observed_at_ms)
-    k1d, _, quality1d = prepare_closed_klines(k1d, "1d", observed_at_ms)
+    k1m, _, quality1m = prepare_closed_klines(
+        k1m, "1m", observed_at_ms, bar_metadata=get_bar_metadata(symbol, "1m", k1m),
+    )
+    k15, _, quality15 = prepare_closed_klines(
+        k15, "15m", observed_at_ms, bar_metadata=get_bar_metadata(symbol, "15m", k15),
+    )
+    k1h, _, quality1h = prepare_closed_klines(
+        k1h, "1h", observed_at_ms, bar_metadata=get_bar_metadata(symbol, "1h", k1h),
+    )
+    k4h, _, quality4h = prepare_closed_klines(
+        k4h, "4h", observed_at_ms, bar_metadata=get_bar_metadata(symbol, "4h", k4h),
+    )
+    k1d, _, quality1d = prepare_closed_klines(
+        k1d, "1d", observed_at_ms, bar_metadata=get_bar_metadata(symbol, "1d", k1d),
+    )
     qualities = {
         "1m": quality1m,
         "15m": quality15,
