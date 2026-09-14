@@ -43,6 +43,8 @@ SCRIPTS = (
     "scripts/smoke_llm_coordinator.py",
     "scripts/smoke_llm_deadline.py",
     "scripts/smoke_review_worker.py",
+    "scripts/smoke_trade_reconciliation.py",
+    "scripts/smoke_trade_lifecycle.py",
     "scripts/smoke_db_migrations.py",
     "scripts/smoke_recovery_bundle.py",
     "scripts/smoke_risk_incidents.py",

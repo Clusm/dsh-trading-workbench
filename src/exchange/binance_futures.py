@@ -9,9 +9,10 @@ import threading
 import time
 import urllib.parse
 import uuid
+from datetime import datetime, timezone
 from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
 
@@ -31,6 +32,12 @@ from data.rate_limit import (
 from exchange.order_outbox import OrderOutbox
 from exchange.protection_mirror import ProtectionOrderMirror
 from exchange.protocol import normalize_algo_orders_payload, parse_iso as _parse_iso, parse_iso_ms
+from exchange.trade_reconciliation import (
+    TradeReconciliationBook,
+    account_reference,
+    normalize_execution_fill,
+    select_close_fills,
+)
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -81,6 +88,12 @@ class BinanceFuturesBroker:
             self.order_outbox.recover_stale_submitting()
         self.mode = environment
         self.environment = environment
+        self.trade_reconciliation = (
+            TradeReconciliationBook(
+                db, environment=environment,
+                account_ref=account_reference(api_key, environment),
+            ) if db is not None else None
+        )
         self.ledger_file = Path(ledger_file) if ledger_file is not None else (
             Path(__file__).resolve().parents[2] / "data" / "futures_source_ledger.json")
         self.ledger_file.parent.mkdir(parents=True, exist_ok=True)
@@ -392,6 +405,16 @@ class BinanceFuturesBroker:
         except Exception:
             return Decimal("0")
 
+    def _step_size(self, symbol: str) -> Decimal | None:
+        """读取 LOT_SIZE.stepSize；生命周期归零判定不能用经验百分比。"""
+        filters = self._symbol_filters.get(symbol, {})
+        value = filters.get("LOT_SIZE", {}).get("stepSize")
+        try:
+            step = Decimal(str(value))
+            return step if step > 0 else None
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+
     def _symbol_max_leverage(self, symbol: str) -> int | None:
         """查询该 symbol 在交易所的实际最大杠杆（所有风险档里的最高 initialLeverage）。"""
         try:
@@ -565,6 +588,16 @@ class BinanceFuturesBroker:
             })
             if not rows:
                 return None, None
+            reconciler = getattr(self, "trade_reconciliation", None)
+            if reconciler is not None:
+                try:
+                    reconciler.ingest(rows, source="rest_order_fee")
+                except Exception as exc:
+                    if self.db:
+                        self.db.log_risk_event(
+                            event_type="trade_fill_ingest_error", severity="warn",
+                            details=f"{symbol} orderId={order_id}: 成交入库失败 {type(exc).__name__}",
+                            action_taken="retain raw response; retry reconciliation")
             pnl = 0.0
             fee = 0.0
             for r in rows:
@@ -577,9 +610,15 @@ class BinanceFuturesBroker:
 
     def _record_trade_outcome(
         self, *, outcome_id: str, symbol: str, side: str, source: str,
-        entry_price: float, exit_price: float, qty: float, net_pnl: float,
+        entry_price: float, exit_price: float, qty: float, net_pnl: float | None,
         exit_reason: str, status: str = "CLOSED", ledger_meta: dict[str, Any] | None = None,
-        opened_at: str | None = None,
+        opened_at: str | None = None, closed_at: str | None = None,
+        lifecycle_id: str | None = None, environment: str | None = None,
+        release_id: str | None = None, attribution_status: str = "UNKNOWN",
+        cost_status: str = "UNKNOWN", actual_closed_at: str | None = None,
+        gross_realized: float | None = None, entry_fee: float | None = None,
+        exit_fee: float | None = None, funding_cashflow: float | None = None,
+        allow_legacy_fallback: bool = True,
     ) -> None:
         """把币安已确认的平仓成交连回原始开仓论点。
 
@@ -594,7 +633,7 @@ class BinanceFuturesBroker:
             open_client_id = str(meta.get("open_client_order_id") or "")
             row = (self.db.fetch_open_intent_by_client_order_id(open_client_id)
                    if open_client_id else None)
-            if row is None:
+            if row is None and allow_legacy_fallback:
                 row = self.db.fetch_latest_open_intent(symbol, side, source)
 
             raw: dict[str, Any] = {}
@@ -607,7 +646,8 @@ class BinanceFuturesBroker:
             opened = opened_at or (str(row["created_at"]) if row is not None else None)
             holding_minutes = None
             opened_dt = _parse_iso(opened)
-            closed_dt = _parse_iso(utc_now())
+            effective_closed_at = closed_at or utc_now()
+            closed_dt = _parse_iso(effective_closed_at)
             if opened_dt is not None and closed_dt is not None:
                 holding_minutes = max(0, int((closed_dt - opened_dt).total_seconds() // 60))
             notional = entry_price * qty
@@ -625,14 +665,26 @@ class BinanceFuturesBroker:
                 exit_price=exit_price,
                 qty=qty,
                 pnl=net_pnl,
-                pnl_pct=(net_pnl / notional * 100.0) if notional else None,
+                pnl_pct=(net_pnl / notional * 100.0)
+                if net_pnl is not None and notional else None,
                 holding_minutes=holding_minutes,
                 expected_holding_minutes=raw.get("expected_holding_minutes"),
                 invalidation=row["invalidation"] if row is not None else None,
                 exit_reason=exit_reason,
                 status=status,
                 opened_at=opened,
-                closed_at=utc_now(),
+                closed_at=effective_closed_at,
+                lifecycle_id=lifecycle_id,
+                environment=environment or str(getattr(self, "environment", "unknown") or "unknown"),
+                release_id=release_id or meta.get("release_id"),
+                attribution_status=attribution_status,
+                cost_status=cost_status,
+                actual_closed_at=actual_closed_at or effective_closed_at,
+                recorded_at=utc_now(),
+                gross_realized=gross_realized,
+                entry_fee=entry_fee,
+                exit_fee=exit_fee,
+                funding_cashflow=funding_cashflow,
             )
         except Exception as exc:
             self.db.log_risk_event(
@@ -1141,6 +1193,22 @@ class BinanceFuturesBroker:
                 entry=price if price > 0 else None,
                 open_client_order_id=first_cid,
             )
+            try:
+                self._ensure_lifecycle_from_snapshot(
+                    {"symbol": symbol, "positionAmt": total_qty,
+                     "entryPrice": price, "leverage": int(intent.leverage)},
+                    {"source": order_source,
+                     "strategy_id": getattr(intent, "strategy_id", None),
+                     "ticket_id": getattr(intent, "ticket_id", None),
+                     "margin_mode": margin_mode,
+                     "open_client_order_id": first_cid},
+                )
+            except Exception as exc:
+                if self.db:
+                    self.db.log_risk_event(
+                        event_type="trade_lifecycle_snapshot_error", severity="warn",
+                        details=f"{symbol}: 开仓后生命周期建立失败 {type(exc).__name__}",
+                        action_taken="retain order; reconcile later")
             if self.db and getattr(intent, "ticket_id", None):
                 self.db.update_signal_ticket(ticket_id=str(intent.ticket_id), status="filled")
         else:
@@ -1505,6 +1573,16 @@ class BinanceFuturesBroker:
         entry = float(pos.get("entryPrice") or 0.0)
         ledger_source, ledger_meta = self._ledger_source(symbol)
         source = str(getattr(intent, "order_source", ledger_source) or ledger_source or "ai")
+        reconciler = getattr(self, "trade_reconciliation", None)
+        if reconciler is not None:
+            try:
+                self._ensure_lifecycle_from_snapshot(pos, ledger_meta)
+            except Exception as exc:
+                if self.db:
+                    self.db.log_risk_event(
+                        event_type="trade_lifecycle_snapshot_error", severity="warn",
+                        details=f"{symbol}: 平仓前生命周期建立失败 {type(exc).__name__}",
+                        action_taken="retain close; reconcile after fill")
 
         # MARKET 单有单笔最大数量限制（例如 SKR 是 5000），超过时分多笔平仓
         max_qty = self._market_max_qty(symbol) if intent.order_type == "MARKET" else float("inf")
@@ -1586,15 +1664,69 @@ class BinanceFuturesBroker:
         # 同步来源台账：剩余仓位继续保留来源；清仓则移除
         remaining_pos = next((x for x in self.positions(force=True) if x["symbol"] == symbol), None)
         remaining_qty = abs(float(remaining_pos.get("positionAmt") or 0)) if remaining_pos else 0.0
-        if not close_unconfirmed and total_filled > 0 and exit_notional > 0:
-            self._record_trade_outcome(
-                outcome_id=f"bn-{first_cid}", symbol=symbol, side=pos_side, source=source,
-                entry_price=entry, exit_price=exit_notional / total_filled,
-                qty=total_filled, net_pnl=total_net_pnl,
-                exit_reason="ai_decision",
-                status="CLOSED" if remaining_qty <= 0 else "REDUCED",
-                ledger_meta=ledger_meta,
+        lifecycle_result = None
+        if not close_unconfirmed and reconciler is not None:
+            try:
+                lifecycle_result = self._reconcile_stored_lifecycle(
+                    symbol, pos_side, Decimal(str(remaining_qty)))
+            except Exception as exc:
+                if self.db:
+                    self.db.log_risk_event(
+                        event_type="trade_fill_reconcile_error", severity="warn",
+                        details=f"{symbol}: 已确认平仓成交归因失败 {type(exc).__name__}",
+                        action_taken="retain lifecycle; retry reconciliation")
+        if not close_unconfirmed and reconciler is not None and lifecycle_result is None:
+            active_lifecycle = self.db.get_active_position_lifecycle(
+                environment=str(self.environment), account_ref=str(reconciler.account_ref),
+                symbol=symbol, position_side=pos_side,
             )
+            if active_lifecycle is not None:
+                self._reconcile_job_retry(
+                    active_lifecycle,
+                    lower_bound_ms=max(0, int(active_lifecycle["opened_at_ms"] or 0)
+                                       - 10 * 60 * 1000),
+                    upper_bound_ms=int(time.time() * 1000),
+                    reason="CLOSED_ORDER_FILL_NOT_AVAILABLE",
+                )
+        if not close_unconfirmed and total_filled > 0 and exit_notional > 0:
+            if lifecycle_result is not None and lifecycle_result.flat_evidence:
+                lifecycle_row = self.db.fetch_one(
+                    "SELECT * FROM position_lifecycles WHERE lifecycle_id=?",
+                    (lifecycle_result.lifecycle_id,))
+                actual_closed = self._iso_from_ms(lifecycle_result.actual_closed_at_ms)
+                self._record_trade_outcome(
+                    outcome_id=f"bn-{first_cid}", symbol=symbol, side=pos_side, source=source,
+                    entry_price=entry, exit_price=exit_notional / total_filled,
+                    qty=float(lifecycle_result.allocated_qty),
+                    net_pnl=float(lifecycle_result.net_pnl)
+                    if lifecycle_result.net_pnl is not None else None,
+                    exit_reason="ai_decision", status="CLOSED", ledger_meta=ledger_meta,
+                    opened_at=self._iso_from_ms(int(lifecycle_row["opened_at_ms"] or 0))
+                    if lifecycle_row else None,
+                    closed_at=actual_closed, lifecycle_id=lifecycle_result.lifecycle_id,
+                    attribution_status=lifecycle_result.attribution_status,
+                    cost_status=lifecycle_result.cost_status, actual_closed_at=actual_closed,
+                    gross_realized=float(lifecycle_result.gross_realized)
+                    if lifecycle_result.gross_realized is not None else None,
+                    entry_fee=float(lifecycle_row["entry_fee"])
+                    if lifecycle_row and lifecycle_row["entry_fee"] is not None else None,
+                    exit_fee=float(lifecycle_result.exit_fee)
+                    if lifecycle_result.exit_fee is not None else None,
+                    funding_cashflow=float(lifecycle_row["funding_cashflow"])
+                    if lifecycle_row and lifecycle_row["funding_cashflow"] is not None else None,
+                    allow_legacy_fallback=False,
+                )
+            elif reconciler is None:
+                # 兼容没有L06账本的纸面/旧替身路径；生产 Broker 有账本时，
+                # 成交未完成归因不再用订单均价伪造可复盘 outcome。
+                self._record_trade_outcome(
+                    outcome_id=f"bn-{first_cid}", symbol=symbol, side=pos_side, source=source,
+                    entry_price=entry, exit_price=exit_notional / total_filled,
+                    qty=total_filled, net_pnl=total_net_pnl,
+                    exit_reason="ai_decision",
+                    status="CLOSED" if remaining_qty <= 0 else "REDUCED",
+                    ledger_meta=ledger_meta,
+                )
         if remaining_qty <= 0:
             self._remove_ledger_position(symbol)
         else:
@@ -1645,6 +1777,16 @@ class BinanceFuturesBroker:
             side = "SELL" if float(pos.get("positionAmt") or 0) > 0 else "BUY"
             entry = float(pos.get("entryPrice") or 0.0)
             try:
+                reconciler = getattr(self, "trade_reconciliation", None)
+                if reconciler is not None:
+                    try:
+                        self._ensure_lifecycle_from_snapshot(pos, meta)
+                    except Exception as exc:
+                        if self.db:
+                            self.db.log_risk_event(
+                                event_type="trade_lifecycle_snapshot_error", severity="warn",
+                                details=f"{symbol}: 紧急平仓前生命周期建立失败 {type(exc).__name__}",
+                                action_taken="retain close; reconcile after fill")
                 max_qty = self._market_max_qty(symbol)
                 chunks: list[float] = []
                 remaining = amt
@@ -1703,16 +1845,70 @@ class BinanceFuturesBroker:
                                     strategy_id=meta.get("strategy_id"),
                                     ticket_id=meta.get("ticket_id"),
                                     margin_mode=str(meta.get("margin_mode", "ISOLATED") or "ISOLATED"))
+                lifecycle_result = None
+                pos_side = "LONG" if float(pos.get("positionAmt") or 0) > 0 else "SHORT"
+                if not close_all_unconfirmed and reconciler is not None:
+                    try:
+                        lifecycle_result = self._reconcile_stored_lifecycle(
+                            symbol, pos_side, Decimal("0"))
+                    except Exception as exc:
+                        if self.db:
+                            self.db.log_risk_event(
+                                event_type="trade_fill_reconcile_error", severity="warn",
+                                details=f"{symbol}: 紧急平仓成交归因失败 {type(exc).__name__}",
+                                action_taken="retain lifecycle; retry reconciliation")
                 if (not close_all_unconfirmed and total_filled > 0
                         and exit_notional > 0 and first_cid):
-                    pos_side = "LONG" if float(pos.get("positionAmt") or 0) > 0 else "SHORT"
-                    self._record_trade_outcome(
-                        outcome_id=f"bn-{first_cid}", symbol=symbol, side=pos_side,
-                        source=source, entry_price=entry,
-                        exit_price=exit_notional / total_filled, qty=total_filled,
-                        net_pnl=total_net_pnl, exit_reason="risk_close_all",
-                        status="CLOSED", ledger_meta=meta,
+                    if lifecycle_result is not None and lifecycle_result.flat_evidence:
+                        lifecycle_row = self.db.fetch_one(
+                            "SELECT * FROM position_lifecycles WHERE lifecycle_id=?",
+                            (lifecycle_result.lifecycle_id,))
+                        actual_closed = self._iso_from_ms(lifecycle_result.actual_closed_at_ms)
+                        self._record_trade_outcome(
+                            outcome_id=f"bn-{first_cid}", symbol=symbol, side=pos_side,
+                            source=source, entry_price=entry,
+                            exit_price=exit_notional / total_filled,
+                            qty=float(lifecycle_result.allocated_qty),
+                            net_pnl=float(lifecycle_result.net_pnl)
+                            if lifecycle_result.net_pnl is not None else None,
+                            exit_reason="risk_close_all", status="CLOSED", ledger_meta=meta,
+                            opened_at=self._iso_from_ms(int(lifecycle_row["opened_at_ms"] or 0))
+                            if lifecycle_row else None,
+                            closed_at=actual_closed, lifecycle_id=lifecycle_result.lifecycle_id,
+                            attribution_status=lifecycle_result.attribution_status,
+                            cost_status=lifecycle_result.cost_status,
+                            actual_closed_at=actual_closed,
+                            gross_realized=float(lifecycle_result.gross_realized)
+                            if lifecycle_result.gross_realized is not None else None,
+                            entry_fee=float(lifecycle_row["entry_fee"])
+                            if lifecycle_row and lifecycle_row["entry_fee"] is not None else None,
+                            exit_fee=float(lifecycle_result.exit_fee)
+                            if lifecycle_result.exit_fee is not None else None,
+                            funding_cashflow=float(lifecycle_row["funding_cashflow"])
+                            if lifecycle_row and lifecycle_row["funding_cashflow"] is not None else None,
+                            allow_legacy_fallback=False,
+                        )
+                    elif reconciler is None:
+                        self._record_trade_outcome(
+                            outcome_id=f"bn-{first_cid}", symbol=symbol, side=pos_side,
+                            source=source, entry_price=entry,
+                            exit_price=exit_notional / total_filled, qty=total_filled,
+                            net_pnl=total_net_pnl, exit_reason="risk_close_all",
+                            status="CLOSED", ledger_meta=meta,
+                        )
+                if not close_all_unconfirmed and reconciler is not None and lifecycle_result is None:
+                    active_lifecycle = self.db.get_active_position_lifecycle(
+                        environment=str(self.environment), account_ref=str(reconciler.account_ref),
+                        symbol=symbol, position_side=pos_side,
                     )
+                    if active_lifecycle is not None:
+                        self._reconcile_job_retry(
+                            active_lifecycle,
+                            lower_bound_ms=max(0, int(active_lifecycle["opened_at_ms"] or 0)
+                                               - 10 * 60 * 1000),
+                            upper_bound_ms=int(time.time() * 1000),
+                            reason="CLOSED_ORDER_FILL_NOT_AVAILABLE",
+                        )
                 self._cancel_symbol_algos(symbol)
                 closed_symbols.append(symbol)
                 receipts.append({"order_id": first_cid, "action": "close_all", "symbol": symbol,
@@ -1817,6 +2013,62 @@ class BinanceFuturesBroker:
             "reason": "" if not missing else f"缺少或重复保护单: {', '.join(missing)}",
         }
 
+    def _ensure_lifecycle_from_snapshot(self, position: dict[str, Any],
+                                        ledger_meta: dict[str, Any]) -> None:
+        """从当前仓位快照建立/补齐生命周期，不把快照本身当成平仓证据。"""
+        reconciler = getattr(self, "trade_reconciliation", None)
+        if self.db is None or reconciler is None:
+            return
+        symbol = str(position.get("symbol") or "").upper()
+        amount = Decimal(str(position.get("positionAmt") or 0))
+        if not symbol or amount == 0:
+            return
+        explicit_side = str(position.get("positionSide") or "").upper()
+        side = explicit_side if explicit_side in {"LONG", "SHORT"} else (
+            "LONG" if amount > 0 else "SHORT")
+        qty = abs(amount)
+        entry_price = Decimal(str(position.get("entryPrice") or 0))
+        if entry_price <= 0:
+            return
+        open_client_id = str(ledger_meta.get("open_client_order_id") or "")
+        open_order = (self.db.fetch_one(
+            "SELECT created_at,raw_json FROM orders WHERE client_order_id=?", (open_client_id,))
+            if open_client_id else None)
+        opened_ms = self._parse_iso_ms(open_order["created_at"]) if open_order else None
+        exact_intent = (self.db.fetch_open_intent_by_client_order_id(open_client_id)
+                        if open_client_id else None)
+        lifecycle = reconciler.ensure_lifecycle(
+            symbol=symbol, position_side=side, entry_qty=qty, entry_price=entry_price,
+            opened_at_ms=opened_ms,
+            attribution_status="ATTRIBUTED" if exact_intent is not None else "UNATTRIBUTED",
+            entry_release_id=open_client_id or None, external=not bool(open_client_id),
+            raw={
+                "source": str(ledger_meta.get("source") or "ai"),
+                "strategy_id": ledger_meta.get("strategy_id"),
+                "ticket_id": ledger_meta.get("ticket_id"),
+                "leverage": position.get("leverage"),
+            },
+        )
+        existing_qty = Decimal(str(lifecycle.get("entry_qty") or 0))
+        if qty > existing_qty:
+            exit_qty = Decimal(str(lifecycle.get("exit_qty") or 0))
+            reconciler.db.update_position_lifecycle(
+                lifecycle_id=str(lifecycle["lifecycle_id"]),
+                entry_qty=float(qty), remaining_qty=float(max(Decimal("0"), qty - exit_qty)),
+                entry_notional=float(qty * entry_price),
+            )
+        if lifecycle.get("entry_fee") is None and open_order:
+            try:
+                raw_order = json.loads(open_order["raw_json"] or "{}")
+                if raw_order.get("commission") is not None:
+                    reconciler.db.update_position_lifecycle(
+                        lifecycle_id=str(lifecycle["lifecycle_id"]),
+                        entry_fee=abs(float(raw_order["commission"])),
+                        cost_status="INCOMPLETE",
+                    )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+
     def sync_positions(self) -> None:
         try:
             pos = self.positions()
@@ -1848,8 +2100,20 @@ class BinanceFuturesBroker:
             # 删除，后续循环将永远没有重试机会。以交易所当前仓位为真值，每轮重新
             # 发现并二次确认所有无仓位 Algo 单。
             orphan_cleanup = self._retry_orphan_algo_cleanup(exchange_symbols)
-            if closed_symbols:
-                self._reconcile_external_closes(closed_symbols)
+            reconcile_targets = list(closed_symbols)
+            if self.db and getattr(self, "trade_reconciliation", None) is not None:
+                # 已创建但上轮失败的补账任务不能因为 ledger 已删除而失去入口；
+                # 只取到期任务，且沿用每轮最多三个 symbol 的预算上限。
+                due_jobs = self.db.fetch_all(
+                    """SELECT DISTINCT symbol FROM trade_reconciliation_jobs
+                       WHERE status IN ('PENDING','RETRY','RUNNING')
+                         AND (next_retry_at IS NULL OR next_retry_at<=?)
+                       ORDER BY updated_at LIMIT ?""",
+                    (utc_now(), self._RECONCILE_MAX_SYMBOLS),
+                )
+                reconcile_targets.extend(str(row["symbol"]) for row in due_jobs)
+            if reconcile_targets:
+                self._reconcile_external_closes(list(dict.fromkeys(reconcile_targets)))
             if self.db:
                 # 只在仓位真正变化（新开/加减仓/改杠杆/换来源）时才写流水，
                 # 避免每个慢循环都重复插入同样的 OPEN 行撑爆表格。
@@ -1883,6 +2147,13 @@ class BinanceFuturesBroker:
                     leverage = int(float(p.get("leverage") or 1))
                     source = str(meta.get("source", "ai") or "ai")
                     prev = last_rows.get((p["symbol"], side))
+                    try:
+                        self._ensure_lifecycle_from_snapshot(p, meta)
+                    except Exception as exc:
+                        self.db.log_risk_event(
+                            event_type="trade_lifecycle_snapshot_error", severity="warn",
+                            details=f"{p['symbol']}: 生命周期快照建立失败 {type(exc).__name__}",
+                            action_taken="retain position snapshot; reconcile later")
                     if (prev and str(prev.get("status")) == "OPEN"
                             and str(prev.get("side")) == side
                             and abs(float(prev.get("qty") or 0) - qty) < 1e-12
@@ -1976,6 +2247,419 @@ class BinanceFuturesBroker:
         """
         return parse_iso_ms(value)
 
+    @staticmethod
+    def _iso_from_ms(value: int | None) -> str | None:
+        """把交易所成交时间转换为审计可读时间；不使用本地补账时间冒充成交时间。"""
+        if value is None or int(value) <= 0:
+            return None
+        return datetime.fromtimestamp(int(value) / 1000, timezone.utc).isoformat(
+            timespec="milliseconds")
+
+    _RECONCILE_PAGE_SIZE = 1000
+    _RECONCILE_MAX_PAGES = 20
+
+    def _fetch_user_trades_window(
+        self, symbol: str, *, start_ms: int, end_ms: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """按明确时间边界和稳定游标分页读取 userTrades。
+
+        Binance 的省略边界排序不能作为业务契约；首请求使用 start/end，后续有
+        数字成交ID时使用 ``fromId`` 推进。每页保留重叠去重，最多读取固定页数，
+        防止异常响应让慢循环无限抓历史。
+        """
+        upper = int(end_ms or time.time() * 1000)
+        page_size = int(self._RECONCILE_PAGE_SIZE)
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        from_id: int | None = None
+        time_cursor = int(start_ms)
+        for _ in range(max(1, int(self._RECONCILE_MAX_PAGES))):
+            params: dict[str, Any] = {"symbol": symbol, "limit": page_size}
+            if from_id is None:
+                params["startTime"] = max(0, time_cursor)
+            else:
+                params["fromId"] = from_id
+            params["endTime"] = upper
+            page = self._signed("GET", "/fapi/v1/userTrades", params, attempts=1) or []
+            if not isinstance(page, list):
+                raise TypeError("userTrades 返回结构不是列表")
+            if not page:
+                break
+            numeric_ids: list[int] = []
+            max_time = time_cursor
+            added = 0
+            for item in page:
+                if not isinstance(item, dict):
+                    raise TypeError("userTrades 列表含非法成交条目")
+                raw_id = item.get("id", item.get("tradeId"))
+                try:
+                    numeric_id = int(raw_id) if raw_id not in (None, "", "-1") else None
+                except (TypeError, ValueError):
+                    numeric_id = None
+                if numeric_id is not None:
+                    numeric_ids.append(numeric_id)
+                    key = f"id:{numeric_id}"
+                else:
+                    key = "raw:" + json.dumps(item, sort_keys=True, separators=(",", ":"), default=str)
+                try:
+                    max_time = max(max_time, int(item.get("time") or item.get("T") or 0))
+                except (TypeError, ValueError):
+                    pass
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(dict(item))
+                added += 1
+            if len(page) < page_size:
+                break
+            if numeric_ids:
+                next_from_id = max(numeric_ids) + 1
+                if from_id is not None and next_from_id <= from_id:
+                    break
+                from_id = next_from_id
+            else:
+                # 没有稳定ID时不能证明同毫秒满页已经前进；若本页没有新事实，
+                # 立即停止并把未完窗口留给补账任务，不能冒险跳过同毫秒成交。
+                if added == 0 or max_time <= time_cursor:
+                    break
+                time_cursor = max_time
+        return rows
+
+    def _reconcile_job_retry(
+        self, lifecycle: Mapping[str, Any], *, lower_bound_ms: int,
+        upper_bound_ms: int | None, reason: str, error: str | None = None,
+        attempt_count: int | None = None,
+    ) -> None:
+        """持久化补账失败/证据不足状态，下一轮仍可继续查询。"""
+        if not self.db:
+            return
+        lifecycle_id = str(lifecycle["lifecycle_id"])
+        existing = self.db.fetch_one(
+            "SELECT attempt_count FROM trade_reconciliation_jobs WHERE job_id=?",
+            (f"mta-reconcile-{lifecycle_id}",),
+        )
+        attempts = int(attempt_count if attempt_count is not None else (
+            int(existing["attempt_count"] or 0) + 1 if existing else 1))
+        delay = min(300.0, 5.0 * (2 ** min(attempts - 1, 6)))
+        next_retry = datetime.fromtimestamp(
+            time.time() + delay, timezone.utc).isoformat(timespec="milliseconds")
+        self.db.upsert_trade_reconciliation_job(
+            job_id=f"mta-reconcile-{lifecycle_id}", lifecycle_id=lifecycle_id,
+            environment=str(lifecycle["environment"]), account_ref=str(lifecycle["account_ref"]),
+            symbol=str(lifecycle["symbol"]), position_side=str(lifecycle["position_side"]),
+            lower_bound_ms=lower_bound_ms, upper_bound_ms=upper_bound_ms,
+            status="RETRY", reason=reason, attempt_count=attempts,
+            next_retry_at=next_retry, last_error=error,
+        )
+
+    def _lifecycle_context(self, symbol: str) -> tuple[dict[str, Any], dict[str, Any], Decimal] | None:
+        """从旧仓位流水或已持久生命周期恢复补账上下文。"""
+        if not self.db:
+            return None
+        rows = self.db.fetch_all(
+            """SELECT id,side,qty,leverage,entry_price,opened_at,source,
+                      strategy_id,ticket_id FROM positions
+               WHERE symbol=? AND status='OPEN' ORDER BY id DESC LIMIT 1""", (symbol,))
+        if rows:
+            previous = dict(rows[0])
+            position_qty = Decimal("0")
+        else:
+            lifecycle = self.db.get_active_position_lifecycle(
+                environment=str(self.environment),
+                account_ref=str(self.trade_reconciliation.account_ref),
+                symbol=symbol, position_side="LONG",
+            )
+            if lifecycle is None:
+                lifecycle = self.db.get_active_position_lifecycle(
+                    environment=str(self.environment),
+                    account_ref=str(self.trade_reconciliation.account_ref),
+                    symbol=symbol, position_side="SHORT",
+                )
+            if lifecycle is None:
+                return None
+            raw: dict[str, Any] = {}
+            try:
+                parsed = json.loads(lifecycle["raw_json"] or "{}")
+                raw = parsed if isinstance(parsed, dict) else {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            qty = float(lifecycle["entry_qty"] or 0.0)
+            notional = float(lifecycle["entry_notional"] or 0.0)
+            previous = {
+                "id": None, "side": str(lifecycle["position_side"]), "qty": qty,
+                "leverage": int(raw.get("leverage") or 1),
+                "entry_price": notional / qty if qty > 0 else 0.0,
+                "opened_at": self._iso_from_ms(int(lifecycle["opened_at_ms"] or 0)),
+                "source": raw.get("source") or "ai",
+                "strategy_id": raw.get("strategy_id"), "ticket_id": raw.get("ticket_id"),
+            }
+            position_qty = Decimal("0")
+        return previous, {}, position_qty
+
+    def _reconcile_stored_lifecycle(
+        self, symbol: str, position_side: str, position_qty: Decimal,
+    ) -> Any:
+        """用已入库的 WS/REST 成交完成本地已确认平仓的生命周期分配。"""
+        book = getattr(self, "trade_reconciliation", None)
+        if self.db is None or book is None:
+            return None
+        lifecycle = self.db.get_active_position_lifecycle(
+            environment=str(self.environment), account_ref=str(book.account_ref),
+            symbol=symbol, position_side=position_side,
+        )
+        if lifecycle is None:
+            return None
+        opened_ms = int(lifecycle["opened_at_ms"] or 0)
+        upper_ms = int(time.time() * 1000)
+        rows = self.db.fetch_execution_fills(
+            environment=str(self.environment), account_ref=str(book.account_ref),
+            symbol=symbol, lower_bound_ms=max(0, opened_ms - 10 * 60 * 1000),
+            upper_bound_ms=upper_ms,
+        )
+        normalized = []
+        for row in rows:
+            try:
+                normalized.append(normalize_execution_fill(
+                    {
+                        "symbol": row["symbol"], "trade_id": row["trade_id"],
+                        "order_id": row["order_id"], "side": row["side"],
+                        "position_side": row["position_side"], "qty": row["qty"],
+                        "price": row["price"], "realized_pnl": row["realized_pnl"],
+                        "commission": row["commission"],
+                        "commission_asset": row["commission_asset"],
+                        "trade_time_ms": row["trade_time_ms"],
+                    }, environment=str(row["environment"]),
+                    account_ref=str(row["account_ref"]), source=str(row["source"]),
+                ))
+            except Exception:
+                # 已经入库的行理论上经过规范化；若旧库夹带坏行，保留其审计事实，
+                # 但不让它参与新归因，等待人工/只读修复报告。
+                continue
+        candidates = select_close_fills(
+            normalized, symbol=symbol, position_side=position_side,
+            opened_at_ms=opened_ms, upper_bound_ms=upper_ms,
+        )
+        if not candidates:
+            return None
+        return book.reconcile(
+            str(lifecycle["lifecycle_id"]), candidates,
+            position_qty=position_qty, step_size=self._step_size(symbol),
+        )
+
+    def _reconcile_one_close_lifecycle(self, symbol: str) -> None:
+        """新生命周期路径：成交表、分页任务和闭合 outcome 的唯一入口。"""
+        if not self.db or getattr(self, "trade_reconciliation", None) is None:
+            return
+        context = self._lifecycle_context(symbol)
+        if context is None:
+            return
+        previous, _, position_qty = context
+        open_side = str(previous.get("side") or "").upper()
+        if open_side not in {"LONG", "SHORT"}:
+            return
+        open_qty = Decimal(str(previous.get("qty") or 0.0))
+        entry_price = Decimal(str(previous.get("entry_price") or 0.0))
+        if open_qty <= 0 or entry_price <= 0:
+            return
+        ledger_meta = {}
+        try:
+            _, ledger_meta = self._ledger_source(symbol)
+        except Exception:
+            ledger_meta = {}
+        open_client_id = str(ledger_meta.get("open_client_order_id") or "")
+        exact_intent = (self.db.fetch_open_intent_by_client_order_id(open_client_id)
+                        if open_client_id else None)
+        attribution_status = "ATTRIBUTED" if exact_intent is not None else "UNATTRIBUTED"
+        opened_ms = self._parse_iso_ms(previous.get("opened_at"))
+        if opened_ms is None:
+            opened_ms = int(time.time() * 1000) - 24 * 3600 * 1000
+        last_closed = self.db.fetch_one(
+            """SELECT lifecycle_id,opened_at_ms,entry_release_id FROM position_lifecycles
+               WHERE environment=? AND account_ref=? AND symbol=? AND position_side=?
+                 AND status='CLOSED' ORDER BY closed_at_ms DESC,recorded_at DESC LIMIT 1""",
+            (str(self.environment), str(self.trade_reconciliation.account_ref), symbol, open_side),
+        )
+        if last_closed is not None and (
+                (open_client_id and str(last_closed["entry_release_id"] or "") == open_client_id)
+                or int(opened_ms) <= int(last_closed["opened_at_ms"] or 0)):
+            # 本地 positions 流水可能尚未在 sync_positions 中收口；若同一开仓
+            # 已经完成生命周期，不得再次生成 lifecycle outcome。
+            return
+        origin_source = str(previous.get("source") or ledger_meta.get("source") or "ai").lower()
+        if origin_source not in {"ai", "strategy"}:
+            origin_source = "ai"
+        lifecycle = self.trade_reconciliation.ensure_lifecycle(
+            symbol=symbol, position_side=open_side, entry_qty=open_qty,
+            entry_price=entry_price, opened_at_ms=opened_ms,
+            attribution_status=attribution_status,
+            entry_release_id=open_client_id or None,
+            external=not bool(open_client_id),
+            raw={
+                "source": origin_source, "strategy_id": previous.get("strategy_id")
+                or ledger_meta.get("strategy_id"),
+                "ticket_id": previous.get("ticket_id") or ledger_meta.get("ticket_id"),
+                "leverage": previous.get("leverage"),
+            },
+        )
+        # positions 是快照流水，部分平仓后最新 OPEN 行的 qty/entry 时间可能已经
+        # 变化；闭合归因必须以 lifecycle 的累计开仓数量和首次开仓时间为准。
+        lifecycle_qty = Decimal(str(lifecycle.get("entry_qty") or open_qty))
+        lifecycle_entry_notional = Decimal(str(lifecycle.get("entry_notional") or 0))
+        lifecycle_entry_price = (
+            lifecycle_entry_notional / lifecycle_qty
+            if lifecycle_qty > 0 and lifecycle_entry_notional > 0 else entry_price
+        )
+        # 开仓订单已确认时，保留真实开仓手续费；缺失则不猜 0。
+        if lifecycle.get("entry_fee") is None and open_client_id:
+            open_order = self.db.fetch_one(
+                "SELECT raw_json FROM orders WHERE client_order_id=?", (open_client_id,))
+            if open_order:
+                try:
+                    raw_order = json.loads(open_order["raw_json"] or "{}")
+                    commission = raw_order.get("commission")
+                    if commission is not None:
+                        self.db.update_position_lifecycle(
+                            lifecycle_id=str(lifecycle["lifecycle_id"]),
+                            entry_fee=abs(float(commission)), cost_status="INCOMPLETE")
+                        lifecycle = dict(self.db.fetch_one(
+                            "SELECT * FROM position_lifecycles WHERE lifecycle_id=?",
+                            (lifecycle["lifecycle_id"],)))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+        end_ms = int(time.time() * 1000)
+        start_ms = max(0, int(opened_ms) - 10 * 60 * 1000)
+        job_id = f"mta-reconcile-{lifecycle['lifecycle_id']}"
+        existing_job = self.db.fetch_one(
+            "SELECT attempt_count FROM trade_reconciliation_jobs WHERE job_id=?", (job_id,))
+        attempt = int(existing_job["attempt_count"] or 0) + 1 if existing_job else 1
+        self.db.upsert_trade_reconciliation_job(
+            job_id=job_id, lifecycle_id=str(lifecycle["lifecycle_id"]),
+            environment=str(lifecycle["environment"]), account_ref=str(lifecycle["account_ref"]),
+            symbol=symbol, position_side=open_side, lower_bound_ms=start_ms,
+            upper_bound_ms=end_ms, status="RUNNING", reason="fetch_user_trades",
+            attempt_count=attempt,
+        )
+        try:
+            raw_trades = self._fetch_user_trades_window(
+                symbol, start_ms=start_ms, end_ms=end_ms)
+            normalized, _ = self.trade_reconciliation.ingest(
+                raw_trades, source="rest_reconcile", default_position_side=open_side)
+            candidates = select_close_fills(
+                normalized, symbol=symbol, position_side=open_side,
+                opened_at_ms=int(opened_ms), upper_bound_ms=end_ms)
+            if not candidates:
+                self._reconcile_job_retry(
+                    lifecycle, lower_bound_ms=start_ms, upper_bound_ms=end_ms,
+                    reason="NO_MATCHING_CLOSE_FILL", attempt_count=attempt)
+                return
+            result = self.trade_reconciliation.reconcile(
+                str(lifecycle["lifecycle_id"]), candidates,
+                position_qty=position_qty, step_size=self._step_size(symbol))
+            if result.status == "RECONCILING" or not result.flat_evidence:
+                self._reconcile_job_retry(
+                    lifecycle, lower_bound_ms=start_ms, upper_bound_ms=end_ms,
+                    reason=("CLOSE_QUANTITY_MISMATCH" if result.status == "RECONCILING"
+                            else "POSITION_NOT_FLAT_WITH_COMPLETE_FILL_EVIDENCE"),
+                    attempt_count=attempt)
+                if result.status == "RECONCILING":
+                    self.db.log_risk_event(
+                        event_type="futures_close_reconcile_mismatch", severity="warn",
+                        details=f"{symbol} 生命周期成交数量与仓位证据不一致，保留补账任务",
+                        action_taken="retry reconciliation")
+                return
+
+            allocations = self.db.fetch_lifecycle_allocations(str(lifecycle["lifecycle_id"]))
+            normalized_by_key = {row.fill_key: row for row in normalized}
+            groups: dict[str, list[tuple[Any, Decimal]]] = {}
+            for allocation in allocations:
+                key = str(allocation["fill_key"])
+                fill = normalized_by_key.get(key)
+                if fill is None:
+                    continue
+                order_key = fill.order_id or f"fill:{key}"
+                groups.setdefault(order_key, []).append(
+                    (fill, Decimal(str(allocation["allocated_qty"]))))
+            for order_key, group in groups.items():
+                if self.db.fetch_one(
+                        "SELECT id FROM orders WHERE exchange_order_id=? LIMIT 1", (order_key,)):
+                    continue
+                qty = sum((allocated for _, allocated in group), Decimal("0"))
+                notional = sum((allocated * fill.price for fill, allocated in group), Decimal("0"))
+                gross: Decimal | None = Decimal("0")
+                fee: Decimal | None = Decimal("0")
+                assets: set[str] = set()
+                for fill, allocated in group:
+                    ratio = allocated / fill.qty if fill.qty else Decimal("0")
+                    if fill.realized_pnl is None:
+                        gross = None
+                    elif gross is not None:
+                        gross += fill.realized_pnl * ratio
+                    if fill.commission is None or not fill.commission_asset:
+                        fee = None
+                    elif fee is not None:
+                        fee += fill.commission * ratio
+                    assets.add(str(fill.commission_asset or "").upper())
+                net = gross - fee if gross is not None and fee is not None and assets <= {"USDT"} else None
+                average_price = notional / qty if qty else Decimal("0")
+                self.db.log_order(
+                    client_order_id=f"mta-sync-{symbol}-{order_key}",
+                    exchange_order_id=order_key, symbol=symbol, side=open_side,
+                    order_type="MARKET", qty=float(qty), price=float(average_price),
+                    status="FILLED",
+                    raw={
+                        "mode": self.environment, "action": "close", "reconciled": True,
+                        "sync_source": "exchange_sync", "fills": float(qty),
+                        "trade_ids": [fill.trade_id for fill, _ in group if fill.trade_id],
+                        "gross_realized": float(gross) if gross is not None else None,
+                        "commission": -float(fee) if fee is not None else None,
+                        "net_pnl": float(net) if net is not None else None,
+                        "partial": False,
+                        "note": "保护单触发或交易所手动平仓，由生命周期成交流水补记",
+                    },
+                    order_source=origin_source,
+                    strategy_id=previous.get("strategy_id") or ledger_meta.get("strategy_id"),
+                    ticket_id=previous.get("ticket_id") or ledger_meta.get("ticket_id"),
+                    margin_mode=str(ledger_meta.get("margin_mode", "ISOLATED") or "ISOLATED"),
+                )
+            actual_closed = self._iso_from_ms(result.actual_closed_at_ms)
+            self._record_trade_outcome(
+                outcome_id=f"lifecycle-{lifecycle['lifecycle_id']}", symbol=symbol,
+                side=open_side, source=origin_source, entry_price=float(lifecycle_entry_price),
+                exit_price=float(sum((fill.price * allocated for fill, allocated in
+                                      [(normalized_by_key.get(str(a["fill_key"])),
+                                        Decimal(str(a["allocated_qty"])))
+                                       for a in allocations]
+                                      if fill is not None), Decimal("0")) / lifecycle_qty),
+                qty=float(lifecycle_qty), net_pnl=float(result.net_pnl)
+                if result.net_pnl is not None else None,
+                exit_reason="exchange_sync", status="CLOSED", ledger_meta={
+                    "open_client_order_id": open_client_id,
+                    "strategy_id": previous.get("strategy_id") or ledger_meta.get("strategy_id"),
+                    "ticket_id": previous.get("ticket_id") or ledger_meta.get("ticket_id"),
+                }, opened_at=self._iso_from_ms(int(lifecycle["opened_at_ms"] or 0))
+                or (str(previous.get("opened_at") or "") or None),
+                closed_at=actual_closed, lifecycle_id=str(lifecycle["lifecycle_id"]),
+                attribution_status=result.attribution_status,
+                cost_status=result.cost_status, actual_closed_at=actual_closed,
+                gross_realized=float(result.gross_realized)
+                if result.gross_realized is not None else None,
+                entry_fee=float(lifecycle["entry_fee"])
+                if lifecycle.get("entry_fee") is not None else None,
+                exit_fee=float(result.exit_fee) if result.exit_fee is not None else None,
+                funding_cashflow=float(lifecycle["funding_cashflow"])
+                if lifecycle.get("funding_cashflow") is not None else None,
+                allow_legacy_fallback=False,
+            )
+            self.db.update_trade_reconciliation_job(
+                job_id=job_id, status="DONE", reason="lifecycle_closed",
+                last_error=None, next_retry_at=None, attempt_count=attempt)
+        except Exception as exc:
+            self._reconcile_job_retry(
+                lifecycle, lower_bound_ms=start_ms, upper_bound_ms=end_ms,
+                reason="RECONCILE_ERROR", error=f"{type(exc).__name__}: {exc}",
+                attempt_count=attempt)
+            raise
+
     def _reconcile_one_close(self, symbol: str) -> None:
         """补记单个 symbol 最近一笔未被记录的平仓成交。
 
@@ -1993,6 +2677,9 @@ class BinanceFuturesBroker:
         修法：显式传 startTime 卡时间窗 → 显式按 time 倒序 → 按 orderId 聚合成交
         → 校验时间晚于开仓、数量能覆盖持仓量，任一不过就放弃（宁缺毋滥）。
         """
+        if getattr(self, "trade_reconciliation", None) is not None:
+            self._reconcile_one_close_lifecycle(symbol)
+            return
         rows = self.db.fetch_all(
             "SELECT id, side, qty, leverage, entry_price, opened_at, source, "
             "strategy_id, ticket_id FROM positions "

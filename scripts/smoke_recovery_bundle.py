@@ -27,7 +27,7 @@ data = project / "data"
 data.mkdir()
 db = sqlite3.connect(data / "agent_trader.sqlite")
 db.execute("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT)")
-db.execute("INSERT INTO schema_migrations VALUES(14, 'test')")
+db.execute("INSERT INTO schema_migrations VALUES(15, 'test')")
 db.commit()
 db.close()
 states = {
@@ -49,7 +49,7 @@ manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
 assert manifest["environment"] == "demo"
 assert manifest["bundle_schema"] == 2
 assert (bundle / "manifest.sha256").is_file()
-assert manifest["files"]["database"]["schema_version"] == 14
+assert manifest["files"]["database"]["schema_version"] == 15
 assert all((bundle / "state" / name).is_file() for name in states)
 assert not (bundle / ".env").exists()
 assert sqlite3.connect(bundle / "agent_trader.sqlite").execute(
@@ -82,7 +82,7 @@ media = tmp / "independent_media" / bundle.name
 media.parent.mkdir()
 shutil.copytree(bundle, media)
 verified = verify_recovery_bundle(media, expected_environment="demo")
-assert verified["database_schema"] == 14
+assert verified["database_schema"] == 15
 print("  PASS  独立介质副本通过清单/哈希/SQLite校验")
 target = tmp / "restore_target"
 preview = restore_to_new_directory(media, target, expected_environment="demo")

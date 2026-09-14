@@ -315,6 +315,9 @@ def _event_type_cn(value: Any) -> str:
         "control_block_open": "控制状态拦截开仓",
         "snapshot_rejected": "权益快照跳变已拦截",
         "futures_close_reconcile_mismatch": "外部平仓补记数量不符",
+        "trade_fill_ingest_error": "成交流水写入错误",
+        "trade_fill_reconcile_error": "成交流水对账错误",
+        "trade_lifecycle_snapshot_error": "持仓生命周期快照错误",
         "futures_orphan_protection_canceled": "孤儿保护单已自动撤销",
         "futures_close_source_error": "分通道强平错误",
         "futures_unsupported_symbol": "不支持的交易对已拦截",
@@ -1205,7 +1208,8 @@ def create_app(service: TradingService) -> FastAPI:
                 if bool(order_cfg.get("enabled", False)) and bool(
                         order_cfg.get("shadow_only", True)):
                     order_mirror = OrderMirror(
-                        service.db, environment=environment, allowed_symbols=allowed)
+                        service.db, environment=environment, allowed_symbols=allowed,
+                        trade_reconciliation=getattr(broker, "trade_reconciliation", None))
                     order_mirror.replay_pending()
                 safety_cfg = service.settings.raw_settings.get(
                     "exchange_safety_monitor", {}) or {}
@@ -1774,6 +1778,8 @@ def create_app(service: TradingService) -> FastAPI:
             "account_mirror": mirror_status,
             "order_mirror": order_mirror_status,
             "order_outbox": order_outbox_status,
+            "trade_reconciliation": runtime.get(
+                "trade_reconciliation", {"enabled": False, "state": "unavailable"}),
             "protection_order_mirror": protection_mirror_status,
             "exchange_safety_monitor": safety_status,
             "server_time": time.time(),
@@ -1859,6 +1865,8 @@ def create_app(service: TradingService) -> FastAPI:
             "account_risk": account_risk,
             "entry_readiness": readiness,
             "order_mirror": order_mirror_status,
+            "trade_reconciliation": runtime.get(
+                "trade_reconciliation", {"enabled": False, "state": "unavailable"}),
             "protection_order_mirror": protection_status,
             "public_market_rate_limit": market_rate,
             "new_entry_gate": {

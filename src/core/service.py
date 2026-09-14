@@ -466,6 +466,20 @@ class TradingService:
         with self._run_thread_lock:
             return bool(self._run_thread and self._run_thread.is_alive())
 
+    def _trade_reconciliation_status(self) -> dict[str, Any]:
+        """返回成交生命周期摘要；仅用于观测，不把补账状态改成新的风险档。"""
+        book = getattr(self.broker, "trade_reconciliation", None)
+        if book is None or not hasattr(book, "db"):
+            return {"enabled": False, "state": "disabled"}
+        try:
+            environment = str(getattr(self.broker, "environment", "unknown") or "unknown")
+            return {
+                "enabled": True, "state": "active",
+                **book.db.trade_reconciliation_status(environment),
+            }
+        except Exception as exc:
+            return {"enabled": True, "state": "degraded", "last_error": type(exc).__name__}
+
     def runtime_status(self) -> dict[str, Any]:
         """返回线程循环的脱敏运行状态，供健康接口读取。"""
         with self._lock:
@@ -492,6 +506,7 @@ class TradingService:
                     and self._review_thread.is_alive()
                 ),
                 "llm_coordinator": coordinator_status(),
+                "trade_reconciliation": self._trade_reconciliation_status(),
             }
 
     def _mirror_fact(self, table: str, environment: str,

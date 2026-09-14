@@ -209,6 +209,6 @@ status = outbox.status()
 check("健康状态暴露UNKNOWN数量", status["unknown_orders"] == 0)
 versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
-check("数据库迁移版本1到14完整", versions == list(range(1, 15)))
+check("数据库迁移版本1到15完整", versions == list(range(1, 16)))
 db.close()
 print(f"\n结果: {passed} 通过 / 0 失败")

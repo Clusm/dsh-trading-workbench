@@ -44,10 +44,11 @@ class OrderMirror:
     对账，不替代 Broker 的订单提交与查询路径。
     """
     def __init__(self, db: AuditDatabase, *, environment: str,
-                 allowed_symbols: Iterable[str] = ()) -> None:
+                 allowed_symbols: Iterable[str] = (), trade_reconciliation: Any = None) -> None:
         self.db = db
         self.environment = str(environment)
         self.allowed_symbols = {str(s).upper() for s in allowed_symbols if s}
+        self.trade_reconciliation = trade_reconciliation
         self.last_event_at: float | None = None
         self.last_reconcile_at: float | None = None
         self.last_error: str | None = None
@@ -79,6 +80,29 @@ class OrderMirror:
         if not self._allowed(symbol):
             self.out_of_scope += 1
             return True
+        # 私有流的 TRADE 帧与 REST userTrades 进入同一成交表；这里只采集真实
+        # lastQty>0 的成交帧，订单状态帧仍由原有镜像状态机处理。
+        if str(order.get("x") or "").upper() == "TRADE":
+            try:
+                last_qty = _float(order.get("l"))
+                last_price = _float(order.get("L") or order.get("ap"))
+                if self.trade_reconciliation is not None and last_qty > 0 and last_price > 0:
+                    self.trade_reconciliation.ingest([{
+                        "symbol": symbol, "trade_id": order.get("t"),
+                        "order_id": order.get("i"), "side": order.get("S"),
+                        "position_side": order.get("ps") or "BOTH", "qty": order.get("l"),
+                        "price": order.get("L") or order.get("ap"),
+                        "realized_pnl": order.get("rp"), "commission": order.get("n"),
+                        "commission_asset": order.get("N"),
+                        "trade_time_ms": order.get("T") or event.transaction_time_ms
+                        or event.event_time_ms,
+                    }], source="user_stream")
+            except Exception as exc:
+                self.last_error = f"ExecutionFillIngest:{type(exc).__name__}"
+                self.db.log_risk_event(
+                    event_type="trade_fill_ingest_error", severity="warn",
+                    details=f"{symbol}: 私有流成交入库失败 {type(exc).__name__}",
+                    action_taken="retain event; REST reconciliation required")
         exchange_id = str(order.get("i") or "")
         if not exchange_id:
             self.last_error = "MissingExchangeOrderId"

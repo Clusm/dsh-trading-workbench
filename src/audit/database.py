@@ -6,9 +6,10 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator, Mapping
 
 from audit.normalization import clean_price, risk_incident_identity, strongest_severity
 from audit.migrations import apply_migration
@@ -833,8 +834,169 @@ class AuditDatabase:
             14, "order_outbox_reconciliation_metadata",
             apply_order_outbox_reconciliation_metadata)
 
+        def apply_trade_reconciliation() -> None:
+            """新增逐成交/持仓生命周期表，并为旧 outcome 加可空归因字段。"""
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS execution_fills (
+                    fill_key TEXT PRIMARY KEY,
+                    environment TEXT NOT NULL,
+                    account_ref TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    trade_id TEXT,
+                    order_id TEXT,
+                    side TEXT NOT NULL,
+                    position_side TEXT NOT NULL DEFAULT 'BOTH',
+                    qty REAL NOT NULL,
+                    price REAL NOT NULL,
+                    realized_pnl REAL,
+                    commission REAL,
+                    commission_asset TEXT,
+                    trade_time_ms INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    received_at TEXT NOT NULL,
+                    raw_json TEXT NOT NULL
+                )"""
+            )
+            self.conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_fills_trade
+                   ON execution_fills(environment,account_ref,trade_id)
+                   WHERE trade_id IS NOT NULL"""
+            )
+            self.conn.execute(
+                """CREATE INDEX IF NOT EXISTS idx_execution_fills_window
+                   ON execution_fills(environment,account_ref,symbol,trade_time_ms,fill_key)"""
+            )
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS position_lifecycles (
+                    lifecycle_id TEXT PRIMARY KEY,
+                    environment TEXT NOT NULL,
+                    account_ref TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    position_side TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'OPEN',
+                    opened_at_ms INTEGER,
+                    closed_at_ms INTEGER,
+                    entry_qty REAL NOT NULL DEFAULT 0,
+                    exit_qty REAL NOT NULL DEFAULT 0,
+                    remaining_qty REAL NOT NULL DEFAULT 0,
+                    entry_notional REAL NOT NULL DEFAULT 0,
+                    exit_notional REAL NOT NULL DEFAULT 0,
+                    gross_realized REAL,
+                    entry_fee REAL,
+                    exit_fee REAL,
+                    funding_cashflow REAL,
+                    attribution_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+                    cost_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+                    entry_release_id TEXT,
+                    external INTEGER NOT NULL DEFAULT 0,
+                    close_reason TEXT,
+                    recorded_at TEXT NOT NULL,
+                    raw_json TEXT NOT NULL DEFAULT '{}'
+                )"""
+            )
+            self.conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_active_position_lifecycle
+                   ON position_lifecycles(environment,account_ref,symbol,position_side)
+                   WHERE status IN ('OPEN','PENDING','RECONCILING')"""
+            )
+            self.conn.execute(
+                """CREATE INDEX IF NOT EXISTS idx_position_lifecycle_status
+                   ON position_lifecycles(environment,status,recorded_at)"""
+            )
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS lifecycle_fill_allocations (
+                    allocation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    lifecycle_id TEXT NOT NULL,
+                    fill_key TEXT NOT NULL UNIQUE,
+                    allocated_qty REAL NOT NULL,
+                    role TEXT NOT NULL,
+                    allocated_at TEXT NOT NULL,
+                    FOREIGN KEY(lifecycle_id) REFERENCES position_lifecycles(lifecycle_id),
+                    CHECK(role IN ('ENTRY','EXIT'))
+                )"""
+            )
+            self.conn.execute(
+                """CREATE INDEX IF NOT EXISTS idx_lifecycle_allocations_lifecycle
+                   ON lifecycle_fill_allocations(lifecycle_id,role,allocated_at)"""
+            )
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS trade_reconciliation_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    lifecycle_id TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    account_ref TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    position_side TEXT NOT NULL,
+                    lower_bound_ms INTEGER NOT NULL,
+                    upper_bound_ms INTEGER,
+                    cursor_time_ms INTEGER,
+                    cursor_trade_id TEXT,
+                    next_retry_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    reason TEXT NOT NULL DEFAULT '',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(lifecycle_id) REFERENCES position_lifecycles(lifecycle_id)
+                )"""
+            )
+            self.conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_active_trade_reconcile_job
+                   ON trade_reconciliation_jobs(lifecycle_id)
+                   WHERE status IN ('PENDING','RUNNING','RETRY')"""
+            )
+            self.conn.execute(
+                """CREATE INDEX IF NOT EXISTS idx_trade_reconcile_jobs_due
+                   ON trade_reconciliation_jobs(status,next_retry_at,updated_at)"""
+            )
+            existing = {
+                row["name"] for row in self.conn.execute(
+                    "PRAGMA table_info(trade_outcomes)").fetchall()
+            }
+            columns = {
+                "lifecycle_id": "TEXT",
+                "environment": "TEXT DEFAULT 'unknown'",
+                "release_id": "TEXT",
+                "attribution_status": "TEXT DEFAULT 'UNKNOWN'",
+                "cost_status": "TEXT DEFAULT 'UNKNOWN'",
+                "actual_closed_at": "TEXT",
+                "recorded_at": "TEXT",
+                "gross_realized": "REAL",
+                "entry_fee": "REAL",
+                "exit_fee": "REAL",
+                "funding_cashflow": "REAL",
+            }
+            for name, declaration in columns.items():
+                if name not in existing:
+                    self.conn.execute(
+                        f"ALTER TABLE trade_outcomes ADD COLUMN {name} {declaration}")
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trade_outcomes_lifecycle "
+                "ON trade_outcomes(lifecycle_id,environment)"
+            )
+
+        self._apply_migration(15, "trade_reconciliation_lifecycle", apply_trade_reconciliation)
+
     def close(self) -> None:
         self.conn.close()
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """在数据库锁内执行一个可回滚的多表事务。
+
+        普通审计写入继续使用各自的小事务；成交归因需要同时保存 fills、分配、
+        lifecycle、outcome 和 job 游标时，必须使用这个显式边界，避免崩溃留下半套事实。
+        """
+        with self.lock:
+            self.conn.execute("BEGIN")
+            try:
+                yield self.conn
+            except Exception:
+                self.conn.rollback()
+                raise
+            else:
+                self.conn.commit()
 
     def upsert_futures_feature(self, *, feature: dict[str, Any]) -> None:
         self._insert(
@@ -1052,6 +1214,206 @@ class AuditDatabase:
         with self.lock:
             return self.conn.execute(sql, params).fetchone()
 
+    def insert_execution_fills(self, fills: Iterable[Mapping[str, Any]]) -> int:
+        """幂等写入规范化成交；返回本次实际新增行数。"""
+        rows = [dict(row) for row in fills]
+        if not rows:
+            return 0
+        columns = (
+            "fill_key", "environment", "account_ref", "symbol", "trade_id", "order_id",
+            "side", "position_side", "qty", "price", "realized_pnl", "commission",
+            "commission_asset", "trade_time_ms", "source", "received_at", "raw_json",
+        )
+        values = [tuple(row.get(column) for column in columns) for row in rows]
+        placeholders = ",".join("?" for _ in columns)
+        with self.transaction() as conn:
+            before = int(conn.total_changes)
+            conn.executemany(
+                f"INSERT OR IGNORE INTO execution_fills({','.join(columns)}) "
+                f"VALUES({placeholders})", values,
+            )
+            return max(0, int(conn.total_changes) - before)
+
+    def fetch_execution_fills(
+        self, *, environment: str, account_ref: str, symbol: str,
+        lower_bound_ms: int | None = None, upper_bound_ms: int | None = None,
+    ) -> list[sqlite3.Row]:
+        """读取某账户/标的的成交事实，默认按真实成交时间和稳定键排序。"""
+        clauses = ["environment=?", "account_ref=?", "symbol=?"]
+        params: list[Any] = [environment, account_ref, symbol]
+        if lower_bound_ms is not None:
+            clauses.append("trade_time_ms>=?")
+            params.append(int(lower_bound_ms))
+        if upper_bound_ms is not None:
+            clauses.append("trade_time_ms<=?")
+            params.append(int(upper_bound_ms))
+        where = " AND ".join(clauses)
+        with self.lock:
+            return self.conn.execute(
+                "SELECT * FROM execution_fills "
+                f"WHERE {where} ORDER BY trade_time_ms,CAST(COALESCE(trade_id,'0') AS INTEGER),fill_key",
+                tuple(params),
+            ).fetchall()
+
+    def get_active_position_lifecycle(
+        self, *, environment: str, account_ref: str, symbol: str,
+        position_side: str,
+    ) -> sqlite3.Row | None:
+        """读取某持仓侧唯一活动生命周期。"""
+        return self.fetch_one(
+            """SELECT * FROM position_lifecycles
+               WHERE environment=? AND account_ref=? AND symbol=? AND position_side=?
+                 AND status IN ('OPEN','PENDING','RECONCILING')
+               ORDER BY recorded_at DESC LIMIT 1""",
+            (environment, account_ref, symbol, position_side),
+        )
+
+    def create_position_lifecycle(
+        self, *, lifecycle_id: str, environment: str, account_ref: str,
+        symbol: str, position_side: str, status: str = "OPEN",
+        opened_at_ms: int | None = None, entry_qty: float = 0.0,
+        entry_notional: float = 0.0, attribution_status: str = "UNKNOWN",
+        cost_status: str = "UNKNOWN", entry_release_id: str | None = None,
+        external: bool = False, raw: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """创建生命周期；活动唯一索引冲突时不覆盖现有生命周期。"""
+        with self.lock:
+            cursor = self.conn.execute(
+                """INSERT OR IGNORE INTO position_lifecycles(
+                    lifecycle_id,environment,account_ref,symbol,position_side,status,
+                    opened_at_ms,entry_qty,remaining_qty,entry_notional,
+                    attribution_status,cost_status,entry_release_id,external,
+                    recorded_at,raw_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    lifecycle_id, environment, account_ref, symbol, position_side, status,
+                    opened_at_ms, float(entry_qty), float(entry_qty), float(entry_notional),
+                    attribution_status, cost_status, entry_release_id, int(bool(external)),
+                    utc_now(), json.dumps(dict(raw or {}), ensure_ascii=False, default=str),
+                ),
+            )
+            self.conn.commit()
+            return cursor.rowcount == 1
+
+    def update_position_lifecycle(self, *, lifecycle_id: str, **values: Any) -> bool:
+        """更新生命周期聚合字段；列名采用白名单，拒绝动态SQL注入。"""
+        allowed = {
+            "status", "opened_at_ms", "closed_at_ms", "entry_qty", "exit_qty",
+            "remaining_qty", "entry_notional", "exit_notional", "gross_realized",
+            "entry_fee", "exit_fee", "funding_cashflow", "attribution_status",
+            "cost_status", "entry_release_id", "close_reason", "raw_json",
+        }
+        updates = {key: value for key, value in values.items() if key in allowed}
+        if not updates:
+            return False
+        updates["recorded_at"] = utc_now()
+        assignments = ",".join(f"{key}=?" for key in updates)
+        params = tuple(updates.values()) + (lifecycle_id,)
+        with self.lock:
+            cursor = self.conn.execute(
+                f"UPDATE position_lifecycles SET {assignments} WHERE lifecycle_id=?", params)
+            self.conn.commit()
+            return cursor.rowcount == 1
+
+    def insert_lifecycle_allocations(self, allocations: Iterable[Mapping[str, Any]]) -> int:
+        """写入成交→生命周期分配；fill_key 唯一约束防止重复消费。"""
+        rows = [dict(row) for row in allocations]
+        if not rows:
+            return 0
+        with self.transaction() as conn:
+            before = int(conn.total_changes)
+            conn.executemany(
+                """INSERT OR IGNORE INTO lifecycle_fill_allocations(
+                    lifecycle_id,fill_key,allocated_qty,role,allocated_at
+                ) VALUES(?,?,?,?,?)""",
+                [(
+                    row["lifecycle_id"], row["fill_key"], float(row["allocated_qty"]),
+                    row["role"], row.get("allocated_at") or utc_now(),
+                ) for row in rows],
+            )
+            return max(0, int(conn.total_changes) - before)
+
+    def fetch_lifecycle_allocations(self, lifecycle_id: str) -> list[sqlite3.Row]:
+        return self.fetch_all(
+            """SELECT a.*,f.symbol,f.trade_id,f.order_id,f.side,f.position_side,
+                      f.qty,f.price,f.realized_pnl,f.commission,f.commission_asset,
+                      f.trade_time_ms,f.source
+               FROM lifecycle_fill_allocations a
+               JOIN execution_fills f ON f.fill_key=a.fill_key
+               WHERE a.lifecycle_id=? ORDER BY f.trade_time_ms,a.allocation_id""",
+            (lifecycle_id,),
+        )
+
+    def upsert_trade_reconciliation_job(
+        self, *, job_id: str, lifecycle_id: str, environment: str, account_ref: str,
+        symbol: str, position_side: str, lower_bound_ms: int, upper_bound_ms: int | None,
+        status: str = "PENDING", reason: str = "", cursor_time_ms: int | None = None,
+        cursor_trade_id: str | None = None, next_retry_at: str | None = None,
+        attempt_count: int = 0, last_error: str | None = None,
+    ) -> bool:
+        """创建或更新生命周期补账任务，重启后保留边界和游标。"""
+        now = utc_now()
+        with self.lock:
+            cursor = self.conn.execute(
+                """INSERT INTO trade_reconciliation_jobs(
+                    job_id,lifecycle_id,environment,account_ref,symbol,position_side,
+                    lower_bound_ms,upper_bound_ms,cursor_time_ms,cursor_trade_id,
+                    next_retry_at,status,reason,attempt_count,last_error,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    lower_bound_ms=excluded.lower_bound_ms,upper_bound_ms=excluded.upper_bound_ms,
+                    cursor_time_ms=excluded.cursor_time_ms,cursor_trade_id=excluded.cursor_trade_id,
+                    next_retry_at=excluded.next_retry_at,status=excluded.status,reason=excluded.reason,
+                    attempt_count=excluded.attempt_count,last_error=excluded.last_error,
+                    updated_at=excluded.updated_at""",
+                (
+                    job_id, lifecycle_id, environment, account_ref, symbol, position_side,
+                    int(lower_bound_ms), upper_bound_ms, cursor_time_ms, cursor_trade_id,
+                    next_retry_at, status, reason, int(attempt_count), last_error, now, now,
+                ),
+            )
+            self.conn.commit()
+            return cursor.rowcount > 0
+
+    def update_trade_reconciliation_job(self, *, job_id: str, **values: Any) -> bool:
+        allowed = {
+            "cursor_time_ms", "cursor_trade_id", "next_retry_at", "status", "reason",
+            "attempt_count", "last_error", "upper_bound_ms",
+        }
+        updates = {key: value for key, value in values.items() if key in allowed}
+        if not updates:
+            return False
+        updates["updated_at"] = utc_now()
+        assignments = ",".join(f"{key}=?" for key in updates)
+        with self.lock:
+            cursor = self.conn.execute(
+                f"UPDATE trade_reconciliation_jobs SET {assignments} WHERE job_id=?",
+                tuple(updates.values()) + (job_id,),
+            )
+            self.conn.commit()
+            return cursor.rowcount == 1
+
+    def trade_reconciliation_status(self, environment: str | None = None) -> dict[str, Any]:
+        """返回不含原始成交的生命周期/补账健康摘要。"""
+        prefix = "WHERE environment=?" if environment else ""
+        params = (environment,) if environment else ()
+        with self.lock:
+            lifecycle_rows = self.conn.execute(
+                f"SELECT status,COUNT(*) n FROM position_lifecycles {prefix} GROUP BY status",
+                params,
+            ).fetchall()
+            job_rows = self.conn.execute(
+                f"SELECT status,COUNT(*) n FROM trade_reconciliation_jobs {prefix} GROUP BY status",
+                params,
+            ).fetchall()
+            fill_count = self.conn.execute(
+                f"SELECT COUNT(*) FROM execution_fills {prefix}", params).fetchone()[0]
+        return {
+            "fills": int(fill_count),
+            "lifecycles": {str(row["status"]): int(row["n"]) for row in lifecycle_rows},
+            "jobs": {str(row["status"]): int(row["n"]) for row in job_rows},
+        }
+
     def register_agent(self, name: str, role: str | None = None, model: str | None = None) -> None:
         with self.lock:
             self.conn.execute(
@@ -1166,7 +1528,13 @@ class AuditDatabase:
                           expected_holding_minutes: int | None = None,
                           invalidation: str | None = None, exit_reason: str | None = None,
                           status: str = "CLOSED", opened_at: str | None = None,
-                          closed_at: str | None = None) -> None:
+                          closed_at: str | None = None, lifecycle_id: str | None = None,
+                          environment: str = "unknown", release_id: str | None = None,
+                          attribution_status: str = "UNKNOWN", cost_status: str = "UNKNOWN",
+                          actual_closed_at: str | None = None, recorded_at: str | None = None,
+                          gross_realized: float | None = None, entry_fee: float | None = None,
+                          exit_fee: float | None = None,
+                          funding_cashflow: float | None = None) -> None:
         """平仓结果落库：把最终盈亏连回当初的 thesis（intent + invalidation）。
 
         这是复盘的核心地基：没有它，复盘只能看"赚/亏"，
@@ -1178,13 +1546,17 @@ class AuditDatabase:
             """INSERT OR IGNORE INTO trade_outcomes(outcome_id, intent_id, decision_id, symbol, side,
                source, strategy_id, ticket_id, confidence, entry_price, exit_price, qty, pnl,
                pnl_pct, holding_minutes, expected_holding_minutes, invalidation, exit_reason,
-               status, opened_at, closed_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               status, opened_at, closed_at, lifecycle_id, environment, release_id,
+               attribution_status, cost_status, actual_closed_at, recorded_at,
+               gross_realized, entry_fee, exit_fee, funding_cashflow)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (outcome_id, intent_id, decision_id, symbol, side, source,
              strategy_id, ticket_id, confidence,
              entry_price, exit_price, qty, pnl, pnl_pct, holding_minutes,
              expected_holding_minutes, invalidation, exit_reason, status,
-             opened_at, closed_at or utc_now()),
+             opened_at, closed_at or utc_now(), lifecycle_id, environment, release_id,
+             attribution_status, cost_status, actual_closed_at or closed_at,
+             recorded_at or utc_now(), gross_realized, entry_fee, exit_fee, funding_cashflow),
         )
 
     def log_risk_verdict(self, *, verdict_id: str, decision_id: str | None, verdict: str,
