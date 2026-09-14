@@ -55,6 +55,21 @@ def _resolve_state(db: Any, event_type: str, symbol: str) -> None:
         method(event_type, {"symbol": symbol})
 
 
+def _resolve_absent_position_states(db: Any, active_symbols: set[str]) -> None:
+    """平仓后自动收口该标的 Guardian 旧事件，避免历史 critical 永久悬挂。"""
+    list_method = getattr(db, "list_risk_incidents", None)
+    resolve_method = getattr(db, "resolve_risk_incident", None)
+    if not callable(list_method) or not callable(resolve_method):
+        return
+    for row in list_method(limit=500):
+        event_type = str(row["event_type"])
+        status = str(row["status"])
+        symbol = str(row["scope"] or "").upper()
+        if (event_type in {"guardian_review_due", "guardian_invalidation"}
+                and status != "RESOLVED" and symbol and symbol not in active_symbols):
+            resolve_method(event_type, {"symbol": symbol})
+
+
 def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
                        execution_mode: str, config: dict[str, Any] | None = None,
                        snapshot_provider: SnapshotProvider = query_guardian_closed_bar) -> TradeDecision:
@@ -68,6 +83,12 @@ def evaluate_positions(*, positions: list[dict[str, Any]], db: Any,
                       else "shadow" if configured_mode != "off" else "off")
     checks: list[dict[str, Any]] = []
     intents: list[TradeIntent] = []
+    active_symbols = {
+        str(position.get("symbol") or "").upper()
+        for position in (positions or [])
+        if str(position.get("source") or "ai") in allowed_sources
+    }
+    _resolve_absent_position_states(db, active_symbols)
 
     for position in positions or []:
         source = str(position.get("source") or "ai")

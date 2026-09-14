@@ -23,6 +23,7 @@ from audit.database import AuditDatabase
 import strategy_runtime
 from data.binance_public import _get_json
 from data.kline_store import get_klines
+from data.rate_limit import PublicMarketBudgetDeferred, PublicMarketCooldown
 
 PUBLIC_BASE = "https://fapi.binance.com"
 TF_MINUTES: dict[str, int] = {
@@ -122,6 +123,8 @@ def _completed(df: pd.DataFrame, now: datetime) -> pd.DataFrame:
 
 def _is_market_transport_outage(exc: Exception) -> bool:
     """判断是否为会影响整轮请求的基础设施故障，而非单一交易对参数错误。"""
+    if isinstance(exc, (PublicMarketCooldown, PublicMarketBudgetDeferred)):
+        return True
     if isinstance(exc, httpx.TransportError):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
@@ -130,6 +133,11 @@ def _is_market_transport_outage(exc: Exception) -> bool:
     return any(marker in text for marker in (
         "公开行情冷却", "rate limit", "temporary ip ban", "getaddrinfo failed",
     ))
+
+
+def _is_market_deferred(exc: Exception) -> bool:
+    """受控冷却/预算让步属于预期降级，不应伪装成策略扫描故障。"""
+    return isinstance(exc, (PublicMarketCooldown, PublicMarketBudgetDeferred))
 
 
 class SignalScanner:
@@ -237,6 +245,7 @@ class SignalScanner:
         scan_had_success = False
         scan_errors: list[str] = []
         transport_outage: str | None = None
+        deferred_reason: str | None = None
 
         # 旧实现只在“本轮刚触发的 ticket”进入执行器时检查过期，导致从未再次
         # 发射的 open ticket 永久滞留。扫描开始时统一收口历史过期票据。
@@ -286,10 +295,15 @@ class SignalScanner:
                                 )
                                 scan_had_success = True
                             except Exception as e:
-                                scan_had_error = True
                                 cycle_klines[market_key] = None
                                 detail = f"market_data {symbol} {tf}: {type(e).__name__} {e}"
-                                scan_errors.append(detail)
+                                if _is_market_deferred(e):
+                                    # 全局健康接口已经精确暴露冷却剩余时间和预算水位。
+                                    # 这里静默让步，避免每轮把正常熔断累计成扫描风险事件。
+                                    deferred_reason = type(e).__name__
+                                else:
+                                    scan_had_error = True
+                                    scan_errors.append(detail)
                                 if _is_market_transport_outage(e):
                                     # DNS、TLS、限流冷却等故障会影响整轮。首次失败后立即
                                     # 短路剩余 K 线请求，避免 8 组请求把慢循环拖住 1~2 分钟。
@@ -392,6 +406,10 @@ class SignalScanner:
             "successful_pairs": sum(1 for frame in cycle_klines.values() if frame is not None),
             "failed_pairs": sum(1 for frame in cycle_klines.values() if frame is None),
             "error_count": len(scan_errors),
+            "status": "deferred" if deferred_reason else (
+                "error" if scan_errors else "ok"
+            ),
+            "deferred_reason": deferred_reason,
             "tickets": len(tickets),
             "expired_tickets": expired_tickets,
         }

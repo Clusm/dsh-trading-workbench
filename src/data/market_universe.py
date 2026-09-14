@@ -18,6 +18,7 @@ import httpx
 from data.binance_public import get_all_24h_tickers
 from data.binance_transport import request_json
 from data.market_stream_cache import get_tickers
+from data.rate_limit import PublicMarketBudgetDeferred, PublicMarketCooldown
 
 PUBLIC_BASE = "https://fapi.binance.com"
 
@@ -108,6 +109,9 @@ class MarketUniverse:
         now = now or _utcnow()
         try:
             prices = self._fetch_all_prices()
+        except (PublicMarketCooldown, PublicMarketBudgetDeferred):
+            # 全局健康页已展示冷却/预算状态；预期让步不生成风险事件。
+            return []
         except Exception as e:
             if self.db:
                 self.db.log_risk_event(event_type="market_universe_price_fail", severity="warn",
@@ -137,6 +141,9 @@ class MarketUniverse:
     def _full_scan(self, now: datetime) -> list[str]:
         try:
             tickers = get_all_24h_tickers(symbols=self.core_symbols)
+        except (PublicMarketCooldown, PublicMarketBudgetDeferred):
+            # 保留上次稳定池，等待下一轮自然恢复。
+            return self.state.get("full_pool") or []
         except Exception as e:
             if self.db:
                 self.db.log_risk_event(event_type="market_universe_full_scan_fail", severity="warn",

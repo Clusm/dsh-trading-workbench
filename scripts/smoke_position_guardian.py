@@ -144,6 +144,24 @@ incident = db.fetch_one(
 check("再次失效会重开并新增一次事件",
       incident["status"] == "OPEN" and incident["occurrence_count"] == 2)
 
+print("\n[5c] 仓位消失后自动收口该标的 Guardian 旧事件")
+evaluate_positions(
+    positions=[{"symbol": "ZECUSDT", "side": "SHORT", "qty": 0.2, "source": "ai"}],
+    db=db, execution_mode="demo", snapshot_provider=snapshot(1),
+)
+stale = db.fetch_one(
+    "SELECT status FROM risk_incidents "
+    "WHERE event_type='guardian_review_due' AND scope='ZECUSDT'"
+)
+evaluate_positions(positions=[], db=db, execution_mode="demo",
+                   snapshot_provider=snapshot(1))
+closed = db.fetch_one(
+    "SELECT status FROM risk_incidents "
+    "WHERE event_type='guardian_review_due' AND scope='ZECUSDT'"
+)
+check("不再持仓的critical事件已自动解决",
+      stale["status"] == "OPEN" and closed["status"] == "RESOLVED")
+
 print("\n[6] 生产配置保持影子，快循环独立于模型链路")
 production = load_decision_policy()
 service_source = (PROJECT_ROOT / "src/core/service.py").read_text(encoding="utf-8")

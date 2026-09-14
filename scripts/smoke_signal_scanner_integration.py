@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from audit.database import AuditDatabase  # noqa: E402
 from core.config_loader import load_settings  # noqa: E402
 from data.market_universe import MarketUniverse  # noqa: E402
+from data.rate_limit import PublicMarketCooldown  # noqa: E402
 from signal_engine import SignalScanner  # noqa: E402
 import signal_engine.scanner as scanner_module  # noqa: E402
 
@@ -135,6 +136,35 @@ def main() -> None:
         assert calls == 1 and errors == 1, (calls, errors)
         db.close()
 
+    # 已进入全局冷却时属于受控让步，不得每轮继续制造 signal_scan_error。
+    with tempfile.TemporaryDirectory(prefix="mta-signal-deferred-") as tmp:
+        root = Path(tmp)
+        (root / "strategy_cards.json").write_text(json.dumps({"cards": [
+            {"id": "a", "indicatorized": True, "signal_fn": "same",
+             "symbols": ["BTCUSDT"], "timeframes": ["1h"]},
+        ]}), encoding="utf-8")
+        db = AuditDatabase(root / "audit.sqlite")
+        deferred_scanner = SignalScanner(
+            knowledge_dir=root, strategy_lab_src="unused",
+            state_file=root / "state.json", db=db,
+        )
+        deferred_scanner._registry = {"same": lambda *_args: None}
+        deferred_scanner._features_mod = SimpleNamespace(clear_feature_cache=lambda: None)
+        original_fetch = scanner_module.fetch_klines
+        scanner_module.fetch_klines = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PublicMarketCooldown("cooldown")
+        )
+        try:
+            deferred_scanner.scan()
+        finally:
+            scanner_module.fetch_klines = original_fetch
+        errors = db.fetch_one(
+            "SELECT COUNT(*) count FROM risk_events WHERE event_type='signal_scan_error'"
+        )["count"]
+        last_scan = json.loads((root / "state.json").read_text(encoding="utf-8"))["last_scan"]
+        assert errors == 0 and last_scan["status"] == "deferred", (errors, last_scan)
+        db.close()
+
     # 非通用模式只能扫描策略卡声明且在白名单内的品种，不能把动态池追加到卡片。
     with tempfile.TemporaryDirectory(prefix="mta-signal-scope-") as tmp:
         root = Path(tmp)
@@ -214,6 +244,30 @@ def main() -> None:
         universe.state["prev_prices"] = {"BTCUSDT": 100.0, "XAUUSDT": 100.0}
         universe._fetch_all_prices = lambda: {"BTCUSDT": 104.0, "XAUUSDT": 150.0}
         assert universe.detect_short_anomalies() == ["BTCUSDT"]
+
+        # 受控冷却保留旧市场池且不产生伪故障事件。
+        db = AuditDatabase(Path(tmp) / "universe.sqlite")
+        universe.db = db
+        universe.state["full_pool"] = ["BTCUSDT"]
+        universe._fetch_all_prices = lambda: (_ for _ in ()).throw(
+            PublicMarketCooldown("cooldown")
+        )
+        assert universe.detect_short_anomalies() == []
+        universe_module.get_all_24h_tickers = lambda *args, **kwargs: (_ for _ in ()).throw(
+            PublicMarketCooldown("cooldown")
+        )
+        try:
+            assert universe._full_scan(pd.Timestamp("2026-09-07", tz="UTC").to_pydatetime()) == [
+                "BTCUSDT"
+            ]
+        finally:
+            universe_module.get_all_24h_tickers = original_tickers
+        false_failures = db.fetch_one(
+            "SELECT COUNT(*) count FROM risk_events "
+            "WHERE event_type IN ('market_universe_price_fail','market_universe_full_scan_fail')"
+        )["count"]
+        assert false_failures == 0, false_failures
+        db.close()
 
     # 历史 open ticket 即使不再发射，也要由扫描周期统一标记为 expired。
     with tempfile.TemporaryDirectory(prefix="mta-signal-expiry-") as tmp:
