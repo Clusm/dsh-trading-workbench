@@ -28,6 +28,8 @@ _LAST_LIMIT_STATUS: int | None = None
 _LAST_LIMITED_AT: float | None = None
 _LIMIT_EVENT_COUNT = 0
 _STATE_FILE: Path | None = None
+_COORDINATION_AVAILABLE = True
+_COORDINATION_ERROR: str | None = None
 
 # USD-M 当前公开额度由 exchangeInfo/响应头校正；2400/min 只是没有响应头时的保守基线。
 _WEIGHT_LIMIT_1M = max(1, int(os.getenv("MTA_BINANCE_WEIGHT_LIMIT_1M", "2400")))
@@ -129,6 +131,10 @@ class ExecutionRateLimited(RuntimeError):
     """签名执行请求收到交易所限流/封禁；调用方不得盲目重试。"""
 
 
+class RateLimitCoordinationUnavailable(RuntimeError):
+    """跨进程限流协调文件不可读写；普通请求必须暂停。"""
+
+
 def configure_rate_limit_budget(*, weight_limit_1m: int = 2400,
                                 local_budget_1m: int = 600,
                                 background_defer_ratio: float = 0.75,
@@ -213,6 +219,20 @@ def _write_payload_locked(payload: dict[str, Any], path: Path) -> None:
     os.replace(temp, path)
 
 
+def _mark_coordination(available: bool, error: Any = None) -> None:
+    """记录协调文件状态；错误摘要不保存路径中的敏感信息。"""
+    global _COORDINATION_AVAILABLE, _COORDINATION_ERROR
+    with _LOCK:
+        _COORDINATION_AVAILABLE = bool(available)
+        _COORDINATION_ERROR = None if available else _safe_telemetry_text(error, 120)
+
+
+def coordination_available() -> bool:
+    """返回跨进程限流协调是否可用。"""
+    with _LOCK:
+        return bool(_COORDINATION_AVAILABLE)
+
+
 def _state_snapshot() -> tuple[Path | None, dict[str, Any]]:
     """取出不含敏感信息的内存状态，避免在文件锁内持有业务锁。"""
     with _LOCK:
@@ -279,8 +299,10 @@ def _persist_state() -> None:
             _merge_observed_order_payload(merged, local)
             merged["request_events"] = _prune_events(list(by_id.values()))
             _write_payload_locked(merged, path)
-    except OSError:
-        # 状态文件只是跨重启保护；磁盘故障不能改写已经做出的内存决策。
+    except OSError as exc:
+        # 状态文件只是跨重启保护；磁盘故障不能回滚已经发出的请求，
+        # 但必须暴露协调不可用，让后续普通请求停止发送。
+        _mark_coordination(False, f"state persist: {type(exc).__name__}: {exc}")
         return
 
 
@@ -363,11 +385,23 @@ def configure_rate_limit_state(path: Path) -> None:
     global _ATTEMPT_COUNT, _RESPONSE_COUNT, _FAILURE_COUNT
     global _RESPONSE_STATUS_COUNTS
     global _OBSERVED_ORDER_COUNT_10S, _OBSERVED_ORDER_COUNT_1M, _OBSERVED_ORDER_AT
-    global _REQUEST_EVENTS
+    global _REQUEST_EVENTS, _COORDINATION_AVAILABLE, _COORDINATION_ERROR
     state_path = Path(path)
+    coordination_error: str | None = None
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        if state_path.exists():
+            with _state_file_lock(state_path):
+                loaded = json.loads(state_path.read_text(encoding="utf-8-sig"))
+                if not isinstance(loaded, dict):
+                    raise ValueError("rate-limit state must be a JSON object")
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        coordination_error = f"{type(exc).__name__}: {exc}"
     with _LOCK:
         _STATE_FILE = state_path
         _STATE_LOCK_FILE = state_path.with_name(f"{state_path.name}.lock")
+        _COORDINATION_AVAILABLE = coordination_error is None
+        _COORDINATION_ERROR = coordination_error
         payload = _read_state_file(state_path)
         try:
             remaining = max(0.0, float(payload.get("cooldown_until") or 0.0) - time.time())
@@ -488,7 +522,7 @@ def throttle(min_interval: float = 0.20, *, weight: int = 1,
 
 def reserve_request(path: str, *, weight: int = 1, priority: str = "normal",
                     endpoint_group: str = "general", source: str = "public_rest",
-                    environment: str = "public") -> str:
+                    environment: str = "public", purpose: str = "unknown") -> str:
     """在真正发 HTTP 前原子预留一次请求并写入脱敏遥测。
 
     预留发生在发送前，网络超时也会计入交易所额度；这避免“失败请求不计数”造成
@@ -507,6 +541,7 @@ def reserve_request(path: str, *, weight: int = 1, priority: str = "normal",
         "group": str(endpoint_group or "general"),
         "weight": max(1, int(weight)),
         "priority": normalized_priority,
+        "purpose": str(purpose or "unknown")[:40],
         "source": str(source or "unknown")[:32],
         "environment": str(environment or "unknown")[:16],
         "status": None,
@@ -517,6 +552,11 @@ def reserve_request(path: str, *, weight: int = 1, priority: str = "normal",
     }
     _refresh_external_state()
     path_state = _STATE_FILE
+    if (path_state is not None and not coordination_available()
+            and normalized_priority != "critical"):
+        raise RateLimitCoordinationUnavailable(
+            "RATE_COORDINATION_UNAVAILABLE：普通请求暂停，等待限流协调文件恢复"
+        )
     if path_state is not None:
         try:
             with _state_file_lock(path_state):
@@ -524,8 +564,13 @@ def reserve_request(path: str, *, weight: int = 1, priority: str = "normal",
                 if path_state.exists():
                     try:
                         payload = json.loads(path_state.read_text(encoding="utf-8-sig"))
-                    except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                        payload = {}
+                    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                        _mark_coordination(False, f"state read: {type(exc).__name__}: {exc}")
+                        # 让外层统一处理：普通请求立即暂停，critical 保护/恢复
+                        # 继续使用进程内保守预算，但不覆盖损坏文件。
+                        raise RateLimitCoordinationUnavailable(
+                            "RATE_COORDINATION_UNAVAILABLE：限流状态文件损坏"
+                        ) from exc
                 now = time.time()
                 remaining = max(0.0, float(payload.get("cooldown_until") or 0.0) - now)
                 if remaining > 0:
@@ -558,9 +603,20 @@ def reserve_request(path: str, *, weight: int = 1, priority: str = "normal",
                 _write_payload_locked(payload, path_state)
         except (PublicMarketCooldown, PublicMarketBudgetDeferred):
             raise
-        except OSError:
-            # 不能因为遥测文件不可写而丢掉一次已通过检查的业务请求。
-            pass
+        except RateLimitCoordinationUnavailable:
+            if normalized_priority != "critical":
+                raise
+            # critical 保护/恢复请求不因协调文件损坏丢弃，但不进入下面的
+            # “成功写回”分支，避免将损坏文件误标为已恢复。
+        except OSError as exc:
+            _mark_coordination(False, f"state write: {type(exc).__name__}: {exc}")
+            if normalized_priority != "critical":
+                raise RateLimitCoordinationUnavailable(
+                    "RATE_COORDINATION_UNAVAILABLE：限流状态文件不可写"
+                ) from exc
+            # critical 保护/恢复请求不因遥测文件故障丢弃，但仍受进程内硬冷却。
+        else:
+            _mark_coordination(True)
     with _LOCK:
         _REQUEST_EVENTS = _prune_events(_REQUEST_EVENTS + [event])
         _REQUEST_COUNT += 1
@@ -604,6 +660,7 @@ def observe_response(headers: Mapping[str, Any] | None, *, path: str,
                 "id": request_id, "at": time.time(), "path": normalized_path,
                 "group": "general", "weight": max(1, int(weight)),
                 "priority": "unknown", "source": "unclassified",
+                "purpose": "unknown",
                 "environment": "unknown", "status": None,
                 "outcome": "pending", "retry_after_seconds": None,
                 "error_type": None, "error_message": None,
@@ -649,6 +706,7 @@ def observe_failure(request_id: str | None, *, path: str, weight: int,
                 "id": request_id, "at": time.time(), "path": normalized_path,
                 "group": "general", "weight": max(1, int(weight)),
                 "priority": "unknown", "source": "unclassified",
+                "purpose": "unknown",
                 "environment": "unknown", "status": None,
                 "outcome": "pending", "retry_after_seconds": None,
                 "error_type": None, "error_message": None,
@@ -767,7 +825,8 @@ def _update_request_event(request_id: str, *, path: str, weight: int,
                 payload["failure_count"] = _safe_int(payload.get("failure_count")) + 1
             _merge_observed_order_payload(payload, observed_order)
             _write_payload_locked(payload, path_state)
-    except OSError:
+    except OSError as exc:
+        _mark_coordination(False, f"event persist: {type(exc).__name__}: {exc}")
         return
 
 
@@ -838,6 +897,8 @@ def rate_limit_status() -> dict[str, Any]:
                 "max_events": _TELEMETRY_EVENT_LIMIT,
             },
             "observed_weight_at": _OBSERVED_WEIGHT_AT,
+            "coordination_available": _COORDINATION_AVAILABLE,
+            "coordination_error": _COORDINATION_ERROR,
         }
 
 
@@ -850,7 +911,7 @@ def _reset_for_test() -> None:
     global _REQUEST_COUNT, _REQUEST_WEIGHT, _ATTEMPT_COUNT, _RESPONSE_COUNT
     global _FAILURE_COUNT, _BLOCKED_COUNT
     global _RESPONSE_STATUS_COUNTS, _REQUEST_EVENTS, _STATE_LOCK_FILE
-    global _DATA_BLOCKED_COUNT
+    global _DATA_BLOCKED_COUNT, _COORDINATION_AVAILABLE, _COORDINATION_ERROR
     with _LOCK:
         _LAST_REQUEST_TS = 0.0
         _NEXT_REQUEST_AT = 0.0
@@ -876,6 +937,8 @@ def _reset_for_test() -> None:
         _RESPONSE_STATUS_COUNTS.clear()
         _REQUEST_EVENTS.clear()
         _DATA_BLOCKED_COUNT = 0
+        _COORDINATION_AVAILABLE = True
+        _COORDINATION_ERROR = None
 
 
 def backoff_seconds(attempt: int, status: int | None = None) -> float:

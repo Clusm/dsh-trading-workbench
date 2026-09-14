@@ -17,7 +17,8 @@ import httpx
 
 from agents.models import RiskVerdict, TradeDecision, TradeIntent
 from audit.database import AuditDatabase, utc_now
-from data.binance_transport import endpoint_group, endpoint_weight
+from data.binance_transport import endpoint_group
+from data.binance_request_policy import parse_retry_after, policy_for
 from data.rate_limit import (
     ExecutionRateLimited,
     PublicMarketCooldown,
@@ -31,6 +32,30 @@ from exchange.order_outbox import OrderOutbox
 from exchange.protection_mirror import ProtectionOrderMirror
 from exchange.protocol import normalize_algo_orders_payload, parse_iso as _parse_iso, parse_iso_ms
 from concurrent.futures import ThreadPoolExecutor
+
+
+def _request_purpose(method: str, path: str, params: dict[str, Any]) -> str:
+    """按请求语义分配优先级；不能把所有签名请求笼统标成 critical。"""
+    normalized_method = str(method or "GET").upper()
+    normalized_path = str(path or "").split("?", 1)[0]
+    if normalized_path in {"/fapi/v1/time", "/fapi/v1/exchangeInfo"}:
+        return "startup"
+    if normalized_path in {"/fapi/v1/account", "/fapi/v2/account", "/fapi/v3/account",
+                           "/fapi/v1/positionRisk", "/fapi/v2/positionRisk"}:
+        return "account_reconcile"
+    if normalized_path in {"/fapi/v1/userTrades"}:
+        return "trade_reconcile"
+    if normalized_path in {"/fapi/v1/openOrders", "/fapi/v1/order"}:
+        return "order_reconcile" if normalized_method == "GET" else (
+            "exit" if params.get("reduceOnly") or params.get("closePosition") else "entry")
+    if normalized_path in {"/fapi/v1/openAlgoOrders", "/fapi/v1/algoOrder"}:
+        return "protection_reconcile" if normalized_method == "GET" else "protect"
+    if normalized_path in {"/fapi/v1/marginType", "/fapi/v1/leverage",
+                           "/fapi/v1/leverageBracket"}:
+        return "setup"
+    if normalized_path == "/fapi/v1/listenKey":
+        return "user_stream"
+    return "normal"
 
 
 class BinanceFuturesBroker:
@@ -116,14 +141,23 @@ class BinanceFuturesBroker:
             try:
                 parsed = urllib.parse.urlparse(url)
                 params = kwargs.get("params") if isinstance(kwargs.get("params"), dict) else {}
+                policy = policy_for(
+                    method, parsed.path, params,
+                    purpose=_request_purpose(method, parsed.path, params),
+                    environment=str(getattr(self, "environment", "live") or "live"),
+                    # 离线传输测试使用 example.invalid 的虚拟路径；真实 Binance
+                    # 主机必须严格登记，不能用 fallback 逃过发布检查。
+                    strict="binance" in str(parsed.hostname or "").lower(),
+                )
                 # 只有生产 fapi 与公共行情共用出口 IP，必须在发送前加入同一预算/冷却
                 # 临界区。Demo/Testnet 走独立主机，保持原有模拟盘行为不受公共池影响。
                 if parsed.hostname == "fapi.binance.com":
                     request_id = reserve_request(
-                        parsed.path, weight=endpoint_weight(parsed.path, params),
-                        priority="critical", endpoint_group=endpoint_group(parsed.path),
+                        parsed.path, weight=policy.ip_weight,
+                        priority=policy.priority, endpoint_group=endpoint_group(parsed.path),
                         source="signed_execution",
                         environment=str(getattr(self, "environment", "live") or "live"),
+                        purpose=policy.purpose,
                     )
                 response = self._client.request(method, url, **kwargs)
                 response_received = True
@@ -133,20 +167,16 @@ class BinanceFuturesBroker:
                     path = parsed.path
                     retry_after = None
                     if response.status_code == 418:
-                        try:
-                            retry_after = float(response.headers.get("Retry-After") or 480.0)
-                        except (TypeError, ValueError):
-                            retry_after = 480.0
-                        retry_after = min(604800.0, max(60.0, retry_after))
+                        retry_after = parse_retry_after(
+                            response.headers, default=480.0,
+                            maximum=604800.0, minimum=60.0)
                     elif response.status_code == 429:
-                        try:
-                            retry_after = float(response.headers.get("Retry-After") or 60.0)
-                        except (TypeError, ValueError):
-                            retry_after = 60.0
-                        retry_after = min(3600.0, max(5.0, retry_after))
+                        retry_after = parse_retry_after(
+                            response.headers, default=60.0,
+                            maximum=3600.0, minimum=5.0)
                     observe_response(
                         response.headers, path=path,
-                        weight=endpoint_weight(path, params), request_id=request_id,
+                        weight=policy.ip_weight, request_id=request_id,
                         status=response.status_code,
                         retry_after_seconds=retry_after,
                         error_code=response.status_code if response.status_code >= 400 else None,
@@ -154,7 +184,7 @@ class BinanceFuturesBroker:
                     )
                     if response.status_code == 418:
                         note_418(retry_after)
-                    elif response.status_code == 429 and response.headers.get("Retry-After"):
+                    elif response.status_code == 429:
                         note_rate_limit(retry_after, status=429)
                 if response.status_code in {418, 429}:
                     raise ExecutionRateLimited(
@@ -164,7 +194,7 @@ class BinanceFuturesBroker:
             except httpx.TransportError as exc:
                 if request_id is not None and not response_received:
                     observe_failure(
-                        request_id, path=parsed.path, weight=endpoint_weight(parsed.path, params),
+                        request_id, path=parsed.path, weight=policy.ip_weight,
                         error_type=type(exc).__name__, error_message=exc,
                     )
                 old_client = self._client

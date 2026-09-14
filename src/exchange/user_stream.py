@@ -13,6 +13,7 @@ from typing import Any, Callable
 import httpx
 
 from data.binance_transport import endpoint_weight
+from data.binance_request_policy import parse_retry_after, policy_for
 from data.rate_limit import (
     ExecutionRateLimited,
     PublicMarketCooldown,
@@ -208,11 +209,9 @@ class BinanceUserDataStream:
         if response.status_code in {418, 429}:
             default = 480.0 if response.status_code == 418 else 60.0
             maximum = 604800.0 if response.status_code == 418 else 3600.0
-            try:
-                retry_after = float(response.headers.get("Retry-After") or default)
-            except (TypeError, ValueError):
-                retry_after = default
-            retry_after = min(maximum, max(5.0, retry_after))
+            retry_after = parse_retry_after(
+                response.headers, default=default, maximum=maximum,
+                minimum=60.0 if response.status_code == 418 else 5.0)
         observe_response(
             response.headers, path=path, weight=endpoint_weight(path),
             request_id=request_id, status=response.status_code,
@@ -229,12 +228,14 @@ class BinanceUserDataStream:
 
     async def _listen_key(self, method: str) -> str | None:
         path = "/fapi/v1/listenKey"
+        policy = policy_for(
+            method, path, purpose="user_stream", environment=self.environment)
         request_id: str | None = None
         if self.environment == "live":
             request_id = reserve_request(
-                path, weight=endpoint_weight(path), priority="critical",
+                path, weight=policy.ip_weight, priority=policy.priority,
                 endpoint_group="signed_execution", source="user_stream",
-                environment=self.environment,
+                environment=self.environment, purpose=policy.purpose,
             )
         try:
             response = await self._client.request(
@@ -244,7 +245,7 @@ class BinanceUserDataStream:
         except httpx.TransportError as exc:
             if request_id is not None:
                 observe_failure(
-                    request_id, path=path, weight=endpoint_weight(path),
+                    request_id, path=path, weight=policy.ip_weight,
                     error_type=type(exc).__name__, error_message=exc,
                 )
             raise

@@ -133,7 +133,7 @@ limited_client = LimitedClient()
 limited_broker = broker_with(limited_client)
 limited_broker.base_url = "https://fapi.binance.com"
 try:
-    limited_broker._signed("GET", "/signed", {}, attempts=3)
+    limited_broker._signed("GET", "/fapi/v1/time", {}, attempts=3)
     raise AssertionError("418 应抛出")
 except ExecutionRateLimited:
     pass

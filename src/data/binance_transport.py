@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from data.rate_limit import (
     PublicMarketBudgetDeferred,
     PublicMarketCooldown,
+    RateLimitCoordinationUnavailable,
     check_available,
     note_418,
     note_rate_limit,
@@ -21,41 +22,15 @@ from data.rate_limit import (
     reserve_request,
     throttle,
 )
+from data.binance_request_policy import parse_retry_after, policy_for
 
 BASE_URL = "https://fapi.binance.com"
 _HTTP_SEND_LOCK = threading.Lock()
 
 
 def endpoint_weight(path: str, params: Mapping[str, Any] | None = None) -> int:
-    """返回保守的 USD-M IP 请求权重；动态端点按参数上取整。"""
-    params = params or {}
-    normalized = str(path).split("?", 1)[0]
-    if normalized == "/fapi/v1/klines":
-        limit = int(params.get("limit") or 500)
-        if limit < 100:
-            return 1
-        if limit < 500:
-            return 2
-        if limit <= 1000:
-            return 5
-        return 10
-    if normalized == "/fapi/v1/ticker/24hr":
-        return 1 if params.get("symbol") else 40
-    if normalized == "/fapi/v1/ticker/price":
-        return 1 if params.get("symbol") else 2
-    if normalized == "/fapi/v1/premiumIndex":
-        return 1 if params.get("symbol") else 10
-    if normalized == "/fapi/v1/depth":
-        limit = int(params.get("limit") or 100)
-        if limit <= 50:
-            return 2
-        if limit <= 100:
-            return 5
-        if limit <= 500:
-            return 10
-        return 20
-    # openInterest、exchangeInfo 和 futures/data 比率端点按至少一个权重保守排队。
-    return 1
+    """返回登记表给出的保守 USD-M IP 权重。"""
+    return policy_for("GET", path, params).ip_weight
 
 
 def endpoint_group(path: str) -> str:
@@ -68,23 +43,22 @@ def endpoint_group(path: str) -> str:
 
 def _retry_after(headers: Mapping[str, Any] | None, default: float,
                  maximum: float) -> float:
-    raw: Any = None
-    for key, value in dict(headers or {}).items():
-        if str(key).lower() == "retry-after":
-            raw = value
-            break
-    try:
-        value = float(raw or default)
-    except (TypeError, ValueError):
-        value = default
-    return min(maximum, max(5.0, value))
+    return parse_retry_after(headers, default=default, maximum=maximum)
 
 
 def request_json(client: Any, path: str, params: dict[str, Any] | None = None,
                  *, timeout: float = 15.0, attempts: int = 3,
-                 priority: str = "normal", base_url: str = BASE_URL) -> Any:
+                 priority: str = "normal", base_url: str = BASE_URL,
+                 purpose: str | None = None) -> Any:
     """发送公共请求；429/418 永不重试，其它传输/5xx故障有界重试。"""
-    weight = endpoint_weight(path, params)
+    policy = policy_for(
+        "GET", path, params,
+        purpose=purpose or ("market_scan" if str(priority).lower() == "background" else "normal"),
+        environment="public",
+    )
+    # 兼容少数显式 critical 调用，但不再把所有签名请求在传输层默认为 critical。
+    request_priority = "critical" if str(priority).lower() == "critical" else policy.priority
+    weight = policy.ip_weight
     last_error: Exception | None = None
     for attempt in range(max(1, int(attempts))):
         request_id: str | None = None
@@ -93,12 +67,12 @@ def request_json(client: Any, path: str, params: dict[str, Any] | None = None,
             # 发送锁覆盖最后一次冷却检查、HTTP和限流响应登记，确保后续排队者
             # 不会在首个429/418已经返回但尚未登记的窗口中穿透。
             with _HTTP_SEND_LOCK:
-                check_available(priority)
-                throttle(0.05, weight=weight, priority=priority)
+                check_available(request_priority, endpoint_group=endpoint_group(path))
+                throttle(0.05, weight=weight, priority=request_priority)
                 request_id = reserve_request(
-                    path, weight=weight, priority=priority,
+                    path, weight=weight, priority=request_priority,
                     endpoint_group=endpoint_group(path), source="public_rest",
-                    environment="public",
+                    environment="public", purpose=policy.purpose,
                 )
                 response = client.get(
                     f"{base_url}{path}", params=params, timeout=timeout,
@@ -135,7 +109,8 @@ def request_json(client: Any, path: str, params: dict[str, Any] | None = None,
                         f"Binance {path}: {payload.get('msg') or payload.get('code')}"
                     )
                 return payload
-        except (PublicMarketCooldown, PublicMarketBudgetDeferred):
+        except (PublicMarketCooldown, PublicMarketBudgetDeferred,
+                RateLimitCoordinationUnavailable):
             raise
         except Exception as exc:
             if request_id is not None and not response_received:

@@ -21,6 +21,8 @@ SCRIPTS = (
     "scripts/smoke_close_reconcile.py",
     "scripts/smoke_market_query_tools.py",
     "scripts/smoke_public_rate_limit.py",
+    "scripts/smoke_request_policy.py",
+    "scripts/check_binance_request_policy.py",
     "scripts/smoke_rate_limit_multiprocess.py",
     "scripts/smoke_market_data_gateway.py",
     "scripts/smoke_ws_routes.py",
