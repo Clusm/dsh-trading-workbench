@@ -1550,6 +1550,8 @@ def create_app(service: TradingService) -> FastAPI:
             channel_state = _channel_state_for_display(service, channel_state, positions)
         except Exception:
             channel_state = latest.get("channel_state") or {}
+        runtime_status = (service.runtime_status()
+                          if hasattr(service, "runtime_status") else {})
         return {
             "control_state": service.control.state,
             "account_risk": latest.get("account_risk") or {},
@@ -1585,6 +1587,9 @@ def create_app(service: TradingService) -> FastAPI:
                         "generated_at": latest["onchain"].generated_at} if latest["onchain"] else None,
             "intel_cache": latest.get("intel_cache"),
             "web3_intel": latest.get("web3_intel") or _intel_snapshot(service),
+            "release_id": (latest.get("release_id")
+                           or runtime_status.get("release_id", "legacy")),
+            "release_manifest": runtime_status.get("release_manifest") or {},
             "channel_state": channel_state,
             "cycle_age_seconds": round(time.time() - float(latest.get("ts") or time.time()), 1),
             "cycle_running": service.cycle_running(),
@@ -1866,6 +1871,8 @@ def create_app(service: TradingService) -> FastAPI:
             "startup_safety": safety,
             "account_risk": account_risk,
             "entry_readiness": readiness,
+            "release_id": runtime.get("release_id", "legacy"),
+            "release_manifest": runtime.get("release_manifest") or {},
             "order_mirror": order_mirror_status,
             "trade_reconciliation": runtime.get(
                 "trade_reconciliation", {"enabled": False, "state": "unavailable"}),
