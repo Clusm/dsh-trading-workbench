@@ -1,6 +1,7 @@
 """阶段 0 最小多 Agent 图：三个情报源 -> 策略库 -> 主Agent -> 风控。"""
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, TypedDict
 
 from pathlib import Path
@@ -120,6 +121,7 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 execution_feedback: dict[str, Any] | None = None,
                 query_budget: int = 8, execution_mode: str = "paper",
                 llm_total_timeout_seconds: float = 240.0,
+                llm_aux_timeout_seconds: float = 60.0,
                 trading_scope: TradingScope | None = None,
                 entry_readiness_provider: Callable[[], Any] | None = None) -> Any:
     # 生产服务显式注入 TradingScope；离线阶段脚本仍可只传旧参数。
@@ -132,6 +134,12 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
             configured_scope = market_core_symbols
         if configured_scope:
             scope = TradingScope.from_symbols(configured_scope)
+
+    aux_timeout = max(1.0, float(llm_aux_timeout_seconds))
+
+    def aux_deadline() -> float:
+        """每个情报摘要单独拥有有限预算，不把供应商阻塞带入无限等待。"""
+        return time.monotonic() + aux_timeout
 
     def market_node(state: AgentState) -> dict[str, Any]:
         pair = (agent_llms or {}).get("market_agent")
@@ -160,7 +168,8 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                     "{\"summary\":\"不超过150字中文总结市场状态、关键异动和风险\","
                     "\"belief\":{\"trend\":\"up|down|range\",\"strength\":0到1,"
                     "\"confidence\":0到1,\"invalidation\":\"什么条件会证明判断错误\"}}",
-                    brief.model_dump(), brief.summary, db, logger, state["run_id"])
+                    brief.model_dump(), brief.summary, db, logger, state["run_id"],
+                    deadline=aux_deadline(), purpose="intel")
                 brief.summary, brief.belief = beliefs.parse_belief(
                     summary, brief.summary, beliefs.market_default(brief.regime))
             recorder.record(agent_name="market_agent", model=pair[1] if pair else model,
@@ -222,7 +231,8 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                     "{\"summary\":\"不超过150字中文总结美股、VIX、美债与美联储事件对加密市场的影响\","
                     "\"belief\":{\"bias\":\"risk_on|risk_off|neutral\",\"confidence\":0到1,"
                     "\"invalidation\":\"什么条件会证明判断错误\"}}",
-                    brief.model_dump(), brief.summary, db, logger, state["run_id"])
+                    brief.model_dump(), brief.summary, db, logger, state["run_id"],
+                    deadline=aux_deadline(), purpose="intel")
                 brief.summary, brief.belief = beliefs.parse_belief(
                     summary, brief.summary, beliefs.macro_default(brief.market_bias))
             recorder.record(agent_name="macro_agent", model=pair[1] if pair else model,
@@ -253,7 +263,8 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                     "{\"summary\":\"不超过150字中文总结稳定币、TVL与趋势币种变化\","
                     "\"belief\":{\"flow_bias\":\"risk_on|risk_off|neutral\",\"confidence\":0到1,"
                     "\"invalidation\":\"什么条件会证明判断错误\"}}",
-                    brief.model_dump(), brief.summary, db, logger, state["run_id"])
+                    brief.model_dump(), brief.summary, db, logger, state["run_id"],
+                    deadline=aux_deadline(), purpose="intel")
                 brief.summary, brief.belief = beliefs.parse_belief(
                     summary, brief.summary, beliefs.onchain_default())
             recorder.record(agent_name="onchain_agent", model=pair[1] if pair else model,

@@ -49,16 +49,23 @@ _ALL_TICKERS_TTL_SECONDS = 30.0
 
 
 def _get_json(client: httpx.Client, path: str, params: dict[str, Any] | None = None,
-              timeout: float = 15.0, attempts: int = 4) -> Any:
+              timeout: float = 15.0, attempts: int = 4,
+              deadline: float | None = None) -> Any:
     """兼容旧调用签名，实际发送统一委托给权重感知传输层。"""
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("market tool deadline exceeded")
+        timeout = min(timeout, max(0.1, remaining))
     return request_json(
         client, path, params, timeout=timeout, attempts=attempts,
-        priority="normal", base_url=BASE_URL,
+        priority="normal", base_url=BASE_URL, deadline=deadline,
     )
 
 
 def get_all_24h_tickers(client: httpx.Client | None = None,
-                        symbols: list[str] | None = None) -> list[dict[str, Any]]:
+                        symbols: list[str] | None = None,
+                        deadline: float | None = None) -> list[dict[str, Any]]:
     global _ALL_TICKERS_CACHE
     # 白名单行情流覆盖完整时直接使用推送快照。没有明确白名单的旧调用仍走全市场REST，
     # 避免把20币快照误当成交易所全部合约。
@@ -73,7 +80,7 @@ def get_all_24h_tickers(client: httpx.Client | None = None,
         own = client is None
         c = client or httpx.Client(timeout=20.0)
         try:
-            rows = _get_json(c, "/fapi/v1/ticker/24hr")
+            rows = _get_json(c, "/fapi/v1/ticker/24hr", deadline=deadline)
             normalized = [dict(row) for row in rows if isinstance(row, dict)]
             _ALL_TICKERS_CACHE = (time.monotonic(), normalized)
             return [dict(row) for row in normalized]
@@ -335,20 +342,23 @@ def prepare_closed_klines(rows: list[list[Any]], interval: str,
 
 
 def analyze_symbol(client: httpx.Client, symbol: str,
-                   ticker: dict[str, Any] | None = None) -> dict[str, Any]:
+                   ticker: dict[str, Any] | None = None,
+                   deadline: float | None = None) -> dict[str, Any]:
     """对单个交易对做一次轻量分析。异常向上抛，由调用方收集。"""
     if ticker is None:
-        ticker = _get_json(client, "/fapi/v1/ticker/24hr", {"symbol": symbol})
+        ticker = _get_json(
+            client, "/fapi/v1/ticker/24hr", {"symbol": symbol}, deadline=deadline,
+        )
     try:
         pct_24h = float(ticker.get("priceChangePercent") or 0.0)
     except (TypeError, ValueError):
         pct_24h = 0.0
 
-    k1m = get_klines(client, symbol, "1m", 600, fetcher=_get_json)
-    k15 = get_klines(client, symbol, "15m", 80, fetcher=_get_json)
-    k1h = get_klines(client, symbol, "1h", 60, fetcher=_get_json)
-    k4h = get_klines(client, symbol, "4h", 60, fetcher=_get_json)
-    k1d = get_klines(client, symbol, "1d", 30, fetcher=_get_json)
+    k1m = get_klines(client, symbol, "1m", 600, fetcher=_get_json, deadline=deadline)
+    k15 = get_klines(client, symbol, "15m", 80, fetcher=_get_json, deadline=deadline)
+    k1h = get_klines(client, symbol, "1h", 60, fetcher=_get_json, deadline=deadline)
+    k4h = get_klines(client, symbol, "4h", 60, fetcher=_get_json, deadline=deadline)
+    k1d = get_klines(client, symbol, "1d", 30, fetcher=_get_json, deadline=deadline)
     observed_at_ms = int(time.time() * 1000)
     k1m, _, quality1m = prepare_closed_klines(
         k1m, "1m", observed_at_ms, bar_metadata=get_bar_metadata(symbol, "1m", k1m),

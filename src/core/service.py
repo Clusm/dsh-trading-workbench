@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
 import threading
 import time
@@ -41,6 +42,7 @@ from core.quotas import TradeQuotaManager
 from core.risk_guard import AccountRiskGuard
 from llm.base import LLMClient
 from llm.mock_client import MockLLMClient
+from llm.request_coordinator import coordinator_status
 from intel import ReadOnlyIntelService
 
 
@@ -206,6 +208,10 @@ class TradingService:
         self._closed = False
         self._thread: threading.Thread | None = None
         self._intel_thread: threading.Thread | None = None
+        self._review_thread: threading.Thread | None = None
+        self._review_queue: queue.Queue[str] = queue.Queue()
+        self._review_pending: set[str] = set()
+        self._review_lock = threading.Lock()
         self._cycle_lock = threading.Lock()
         # 保护单/挂单对账的独立轻量锁：与慢循环的 _cycle_lock 分开，
         # 避免 LLM 长决策（最长 600s）期间 SL/TP 补挂与限价单到期撤单全部停摆。
@@ -239,6 +245,7 @@ class TradingService:
             "order_submission_ready": False,
             "market_cooldown_active": None,
             "data_budget_available": False,
+            "rate_coordination_available": True,
             "order_mirror_ok": True if self.broker.environment == "paper" else None,
             "protection_mirror_ok": True if self.broker.environment == "paper" else None,
             "unknown_orders": 0,
@@ -475,6 +482,16 @@ class TradingService:
                 "last_latest_refresh_at": self._last_latest_refresh_at,
                 "last_latest_refresh_error": self._last_latest_refresh_error,
                 "started_at": self._started_at,
+                "review_queue_size": (
+                    self._review_queue.qsize()
+                    if isinstance(getattr(self, "_review_queue", None), queue.Queue)
+                    else 0
+                ),
+                "review_worker_alive": bool(
+                    getattr(self, "_review_thread", None)
+                    and self._review_thread.is_alive()
+                ),
+                "llm_coordinator": coordinator_status(),
             }
 
     def _mirror_fact(self, table: str, environment: str,
@@ -513,6 +530,8 @@ class TradingService:
             budget_available = False
         facts["market_cooldown_active"] = bool(market_rate.get("active"))
         facts["data_budget_available"] = budget_available
+        facts["rate_coordination_available"] = (
+            market_rate.get("coordination_available") is True)
         try:
             facts["order_submission_ready"] = bool(self.broker.order_submission_ready())
         except Exception:
@@ -704,6 +723,9 @@ class TradingService:
             llm_total_timeout_seconds=float(
                 (self.settings.raw_settings.get("llm", {}) or {}).get(
                     "total_timeout_seconds", 240.0)),
+            llm_aux_timeout_seconds=float(
+                (self.settings.raw_settings.get("llm", {}) or {}).get(
+                    "aux_timeout_seconds", 60.0)),
         )
         state = graph.invoke({"run_id": run_id, "decision_id": decision_id})
         decision = state.get("decision")
@@ -884,7 +906,12 @@ class TradingService:
             intel_worker.join(timeout=max(0.0, deadline - time.monotonic()))
         intel_alive = bool(intel_worker and intel_worker.is_alive())
         worker_alive = bool(worker and worker.is_alive())
-        return not scheduler_alive and not worker_alive and not intel_alive
+        review_worker = getattr(self, "_review_thread", None)
+        if (review_worker and review_worker is not threading.current_thread()
+                and review_worker.is_alive()):
+            review_worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        review_alive = bool(review_worker and review_worker.is_alive())
+        return not scheduler_alive and not worker_alive and not intel_alive and not review_alive
 
     def _loop(self, interval_minutes: float) -> None:
         fast_interval = float(self.settings.raw_settings.get("decision_cycle", {}).get("fast_interval_seconds", 30))
@@ -912,12 +939,101 @@ class TradingService:
             wait = max(1.0, min(fast_interval, max(1.0, next_slow - time.monotonic())))
             self._stop_event.wait(wait)
 
-    def _maybe_auto_review(self, now: datetime | None = None) -> list[str]:
-        """到点自动生成复盘报告。
+    def _start_review_worker(self) -> None:
+        """启动受管理的复盘worker；复盘不得占用交易调度线程。"""
+        if getattr(self, "_stop_event", None) is not None and self._stop_event.is_set():
+            return
+        with self._review_lock:
+            if self._review_thread and self._review_thread.is_alive():
+                return
+            self._review_thread = threading.Thread(
+                target=self._review_worker_loop, name="review-worker", daemon=True,
+            )
+            self._review_thread.start()
 
-        触发条件：UTC 时间已过 review.time_utc，且该日报告尚未生成（查 daily_reviews 表，
-        重启也不会重复跑）。最多回填最近 7 天的缺口。返回本次生成的日期列表。
-        """
+    def _review_worker_loop(self) -> None:
+        """串行处理复盘队列；失败只记录审计，不影响快慢交易循环。"""
+        while not self._stop_event.is_set():
+            try:
+                review_date = self._review_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                if self._stop_event.is_set():
+                    continue
+                if self.db.fetch_one(
+                    "SELECT review_date FROM daily_reviews WHERE review_date=?",
+                    (review_date,),
+                ):
+                    continue
+                cfg = self.settings.raw_settings.get("review", {}) or {}
+                llm = None
+                model = None
+                if bool(cfg.get("use_llm", True)):
+                    try:
+                        client, model = build_llm_for_agent(self.settings, "review_agent")
+                        if not isinstance(client, MockLLMClient):
+                            llm = client
+                    except Exception:
+                        llm = None
+                        model = None
+                from agents.review import run_review_agent
+                run_review_agent(
+                    self.db, self.settings.reviews_dir, review_date=review_date,
+                    llm=llm, model=model, logger=self.logger,
+                    total_timeout_seconds=float(cfg.get("total_timeout_seconds", 120.0)),
+                )
+                self.db.log_risk_event(
+                    event_type="auto_review_done", severity="info",
+                    details=f"自动复盘已生成：{review_date}", action_taken="none",
+                )
+            except Exception as exc:
+                self.db.log_risk_event(
+                    event_type="auto_review_error", severity="warn",
+                    details=f"{review_date}: {type(exc).__name__}: {exc}",
+                    action_taken="skip",
+                )
+            finally:
+                with self._review_lock:
+                    self._review_pending.discard(review_date)
+                self._review_queue.task_done()
+
+    def _run_reviews_inline(self, missing: list[str], cfg: dict[str, Any]) -> list[str]:
+        """兼容未完整构造的离线夹具；生产实例始终走队列worker。"""
+        from agents.review import run_review_agent
+        llm = None
+        model = None
+        if bool(cfg.get("use_llm", True)):
+            try:
+                client, model = build_llm_for_agent(self.settings, "review_agent")
+                if not isinstance(client, MockLLMClient):
+                    llm = client
+            except Exception:
+                llm = None
+                model = None
+        generated: list[str] = []
+        for date in missing:
+            try:
+                run_review_agent(
+                    self.db, self.settings.reviews_dir, review_date=date,
+                    llm=llm, model=model, logger=self.logger,
+                    total_timeout_seconds=float(cfg.get("total_timeout_seconds", 120.0)),
+                )
+                generated.append(date)
+            except Exception as exc:
+                self.db.log_risk_event(
+                    event_type="auto_review_error", severity="warn",
+                    details=f"{date}: {type(exc).__name__}: {exc}", action_taken="skip",
+                )
+        if generated:
+            self.db.log_risk_event(
+                event_type="auto_review_done", severity="info",
+                details=f"自动复盘已生成：{', '.join(generated)}", action_taken="none",
+            )
+        return generated
+
+    def _maybe_auto_review(self, now: datetime | None = None) -> list[str]:
+        """到点发现复盘缺口并入队，返回本次新增的日期列表。"""
         cfg = self.settings.raw_settings.get("review", {}) or {}
         if not bool(cfg.get("auto", True)):
             return []
@@ -939,30 +1055,24 @@ class TradingService:
         if not missing:
             return []
 
-        from agents.review import run_review_agent
-        llm = None
-        model = None
-        if bool(cfg.get("use_llm", True)):
-            try:
-                client, m = build_llm_for_agent(self.settings, "review_agent")
-                if not isinstance(client, MockLLMClient):
-                    llm, model = client, m
-            except Exception:
-                llm = None
-        generated: list[str] = []
-        for date in missing:
-            try:
-                run_review_agent(self.db, self.settings.reviews_dir, review_date=date,
-                                 llm=llm, model=model, logger=self.logger)
-                generated.append(date)
-            except Exception as e:
-                self.db.log_risk_event(event_type="auto_review_error", severity="warn",
-                                       details=f"{date}: {type(e).__name__}: {e}", action_taken="skip")
-        if generated:
-            self.db.log_risk_event(event_type="auto_review_done", severity="info",
-                                   details=f"自动复盘已生成：{', '.join(generated)}",
-                                   action_taken="none")
-        return generated
+        # MagicMock/极早期离线夹具没有真实队列；生产TradingService在__init__已初始化。
+        if not isinstance(getattr(self, "_review_queue", None), queue.Queue):
+            return TradingService._run_reviews_inline(self, missing, cfg)
+        queued: list[str] = []
+        with self._review_lock:
+            for date in missing:
+                if date in self._review_pending:
+                    continue
+                self._review_pending.add(date)
+                self._review_queue.put(date)
+                queued.append(date)
+        if queued:
+            self._start_review_worker()
+            self.db.log_risk_event(
+                event_type="auto_review_queued", severity="info",
+                details=f"自动复盘已入队：{', '.join(queued)}", action_taken="queue",
+            )
+        return queued
 
     def close(self) -> None:
         """幂等关闭线程、流、Broker、数据库及实例锁。"""

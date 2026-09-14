@@ -94,6 +94,8 @@ def evaluate_entry_readiness(
         reasons.append("MARKET_COOLDOWN")
     if _fact_bool(facts, "data_budget_available") is not True:
         reasons.append("MARKET_DATA_BUDGET")
+    if _fact_bool(facts, "rate_coordination_available") is not True:
+        reasons.append("RATE_COORDINATION_UNAVAILABLE")
 
     order_mirror = _fact_bool(facts, "order_mirror_ok")
     if order_mirror is not True:

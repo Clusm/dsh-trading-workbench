@@ -97,7 +97,7 @@ class RetryClient:
 
 
 retry_client = RetryClient()
-check("公开行情503有界重试后恢复", retry_service._get_json(retry_client, "/test") == {"ok": True}
+check("公开行情503有界重试后恢复", retry_service._get_json(retry_client, "/fapi/v1/time") == {"ok": True}
       and retry_client.calls == 2)
 
 print("\n[2] 到期影子回看")

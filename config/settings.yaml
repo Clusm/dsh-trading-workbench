@@ -70,10 +70,18 @@ llm:
   # 主决策Agent跨多轮工具调用的总时限；到期安全降级为 no_trade。
   # 不改变模型、推理档、风险参数或既有平仓/保护路径。
   total_timeout_seconds: 240
+  # 市场/宏观/链上摘要各自的辅助调用上限；超时使用原结构化简报，不阻塞下游保护。
+  aux_timeout_seconds: 60
   # 瞬时错误（504/429/5xx/网络异常）重试次数与退避间隔
   # 保留有限重试处理 429/5xx/网络异常；鉴权和参数类 4xx 不重试。
   max_retries: 3
   retry_backoff_seconds: 3.0
+  # 同一供应商凭据的所有Agent共享准入；不猜供应商RPM/TPM，只控制本地并发和排队。
+  coordinator:
+    max_concurrency: 1
+    queue_poll_seconds: 0.25
+    queue_deadline_seconds: 30
+  default_429_cooldown_seconds: 5
 
 execution:
   default_mode: demo

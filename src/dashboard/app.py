@@ -342,7 +342,15 @@ def _event_type_cn(value: Any) -> str:
         "capital_reset_skipped": "破产重置已跳过",
         "decision_downgraded": "决策校验降级",
         "llm_time_budget_exhausted": "AI决策总时限耗尽",
+        "llm_admission_timeout": "AI供应商排队超时",
+        "llm_provider_cooldown": "AI供应商冷却中",
+        "llm_deadline_exceeded": "AI总时限耗尽",
         "action_space_no_open": "本轮禁止开仓",
+        "entry_readiness_block_open": "就绪闸门拦截开仓",
+        "entry_readiness_unavailable": "就绪状态不可用",
+        "futures_scope_open_blocked": "合约开仓范围拦截",
+        "paper_scope_open_blocked": "纸面开仓范围拦截",
+        "strategy_scope_skip": "策略越过开仓范围已跳过",
         "intent_log_error": "intent落库错误",
         "outcome_log_error": "平仓归因错误",
         "fast_cycle_error": "快循环错误",
@@ -358,6 +366,7 @@ def _event_type_cn(value: Any) -> str:
         "manual_reset_close_error": "手动重置平仓错误",
         "manual_reset_rejected": "手动重置被拒绝",
         "auto_review_done": "自动复盘完成",
+        "auto_review_queued": "自动复盘已入队",
         "auto_review_error": "自动复盘失败",
         "mode_switch_saved": "执行模式已保存",
     }.get(str(value), str(value))
@@ -541,6 +550,24 @@ def _decision_observability(service: TradingService) -> dict[str, Any]:
            WHERE i.action='open' AND i.status='approved' AND o.status='FILLED'""")
     total_llm = int(llm["total"] or 0) if llm else 0
     ok_llm = int(llm["ok"] or 0) if llm else 0
+    window_start = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    recent_llm = service.db.fetch_all(
+        "SELECT status, latency_ms FROM llm_calls WHERE started_at >= ?",
+        (window_start,),
+    )
+    recent_latencies = sorted(
+        int(row["latency_ms"]) for row in recent_llm
+        if row["latency_ms"] is not None and int(row["latency_ms"]) >= 0
+    )
+
+    def percentile(values: list[int], fraction: float) -> int | None:
+        if not values:
+            return None
+        index = min(len(values) - 1, max(0, int((len(values) - 1) * fraction)))
+        return values[index]
+
+    recent_ok = sum(1 for row in recent_llm if str(row["status"]) == "ok")
+    recent_errors = len(recent_llm) - recent_ok
     approved = int(approved_opens["n"] or 0) if approved_opens else 0
     filled = int(filled_opens["n"] or 0) if filled_opens else 0
     now_ms = int(time.time() * 1000)
@@ -548,6 +575,16 @@ def _decision_observability(service: TradingService) -> dict[str, Any]:
         "sampled_decisions": len(rows), "checks": check_counts,
         "llm_availability": round(ok_llm / total_llm, 4) if total_llm else None,
         "llm_calls": total_llm,
+        "llm_24h": {
+            "state": "NO_DATA" if not recent_llm else "OK",
+            "calls": len(recent_llm),
+            "successful_calls": recent_ok,
+            "failed_calls": recent_errors,
+            "availability": (round(recent_ok / len(recent_llm), 4)
+                             if recent_llm else None),
+            "latency_p95_ms": percentile(recent_latencies, 0.95),
+            "latency_p99_ms": percentile(recent_latencies, 0.99),
+        },
         "signal_events": int(signals["n"] or 0) if signals else 0,
         "scan_errors": int(scan_errors["n"] or 0) if scan_errors else 0,
         "execution_conversion": round(filled / approved, 4) if approved else None,

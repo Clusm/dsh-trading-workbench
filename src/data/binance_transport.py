@@ -49,7 +49,8 @@ def _retry_after(headers: Mapping[str, Any] | None, default: float,
 def request_json(client: Any, path: str, params: dict[str, Any] | None = None,
                  *, timeout: float = 15.0, attempts: int = 3,
                  priority: str = "normal", base_url: str = BASE_URL,
-                 purpose: str | None = None) -> Any:
+                 purpose: str | None = None,
+                 deadline: float | None = None) -> Any:
     """发送公共请求；429/418 永不重试，其它传输/5xx故障有界重试。"""
     policy = policy_for(
         "GET", path, params,
@@ -64,6 +65,12 @@ def request_json(client: Any, path: str, params: dict[str, Any] | None = None,
         request_id: str | None = None
         response_received = False
         try:
+            effective_timeout = float(timeout)
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Binance request deadline exceeded")
+                effective_timeout = min(effective_timeout, max(0.1, remaining))
             # 发送锁覆盖最后一次冷却检查、HTTP和限流响应登记，确保后续排队者
             # 不会在首个429/418已经返回但尚未登记的窗口中穿透。
             with _HTTP_SEND_LOCK:
@@ -75,7 +82,7 @@ def request_json(client: Any, path: str, params: dict[str, Any] | None = None,
                     environment="public", purpose=policy.purpose,
                 )
                 response = client.get(
-                    f"{base_url}{path}", params=params, timeout=timeout,
+                    f"{base_url}{path}", params=params, timeout=effective_timeout,
                 )
                 response_received = True
                 status = int(getattr(response, "status_code", 0) or 0)
@@ -127,5 +134,11 @@ def request_json(client: Any, path: str, params: dict[str, Any] | None = None,
                 raise
             if attempt + 1 >= max(1, int(attempts)):
                 break
-            time.sleep(min(2.0, 0.25 * (2 ** attempt)))
+            delay = min(2.0, 0.25 * (2 ** attempt))
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                delay = min(delay, remaining)
+            time.sleep(delay)
     raise last_error if last_error is not None else RuntimeError("Binance public request failed")

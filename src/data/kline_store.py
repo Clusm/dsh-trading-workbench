@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import threading
 import time
@@ -553,7 +554,8 @@ def validate_kline_rows(rows: list[list[Any]] | None, interval: str, *,
 
 def get_klines(client: Any, symbol: str, interval: str, limit: int,
                *, priority: str = "normal",
-               fetcher: Callable[..., Any] | None = None) -> list[list[Any]]:
+               fetcher: Callable[..., Any] | None = None,
+               deadline: float | None = None) -> list[list[Any]]:
     """返回连续K线；缓存充足且包含当前形成中的bar时完全不访问REST。"""
     global _REST_FULL_LOADS, _REST_INCREMENTAL_LOADS
     key = _key(symbol, interval)
@@ -575,6 +577,7 @@ def get_klines(client: Any, symbol: str, interval: str, limit: int,
         if key[1] in _AGGREGATED_INTERVALS:
             _ensure_aggregation_base(
                 client, key[0], priority=priority, fetcher=fetcher,
+                deadline=deadline,
             )
         return result
 
@@ -601,9 +604,22 @@ def get_klines(client: Any, symbol: str, interval: str, limit: int,
             params.update({"startTime": last_open, "limit": missing})
 
     if fetcher is None:
-        rows = request_json(client, "/fapi/v1/klines", params, priority=priority)
+        rows = request_json(
+            client, "/fapi/v1/klines", params, priority=priority,
+            deadline=deadline,
+        )
     else:
-        rows = fetcher(client, "/fapi/v1/klines", params)
+        try:
+            parameters = inspect.signature(fetcher).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        accepts_deadline = "deadline" in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        rows = (fetcher(client, "/fapi/v1/klines", params, deadline=deadline)
+                if deadline is not None and accepts_deadline
+                else fetcher(client, "/fapi/v1/klines", params))
     fetched = [list(row) for row in rows or [] if isinstance(row, list)]
     received_at_ms = int(time.time() * 1000)
     with _LOCK:
@@ -631,16 +647,19 @@ def get_klines(client: Any, symbol: str, interval: str, limit: int,
     if key[1] in _AGGREGATED_INTERVALS:
         _ensure_aggregation_base(
             client, key[0], priority=priority, fetcher=fetcher,
+            deadline=deadline,
         )
     return result
 
 
 def _ensure_aggregation_base(client: Any, symbol: str, *, priority: str,
-                             fetcher: Callable[..., Any] | None) -> None:
+                             fetcher: Callable[..., Any] | None,
+                             deadline: float | None = None) -> None:
     """惰性建立15m历史底座，并立即生成当前高周期bar。"""
     try:
         base_rows = get_klines(
             client, symbol, "15m", 200, priority=priority, fetcher=fetcher,
+            deadline=deadline,
         )
     except Exception:
         return

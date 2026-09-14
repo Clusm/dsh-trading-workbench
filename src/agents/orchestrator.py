@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import re
 import time
 import uuid
@@ -17,11 +18,8 @@ from core.agent_recorder import AgentRecorder
 from core.decision_policy import enforced_issues, evaluate_open_intent
 from core.portfolio_policy import evaluate_portfolio_intent
 from data.market_query import TOOL_SPECS, execute_tool
-from llm.base import LLMClient
-from llm.openai_compatible_client import (
-    LLMTimeBudgetExceeded,
-    OpenAICompatibleLLMClient,
-)
+from llm.base import LLMClient, call_chat
+from llm.openai_compatible_client import LLMTimeBudgetExceeded
 
 from . import lessons
 from .models import MacroBrief, MarketBrief, OnchainBrief, StrategyRefs, TradeDecision
@@ -309,6 +307,22 @@ REVIEW_TOOL_SPECS = [
 
 # symbol 数量超过此阈值时改用描述约束：enum 会显著撑大 schema，反而涨 token
 MAX_SYMBOL_ENUM = 60
+
+
+def _execute_tool_with_deadline(name: str, arguments: dict[str, Any],
+                                deadline: float) -> dict[str, Any]:
+    """向新版工具传递绝对deadline，兼容旧离线夹具的两参数替身。"""
+    try:
+        parameters = inspect.signature(execute_tool).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_deadline = "deadline" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if accepts_deadline:
+        return execute_tool(name, arguments, deadline=deadline)
+    return execute_tool(name, arguments)
 
 
 def build_submit_decision_spec(space: ActionSpace | None = None) -> dict[str, Any]:
@@ -822,11 +836,10 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
             # 预算耗尽后把模型钉死在 submit_decision 上，保证本轮一定有结论而不是拖成 no_trade
             choice: Any = ({"type": "function", "function": {"name": "submit_decision"}}
                            if (force_submit or is_final_round) else "auto")
-            if isinstance(llm, OpenAICompatibleLLMClient):
-                raw = llm.chat(messages, tools=tools, tool_choice=choice,
-                               deadline=deadline)
-            else:
-                raw = llm.chat(messages, tools=tools, tool_choice=choice)
+            raw = call_chat(
+                llm, messages, tools=tools, tool_choice=choice,
+                deadline=deadline, purpose="decision",
+            )
             status = "ok"
             error = None
         except Exception as e:
@@ -960,7 +973,13 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                         result = {"error": f"查询预算已用尽（{query_budget}/{query_budget}）。"
                                           "请基于现有数据直接调用 submit_decision 提交决策，不要再查询。"}
                     else:
-                        result = execute_tool(fname, args)
+                        if time.monotonic() >= deadline:
+                            result = {
+                                "error": "LLM_DEADLINE_EXCEEDED",
+                                "reason_code": "LLM_DEADLINE_EXCEEDED",
+                            }
+                        else:
+                            result = _execute_tool_with_deadline(fname, args, deadline)
                         query_used += 1
                         for s in _extract_query_symbols(fname, args):
                             if s and s not in queried:
@@ -977,6 +996,17 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                                 "limit": query_budget,
                                 "queried": list(queried),
                                 "note": "以上为本轮已查询品种，直接复用结论，不要重复查询",
+                            }
+                        if time.monotonic() >= deadline:
+                            force_submit = True
+                            result = {
+                                "error": "LLM_DEADLINE_EXCEEDED",
+                                "reason_code": "LLM_DEADLINE_EXCEEDED",
+                                "_budget": {
+                                    "used": query_used,
+                                    "limit": query_budget,
+                                    "note": "本轮总时限已耗尽，禁止继续查询；请提交no_trade。",
+                                },
                             }
                 elif fname == "query_review_library":
                     try:

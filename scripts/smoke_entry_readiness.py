@@ -33,6 +33,7 @@ def _facts(scope: TradingScope) -> dict[str, object]:
         "order_submission_ready": True,
         "market_cooldown_active": False,
         "data_budget_available": True,
+        "rate_coordination_available": True,
         "order_mirror_ok": True,
         "protection_mirror_ok": True,
         "unknown_orders": 0,

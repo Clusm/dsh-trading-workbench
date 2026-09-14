@@ -7,19 +7,21 @@ from typing import Any
 
 from audit.database import AuditDatabase, utc_now
 from audit.jsonl_logger import JsonlLogger
-from llm.base import LLMClient
+from llm.base import LLMClient, call_complete
 
 
 def summarize(agent_name: str, llm: LLMClient | None, model: str | None,
               role_prompt: str, payload: dict[str, Any], fallback: str,
-              db: AuditDatabase, logger: JsonlLogger, run_id: str | None = None) -> str:
+              db: AuditDatabase, logger: JsonlLogger, run_id: str | None = None,
+              deadline: float | None = None,
+              purpose: str = "intel") -> str:
     if llm is None:
         return fallback
     call_id = str(uuid.uuid4())
     user = str(payload)
     started = time.monotonic()
     try:
-        resp = llm.complete(role_prompt, user)
+        resp = call_complete(llm, role_prompt, user, deadline=deadline, purpose=purpose)
         status = "ok"
         text = resp.content.strip()[:600]
         error = None

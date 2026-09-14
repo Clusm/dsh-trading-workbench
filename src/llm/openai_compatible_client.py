@@ -8,6 +8,13 @@ from typing import Any
 import httpx
 
 from .base import LLMClient, LLMResponse
+from .request_coordinator import (
+    LLMAdmissionTimeout,
+    LLMRequestCoordinator,
+    get_default_coordinator,
+    parse_retry_after,
+    provider_scope,
+)
 
 # 瞬时错误（可重试）：网关超时(504)、限流(429)、5xx 与网络层异常
 _TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
@@ -31,7 +38,10 @@ class OpenAICompatibleLLMClient(LLMClient):
                  model: str = "deepseek-v4-flash", temperature: float = 0.2,
                  max_tokens: int = 2000, timeout_seconds: int = 60,
                  reasoning_effort: str | None = None,
-                 max_retries: int = 1, retry_backoff_seconds: float = 2.0):
+                 max_retries: int = 1, retry_backoff_seconds: float = 2.0,
+                 purpose: str = "normal",
+                 coordinator: LLMRequestCoordinator | None = None,
+                 default_429_cooldown_seconds: float = 5.0):
         self.api_key = (
             api_key
             or os.getenv("SENSENOVA_API_KEY", "")
@@ -53,6 +63,10 @@ class OpenAICompatibleLLMClient(LLMClient):
         self.reasoning_effort = reasoning_effort
         self.max_retries = max(0, int(max_retries))
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
+        self.purpose = str(purpose or "normal")
+        self.coordinator = coordinator or get_default_coordinator()
+        self.provider_scope = provider_scope(self.base_url, self.api_key)
+        self.default_429_cooldown_seconds = max(0.0, float(default_429_cooldown_seconds))
         # 与 Binance Broker 使用同一网络语义：MTA_NO_PROXY=1 时不仅依赖调用方
         # 清理环境变量，还关闭 httpx 的系统代理/PAC 自动发现，避免请求误入失效代理。
         self._trust_env = os.getenv("MTA_NO_PROXY", "").strip().lower() not in {
@@ -60,9 +74,14 @@ class OpenAICompatibleLLMClient(LLMClient):
         }
 
     def _post(self, payload: dict[str, Any], *, deadline: float | None = None,
-              timeout_seconds: float | None = None) -> httpx.Response:
+              timeout_seconds: float | None = None,
+              purpose: str | None = None) -> httpx.Response:
         """单次 POST，带有界重试，并遵守本轮总时限。"""
         last_error: Exception | None = None
+        request_purpose = str(purpose or self.purpose)
+        priority = ("critical" if request_purpose in {"decision", "protect", "exit"}
+                    else "background" if request_purpose in {"intel", "review"}
+                    else "normal")
         for attempt in range(self.max_retries + 1):
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
@@ -71,30 +90,49 @@ class OpenAICompatibleLLMClient(LLMClient):
                 request_timeout = float(timeout_seconds or self.timeout_seconds)
                 if remaining is not None:
                     request_timeout = min(request_timeout, max(0.1, remaining))
-                with httpx.Client(
-                    timeout=request_timeout,
-                    trust_env=self._trust_env,
-                ) as client:
-                    r = client.post(
-                        f"{self.base_url}/chat/completions",
-                        headers={"Authorization": f"Bearer {self.api_key}"},
-                        json=payload,
-                    )
-                r.raise_for_status()
-                return r
+                with self.coordinator.admit(
+                    self.provider_scope, purpose=request_purpose,
+                    priority=priority, deadline=deadline,
+                ):
+                    with httpx.Client(
+                        timeout=request_timeout,
+                        trust_env=self._trust_env,
+                    ) as client:
+                        r = client.post(
+                            f"{self.base_url}/chat/completions",
+                            headers={"Authorization": f"Bearer {self.api_key}"},
+                            json=payload,
+                        )
+                    r.raise_for_status()
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise LLMTimeBudgetExceeded(
+                            "LLM total time budget exceeded during HTTP request"
+                        )
+                    return r
+            except LLMAdmissionTimeout as e:
+                raise LLMTimeBudgetExceeded(str(e)) from e
             except Exception as e:
                 last_error = e
+                if (isinstance(e, httpx.HTTPStatusError)
+                        and e.response.status_code == 429):
+                    retry_after = parse_retry_after(
+                        e.response.headers,
+                        default=self.default_429_cooldown_seconds,
+                        maximum=86400.0,
+                    )
+                    self.coordinator.mark_cooldown(
+                        self.provider_scope, retry_after, reason="HTTP 429",
+                    )
                 if attempt >= self.max_retries or not _is_transient_error(e):
                     raise
                 delay = self.retry_backoff_seconds * (attempt + 1)
-                # SenseNova 429 若返回 Retry-After，应尊重供应商给出的冷却时间；
-                # 设置上限避免异常响应让交易决策线程无限等待。
+                # Retry-After是供应商给出的最早重试时间，不能再被60秒的人为上限截断。
                 if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 429:
-                    try:
-                        delay = max(delay, min(60.0, float(e.response.headers.get(
-                            "Retry-After", "0"))))
-                    except (TypeError, ValueError):
-                        pass
+                    delay = max(delay, parse_retry_after(
+                        e.response.headers,
+                        default=self.default_429_cooldown_seconds,
+                        maximum=86400.0,
+                    ))
                 if deadline is not None:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -107,7 +145,8 @@ class OpenAICompatibleLLMClient(LLMClient):
         raise last_error
 
     def complete(self, system: str, user: str,
-                 *, deadline: float | None = None) -> LLMResponse:
+                 *, deadline: float | None = None,
+                 purpose: str | None = None) -> LLMResponse:
         if not self.api_key:
             raise RuntimeError("LLM API key 未设置")
         payload = {
@@ -124,7 +163,7 @@ class OpenAICompatibleLLMClient(LLMClient):
             payload["reasoning_effort"] = self.reasoning_effort
             payload["thinking"] = {"type": "enabled"}
         started = time.monotonic()
-        r = self._post(payload, deadline=deadline)
+        r = self._post(payload, deadline=deadline, purpose=purpose)
         data = r.json()
         latency_ms = int((time.monotonic() - started) * 1000)
         choice = data["choices"][0]
@@ -140,7 +179,8 @@ class OpenAICompatibleLLMClient(LLMClient):
         )
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
-             tool_choice: str = "auto", *, deadline: float | None = None) -> dict[str, Any]:
+             tool_choice: str = "auto", *, deadline: float | None = None,
+             purpose: str | None = None) -> dict[str, Any]:
         if not self.api_key:
             raise RuntimeError("LLM API key 未设置")
         payload = {
@@ -156,5 +196,5 @@ class OpenAICompatibleLLMClient(LLMClient):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice
-        r = self._post(payload, deadline=deadline)
+        r = self._post(payload, deadline=deadline, purpose=purpose)
         return r.json()

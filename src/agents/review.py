@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -139,7 +140,8 @@ def _build_calibration_stats(db: AuditDatabase) -> dict:
 def run_review_agent(db: AuditDatabase, reviews_dir: Path,
                      review_date: str | None = None,
                      llm: LLMClient | None = None, model: str | None = None,
-                     logger: JsonlLogger | None = None) -> Path:
+                     logger: JsonlLogger | None = None,
+                     total_timeout_seconds: float = 120.0) -> Path:
     if review_date:
         date_obj = datetime.strptime(review_date, "%Y-%m-%d")
     else:
@@ -147,6 +149,7 @@ def run_review_agent(db: AuditDatabase, reviews_dir: Path,
         date_obj = datetime.now(timezone.utc) - timedelta(days=1)
     review_date = date_obj.strftime("%Y-%m-%d")
     start, end = _date_range(review_date)
+    deadline = time.monotonic() + max(0.0, float(total_timeout_seconds))
     reviews_dir = Path(reviews_dir)
     reviews_dir.mkdir(parents=True, exist_ok=True)
 
@@ -288,7 +291,8 @@ def run_review_agent(db: AuditDatabase, reviews_dir: Path,
         llm_summary = summarize(
             "review_agent", llm, model,
             "你是交易复盘员。根据当日完整数据，用中文300字以内总结：盈亏结构、主要亏损原因、决策流程问题、次日应如何调整。",
-            {"report": base_report}, "LLM复盘暂不可用", db, logger)
+            {"report": base_report}, "LLM复盘暂不可用", db, logger,
+            deadline=deadline, purpose="review")
         lines.append(llm_summary)
     else:
         lines.append("- LLM 复盘待接入。")

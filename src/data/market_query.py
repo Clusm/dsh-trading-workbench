@@ -124,7 +124,8 @@ def _pack_candles(klines: list[list[Any]], interval: str, max_candles: int = 20)
 
 
 def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
-                        include_candles: bool = True) -> dict[str, Any]:
+                        include_candles: bool = True,
+                        deadline: float | None = None) -> dict[str, Any]:
     symbol = _fmt_symbol(symbol)
     scope = _configured_scope()
     if scope is None:
@@ -137,19 +138,28 @@ def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-    with httpx.Client(timeout=20.0) as client:
+    remaining = (deadline - time.monotonic()) if deadline is not None else 20.0
+    if remaining <= 0:
+        return {"error": "LLM_DEADLINE_EXCEEDED", "reason_code": "LLM_DEADLINE_EXCEEDED"}
+    with httpx.Client(timeout=min(20.0, max(0.1, remaining))) as client:
         streamed_ticker = get_tickers([symbol], max_age=30.0)
         ticker = (streamed_ticker[0] if streamed_ticker else
-                  _get_json(client, "/fapi/v1/ticker/24hr", {"symbol": symbol}))
-        klines = get_klines(client, symbol, interval, limit, fetcher=_get_json)
+                  _get_json(client, "/fapi/v1/ticker/24hr", {"symbol": symbol},
+                            deadline=deadline))
+        klines = get_klines(
+            client, symbol, interval, limit, fetcher=_get_json, deadline=deadline,
+        )
         try:
             streamed_mark = get_marks([symbol], max_age=30.0)
             premium = (streamed_mark[0] if streamed_mark else
-                       _get_json(client, "/fapi/v1/premiumIndex", {"symbol": symbol}))
+                       _get_json(client, "/fapi/v1/premiumIndex", {"symbol": symbol},
+                                 deadline=deadline))
         except Exception:
             premium = {}
         try:
-            oi = _get_json(client, "/fapi/v1/openInterest", {"symbol": symbol})
+            oi = _get_json(
+                client, "/fapi/v1/openInterest", {"symbol": symbol}, deadline=deadline,
+            )
         except Exception:
             oi = {}
 
@@ -279,7 +289,8 @@ def query_guardian_closed_bar(symbol: str, interval: str = "15m") -> dict[str, A
     return result
 
 
-def query_symbol_cards(symbols: list[str], top_n: int = 20) -> dict[str, Any]:
+def query_symbol_cards(symbols: list[str], top_n: int = 20,
+                       deadline: float | None = None) -> dict[str, Any]:
     """批量轻量指标卡：无 K 线，一次最多 20 个，适合先宽扫再深挖。"""
     scope = _configured_scope()
     if scope is None:
@@ -296,7 +307,7 @@ def query_symbol_cards(symbols: list[str], top_n: int = 20) -> dict[str, Any]:
     if cached is not None:
         return cached
     try:
-        tickers = get_all_24h_tickers(symbols=syms)
+        tickers = get_all_24h_tickers(symbols=syms, deadline=deadline)
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
     by = {str(t.get("symbol")): t for t in tickers}
@@ -319,7 +330,7 @@ def query_symbol_cards(symbols: list[str], top_n: int = 20) -> dict[str, Any]:
     return result
 
 
-def query_top_symbols(top_n: int = 20) -> dict[str, Any]:
+def query_top_symbols(top_n: int = 20, deadline: float | None = None) -> dict[str, Any]:
     top_n = max(5, min(int(top_n), 40))
     cache_key = ("top", top_n)
     cached = _cache_get(cache_key)
@@ -329,7 +340,7 @@ def query_top_symbols(top_n: int = 20) -> dict[str, Any]:
     if scope is None:
         return {"error": "trading_scope_unavailable，已拒绝全市场回退"}
     core_symbols = list(scope.symbols)
-    tickers = get_all_24h_tickers(symbols=core_symbols)
+    tickers = get_all_24h_tickers(symbols=core_symbols, deadline=deadline)
     # 只在核心池内选：这份列表会被主 Agent 当作可交易标的的权威来源
     symbols = select_top_symbols(tickers, top_n=top_n, core_symbols=core_symbols)
     rows = []
@@ -576,12 +587,16 @@ TOOL_HANDLERS = {
 }
 
 
-def execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+def execute_tool(name: str, arguments: dict[str, Any], *,
+                 deadline: float | None = None) -> dict[str, Any]:
     handler = TOOL_HANDLERS.get(name)
     if not handler:
         return {"error": f"unknown tool {name}"}
     try:
-        result = handler(**arguments)
+        call_args = dict(arguments or {})
+        if deadline is not None and name in TOOL_HANDLERS:
+            call_args["deadline"] = deadline
+        result = handler(**call_args)
         if isinstance(result, dict):
             return result
         return {"result": result}

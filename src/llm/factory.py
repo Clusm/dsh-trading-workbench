@@ -8,6 +8,7 @@ from core.config_loader import Settings
 from llm.base import LLMClient
 from llm.mock_client import MockLLMClient
 from llm.openai_compatible_client import OpenAICompatibleLLMClient
+from llm.request_coordinator import configure_default_coordinator
 
 
 def _agent_cfg(settings: Settings, agent_name: str) -> dict[str, Any]:
@@ -19,6 +20,14 @@ def _agent_cfg(settings: Settings, agent_name: str) -> dict[str, Any]:
 
 def build_llm_for_agent(settings: Settings, agent_name: str) -> tuple[LLMClient, str]:
     base = settings.llm_config
+    coordinator_cfg = base.get("coordinator", {}) or {}
+    coordinator = configure_default_coordinator(
+        max_concurrency=int(coordinator_cfg.get("max_concurrency", 1)),
+        queue_poll_seconds=float(coordinator_cfg.get("queue_poll_seconds", 0.25)),
+        default_queue_deadline_seconds=float(
+            coordinator_cfg.get("queue_deadline_seconds", 30.0)
+        ),
+    )
     acfg = _agent_cfg(settings, agent_name)
     api_key_env = base.get("api_key_env", "SENSENOVA_API_KEY")
     api_key = os.getenv(api_key_env, "").strip()
@@ -43,5 +52,13 @@ def build_llm_for_agent(settings: Settings, agent_name: str) -> tuple[LLMClient,
         reasoning_effort=acfg.get("reasoning_effort", base.get("reasoning_effort")),
         max_retries=int(base.get("max_retries", 1)),
         retry_backoff_seconds=float(base.get("retry_backoff_seconds", 2.0)),
+        purpose=("decision" if agent_name == "ai_trader"
+                 else "review" if agent_name == "review_agent"
+                 else "intel" if agent_name.endswith("_agent")
+                 else "normal"),
+        coordinator=coordinator,
+        default_429_cooldown_seconds=float(
+            base.get("default_429_cooldown_seconds", 5.0)
+        ),
     )
     return client, client.model

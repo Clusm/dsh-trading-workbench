@@ -13,11 +13,13 @@ class MockLLMClient(LLMClient):
         self.fixed_output = fixed_output
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
-             tool_choice: str = "auto") -> dict[str, Any]:
+             tool_choice: str = "auto", *, deadline: float | None = None,
+             purpose: str | None = None) -> dict[str, Any]:
         return {"choices": [{"message": {"role": "assistant", "content": self.fixed_output}}],
                 "usage": {}, "model": "mock"}
 
-    def complete(self, system: str, user: str) -> LLMResponse:
+    def complete(self, system: str, user: str, *, deadline: float | None = None,
+                 purpose: str | None = None) -> LLMResponse:
         return LLMResponse(
             content=self.fixed_output,
             model="mock",
