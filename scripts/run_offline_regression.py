@@ -10,15 +10,18 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = (
     "scripts/check_execution_boundaries.py",
+    "scripts/test_secret_scanner.py",
     "scripts/test_precheck_fixes.py",
     "scripts/smoke_p0_account_safety.py",
     "scripts/smoke_channels.py",
     "scripts/smoke_baseline_guard.py",
     "scripts/smoke_order_outbox.py",
+    "scripts/smoke_order_mirror.py",
     "scripts/smoke_binance_transport.py",
     "scripts/smoke_close_reconcile.py",
     "scripts/smoke_market_query_tools.py",
     "scripts/smoke_public_rate_limit.py",
+    "scripts/smoke_rate_limit_multiprocess.py",
     "scripts/smoke_market_data_gateway.py",
     "scripts/smoke_ws_routes.py",
     "scripts/smoke_intel_sidecar.py",

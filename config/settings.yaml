@@ -67,6 +67,9 @@ llm:
   max_tokens: 2000
   reasoning_effort: low
   timeout_seconds: 180
+  # 主决策Agent跨多轮工具调用的总时限；到期安全降级为 no_trade。
+  # 不改变模型、推理档、风险参数或既有平仓/保护路径。
+  total_timeout_seconds: 240
   # 瞬时错误（504/429/5xx/网络异常）重试次数与退避间隔
   # 保留有限重试处理 429/5xx/网络异常；鉴权和参数类 4xx 不重试。
   max_retries: 3

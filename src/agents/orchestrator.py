@@ -18,6 +18,10 @@ from core.decision_policy import enforced_issues, evaluate_open_intent
 from core.portfolio_policy import evaluate_portfolio_intent
 from data.market_query import TOOL_SPECS, execute_tool
 from llm.base import LLMClient
+from llm.openai_compatible_client import (
+    LLMTimeBudgetExceeded,
+    OpenAICompatibleLLMClient,
+)
 
 from . import lessons
 from .models import MacroBrief, MarketBrief, OnchainBrief, StrategyRefs, TradeDecision
@@ -772,8 +776,11 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                      execution_feedback: dict[str, Any] | None = None,
                      action_space: ActionSpace | None = None,
                      prices: dict[str, float] | None = None,
-                     query_budget: int = DEFAULT_QUERY_BUDGET) -> TradeDecision:
+                     query_budget: int = DEFAULT_QUERY_BUDGET,
+                     total_timeout_seconds: float = 240.0) -> TradeDecision:
     query_budget = max(1, int(query_budget))
+    total_timeout_seconds = max(0.0, float(total_timeout_seconds))
+    deadline = time.monotonic() + total_timeout_seconds
     user_prompt = build_user_prompt(market, macro, onchain, strategy, risk_envelope, portfolio,
                                     trading_quota, supported_symbols=supported_symbols,
                                     execution_feedback=execution_feedback,
@@ -804,10 +811,18 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
         # 哪怕结论是一句有明确原因的 no_trade，也远好过一句笼统的超时报错。
         is_final_round = round_no == MAX_ROUNDS - 1
         try:
+            if time.monotonic() >= deadline:
+                raise LLMTimeBudgetExceeded(
+                    f"LLM total time budget exceeded ({total_timeout_seconds:g}s)"
+                )
             # 预算耗尽后把模型钉死在 submit_decision 上，保证本轮一定有结论而不是拖成 no_trade
             choice: Any = ({"type": "function", "function": {"name": "submit_decision"}}
                            if (force_submit or is_final_round) else "auto")
-            raw = llm.chat(messages, tools=tools, tool_choice=choice)
+            if isinstance(llm, OpenAICompatibleLLMClient):
+                raw = llm.chat(messages, tools=tools, tool_choice=choice,
+                               deadline=deadline)
+            else:
+                raw = llm.chat(messages, tools=tools, tool_choice=choice)
             status = "ok"
             error = None
         except Exception as e:
@@ -817,6 +832,12 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
             raw = {"choices": [], "usage": {}, "error": str(e)}
             _log_llm_round(db, logger, run_id, model, messages, {}, raw,
                            int((time.monotonic() - started) * 1000), status, error)
+            if isinstance(e, LLMTimeBudgetExceeded):
+                db.log_risk_event(
+                    event_type="llm_time_budget_exhausted", severity="warn",
+                    details=(f"主决策Agent本轮总时限 {total_timeout_seconds:g}s 已耗尽"),
+                    action_taken="no_trade",
+                )
             break
 
         latency_ms = int((time.monotonic() - started) * 1000)

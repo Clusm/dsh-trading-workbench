@@ -95,6 +95,8 @@ service._thread = threading.Thread(target=scheduler)
 service._thread.start()
 check("安全停止返回True", service.stop_background(wait_seconds=1.0))
 check("停止事件已设置", service._stop_event.is_set())
+service._stop_event.clear()
+check("停止后不再接受新的慢决策", service.request_run() is False)
 
 print("\n[3] 展示快照失败必须可观测且保留最后有效值")
 service._refresh_latest_channels(state={"positions": []}, prices={})
@@ -109,4 +111,4 @@ check("刷新失败保留上次有效通道", service._latest["channel_state"] =
 status = service.runtime_status()
 check("运行状态暴露快照刷新错误", status["last_latest_refresh_error"] == "RuntimeError")
 
-print("\n结果: 11 通过 / 0 失败")
+print("\n结果: 12 通过 / 0 失败")

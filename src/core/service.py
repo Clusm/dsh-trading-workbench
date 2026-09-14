@@ -192,6 +192,8 @@ class TradingService:
         self._latest: dict[str, Any] = {}
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
+        self._accepting_work = True
+        self._closed = False
         self._thread: threading.Thread | None = None
         self._intel_thread: threading.Thread | None = None
         self._cycle_lock = threading.Lock()
@@ -251,6 +253,8 @@ class TradingService:
 
     def run_once(self) -> dict[str, Any]:
         """同步运行一轮慢决策；已有慢循环时返回 skipped，绝不并发执行两轮。"""
+        if not getattr(self, "_accepting_work", True):
+            return {"skipped": True, "reason": "service_shutting_down"}
         if not self._cycle_lock.acquire(blocking=False):
             return {"skipped": True, "reason": "cycle_running"}
         started = time.perf_counter()
@@ -391,6 +395,10 @@ class TradingService:
         # Web手动触发与调度线程可能同时到达，检查和赋值必须原子；
         # 否则两个线程都可能越过 is_alive() 并各自启动一次慢决策。
         with self._run_thread_lock:
+            if (getattr(self, "_closed", False) or
+                    not getattr(self, "_accepting_work", True) or
+                    self._stop_event.is_set()):
+                return False
             if self._run_thread and self._run_thread.is_alive():
                 return False
             worker = threading.Thread(target=self._run_once_background, daemon=True)
@@ -418,6 +426,8 @@ class TradingService:
         """返回线程循环的脱敏运行状态，供健康接口读取。"""
         with self._lock:
             return {
+                "accepting_work": bool(getattr(self, "_accepting_work", True)),
+                "closed": bool(getattr(self, "_closed", False)),
                 "last_fast_cycle_at": self._last_fast_cycle_at,
                 "last_fast_cycle_error": self._last_fast_cycle_error,
                 "last_fast_cycle_duration_ms": self._last_fast_cycle_duration_ms,
@@ -529,6 +539,9 @@ class TradingService:
             query_budget=int((self.settings.raw_settings.get("decision_cycle", {})
                               or {}).get("query_budget", 8)),
             execution_mode=str(getattr(self.broker, "mode", "paper") or "paper"),
+            llm_total_timeout_seconds=float(
+                (self.settings.raw_settings.get("llm", {}) or {}).get(
+                    "total_timeout_seconds", 240.0)),
         )
         state = graph.invoke({"run_id": run_id, "decision_id": decision_id})
         decision = state.get("decision")
@@ -659,8 +672,12 @@ class TradingService:
 
     def start_background(self, interval_minutes: float) -> None:
         """启动快慢循环和只读情报线程；重复调用不会创建第二组线程。"""
+        if getattr(self, "_closed", False):
+            return
         if self._thread and self._thread.is_alive():
             return
+        with self._run_thread_lock:
+            self._accepting_work = True
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._loop, args=(interval_minutes,), daemon=True)
         self._thread.start()
@@ -684,6 +701,10 @@ class TradingService:
         不能在慢决策仍可能访问 Broker/DB 时先关闭共享资源。超时后由调用方
         保留资源和实例锁，进程退出时交给操作系统回收，避免产生半关闭竞态。
         """
+        # 先关闭任务入口，再发停止信号；这样停止与 Web 手动触发并发时，
+        # 不会在等待期间又创建一轮新的慢决策。
+        with self._run_thread_lock:
+            self._accepting_work = False
         self._stop_event.set()
         deadline = time.monotonic() + max(0.0, float(wait_seconds))
         scheduler = self._thread
@@ -782,6 +803,8 @@ class TradingService:
 
     def close(self) -> None:
         """幂等关闭线程、流、Broker、数据库及实例锁。"""
+        if getattr(self, "_closed", False):
+            return
         if not self.stop_background():
             try:
                 self.db.log_risk_event(
@@ -801,3 +824,4 @@ class TradingService:
             self.db.close()
         finally:
             self._instance_lock.release()
+            self._closed = True

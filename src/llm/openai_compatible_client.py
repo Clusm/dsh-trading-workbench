@@ -13,6 +13,10 @@ from .base import LLMClient, LLMResponse
 _TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
 
 
+class LLMTimeBudgetExceeded(RuntimeError):
+    """本轮 LLM 总时间预算耗尽，调用方必须安全降级。"""
+
+
 def _is_transient_error(exc: Exception) -> bool:
     """504/429/5xx 或网络层异常视为瞬时错误，可重试；401/400 等凭据/参数错误不重试。"""
     if isinstance(exc, httpx.HTTPStatusError):
@@ -55,13 +59,20 @@ class OpenAICompatibleLLMClient(LLMClient):
             "1", "true", "yes", "on",
         }
 
-    def _post(self, payload: dict[str, Any]) -> httpx.Response:
-        """单次 POST，带 max_retries 次瞬时错误重试（指数退避）。"""
+    def _post(self, payload: dict[str, Any], *, deadline: float | None = None,
+              timeout_seconds: float | None = None) -> httpx.Response:
+        """单次 POST，带有界重试，并遵守本轮总时限。"""
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise LLMTimeBudgetExceeded("LLM total time budget exceeded")
             try:
+                request_timeout = float(timeout_seconds or self.timeout_seconds)
+                if remaining is not None:
+                    request_timeout = min(request_timeout, max(0.1, remaining))
                 with httpx.Client(
-                    timeout=self.timeout_seconds,
+                    timeout=request_timeout,
                     trust_env=self._trust_env,
                 ) as client:
                     r = client.post(
@@ -84,11 +95,19 @@ class OpenAICompatibleLLMClient(LLMClient):
                             "Retry-After", "0"))))
                     except (TypeError, ValueError):
                         pass
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise LLMTimeBudgetExceeded(
+                            "LLM total time budget exceeded during retry backoff"
+                        ) from e
+                    delay = min(delay, remaining)
                 time.sleep(delay)
         assert last_error is not None
         raise last_error
 
-    def complete(self, system: str, user: str) -> LLMResponse:
+    def complete(self, system: str, user: str,
+                 *, deadline: float | None = None) -> LLMResponse:
         if not self.api_key:
             raise RuntimeError("LLM API key 未设置")
         payload = {
@@ -105,7 +124,7 @@ class OpenAICompatibleLLMClient(LLMClient):
             payload["reasoning_effort"] = self.reasoning_effort
             payload["thinking"] = {"type": "enabled"}
         started = time.monotonic()
-        r = self._post(payload)
+        r = self._post(payload, deadline=deadline)
         data = r.json()
         latency_ms = int((time.monotonic() - started) * 1000)
         choice = data["choices"][0]
@@ -121,7 +140,7 @@ class OpenAICompatibleLLMClient(LLMClient):
         )
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
-             tool_choice: str = "auto") -> dict[str, Any]:
+             tool_choice: str = "auto", *, deadline: float | None = None) -> dict[str, Any]:
         if not self.api_key:
             raise RuntimeError("LLM API key 未设置")
         payload = {
@@ -137,5 +156,5 @@ class OpenAICompatibleLLMClient(LLMClient):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice
-        r = self._post(payload)
+        r = self._post(payload, deadline=deadline)
         return r.json()

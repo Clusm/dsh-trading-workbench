@@ -117,7 +117,8 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 quota_manager: Any = None,
                 signal_scanner_config: dict[str, Any] | None = None,
                 execution_feedback: dict[str, Any] | None = None,
-                query_budget: int = 8, execution_mode: str = "paper") -> Any:
+                query_budget: int = 8, execution_mode: str = "paper",
+                llm_total_timeout_seconds: float = 240.0) -> Any:
     def market_node(state: AgentState) -> dict[str, Any]:
         pair = (agent_llms or {}).get("market_agent")
 
@@ -367,6 +368,7 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 action_space=action_space,
                 prices=dict(state["market"].last_prices) if state.get("market") else {},
                 query_budget=query_budget,
+                total_timeout_seconds=llm_total_timeout_seconds,
             )
             decision = ChannelDecision(
                 channel="ai", decision=raw.decision, intents=raw.intents,

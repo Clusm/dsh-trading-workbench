@@ -1692,6 +1692,8 @@ def create_app(service: TradingService) -> FastAPI:
             health_reasons.append("broker_state_unavailable")
         if not db_readable:
             health_reasons.append("database_unreadable")
+        if not bool(runtime.get("accepting_work", True)):
+            health_reasons.append("service_shutting_down")
         # 仅标记控制台展示已降级；这不是新的交易闸门，不能改变 /api/ready 语义。
         if runtime.get("last_latest_refresh_error"):
             health_reasons.append("latest_snapshot_refresh_error")
@@ -1749,6 +1751,9 @@ def create_app(service: TradingService) -> FastAPI:
         broker_state = _broker_state_cached(service)
         reasons: list[str] = []
         market_rate = rate_limit_status()
+        runtime = service.runtime_status() if hasattr(service, "runtime_status") else {}
+        if not bool(runtime.get("accepting_work", True)):
+            reasons.append("service_shutting_down")
         # 418/429 是共享出口状态，不代表保护链路停止；但没有可靠公共行情时，
         # 必须禁止新开仓，close/reduce/adjust 仍由原有执行链处理。
         if market_rate.get("active"):
@@ -1765,7 +1770,6 @@ def create_app(service: TradingService) -> FastAPI:
             reasons.append(f"control_state_{service.control.state}")
         if not account_risk.get("allow_new", False):
             reasons.append("account_risk_blocks_new")
-        runtime = service.runtime_status() if hasattr(service, "runtime_status") else {}
         protection_mirror = getattr(app.state, "protection_order_mirror", None)
         try:
             protection_status = (protection_mirror.status()

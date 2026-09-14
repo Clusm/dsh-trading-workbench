@@ -158,6 +158,22 @@ check("漏表态收到 issues", any("缺少对 BTCUSDT 的表态" in i for i in 
 check("最终成功提交", d.decision == "no_trade" and d.position_reviews[0].verdict == "hold",
       f"{d.decision} {d.position_reviews}")
 
+print("\n[3b] LLM总时限耗尽必须安全收敛")
+budget_db, budget_rec, budget_tmp = make_ctx()
+budget_llm = SLLM([])
+budget_decision = run_orchestrator(
+    llm=budget_llm, model="s", recorder=budget_rec, db=budget_db,
+    logger=JsonlLogger(budget_tmp / "logs"), run_id="budget-run",
+    market=MarketBrief(), macro=MacroBrief(), onchain=OnchainBrief(),
+    strategy=StrategyRefs(), risk_envelope={}, total_timeout_seconds=0,
+)
+check("总时限耗尽不调用模型", budget_decision.decision == "no_trade" and budget_llm.calls == 0,
+      f"decision={budget_decision.decision} calls={budget_llm.calls}")
+check("总时限耗尽记审计事件", budget_db.fetch_one(
+    "SELECT id FROM risk_events WHERE event_type='llm_time_budget_exhausted'"
+) is not None)
+budget_db.close()
+
 print("\n[4] invalidation：开仓必填 + 落库")
 db2, rec2, _ = make_ctx()
 no_inv = {"decision": "open", "intents": [{"symbol": "BTCUSDT", "action": "open", "side": "LONG",
