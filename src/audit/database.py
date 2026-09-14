@@ -342,6 +342,11 @@ class AuditDatabase:
         self.conn = sqlite3.connect(str(self.db_file), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
+        # 发布上下文只存于当前进程内，具体事实仍写入各表的可审计字段。未被服务
+        # 设置上下文的离线/历史调用统一归入 legacy，不能冒充当前发布批次。
+        self.release_id = "legacy"
+        self.environment = "unknown"
+        self.account_ref = "unknown"
         self.conn.execute("PRAGMA journal_mode=WAL")
         # 跨进程访问（诊断脚本/DB浏览器）撞写锁时等待而不是立刻抛 database is locked
         self.conn.execute("PRAGMA busy_timeout=5000")
@@ -978,8 +983,158 @@ class AuditDatabase:
 
         self._apply_migration(15, "trade_reconciliation_lifecycle", apply_trade_reconciliation)
 
+        def apply_release_metadata() -> None:
+            """为发布批次和不可变观察样本增加可空向前兼容元数据。"""
+            release_only = {
+                "agent_runs", "llm_calls", "artifacts", "tool_calls",
+                "trade_outcomes",
+            }
+            scoped = {
+                "trade_decisions", "trade_intents", "orders", "positions",
+                "signal_events", "signal_tickets", "shadow_decisions",
+                "portfolio_snapshots", "risk_events", "execution_fills",
+                "position_lifecycles", "trade_reconciliation_jobs",
+            }
+            for table in sorted(release_only | scoped):
+                existing = {
+                    row["name"] for row in self.conn.execute(
+                        f"PRAGMA table_info({table})").fetchall()
+                }
+                if "release_id" not in existing:
+                    self.conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN release_id TEXT DEFAULT 'legacy'")
+                self.conn.execute(
+                    f"UPDATE {table} SET release_id='legacy' WHERE release_id IS NULL")
+            for table in sorted(scoped):
+                existing = {
+                    row["name"] for row in self.conn.execute(
+                        f"PRAGMA table_info({table})").fetchall()
+                }
+                if "environment" not in existing:
+                    self.conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN environment TEXT DEFAULT 'unknown'")
+                self.conn.execute(
+                    f"UPDATE {table} SET environment='unknown' WHERE environment IS NULL")
+            # 观察行按发布/环境/账户/UTC分钟幂等；同一分钟重复采样不能篡改第一份证据。
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS release_observations (
+                    observation_id TEXT PRIMARY KEY,
+                    release_id TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    account_ref TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    observed_minute TEXT NOT NULL,
+                    health_state TEXT NOT NULL,
+                    component_status_json TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    rate_limit_json TEXT NOT NULL,
+                    coverage_json TEXT NOT NULL,
+                    entry_readiness_json TEXT NOT NULL,
+                    raw_json TEXT NOT NULL,
+                    UNIQUE(release_id, environment, account_ref, observed_minute)
+                )"""
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_release_observations_window "
+                "ON release_observations(release_id,environment,observed_minute)"
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_release_observations_session "
+                "ON release_observations(session_id,observed_at)"
+            )
+            for table in sorted(scoped):
+                self.conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{table}_release "
+                    f"ON {table}(release_id,environment)"
+                )
+
+        self._apply_migration(16, "release_batch_and_observations", apply_release_metadata)
+
     def close(self) -> None:
         self.conn.close()
+
+    def set_release_context(self, *, release_id: str | None,
+                            environment: str | None,
+                            account_ref: str | None) -> None:
+        """设置当前进程的发布上下文；不接受凭据原文作为账户标识。"""
+        self.release_id = str(release_id or "legacy")[:160]
+        self.environment = str(environment or "unknown").lower()[:32]
+        self.account_ref = str(account_ref or "unknown")[:160]
+
+    def current_schema_version(self) -> int:
+        """返回已应用的最高迁移版本，供发布清单和恢复包复用。"""
+        row = self.fetch_one("SELECT MAX(version) AS version FROM schema_migrations")
+        return int(row["version"] or 0) if row else 0
+
+    def log_release_observation(
+        self, *, observed_at: str, observed_minute: str, session_id: str,
+        health_state: str, component_status: Mapping[str, Any] | None = None,
+        config_hash: str = "", rate_limit: Mapping[str, Any] | None = None,
+        coverage: Mapping[str, Any] | None = None,
+        entry_readiness: Mapping[str, Any] | None = None,
+        raw: Mapping[str, Any] | None = None,
+        release_id: str | None = None, environment: str | None = None,
+        account_ref: str | None = None,
+    ) -> bool:
+        """以 UTC 分钟为幂等键保存不可变运行观察样本。
+
+        观察样本是发布门禁的证据，不应被后续轮询覆盖；同一发布/环境/账户/分钟
+        的重复写入直接忽略。所有 JSON 字段只接受结构化运行摘要，调用方不得放入
+        API key、secret 或完整请求头。
+        """
+        effective_release = str(release_id or self.release_id)[:160]
+        effective_environment = str(environment or self.environment).lower()[:32]
+        effective_account = str(account_ref or self.account_ref)[:160]
+        observation_id = str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"mta-release-observation:{effective_release}:{effective_environment}:"
+            f"{effective_account}:{observed_minute}",
+        ))
+        payloads = (
+            component_status or {}, rate_limit or {}, coverage or {},
+            entry_readiness or {}, raw or {},
+        )
+        encoded = [json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+                   for item in payloads]
+        with self.lock:
+            cursor = self.conn.execute(
+                """INSERT OR IGNORE INTO release_observations(
+                    observation_id,release_id,environment,account_ref,session_id,
+                    observed_at,observed_minute,health_state,component_status_json,
+                    config_hash,rate_limit_json,coverage_json,entry_readiness_json,raw_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    observation_id, effective_release, effective_environment, effective_account,
+                    str(session_id)[:160], str(observed_at), str(observed_minute)[:16],
+                    str(health_state).lower()[:32], encoded[0], str(config_hash)[:128],
+                    encoded[1], encoded[2], encoded[3], encoded[4],
+                ),
+            )
+            self.conn.commit()
+        return cursor.rowcount == 1
+
+    def fetch_release_observations(
+        self, *, release_id: str, environment: str, account_ref: str | None = None,
+        since: str | None = None, until: str | None = None,
+    ) -> list[sqlite3.Row]:
+        """读取发布观察证据；该读取接口不执行迁移、不改变样本。"""
+        clauses = ["release_id=?", "environment=?"]
+        params: list[Any] = [release_id, environment]
+        if account_ref:
+            clauses.append("account_ref=?")
+            params.append(account_ref)
+        if since:
+            clauses.append("observed_at>=?")
+            params.append(since)
+        if until:
+            clauses.append("observed_at<=?")
+            params.append(until)
+        return self.fetch_all(
+            "SELECT * FROM release_observations WHERE " + " AND ".join(clauses)
+            + " ORDER BY observed_minute,observed_at",
+            tuple(params),
+        )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -1023,12 +1178,17 @@ class AuditDatabase:
 
     def log_shadow_decision(self, *, decision_id: str, symbol: str, signal: str,
                             reference_price: float | None, confidence: float, source: str,
-                            execution_weight: float, feature_json: str) -> None:
+                            execution_weight: float, feature_json: str,
+                            environment: str | None = None,
+                            release_id: str | None = None) -> None:
+        effective_environment = str(environment or self.environment).lower()
+        effective_release = str(release_id or self.release_id)
         self._insert(
             """INSERT INTO shadow_decisions(decision_id,created_at,symbol,signal,reference_price,
-               confidence,source,execution_weight,feature_json) VALUES(?,?,?,?,?,?,?,?,?)""",
+               confidence,source,execution_weight,feature_json,environment,release_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (decision_id, utc_now(), symbol, signal, reference_price, confidence, source,
-             execution_weight, feature_json),
+             execution_weight, feature_json, effective_environment, effective_release),
         )
 
     def record_mark_price_samples(self, *, sampled_at: str, prices: dict[str, float],
@@ -1219,8 +1379,10 @@ class AuditDatabase:
         rows = [dict(row) for row in fills]
         if not rows:
             return 0
+        for row in rows:
+            row.setdefault("release_id", self.release_id)
         columns = (
-            "fill_key", "environment", "account_ref", "symbol", "trade_id", "order_id",
+            "fill_key", "release_id", "environment", "account_ref", "symbol", "trade_id", "order_id",
             "side", "position_side", "qty", "price", "realized_pnl", "commission",
             "commission_asset", "trade_time_ms", "source", "received_at", "raw_json",
         )
@@ -1274,19 +1436,21 @@ class AuditDatabase:
         opened_at_ms: int | None = None, entry_qty: float = 0.0,
         entry_notional: float = 0.0, attribution_status: str = "UNKNOWN",
         cost_status: str = "UNKNOWN", entry_release_id: str | None = None,
-        external: bool = False, raw: Mapping[str, Any] | None = None,
+        release_id: str | None = None, external: bool = False,
+        raw: Mapping[str, Any] | None = None,
     ) -> bool:
         """创建生命周期；活动唯一索引冲突时不覆盖现有生命周期。"""
         with self.lock:
             cursor = self.conn.execute(
                 """INSERT OR IGNORE INTO position_lifecycles(
-                    lifecycle_id,environment,account_ref,symbol,position_side,status,
+                    lifecycle_id,release_id,environment,account_ref,symbol,position_side,status,
                     opened_at_ms,entry_qty,remaining_qty,entry_notional,
                     attribution_status,cost_status,entry_release_id,external,
                     recorded_at,raw_json
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    lifecycle_id, environment, account_ref, symbol, position_side, status,
+                    lifecycle_id, release_id or self.release_id, environment, account_ref,
+                    symbol, position_side, status,
                     opened_at_ms, float(entry_qty), float(entry_qty), float(entry_notional),
                     attribution_status, cost_status, entry_release_id, int(bool(external)),
                     utc_now(), json.dumps(dict(raw or {}), ensure_ascii=False, default=str),
@@ -1350,16 +1514,17 @@ class AuditDatabase:
         status: str = "PENDING", reason: str = "", cursor_time_ms: int | None = None,
         cursor_trade_id: str | None = None, next_retry_at: str | None = None,
         attempt_count: int = 0, last_error: str | None = None,
+        release_id: str | None = None,
     ) -> bool:
         """创建或更新生命周期补账任务，重启后保留边界和游标。"""
         now = utc_now()
         with self.lock:
             cursor = self.conn.execute(
                 """INSERT INTO trade_reconciliation_jobs(
-                    job_id,lifecycle_id,environment,account_ref,symbol,position_side,
+                    job_id,lifecycle_id,release_id,environment,account_ref,symbol,position_side,
                     lower_bound_ms,upper_bound_ms,cursor_time_ms,cursor_trade_id,
                     next_retry_at,status,reason,attempt_count,last_error,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     lower_bound_ms=excluded.lower_bound_ms,upper_bound_ms=excluded.upper_bound_ms,
                     cursor_time_ms=excluded.cursor_time_ms,cursor_trade_id=excluded.cursor_trade_id,
@@ -1367,7 +1532,8 @@ class AuditDatabase:
                     attempt_count=excluded.attempt_count,last_error=excluded.last_error,
                     updated_at=excluded.updated_at""",
                 (
-                    job_id, lifecycle_id, environment, account_ref, symbol, position_side,
+                    job_id, lifecycle_id, release_id or self.release_id, environment,
+                    account_ref, symbol, position_side,
                     int(lower_bound_ms), upper_bound_ms, cursor_time_ms, cursor_trade_id,
                     next_retry_at, status, reason, int(attempt_count), last_error, now, now,
                 ),
@@ -1426,48 +1592,63 @@ class AuditDatabase:
                       status: str, model: str | None = None, input_summary: str = "",
                       output_summary: str = "", prompt_tokens: int = 0,
                       completion_tokens: int = 0, cost_estimate: float = 0.0,
-                      latency_ms: int | None = None, error: str | None = None) -> None:
+                      latency_ms: int | None = None, error: str | None = None,
+                      release_id: str | None = None) -> None:
+        effective_release = str(release_id or self.release_id)
         self._insert(
             """INSERT INTO agent_runs(run_id, agent_name, started_at, ended_at, status, model,
                input_summary, output_summary, prompt_tokens, completion_tokens, cost_estimate,
-               latency_ms, error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               latency_ms, error, release_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, agent_name, started_at, ended_at, status, model, input_summary,
-             output_summary, prompt_tokens, completion_tokens, cost_estimate, latency_ms, error),
+             output_summary, prompt_tokens, completion_tokens, cost_estimate, latency_ms, error,
+             effective_release),
         )
 
     def log_llm_call(self, *, call_id: str, run_id: str | None, agent_name: str, model: str,
                      started_at: str, ended_at: str, prompt_tokens: int, completion_tokens: int,
                      cost_estimate: float, latency_ms: int, status: str,
                      error: str | None = None, prompt_file: str | None = None,
-                     completion_file: str | None = None) -> None:
+                     completion_file: str | None = None,
+                     release_id: str | None = None) -> None:
+        effective_release = str(release_id or self.release_id)
         self._insert(
             """INSERT INTO llm_calls(call_id, run_id, agent_name, model, started_at, ended_at,
                prompt_tokens, completion_tokens, cost_estimate, latency_ms, status, error,
-               prompt_file, completion_file) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               prompt_file, completion_file, release_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (call_id, run_id, agent_name, model, started_at, ended_at, prompt_tokens,
              completion_tokens, cost_estimate, latency_ms, status, error, prompt_file,
-             completion_file),
+             completion_file, effective_release),
         )
 
     def log_artifact(self, *, artifact_id: str, run_id: str | None, agent_name: str,
                      artifact_type: str, created_at: str, json_path: str,
-                     sha256: str | None = None) -> None:
+                     sha256: str | None = None, release_id: str | None = None) -> None:
+        effective_release = str(release_id or self.release_id)
         self._insert(
             """INSERT INTO artifacts(artifact_id, run_id, agent_name, artifact_type, created_at,
-               json_path, sha256) VALUES(?,?,?,?,?,?,?)""",
-            (artifact_id, run_id, agent_name, artifact_type, created_at, json_path, sha256),
+               json_path, sha256, release_id) VALUES(?,?,?,?,?,?,?,?)""",
+            (artifact_id, run_id, agent_name, artifact_type, created_at, json_path, sha256,
+             effective_release),
         )
 
     def log_trade_decision(self, *, decision_id: str, run_id: str | None, decision: str,
-                           reasoning: str, raw_json: str, channel: str = "ai") -> None:
+                           reasoning: str, raw_json: str, channel: str = "ai",
+                           environment: str | None = None,
+                           release_id: str | None = None) -> None:
+        effective_environment = str(environment or self.environment).lower()
+        effective_release = str(release_id or self.release_id)
         self._insert(
             """INSERT INTO trade_decisions(decision_id, run_id, created_at, decision, channel,
-               reasoning, raw_json) VALUES(?,?,?,?,?,?,?)""",
-            (decision_id, run_id, utc_now(), decision, channel, reasoning, raw_json),
+               reasoning, raw_json, environment, release_id) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (decision_id, run_id, utc_now(), decision, channel, reasoning, raw_json,
+             effective_environment, effective_release),
         )
 
-    def log_trade_intent(self, *, intent_id: str, decision_id: str | None,                         run_id: str | None, intent: Any, status: str,
-                         blocked_reason: str | None = None) -> None:
+    def log_trade_intent(self, *, intent_id: str, decision_id: str | None,
+                         run_id: str | None, intent: Any, status: str,
+                         blocked_reason: str | None = None,
+                         environment: str | None = None,
+                         release_id: str | None = None) -> None:
         """落库单条 intent。Outcome Tracker / invalidation 归因依赖本表，缺它复盘无地基。"""
         data = intent.model_dump() if hasattr(intent, "model_dump") else dict(intent or {})
         invalidation = data.get("invalidation")
@@ -1475,12 +1656,14 @@ class AuditDatabase:
             belief = data.get("belief")
             if isinstance(belief, dict):
                 invalidation = belief.get("invalidation")
+        effective_environment = str(environment or self.environment).lower()
+        effective_release = str(release_id or self.release_id)
         self._insert(
             """INSERT INTO trade_intents(intent_id, decision_id, run_id, created_at, symbol,
                action, client_order_id, side, qty, leverage, order_type, stop_loss, take_profit,
                expected_holding_minutes, confidence, order_source, strategy_id, ticket_id,
-               invalidation, blocked_reason, status, raw_json)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               invalidation, blocked_reason, status, raw_json, environment, release_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 intent_id, decision_id, run_id, utc_now(),
                 data.get("symbol"), data.get("action"), data.get("client_order_id"),
@@ -1490,6 +1673,7 @@ class AuditDatabase:
                 data.get("order_source") or "ai", data.get("strategy_id"),
                 data.get("ticket_id"), invalidation, blocked_reason, status,
                 json.dumps(data, ensure_ascii=False, default=str),
+                effective_environment, effective_release,
             ),
         )
 
@@ -1540,6 +1724,10 @@ class AuditDatabase:
         这是复盘的核心地基：没有它，复盘只能看"赚/亏"，
         无法知道"当初的 thesis 是不是被行情证伪"。
         """
+        effective_environment = str(
+            environment if environment and environment != "unknown" else self.environment
+        ).lower()
+        effective_release = str(release_id or self.release_id)
         # outcome_id 由成交命令/交易所订单号稳定派生。同步循环可能重复看到同一笔
         # 成交，使用 INSERT OR IGNORE 让补记天然幂等，避免重启或重试制造双份盈亏。
         self._insert(
@@ -1554,7 +1742,7 @@ class AuditDatabase:
              strategy_id, ticket_id, confidence,
              entry_price, exit_price, qty, pnl, pnl_pct, holding_minutes,
              expected_holding_minutes, invalidation, exit_reason, status,
-             opened_at, closed_at or utc_now(), lifecycle_id, environment, release_id,
+             opened_at, closed_at or utc_now(), lifecycle_id, effective_environment, effective_release,
              attribution_status, cost_status, actual_closed_at or closed_at,
              recorded_at or utc_now(), gross_realized, entry_fee, exit_fee, funding_cashflow),
         )
@@ -1568,15 +1756,20 @@ class AuditDatabase:
         )
 
     def log_risk_event(self, *, event_type: str, severity: str, details: str,
-                       action_taken: str = "", raw: dict[str, Any] | None = None) -> None:
+                       action_taken: str = "", raw: dict[str, Any] | None = None,
+                       environment: str | None = None,
+                       release_id: str | None = None) -> None:
         now = utc_now()
         raw_data = raw if isinstance(raw, dict) else {}
         raw_json = json.dumps(raw_data, ensure_ascii=False)
+        effective_environment = str(environment or self.environment).lower()
+        effective_release = str(release_id or self.release_id)
         with self.lock:
             self.conn.execute(
                 """INSERT INTO risk_events(event_id, created_at, event_type, severity, details,
-                   action_taken, raw_json) VALUES(?,?,?,?,?,?,?)""",
-                (str(uuid.uuid4()), now, event_type, severity, details, action_taken, raw_json),
+                   action_taken, raw_json, environment, release_id) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (str(uuid.uuid4()), now, event_type, severity, details, action_taken, raw_json,
+                 effective_environment, effective_release),
             )
             # info 只是审计流水；只有需处置的风险才进入 incident 生命周期。
             if severity in {"warn", "error", "critical"}:
@@ -1710,15 +1903,20 @@ class AuditDatabase:
                   symbol: str, side: str, order_type: str, qty: float, price: float | None,
                   status: str, raw: dict[str, Any] | None = None,
                   order_source: str = "ai", strategy_id: str | None = None,
-                  ticket_id: str | None = None, margin_mode: str = "ISOLATED") -> None:
+                  ticket_id: str | None = None, margin_mode: str = "ISOLATED",
+                  environment: str | None = None,
+                  release_id: str | None = None) -> None:
+        effective_environment = str(environment or self.environment).lower()
+        effective_release = str(release_id or self.release_id)
         self._insert(
             """INSERT INTO orders(client_order_id, exchange_order_id, symbol, side, order_type,
                qty, price, status, order_source, strategy_id, ticket_id, margin_mode,
-               created_at, updated_at, raw_json)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               created_at, updated_at, raw_json, environment, release_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (client_order_id, exchange_order_id, symbol, side, order_type, qty, price,
              status, order_source, strategy_id, ticket_id, margin_mode,
-             utc_now(), utc_now(), json.dumps(raw or {}, ensure_ascii=False)),
+             utc_now(), utc_now(), json.dumps(raw or {}, ensure_ascii=False),
+             effective_environment, effective_release),
         )
 
     def update_signal_ticket(self, *, ticket_id: str, status: str) -> None:
@@ -1768,17 +1966,22 @@ class AuditDatabase:
                      entry_price: float | None, leverage: int, stop_loss: float | None,
                      take_profit: float | None, status: str = "OPEN",
                      source: str = "ai", strategy_id: str | None = None,
-                     ticket_id: str | None = None, margin_mode: str = "ISOLATED") -> None:
+                     ticket_id: str | None = None, margin_mode: str = "ISOLATED",
+                     environment: str | None = None,
+                     release_id: str | None = None) -> None:
+        effective_environment = str(environment or self.environment).lower()
+        effective_release = str(release_id or self.release_id)
         self._insert(
             """INSERT INTO positions(symbol, side, qty, entry_price, leverage,
                stop_loss, take_profit, source, strategy_id, ticket_id, margin_mode,
-               status, opened_at, raw_json)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               status, opened_at, raw_json, environment, release_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (symbol, side, float(f"{float(qty):.8g}") if qty is not None else qty,
              self._clean_price(entry_price), leverage,
              self._clean_price(stop_loss), self._clean_price(take_profit),
              source, strategy_id, ticket_id, margin_mode,
-             status, utc_now(), json.dumps({"symbol": symbol, "side": side, "qty": qty}, ensure_ascii=False)),
+             status, utc_now(), json.dumps({"symbol": symbol, "side": side, "qty": qty}, ensure_ascii=False),
+             effective_environment, effective_release),
         )
 
     def close_open_position(self, *, symbol: str, side: str,
@@ -1878,14 +2081,19 @@ class AuditDatabase:
                          signal_price: float | None, bar_open_time: int = 0,
                          params: dict[str, Any] | None = None,
                          status: str = "triggered",
-                         raw: dict[str, Any] | None = None) -> None:
+                         raw: dict[str, Any] | None = None,
+                         environment: str | None = None,
+                         release_id: str | None = None) -> None:
+        effective_environment = str(environment or self.environment).lower()
+        effective_release = str(release_id or self.release_id)
         self._insert(
             """INSERT INTO signal_events(signal_id, strategy_id, symbol, timeframe, side,
-               signal_time, signal_price, bar_open_time, params_json, status, created_at, raw_json)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+               signal_time, signal_price, bar_open_time, params_json, status, created_at, raw_json,
+               environment, release_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (signal_id, strategy_id, symbol, timeframe, side, signal_time,
              signal_price, bar_open_time, json.dumps(params or {}, ensure_ascii=False),
-             status, utc_now(), json.dumps(raw or {}, ensure_ascii=False)),
+             status, utc_now(), json.dumps(raw or {}, ensure_ascii=False),
+             effective_environment, effective_release),
         )
 
     def log_signal_ticket(self, *, ticket_id: str, signal_id: str, strategy_id: str,
@@ -1893,16 +2101,20 @@ class AuditDatabase:
                           entry_zone_low: float, entry_zone_high: float, expires_at: str,
                           stop_loss_pct: float, take_profit_pct: float,
                           time_stop_hours: int = 48, status: str = "open",
-                          raw: dict[str, Any] | None = None) -> None:
+                          raw: dict[str, Any] | None = None,
+                          environment: str | None = None,
+                          release_id: str | None = None) -> None:
+        effective_environment = str(environment or self.environment).lower()
+        effective_release = str(release_id or self.release_id)
         self._insert(
             """INSERT INTO signal_tickets(ticket_id, signal_id, strategy_id, symbol, side,
                signal_time, signal_price, entry_zone_low, entry_zone_high, expires_at,
                stop_loss_pct, take_profit_pct, time_stop_hours, status, created_at, updated_at,
-               raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               raw_json, environment, release_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (ticket_id, signal_id, strategy_id, symbol, side, signal_time, signal_price,
              entry_zone_low, entry_zone_high, expires_at, stop_loss_pct, take_profit_pct,
              time_stop_hours, status, utc_now(), utc_now(),
-             json.dumps(raw or {}, ensure_ascii=False)),
+             json.dumps(raw or {}, ensure_ascii=False), effective_environment, effective_release),
         )
 
     def log_decision_conflict(self, *, run_id: str | None, decision_id: str | None,
@@ -1945,12 +2157,17 @@ class AuditDatabase:
 
     def log_portfolio_snapshot(self, *, equity: float, margin_balance: float,
                                available_balance: float, unrealized_pnl: float,
-                               margin_used: float, raw: dict[str, Any] | None = None) -> None:
+                               margin_used: float, raw: dict[str, Any] | None = None,
+                               environment: str | None = None,
+                               release_id: str | None = None) -> None:
+        effective_environment = str(environment or self.environment).lower()
+        effective_release = str(release_id or self.release_id)
         self._insert(
             """INSERT INTO portfolio_snapshots(created_at, equity, margin_balance, available_balance,
-               unrealized_pnl, margin_used, raw_json) VALUES(?,?,?,?,?,?,?)""",
+               unrealized_pnl, margin_used, raw_json, environment, release_id)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
             (utc_now(), equity, margin_balance, available_balance, unrealized_pnl, margin_used,
-             json.dumps(raw or {}, ensure_ascii=False)),
+             json.dumps(raw or {}, ensure_ascii=False), effective_environment, effective_release),
         )
 
     def table_counts(self) -> dict[str, int]:

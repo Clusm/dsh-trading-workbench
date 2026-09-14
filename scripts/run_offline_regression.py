@@ -46,6 +46,7 @@ SCRIPTS = (
     "scripts/smoke_trade_reconciliation.py",
     "scripts/smoke_trade_lifecycle.py",
     "scripts/smoke_db_migrations.py",
+    "scripts/smoke_release_acceptance.py",
     "scripts/smoke_recovery_bundle.py",
     "scripts/smoke_risk_incidents.py",
     "scripts/smoke_dashboard_health.py",

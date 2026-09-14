@@ -40,6 +40,7 @@ from core.intel_cache import IntelCache
 from core.instance_lock import InstanceLock
 from core.quotas import TradeQuotaManager
 from core.risk_guard import AccountRiskGuard
+from core.release_manifest import build_release_manifest, write_manifest
 from llm.base import LLMClient
 from llm.mock_client import MockLLMClient
 from llm.request_coordinator import coordinator_status
@@ -57,6 +58,7 @@ def build_execution_feedback(state: dict[str, Any], decision: Any,
     ai_decision = state.get("ai_decision")
     return {
         "ts": time.time(),
+        "release_id": state.get("release_id"),
         "decision": decision.model_dump() if decision else None,
         "risk_verdict": risk_verdict.model_dump() if risk_verdict else None,
         "execution_receipts": state.get("execution") or [],
@@ -119,6 +121,39 @@ class TradingService:
         self.broker.runtime_instance_id = self.runtime_instance_id
         if not getattr(self.broker, "environment", None):
             self.broker.environment = str(getattr(self.broker, "mode", "paper") or "paper")
+        broker_environment = str(getattr(self.broker, "environment", "unknown") or "unknown").lower()
+        reconciliation_book = getattr(self.broker, "trade_reconciliation", None)
+        broker_account_ref = getattr(reconciliation_book, "account_ref", None)
+        if not broker_account_ref:
+            broker_account_ref = f"{broker_environment}:local"
+        self.release_manifest_obj = build_release_manifest(
+            settings.project_root,
+            environment=broker_environment,
+            account_ref=str(broker_account_ref),
+            db_file=settings.db_file,
+            egress_id=os.getenv("MTA_EGRESS_ID", "unknown"),
+            release_id=os.getenv("MTA_RELEASE_ID") or None,
+        )
+        self.release_manifest = self.release_manifest_obj.to_dict()
+        self.release_id = self.release_manifest_obj.release_id
+        self.db.set_release_context(
+            release_id=self.release_id,
+            environment=broker_environment,
+            account_ref=self.release_manifest_obj.account_ref,
+        )
+        self.recorder.release_id = self.release_id
+        if reconciliation_book is not None:
+            reconciliation_book.release_id = self.release_id
+        try:
+            write_manifest(settings.project_root / "data" / "release_manifest.json",
+                           self.release_manifest_obj)
+        except Exception as exc:
+            # 清单写失败不改变交易风险档，但必须留下可见事故，发布报告也会因
+            # 缺少对应证据而保持 NO_GO，避免“运行着但无法证明版本”的假上线。
+            self.db.log_risk_event(
+                event_type="release_manifest_write_error", severity="critical",
+                details=f"{type(exc).__name__}: {exc}", action_taken="release evidence unavailable",
+            )
         self.paper_broker = self.broker  # 兼容旧名称
         # 不在构造阶段同步仓位：外部平仓补记会回查多笔 userTrades，网络波动时
         # 可阻塞数分钟，导致 Uvicorn 尚未监听、资金页面无法打开。后台慢循环会
@@ -223,6 +258,7 @@ class TradingService:
         }
         self._account_risk_status: dict[str, Any] = {}
         self._started_at = time.time()
+        self._last_release_observation_minute: str | None = None
         self._last_fast_cycle_at: float | None = None
         self._last_fast_cycle_error: str | None = None
         self._last_fast_cycle_duration_ms: float | None = None
@@ -293,7 +329,81 @@ class TradingService:
         mu = getattr(self, "universe", None)
         cfg["scan_pool"] = mu.get_scan_pool() if mu is not None else None
         cfg["universal_cards"] = bool(self.settings.raw_settings.get("signal_scanner", {}).get("universal_cards", True))
+        cfg["release_id"] = getattr(self, "release_id", "legacy")
         return cfg
+
+    def _record_release_observation(self) -> None:
+        """每个 UTC 分钟保存一次运行证据；只读采集内存/状态，不发网络请求。"""
+        writer = getattr(self.db, "log_release_observation", None)
+        if not callable(writer):
+            return
+        observed = datetime.now(timezone.utc)
+        observed_at = observed.isoformat(timespec="milliseconds")
+        observed_minute = observed.isoformat(timespec="minutes")
+        if observed_minute == getattr(self, "_last_release_observation_minute", None):
+            return
+        try:
+            rate = rate_limit_status()
+            entry = (getattr(getattr(self, "_entry_readiness_snapshot", None), "as_dict", lambda: {})()
+                     or {})
+            with self._lock:
+                fast_error = self._last_fast_cycle_error
+                slow_error = self._last_slow_cycle_error
+                closed = bool(getattr(self, "_closed", False))
+                fast_at = self._last_fast_cycle_at
+                slow_at = self._last_slow_cycle_at
+            persistence_ok = True
+            try:
+                self.db.fetch_one("SELECT 1")
+            except Exception:
+                persistence_ok = False
+            components = {
+                "service": "stopped" if closed else "healthy",
+                "fast_cycle": "degraded" if fast_error else ("healthy" if fast_at else "unknown"),
+                "slow_cycle": "degraded" if slow_error else ("healthy" if slow_at else "unknown"),
+                "persistence": "healthy" if persistence_ok else "degraded",
+            }
+            health_state = "healthy" if (
+                not closed and persistence_ok and not fast_error and not slow_error
+            ) else "degraded"
+            scope = getattr(self, "trading_scope", None)
+            scope_hash = getattr(scope, "scope_hash", "unknown")
+            scope_symbols = getattr(scope, "allowed_open_symbols", None)
+            if callable(scope_symbols):
+                try:
+                    scope_count = len(scope_symbols(None))
+                except Exception:
+                    scope_count = None
+            else:
+                scope_count = None
+            inserted = writer(
+                observed_at=observed_at,
+                observed_minute=observed_minute,
+                session_id=str(getattr(self, "runtime_instance_id", "unknown")),
+                health_state=health_state,
+                component_status=components,
+                config_hash=str((getattr(self, "release_manifest", {}) or {}).get("content_hash", "")),
+                rate_limit=rate,
+                coverage={"scope_hash": scope_hash, "scope_symbol_count": scope_count},
+                entry_readiness=entry,
+                raw={"runtime_instance_id": getattr(self, "runtime_instance_id", "unknown")},
+                release_id=getattr(self, "release_id", "legacy"),
+                environment=str(getattr(self.broker, "environment", "unknown") or "unknown"),
+                account_ref=str((getattr(self, "release_manifest", {}) or {}).get("account_ref", "unknown")),
+            )
+            # 即使是同一分钟已存在的幂等行，也不必重复尝试写入。
+            if inserted or inserted is False:
+                with self._lock:
+                    self._last_release_observation_minute = observed_minute
+        except Exception as exc:
+            try:
+                self.db.log_risk_event_once_while_open(
+                    event_type="release_observation_error", severity="critical",
+                    details=f"{type(exc).__name__}: {exc}",
+                    action_taken="release evidence degraded",
+                )
+            except Exception:
+                pass
 
     def run_once(self) -> dict[str, Any]:
         """同步运行一轮慢决策；已有慢循环时返回 skipped，绝不并发执行两轮。"""
@@ -507,6 +617,12 @@ class TradingService:
                 ),
                 "llm_coordinator": coordinator_status(),
                 "trade_reconciliation": self._trade_reconciliation_status(),
+                "release_id": getattr(self, "release_id", "legacy"),
+                "release_manifest": {
+                    key: (getattr(self, "release_manifest", {}) or {}).get(key)
+                    for key in ("git_commit", "content_hash", "schema_version",
+                                "environment", "account_ref", "egress_id", "threshold_version")
+                },
             }
 
     def _mirror_fact(self, table: str, environment: str,
@@ -741,8 +857,10 @@ class TradingService:
             llm_aux_timeout_seconds=float(
                 (self.settings.raw_settings.get("llm", {}) or {}).get(
                     "aux_timeout_seconds", 60.0)),
+            release_id=getattr(self, "release_id", "legacy"),
         )
-        state = graph.invoke({"run_id": run_id, "decision_id": decision_id})
+        state = graph.invoke({"run_id": run_id, "decision_id": decision_id,
+                              "release_id": getattr(self, "release_id", "legacy")})
         decision = state.get("decision")
         market_brief = state.get("market")
         try:
@@ -786,6 +904,7 @@ class TradingService:
             "channel_state": channel_status,
             "intel_cache": self.intel_cache.stats(),
             "web3_intel": self.intel_sidecar.snapshot(),
+            "release_id": getattr(self, "release_id", "legacy"),
             "ts": time.time(),
         }
         self.execution_feedback = self._build_feedback(state, decision, channel_status, broker_state)
@@ -932,6 +1051,9 @@ class TradingService:
         fast_interval = float(self.settings.raw_settings.get("decision_cycle", {}).get("fast_interval_seconds", 30))
         next_slow = time.monotonic()
         while not self._stop_event.is_set():
+            # 发布门禁依赖连续、按版本隔离的运行证据；该写入只读内存/状态，
+            # 不会触发行情、账户或订单网络请求。
+            self._record_release_observation()
             # SQLite在线备份包含WAL内容；频率门禁在manager内部，循环检查成本近似为零。
             self.db_backup.maybe_backup()
             now = time.monotonic()

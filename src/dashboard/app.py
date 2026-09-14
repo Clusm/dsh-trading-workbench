@@ -372,6 +372,8 @@ def _event_type_cn(value: Any) -> str:
         "auto_review_queued": "自动复盘已入队",
         "auto_review_error": "自动复盘失败",
         "mode_switch_saved": "执行模式已保存",
+        "release_manifest_write_error": "发布清单写入失败",
+        "release_observation_error": "发布观察证据写入失败",
     }.get(str(value), str(value))
 
 def _agent_cn(value: Any) -> str:

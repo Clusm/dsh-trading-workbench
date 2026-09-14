@@ -3,13 +3,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from core.release_evidence import build_release_readiness_report  # noqa: E402
 
 
 def _scalar(connection: sqlite3.Connection, sql: str, default: Any = 0) -> Any:
@@ -150,9 +155,41 @@ def build_report(db_path: Path) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="只读汇总 Demo 验收样本")
     parser.add_argument("--db", type=Path, default=ROOT / "data" / "agent_trader.sqlite")
+    parser.add_argument("--manifest", type=Path, default=None,
+                        help="可选发布清单；提供后按 release_id 生成严格报告")
+    parser.add_argument("--environment", default="demo")
+    parser.add_argument("--since", default=None)
+    parser.add_argument("--until", default=None)
+    parser.add_argument("--strict", action="store_true",
+                        help="严格门禁不是 GO 时返回 1，schema/IO 错误返回 2")
+    parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
-    print(json.dumps(build_report(args.db), ensure_ascii=False, indent=2))
-    return 0
+    try:
+        if args.manifest:
+            manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise ValueError("manifest must be a JSON object")
+            report = build_release_readiness_report(
+                args.db, manifest, environment=args.environment,
+                since=args.since, until=args.until,
+            )
+        else:
+            if args.strict:
+                raise ValueError("--strict requires --manifest")
+            report = build_report(args.db)
+        if args.out:
+            target = args.out
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+            temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+                                 encoding="utf-8")
+            temporary.replace(target)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 1 if args.strict and report.get("release_readiness") != "GO" else 0
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        print(json.dumps({"read_only": True, "error": f"{type(exc).__name__}: {exc}"},
+                         ensure_ascii=False, indent=2))
+        return 2
 
 
 if __name__ == "__main__":

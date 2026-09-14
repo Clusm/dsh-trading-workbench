@@ -384,6 +384,7 @@ class TradeReconciliationBook:
         self.db = db
         self.environment = str(environment or "unknown").lower()
         self.account_ref = str(account_ref or "unknown")
+        self.release_id = str(getattr(db, "release_id", "legacy") or "legacy")
 
     def ingest(
         self, rows: Iterable[Mapping[str, Any]], *, source: str,
@@ -437,7 +438,9 @@ class TradeReconciliationBook:
             opened_at_ms=opened, entry_qty=float(entry_qty),
             entry_notional=float(entry_qty * entry_price),
             attribution_status=attribution_status, cost_status=cost_status,
-            entry_release_id=entry_release_id, external=external, raw=raw,
+            entry_release_id=entry_release_id,
+            release_id=getattr(self.db, "release_id", self.release_id),
+            external=external, raw=raw,
         )
         result = self.db.fetch_one(
             "SELECT * FROM position_lifecycles WHERE lifecycle_id=?", (lifecycle_id,))

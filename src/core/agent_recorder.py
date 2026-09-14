@@ -20,6 +20,9 @@ class AgentRecorder:
         self.db = db
         self.logger = logger
         self.artifacts_dir = Path(artifacts_dir)
+        # 发布批次由 Service 在 broker 建立后写入数据库上下文；这里仅保存一个
+        # 兼容旧调用的快照，数据库本身仍会以当前上下文作为默认值。
+        self.release_id = str(getattr(db, "release_id", "legacy") or "legacy")
 
     def save_artifact(self, agent_name: str, artifact_type: str, obj: BaseModel | dict,
                       run_id: str | None = None) -> str:
@@ -36,6 +39,7 @@ class AgentRecorder:
             created_at=utc_now(),
             json_path=str(p),
             sha256=sha,
+            release_id=getattr(self.db, "release_id", self.release_id),
         )
         return str(p)
 
@@ -76,6 +80,7 @@ class AgentRecorder:
             output_summary=output_summary,
             latency_ms=latency_ms,
             error=err_text,
+            release_id=getattr(self.db, "release_id", self.release_id),
         )
         self.logger.log_agent(agent_name, {
             "cycle_run_id": run_id,

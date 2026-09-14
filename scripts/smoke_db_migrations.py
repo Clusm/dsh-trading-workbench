@@ -34,7 +34,7 @@ columns = {row["name"] for row in db.fetch_all("PRAGMA table_info(orders)")}
 versions = db.fetch_all("SELECT version, name FROM schema_migrations ORDER BY version")
 check("补齐order_source列", "order_source" in columns)
 check("补齐margin_mode列", "margin_mode" in columns)
-check("记录迁移版本1到15", [row["version"] for row in versions] == list(range(1, 16)))
+check("记录迁移版本1到16", [row["version"] for row in versions] == list(range(1, 17)))
 check("新增成交/生命周期/补账表", all(
     db.fetch_one("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
     is not None
@@ -45,6 +45,22 @@ check("trade_outcomes含生命周期与成本状态", {
     "lifecycle_id", "attribution_status", "cost_status", "actual_closed_at",
     "gross_realized", "entry_fee", "exit_fee", "funding_cashflow",
 }.issubset(outcome_columns))
+check("核心审计表含发布上下文", all(
+    {row["name"] for row in db.fetch_all(f"PRAGMA table_info({table})")}
+    .issuperset({"release_id", "environment"})
+    for table in ("trade_decisions", "trade_intents", "orders", "positions",
+                  "shadow_decisions", "risk_events", "portfolio_snapshots",
+                  "signal_events", "signal_tickets", "execution_fills",
+                  "position_lifecycles", "trade_reconciliation_jobs")))
+check("发布观察表按分钟建立", db.fetch_one(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='release_observations'")
+      is not None)
+observation_columns = {row["name"] for row in db.fetch_all(
+    "PRAGMA table_info(release_observations)")}
+check("发布观察表含门禁字段", {
+    "release_id", "environment", "account_ref", "observed_minute", "health_state",
+    "rate_limit_json", "entry_readiness_json",
+}.issubset(observation_columns))
 db.log_shadow_decision(
     decision_id="legacy-b", symbol="BTCUSDT", signal="bullish", reference_price=100.0,
     confidence=0.5, source="binance_top_trader_proxy", execution_weight=0.0,
@@ -59,7 +75,7 @@ db.close()
 print("\n[2] 重启后迁移不重复")
 again = AuditDatabase(db_path)
 versions_again = again.fetch_all("SELECT version FROM schema_migrations")
-check("版本记录保持唯一", [row["version"] for row in versions_again] == list(range(1, 16)))
+check("版本记录保持唯一", [row["version"] for row in versions_again] == list(range(1, 17)))
 check("旧B组名称已归一", again.fetch_one(
     "SELECT source FROM shadow_decisions WHERE decision_id='legacy-b'")["source"] == "B_contract_market")
 again.close()
@@ -86,4 +102,4 @@ check("失败版本没有登记", raw.execute(
     "SELECT COUNT(*) FROM schema_migrations WHERE version=99").fetchone()[0] == 0)
 raw.close()
 
-print("\n结果: 10 通过 / 0 失败")
+print("\n结果: 13 通过 / 0 失败")

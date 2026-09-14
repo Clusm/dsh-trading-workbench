@@ -185,6 +185,6 @@ recovery_db.close()
 
 versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
-check("数据库迁移版本1到15完整", versions == list(range(1, 16)))
+check("数据库迁移版本1到16完整", versions == list(range(1, 17)))
 db.close()
 print("\n结果: 26 通过 / 0 失败")

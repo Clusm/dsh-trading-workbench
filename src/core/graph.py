@@ -31,6 +31,7 @@ class AgentState(TypedDict, total=False):
     """LangGraph 单轮共享状态；字段均为当前 run 的结构化中间产物。"""
     run_id: str
     decision_id: str
+    release_id: str
     market: MarketBrief
     macro: MacroBrief
     onchain: OnchainBrief
@@ -75,7 +76,8 @@ def _match_block_reason(verdict: RiskVerdict, intent: Any) -> str | None:
 
 
 def _log_intents(db: AuditDatabase, run_id: str | None, decision_id: str | None,
-                 decision: TradeDecision | None, verdict: RiskVerdict) -> None:
+                 decision: TradeDecision | None, verdict: RiskVerdict,
+                 release_id: str | None = None) -> None:
     """逐条 intent 落库。这是 Outcome Tracker / invalidation 的归因地基——
     intent 不落库，订单就无法连回当初的 thesis，复盘只能看赚亏。"""
     if decision is None:
@@ -96,7 +98,7 @@ def _log_intents(db: AuditDatabase, run_id: str | None, decision_id: str | None,
             db.log_trade_intent(
                 intent_id=f"{decision_id}-{idx}" if decision_id else str(uuid.uuid4()),
                 decision_id=decision_id, run_id=run_id, intent=intent,
-                status=status, blocked_reason=blocked,
+                status=status, blocked_reason=blocked, release_id=release_id,
             )
         except Exception as e:
             db.log_risk_event(event_type="intent_log_error", severity="warn",
@@ -123,7 +125,8 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 llm_total_timeout_seconds: float = 240.0,
                 llm_aux_timeout_seconds: float = 60.0,
                 trading_scope: TradingScope | None = None,
-                entry_readiness_provider: Callable[[], Any] | None = None) -> Any:
+                entry_readiness_provider: Callable[[], Any] | None = None,
+                release_id: str | None = None) -> Any:
     # 生产服务显式注入 TradingScope；离线阶段脚本仍可只传旧参数。
     # 有 risk_config 范围时也尝试构造一个只读副本，保证直接调用 build_graph 的
     # 入口不会重新退回全市场开仓。
@@ -550,7 +553,8 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                                         allow_new_positions, prices=prices,
                                         available_cash=cash,
                                         portfolio=portfolio_state if isinstance(portfolio_state, dict) else None)
-        _log_intents(db, state.get("run_id"), state.get("decision_id"), decision, verdict)
+        _log_intents(db, state.get("run_id"), state.get("decision_id"), decision, verdict,
+                     release_id=state.get("release_id") or release_id)
         trace = list(decision.pipeline_trace)
         for item in trace:
             if item.get("stage") == "risk_guard":
