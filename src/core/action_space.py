@@ -52,8 +52,12 @@ class ActionSpace:
     max_open_positions: int = 8
     # 全量交易所白名单：用于 check_intent 兜底校验（确保 symbol 真实可交易）。
     supported_symbols: list[str] = field(default_factory=list)
+    # 业务开仓白名单：只约束 open，不影响已有持仓的 close/reduce/adjust。
+    # None 表示旧调用方未提供该概念，此时兼容回退到 tradeable/supported；
+    # 空列表则是明确的 fail closed，代表本轮没有任何开仓授权。
+    open_symbols: list[str] | None = None
     # 本轮可交易引导池（核心主流 + 异动山寨）：用于 submit_decision 的 enum 与提示词展示。
-    # 一定是 supported_symbols 的子集，避免“enum 说合法、闸门却拒绝”的漂移。
+    # 一定是 open_symbols 的子集（若提供），避免“enum 说合法、闸门却拒绝”的漂移。
     tradeable_symbols: list[str] = field(default_factory=list)
     held_symbols: list[str] = field(default_factory=list)
     strategy_held_symbols: list[str] = field(default_factory=list)
@@ -122,6 +126,15 @@ class ActionSpace:
 
         if self.supported_symbols and symbol not in {s.upper() for s in self.supported_symbols}:
             issues.append(f"{symbol} 不在交易所支持的 symbol 列表内（{_fmt_symbols(self.supported_symbols)}）")
+
+        # 开仓必须同时满足“交易所存在”和“项目业务白名单”。存量管理动作不走这里，
+        # 这样白名单收缩或临时禁开时，系统仍能安全平掉原有仓位。
+        if action == NEW_POSITION_ACTION:
+            open_symbols = self.open_symbols
+            if open_symbols is None:
+                open_symbols = self.tradeable_symbols or self.supported_symbols
+            if open_symbols is not None and symbol not in {s.upper() for s in open_symbols}:
+                issues.append(f"{symbol} 不在当前业务开仓白名单内（{_fmt_symbols(open_symbols)}）")
 
         # 存量管理动作必须打在真实持仓上，避免幻觉 symbol
         held = {s.upper() for s in self.held_symbols}
@@ -286,9 +299,15 @@ class ActionSpace:
         lines.append(f"当前持仓：{_fmt_symbols(self.held_symbols)}")
         if self.strategy_held_symbols:
             lines.append(f"策略通道已占用（AI 不得重复开仓）：{_fmt_symbols(self.strategy_held_symbols)}")
-        pool = self.tradeable_symbols or self.supported_symbols
+        pool = self.tradeable_symbols
         if pool:
-            lines.append(f"可交易 symbol 共 {len(pool)} 个：{_fmt_symbols(pool)}")
+            lines.append(f"本轮候选开仓 symbol 共 {len(pool)} 个：{_fmt_symbols(pool)}")
+        elif self.open_symbols is not None:
+            lines.append(f"当前业务开仓白名单共 {len(self.open_symbols)} 个："
+                         f"{_fmt_symbols(self.open_symbols)}")
+        elif self.supported_symbols:
+            lines.append(f"可用 instrument 共 {len(self.supported_symbols)} 个："
+                         f"{_fmt_symbols(self.supported_symbols)}")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ 构造
@@ -329,12 +348,22 @@ class ActionSpace:
         supported = risk_config.get("supported_symbols") or []
         supported_list = [str(s).strip().upper() for s in supported if s]
         supported_set = set(supported_list)
+        # 注意不能使用 ``or`` 判断 allowed_open_symbols：空列表是明确禁止开仓，
+        # 不是“配置缺失”。这条区别是 fail-closed 的核心。
+        has_open_scope = "allowed_open_symbols" in risk_config
+        configured_open = risk_config.get("allowed_open_symbols") if has_open_scope else None
+        open_list = ([str(s).strip().upper() for s in (configured_open or []) if s]
+                     if has_open_scope else None)
+        open_set = set(open_list or []) if open_list is not None else None
         if tradeable_symbols is not None:
             tradeable = [str(s).strip().upper() for s in tradeable_symbols if s]
         else:
-            tradeable = list(supported_list)
-        # 引导池必须是白名单子集，且保持顺序去重
-        tradeable = [s for s in tradeable if s in supported_set]
+            tradeable = list(open_list if open_list is not None else supported_list)
+        # 候选池必须是业务开仓白名单和交易所 instrument 的交集，并保持顺序去重。
+        if open_set is not None:
+            tradeable = [s for s in tradeable if s in open_set]
+        if supported_set:
+            tradeable = [s for s in tradeable if s in supported_set]
         seen: set[str] = set()
         tradeable = [s for s in tradeable if not (s in seen or seen.add(s))]
         return cls(
@@ -348,6 +377,7 @@ class ActionSpace:
             strong_confidence_threshold=float(risk_config.get("strong_confidence_threshold", 0.75)),
             max_open_positions=int(risk_config.get("max_open_positions", 8)),
             supported_symbols=supported_list,
+            open_symbols=open_list,
             tradeable_symbols=tradeable,
             held_symbols=held,
             strategy_held_symbols=strategy_held,

@@ -941,6 +941,16 @@ class BinanceFuturesBroker:
 
     def _open(self, intent: Any) -> dict[str, Any] | None:
         symbol = intent.symbol
+        # 最终执行层再次校验业务开仓白名单，防止策略/AI/脚本绕过上游 schema
+        # 直接调用 Broker。该检查只放在 _open，绝不影响已有仓位的平仓和减仓。
+        scope = getattr(self, "trading_scope", None)
+        if scope is not None and not scope.allows_open(symbol, self._symbol_filters.keys()):
+            if self.db:
+                self.db.log_risk_event(
+                    event_type="futures_scope_open_blocked", severity="warn",
+                    details=f"{symbol} 不在当前业务开仓白名单内，最终执行层拒绝",
+                    action_taken="skip open")
+            return None
         if self._symbol_filters and symbol not in self._symbol_filters:
             if self.db:
                 self.db.log_risk_event(event_type="futures_unsupported_symbol", severity="warn",

@@ -11,7 +11,7 @@ P1 先做安全的最小闭环：
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable
 
 from audit.database import AuditDatabase
 from data.market_query import get_live_prices
@@ -50,7 +50,7 @@ def build_intent_from_ticket(ticket: dict[str, Any], price: float,
         sl = price * (1.0 + sl_pct)
         tp = price * (1.0 - tp_pct)
     return TradeIntent(
-        symbol=str(ticket["symbol"]),
+        symbol=str(ticket["symbol"]).strip().upper(),
         action="open",
         side="LONG" if side == "LONG" else "SHORT",
         qty=round(qty, 8),
@@ -83,7 +83,8 @@ def run_strategy_trader(*, tickets: list[dict[str, Any]],
                         max_leverage: int = 20,
                         risk_per_trade: float = 0.02,
                         channel_status: dict[str, Any] | None = None,
-                        db: AuditDatabase | None = None) -> ChannelDecision:
+                        db: AuditDatabase | None = None,
+                        allowed_symbols: Iterable[str] | None = None) -> ChannelDecision:
     intents: list[TradeIntent] = []
     notes: list[str] = []
     portfolio = portfolio or {}
@@ -107,7 +108,10 @@ def run_strategy_trader(*, tickets: list[dict[str, Any]],
     margin_cap = strategy_equity * 0.80
 
     now = utc_now()
-    symbols = [str(t["symbol"]) for t in tickets]
+    allowed_set = ({str(s).strip().upper() for s in allowed_symbols if s}
+                   if allowed_symbols is not None else None)
+    symbols = [str(t["symbol"]).strip().upper() for t in tickets
+               if allowed_set is None or str(t.get("symbol") or "").strip().upper() in allowed_set]
     prices = dict(prices or {})
     missing = [s for s in symbols if s not in prices]
     if missing:
@@ -121,8 +125,15 @@ def run_strategy_trader(*, tickets: list[dict[str, Any]],
                      if str(p.get("source", "ai")) == "strategy" and p.get("strategy_id")}
 
     for ticket in tickets:
-        symbol = str(ticket["symbol"])
+        symbol = str(ticket["symbol"]).strip().upper()
         strategy_id = str(ticket.get("strategy_id", ""))
+        if allowed_set is not None and symbol not in allowed_set:
+            notes.append(f"{ticket.get('ticket_id', symbol)} 不在当前业务开仓白名单内，跳过")
+            if db:
+                db.log_risk_event(
+                    event_type="strategy_scope_skip", severity="info",
+                    details=f"{symbol} 不在当前业务开仓白名单内", action_taken="skip open")
+            continue
         if not _not_expired(ticket, now):
             notes.append(f"{ticket['ticket_id']} 已过期，跳过")
             if db:

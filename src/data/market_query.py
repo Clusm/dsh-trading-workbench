@@ -25,6 +25,7 @@ from data.binance_transport import request_json
 from data.kline_store import get_klines
 from data.market_stream_cache import get_marks, get_tickers
 from data.rate_limit import cooldown_remaining
+from core.trading_scope import TradingScope
 
 BASE_URL = "https://fapi.binance.com"
 VALID_INTERVALS = {"1m", "5m", "15m", "1h", "4h", "1d"}
@@ -60,17 +61,28 @@ def _core_symbols() -> list[str]:
     XAGUSDT 白银、XAUUSDT 黄金、SKHYNIXUSDT、SNDKUSDT、SPCXUSDT 等）混进返回列表。
     它们在美股时段成交额会冲进全市场前十，但历史订单一次都没有，真下单就是事故。
 
-    读不到配置时返回空列表，此时调用方退回全市场扫描，行为与改动前一致（不更差）。
+    读不到配置时返回空列表；调用方必须 fail closed，不能再退回全市场扫描。
     """
     global _CORE_SYMBOLS
     if _CORE_SYMBOLS is None:
         try:
             cfg = yaml.safe_load(_SETTINGS_PATH.read_text(encoding="utf-8")) or {}
-            _CORE_SYMBOLS = [str(s).strip().upper()
-                             for s in (cfg.get("market_universe", {}) or {}).get("core_symbols") or []]
+            raw_symbols = (cfg.get("market_universe", {}) or {}).get("core_symbols") or []
+            _CORE_SYMBOLS = list(TradingScope.from_symbols(raw_symbols).symbols)
         except Exception:
             _CORE_SYMBOLS = []
     return _CORE_SYMBOLS
+
+
+def _configured_scope() -> TradingScope | None:
+    """返回行情工具使用的范围；配置不可用时返回 None 触发 fail closed。"""
+    symbols = _core_symbols()
+    if not symbols:
+        return None
+    try:
+        return TradingScope.from_symbols(symbols)
+    except ValueError:
+        return None
 
 
 def _fmt_symbol(symbol: str) -> str:
@@ -114,6 +126,11 @@ def _pack_candles(klines: list[list[Any]], interval: str, max_candles: int = 20)
 def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
                         include_candles: bool = True) -> dict[str, Any]:
     symbol = _fmt_symbol(symbol)
+    scope = _configured_scope()
+    if scope is None:
+        return {"error": "trading_scope_unavailable，已拒绝行情工具请求"}
+    if not scope.allows_open(symbol):
+        return {"error": f"{symbol} 不在当前业务开仓白名单内，已拒绝行情工具请求"}
     interval = interval if interval in VALID_INTERVALS else "15m"
     limit = max(20, min(int(limit), 500))
     cache_key = ("detail", symbol, interval, limit, include_candles)
@@ -262,10 +279,16 @@ def query_guardian_closed_bar(symbol: str, interval: str = "15m") -> dict[str, A
 
 def query_symbol_cards(symbols: list[str], top_n: int = 20) -> dict[str, Any]:
     """批量轻量指标卡：无 K 线，一次最多 20 个，适合先宽扫再深挖。"""
+    scope = _configured_scope()
+    if scope is None:
+        return {"error": "trading_scope_unavailable，已拒绝行情工具请求"}
     syms = [_fmt_symbol(s) for s in (symbols or [])]
     syms = list(dict.fromkeys(syms))[:max(1, min(int(top_n), 40))]
     if not syms:
         return {"error": "symbols 列表不能为空，请给出至少一个交易对"}
+    rejected = [symbol for symbol in syms if not scope.allows_open(symbol)]
+    if rejected:
+        return {"error": f"symbol 不在当前业务开仓白名单内，已拒绝: {', '.join(rejected)}"}
     cache_key = ("cards", tuple(syms))
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -300,9 +323,13 @@ def query_top_symbols(top_n: int = 20) -> dict[str, Any]:
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-    tickers = get_all_24h_tickers(symbols=_core_symbols() or None)
+    scope = _configured_scope()
+    if scope is None:
+        return {"error": "trading_scope_unavailable，已拒绝全市场回退"}
+    core_symbols = list(scope.symbols)
+    tickers = get_all_24h_tickers(symbols=core_symbols)
     # 只在核心池内选：这份列表会被主 Agent 当作可交易标的的权威来源
-    symbols = select_top_symbols(tickers, top_n=top_n, core_symbols=_core_symbols() or None)
+    symbols = select_top_symbols(tickers, top_n=top_n, core_symbols=core_symbols)
     rows = []
     for t in tickers:
         if t["symbol"] in symbols:

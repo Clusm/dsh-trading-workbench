@@ -20,6 +20,7 @@ from audit.jsonl_logger import JsonlLogger  # noqa: E402
 from core.agent_recorder import AgentRecorder  # noqa: E402
 from core.config_loader import load_settings  # noqa: E402
 from core.graph import build_graph  # noqa: E402
+from core.trading_scope import scope_from_settings  # noqa: E402
 from llm.mock_client import MockLLMClient  # noqa: E402
 
 
@@ -42,6 +43,7 @@ def main() -> None:
         risk_config=settings.raw_risk,
         knowledge_dir=settings.knowledge_dir,
         enable_live_data=False,
+        trading_scope=scope_from_settings(settings.raw_settings),
     )
 
     run_id = str(uuid.uuid4())

@@ -31,6 +31,7 @@ from core.control import ControlState  # noqa: E402
 from core.service import build_execution_feedback  # noqa: E402
 from core.intel_cache import IntelCache  # noqa: E402
 from core.graph import build_graph  # noqa: E402
+from core.trading_scope import scope_from_settings  # noqa: E402
 from llm.factory import build_llm_for_agent  # noqa: E402
 
 
@@ -62,6 +63,8 @@ def run_one_cycle(settings, db, logger, recorder, broker, capital, quota, llm, m
     pre_prices = get_live_prices(position_symbols) if position_symbols else {}
     channel_status = channels.sync(pre_prices, session_equity=capital.session_equity())
     mu_cfg = settings.raw_settings.get("market_universe", {}) or {}
+    trading_scope = scope_from_settings(settings.raw_settings)
+    broker.trading_scope = trading_scope
     universe = MarketUniverse(
         state_file=settings.project_root / str(mu_cfg.get("state_file", "data/market_universe_state.json")),
         core_symbols=mu_cfg.get("core_symbols") or [],
@@ -77,7 +80,10 @@ def run_one_cycle(settings, db, logger, recorder, broker, capital, quota, llm, m
     risk_cfg["channel_max_margin_usage"] = float(ch_cfg.get("channel_max_margin_usage", 0.80))
     risk_cfg["ai_max_leverage"] = int(ch_cfg.get("ai_max_leverage", 20))
     risk_cfg["channel_status"] = channel_status
-    risk_cfg["supported_symbols"] = list(getattr(broker, "_symbol_filters", {}).keys()) or None
+    instrument_symbols = list(getattr(broker, "_symbol_filters", {}).keys())
+    risk_cfg["supported_symbols"] = instrument_symbols or None
+    risk_cfg["allowed_open_symbols"] = trading_scope.allowed_open_symbols(instrument_symbols)
+    risk_cfg["trading_scope_hash"] = trading_scope.scope_hash
     graph = build_graph(
         llm=llm,
         model=model,
@@ -103,6 +109,7 @@ def run_one_cycle(settings, db, logger, recorder, broker, capital, quota, llm, m
         allow_new_positions=bool(control.allow_new_positions and equity_available),
         execution_feedback=dict(execution_feedback or {}),
         execution_mode=str(getattr(broker, "mode", "paper") or "paper"),
+        trading_scope=trading_scope,
     )
     state = graph.invoke({"run_id": run_id, "decision_id": decision_id})
     decision = state.get("decision")

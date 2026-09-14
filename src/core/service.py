@@ -20,6 +20,7 @@ from core.control import ControlState
 from core.graph import build_graph
 from core.decision_pipeline import authorize_decision, sign_execution
 from core.position_guardian import evaluate_positions
+from core.trading_scope import scope_from_settings
 from llm.factory import build_llm_for_agent
 from exchange.factory import create_broker
 from core.capital import CapitalManager
@@ -105,7 +106,12 @@ class TradingService:
         )
         self.logger = JsonlLogger(settings.logs_dir)
         self.recorder = AgentRecorder(self.db, self.logger, settings.artifacts_dir)
+        # 开仓范围必须在实例启动时一次性校验；配置缺失或重复时直接拒绝启动，
+        # 不能像旧逻辑一样退回全市场。该对象随后注入 Broker、策略和 AI 三条路径。
+        mu_cfg = settings.raw_settings.get("market_universe", {}) or {}
+        self.trading_scope = scope_from_settings(settings.raw_settings)
         self.broker = create_broker(settings, self.db)
+        self.broker.trading_scope = self.trading_scope
         self.paper_broker = self.broker  # 兼容旧名称
         # 不在构造阶段同步仓位：外部平仓补记会回查多笔 userTrades，网络波动时
         # 可阻塞数分钟，导致 Uvicorn 尚未监听、资金页面无法打开。后台慢循环会
@@ -136,7 +142,6 @@ class TradingService:
             mode=str(stability_cfg.get("risk_guard_mode", "audit_only")),
         )
         ch_cfg = settings.raw_settings.get("channels", {}) or {}
-        mu_cfg = settings.raw_settings.get("market_universe", {}) or {}
         self.universe = MarketUniverse(
             state_file=settings.project_root / str(mu_cfg.get("state_file", "data/market_universe_state.json")),
             core_symbols=mu_cfg.get("core_symbols") or [],
@@ -500,12 +505,17 @@ class TradingService:
         risk_config["ai_max_leverage"] = int(ch_cfg.get("ai_max_leverage", 20))
         risk_config["ai_strong_max_leverage"] = int(ch_cfg.get("ai_strong_max_leverage", 25))
         risk_config["channel_status"] = channel_status
-        # 全量白名单：过滤非法 symbol（垃圾数据），只保留标准 USDT 永续格式
+        # instrument 集合只表示交易所可识别/可管理的合约；开仓必须再与项目业务
+        # TradingScope 求交集。这样白名单外的历史持仓仍可管理，但不能新开。
         all_symbols = list(getattr(self.broker, "_symbol_filters", {}).keys()) or []
-        risk_config["supported_symbols"] = [
+        instrument_symbols = [
             s for s in all_symbols
             if re.fullmatch(r"[0-9A-Z]+USDT", str(s))
-        ] or None
+        ]
+        risk_config["supported_symbols"] = instrument_symbols or None
+        risk_config["allowed_open_symbols"] = self.trading_scope.allowed_open_symbols(
+            instrument_symbols)
+        risk_config["trading_scope_hash"] = self.trading_scope.scope_hash
         previous_feedback = dict(self.execution_feedback or {})
         graph = build_graph(
             llm=self.llm,
@@ -539,6 +549,7 @@ class TradingService:
             query_budget=int((self.settings.raw_settings.get("decision_cycle", {})
                               or {}).get("query_budget", 8)),
             execution_mode=str(getattr(self.broker, "mode", "paper") or "paper"),
+            trading_scope=self.trading_scope,
             llm_total_timeout_seconds=float(
                 (self.settings.raw_settings.get("llm", {}) or {}).get(
                     "total_timeout_seconds", 240.0)),

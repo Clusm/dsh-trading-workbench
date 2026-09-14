@@ -317,6 +317,15 @@ class PaperBroker:
     def _open(self, intent: Any, price: float, source: str,
               existing: tuple[str, dict[str, Any]] | None,
               risk_config: dict[str, Any], db: AuditDatabase) -> dict[str, Any] | None:
+        # PaperBroker 也执行同一业务范围检查，确保离线验证和 demo/live 的
+        # 最终开仓行为一致；close/reduce/adjust 不经过此分支。
+        scope = getattr(self, "trading_scope", None)
+        if scope is not None and not scope.allows_open(intent.symbol):
+            db.log_risk_event(
+                event_type="paper_scope_open_blocked", severity="warn",
+                details=f"{intent.symbol} 不在当前业务开仓白名单内，最终执行层拒绝",
+                action_taken="skip open")
+            return None
         if intent.stop_loss is None or float(intent.stop_loss) <= 0                 or intent.take_profit is None or float(intent.take_profit) <= 0:
             db.log_risk_event(event_type="paper_reject_bare", severity="warn",
                               details=f"{intent.symbol} 新开仓必须同时设置初始止损和止盈，跳过")

@@ -21,6 +21,7 @@ from core.action_space import ActionSpace
 from core.agent_recorder import AgentRecorder
 from core.decision_pipeline import authorize_decision, sign_execution
 from core.position_guardian import evaluate_positions
+from core.trading_scope import TradingScope
 from data.market_query import get_live_prices
 from llm.base import LLMClient
 
@@ -118,7 +119,19 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 signal_scanner_config: dict[str, Any] | None = None,
                 execution_feedback: dict[str, Any] | None = None,
                 query_budget: int = 8, execution_mode: str = "paper",
-                llm_total_timeout_seconds: float = 240.0) -> Any:
+                llm_total_timeout_seconds: float = 240.0,
+                trading_scope: TradingScope | None = None) -> Any:
+    # 生产服务显式注入 TradingScope；离线阶段脚本仍可只传旧参数。
+    # 有 risk_config 范围时也尝试构造一个只读副本，保证直接调用 build_graph 的
+    # 入口不会重新退回全市场开仓。
+    scope = trading_scope
+    if scope is None:
+        configured_scope = risk_config.get("allowed_open_symbols")
+        if configured_scope is None:
+            configured_scope = market_core_symbols
+        if configured_scope:
+            scope = TradingScope.from_symbols(configured_scope)
+
     def market_node(state: AgentState) -> dict[str, Any]:
         pair = (agent_llms or {}).get("market_agent")
 
@@ -311,6 +324,7 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 risk_per_trade=float(cfg.get("strategy_risk_per_trade", 0.02) or 0.02),
                 channel_status=risk_config.get("channel_status") or {},
                 db=db,
+                allowed_symbols=list(scope.symbols) if scope is not None else None,
             )
             strategy_error = ""
         except Exception as e:
@@ -330,11 +344,23 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
             ai_portfolio = portfolio_state if portfolio_state is not None else (
                 broker.state if broker is not None else None)
             # 双层可交易集合：核心主流 + 异动山寨。异动币被检测到后进入本轮可交易池。
-            anomaly_symbols = orchestrator.extract_anomaly_symbols(state["market"]) if state.get("market") else []
-            tradeable = list(orchestrator.AI_CORE_SYMBOLS)
-            for s in anomaly_symbols:
-                if s not in tradeable:
-                    tradeable.append(s)
+            anomaly_symbols = (
+                orchestrator.extract_anomaly_symbols(
+                    state["market"],
+                    allowed_symbols=scope.symbols if scope is not None else None,
+                )
+                if state.get("market") else []
+            )
+            if scope is not None:
+                # 异动只是在白名单内改变本轮排序/关注度，不能扩大业务开仓集合。
+                tradeable = scope.candidate_symbols(
+                    list(scope.symbols) + anomaly_symbols,
+                )
+            else:
+                tradeable = list(orchestrator.AI_CORE_SYMBOLS)
+                for s in anomaly_symbols:
+                    if s not in tradeable:
+                        tradeable.append(s)
             # 同一份 ActionSpace 同时喂给：动态 schema 生成 + submit_decision 的 Validator 回环。
             # risk_node 里的运行时闸门用同一谓词再复核一次。
             action_space = ActionSpace.from_context(

@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable
 
 import copy
 
@@ -49,7 +49,8 @@ AI_CORE_SYMBOLS = [
 ]
 
 
-def extract_anomaly_symbols(market: MarketBrief) -> list[str]:
+def extract_anomaly_symbols(market: MarketBrief,
+                            allowed_symbols: Iterable[str] | None = None) -> list[str]:
     """从 market_brief 的 anomalies / top_movers 提取异动 symbol（非核心池山寨币）。
 
     这是「主流为主 + 山寨异动」双层可交易集合的关键：异动山寨币被检测到后，
@@ -57,13 +58,16 @@ def extract_anomaly_symbols(market: MarketBrief) -> list[str]:
     """
     symbols: list[str] = []
     seen: set[str] = set()
+    # 生产调用传入 TradingScope 的开仓白名单；保留 None 兼容旧的离线脚本。
+    # ``AI_CORE_SYMBOLS`` 只是提示词层面的主流基线，不得替代 settings 中的业务范围。
+    allowed = {str(s).strip().upper() for s in allowed_symbols or [] if s}
     core = set(AI_CORE_SYMBOLS)
     for text in list(market.anomalies or []) + list(market.top_movers or []):
         m = re.match(r"^([0-9A-Z]+USDT)", str(text).strip())
         if not m:
             continue
         sym = m.group(1).upper()
-        if sym and sym not in seen and sym not in core:
+        if sym and sym not in seen and sym not in core and (not allowed or sym in allowed):
             seen.add(sym)
             symbols.append(sym)
     return symbols
