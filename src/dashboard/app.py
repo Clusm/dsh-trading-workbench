@@ -341,6 +341,7 @@ def _event_type_cn(value: Any) -> str:
         "baseline_reanchored": "资金基线手动重锚",
         "capital_reset_skipped": "破产重置已跳过",
         "decision_downgraded": "决策校验降级",
+        "llm_time_budget_exhausted": "AI决策总时限耗尽",
         "action_space_no_open": "本轮禁止开仓",
         "intent_log_error": "intent落库错误",
         "outcome_log_error": "平仓归因错误",
