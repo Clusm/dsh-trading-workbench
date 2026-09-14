@@ -21,6 +21,9 @@ from data.binance_public import (
     prepare_closed_klines,
     select_top_symbols,
 )
+from data.binance_transport import request_json
+from data.kline_store import get_klines
+from data.market_stream_cache import get_marks, get_tickers
 from data.rate_limit import cooldown_remaining
 
 BASE_URL = "https://fapi.binance.com"
@@ -118,10 +121,14 @@ def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
     if cached is not None:
         return cached
     with httpx.Client(timeout=20.0) as client:
-        ticker = _get_json(client, "/fapi/v1/ticker/24hr", {"symbol": symbol})
-        klines = _get_json(client, "/fapi/v1/klines", {"symbol": symbol, "interval": interval, "limit": limit})
+        streamed_ticker = get_tickers([symbol], max_age=30.0)
+        ticker = (streamed_ticker[0] if streamed_ticker else
+                  _get_json(client, "/fapi/v1/ticker/24hr", {"symbol": symbol}))
+        klines = get_klines(client, symbol, interval, limit, fetcher=_get_json)
         try:
-            premium = _get_json(client, "/fapi/v1/premiumIndex", {"symbol": symbol})
+            streamed_mark = get_marks([symbol], max_age=30.0)
+            premium = (streamed_mark[0] if streamed_mark else
+                       _get_json(client, "/fapi/v1/premiumIndex", {"symbol": symbol}))
         except Exception:
             premium = {}
         try:
@@ -229,9 +236,7 @@ def query_guardian_closed_bar(symbol: str, interval: str = "15m") -> dict[str, A
     observed_at_ms = int(time.time() * 1000)
     try:
         with httpx.Client(timeout=12.0) as client:
-            rows = _get_json(client, "/fapi/v1/klines", {
-                "symbol": symbol, "interval": interval, "limit": 24,
-            })
+            rows = get_klines(client, symbol, interval, 24, fetcher=_get_json)
         closed, live_bar, quality = prepare_closed_klines(
             rows, interval, observed_at_ms=observed_at_ms, min_closed=3,
         )
@@ -266,7 +271,7 @@ def query_symbol_cards(symbols: list[str], top_n: int = 20) -> dict[str, Any]:
     if cached is not None:
         return cached
     try:
-        tickers = get_all_24h_tickers()
+        tickers = get_all_24h_tickers(symbols=syms)
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
     by = {str(t.get("symbol")): t for t in tickers}
@@ -295,7 +300,7 @@ def query_top_symbols(top_n: int = 20) -> dict[str, Any]:
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-    tickers = get_all_24h_tickers()
+    tickers = get_all_24h_tickers(symbols=_core_symbols() or None)
     # 只在核心池内选：这份列表会被主 Agent 当作可交易标的的权威来源
     symbols = select_top_symbols(tickers, top_n=top_n, core_symbols=_core_symbols() or None)
     rows = []
@@ -376,20 +381,20 @@ def _fetch_price(symbol: str) -> float | None:
     if cooldown_remaining() > 0:
         return None
     try:
-        r = _shared_get(f"{BASE_URL}/fapi/v1/ticker/price",
-                        params={"symbol": symbol}, timeout=3.0)
-        r.raise_for_status()
-        return float(r.json().get("price") or 0.0)
+        payload = request_json(
+            _shared_client(), "/fapi/v1/ticker/price", {"symbol": symbol},
+            timeout=3.0, attempts=2, priority="normal", base_url=BASE_URL,
+        )
+        return float(payload.get("price") or 0.0)
     except Exception:
         return None
 
 
 def _fetch_all_prices() -> dict[str, float]:
-    if cooldown_remaining() > 0:
-        raise RuntimeError("Binance 公开行情冷却中")
-    r = _shared_get(f"{BASE_URL}/fapi/v1/ticker/price", timeout=6.0)
-    r.raise_for_status()
-    data = r.json()
+    data = request_json(
+        _shared_client(), "/fapi/v1/ticker/price", timeout=6.0,
+        attempts=2, priority="background", base_url=BASE_URL,
+    )
     out: dict[str, float] = {}
     for item in data or []:
         symbol = str(item.get("symbol") or "")

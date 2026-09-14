@@ -21,6 +21,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from core.service import TradingService
 from data.market_query import get_live_prices
 from data.price_stream import PriceStream
+from data.kline_store import kline_store_status
+from data.market_stream_cache import stream_cache_status
 from data.rate_limit import rate_limit_status
 from exchange.event_inbox import ExchangeEventInbox
 from exchange.account_mirror import AccountMirror
@@ -1082,11 +1084,24 @@ def _position_symbols(service: TradingService) -> list[str]:
     return [str(p.get("symbol")) for p in (state.get("positions") or []) if p.get("symbol")]
 
 
+def _market_stream_symbols(service: TradingService) -> list[str]:
+    """行情流始终覆盖20币白名单，并把任何外部持仓标的置顶补入。"""
+    settings = getattr(service, "settings", None)
+    raw = getattr(settings, "raw_settings", {}) or {}
+    configured = list(((raw.get("market_universe", {}) or {}).get("core_symbols") or []))
+    combined = _position_symbols(service) + configured
+    return list(dict.fromkeys(str(symbol).upper() for symbol in combined if symbol))
+
+
 def create_app(service: TradingService) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # 行情推送：可用时把 REST 轮询降到零；出口不支持时自动降级，不影响页面
-        stream = PriceStream(lambda: _position_symbols(service))
+        market_data_cfg = service.settings.raw_settings.get("binance_market_data", {}) or {}
+        stream = PriceStream(
+            lambda: _market_stream_symbols(service),
+            kline_intervals=market_data_cfg.get("kline_intervals") or ("1m", "15m"),
+        )
         app.state.price_stream = stream
         task = asyncio.create_task(stream.serve())
         intel_cfg = service.settings.raw_settings.get("web3_intel", {}) or {}
@@ -1698,6 +1713,14 @@ def create_app(service: TradingService) -> FastAPI:
             "runtime": runtime,
             # 只解释策略/AI 行情为何降级，不改变总健康或交易闸门语义。
             "public_market_rate_limit": rate_limit_status(),
+            "public_market_stream": {
+                **(getattr(app.state, "price_stream", None).status()
+                   if getattr(app.state, "price_stream", None) is not None
+                   and callable(getattr(app.state.price_stream, "status", None))
+                   else {"enabled": False, "state": "unavailable", "active": False}),
+                "cache": stream_cache_status(),
+                "klines": kline_store_status(),
+            },
             "database_backup": (service.db_backup.status()
                                 if hasattr(service, "db_backup") else {"enabled": False}),
             "risk_incidents": service.db.risk_incident_summary(),

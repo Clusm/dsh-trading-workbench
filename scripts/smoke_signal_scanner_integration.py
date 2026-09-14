@@ -200,7 +200,7 @@ def main() -> None:
         )
         import data.market_universe as universe_module
         original_tickers = universe_module.get_all_24h_tickers
-        universe_module.get_all_24h_tickers = lambda: [
+        universe_module.get_all_24h_tickers = lambda *args, **kwargs: [
             {"symbol": "XAUUSDT", "quoteVolume": "9999", "priceChangePercent": "20"},
             {"symbol": "BTCUSDT", "quoteVolume": "100", "priceChangePercent": "1"},
             {"symbol": "ETHUSDT", "quoteVolume": "80", "priceChangePercent": "2"},

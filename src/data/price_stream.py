@@ -31,12 +31,15 @@ import os
 import time
 from typing import Awaitable, Callable, Iterable
 
+from data.kline_store import push_kline_event
+from data.market_stream_cache import push_book, push_mark, push_ticker
 from data.market_query import push_stream_price
 
 FSTREAM_BASE = "wss://fstream.binance.com"
 # Binance 2026-09-04 文档已将 ticker/markPrice/kline 等常规行情迁移到
 # /market。旧的无路由地址只再推 /public 类数据，会出现“握手成功但零帧”。
 MARKET_COMBINED_PATH = "/market/stream?streams={streams}"
+PUBLIC_COMBINED_PATH = "/public/stream?streams={streams}"
 
 # 握手成功但迟迟收不到首帧，基本可以判定该出口不支持合约推送
 FIRST_FRAME_TIMEOUT = 15.0
@@ -46,6 +49,8 @@ FAST_RETRY_SECONDS = 5.0
 SLOW_RETRY_SECONDS = 120.0
 # 订阅列表多久核对一次（持仓变动后自动跟上）
 RESUBSCRIBE_INTERVAL = 15.0
+# 只订阅两个基础周期，避免20币×7周期形成数百帧/秒；高周期由kline_store聚合。
+KLINE_INTERVALS = ("1m", "15m")
 
 
 def _proxy() -> str | None:
@@ -66,12 +71,23 @@ class PriceStream:
         self,
         symbols_provider: Callable[[], Iterable[str]],
         on_status: Callable[[str, str], Awaitable[None]] | None = None,
+        kline_intervals: Iterable[str] | None = None,
     ) -> None:
         self._symbols_provider = symbols_provider
         self._on_status = on_status
+        requested_intervals = tuple(str(item) for item in (kline_intervals or KLINE_INTERVALS))
+        self._kline_intervals = tuple(item for item in requested_intervals
+                                      if item in KLINE_INTERVALS) or KLINE_INTERVALS
         self._subscribed: set[str] = set()
         self._failures = 0
         self._last_price_at = 0.0
+        self._last_frame_at = 0.0
+        self._messages = 0
+        self._reconnects = 0
+        self._book_subscribed: set[str] = set()
+        self._book_active = False
+        self._book_last_frame_at = 0.0
+        self._book_failures = 0
         self._state = "init"  # init | live | blocked | disabled
         self._stop = False
 
@@ -96,12 +112,44 @@ class PriceStream:
             return "无持仓，无需推送"
         return "正在连接推送…"
 
+    def status(self) -> dict[str, object]:
+        now = time.time()
+        return {
+            "enabled": True,
+            "state": self._state,
+            "active": self.active,
+            "symbols": len(self._wanted_symbols()),
+            "subscribed_streams": len(self._subscribed),
+            "messages": self._messages,
+            "reconnects": self._reconnects,
+            "failures": self._failures,
+            "last_frame_at": self._last_frame_at or None,
+            "last_frame_age_seconds": (round(now - self._last_frame_at, 3)
+                                       if self._last_frame_at else None),
+            "text": self.status_text(),
+            "book_ticker_active": (self._book_active and
+                                   now - self._book_last_frame_at < 15.0),
+            "book_ticker_streams": len(self._book_subscribed),
+            "book_ticker_failures": self._book_failures,
+        }
+
     def stop(self) -> None:
         self._stop = True
 
     # ---- 主循环 ----
     async def serve(self) -> None:
-        """永不退出的后台协程：连接 → 收帧 → 断线重连。"""
+        """并行维护常规行情与高频最优买卖价，两条链路独立降级。"""
+        market = asyncio.create_task(self._serve_market())
+        book = asyncio.create_task(self._serve_books())
+        try:
+            await asyncio.gather(market, book)
+        finally:
+            market.cancel()
+            book.cancel()
+            await asyncio.gather(market, book, return_exceptions=True)
+
+    async def _serve_market(self) -> None:
+        """永不退出的常规行情协程：连接、收帧、断线退避。"""
         try:
             import websockets  # noqa: F401  依赖缺失是永久性的，直接降级不再重试
         except ImportError:
@@ -121,10 +169,54 @@ class PriceStream:
             delay = SLOW_RETRY_SECONDS if self._failures >= FAILURES_BEFORE_BACKOFF else FAST_RETRY_SECONDS
             await asyncio.sleep(delay)
 
+    async def _serve_books(self) -> None:
+        """bookTicker使用/public路由；失败不拖垮/market上的价格和K线。"""
+        try:
+            import websockets  # noqa: F401
+        except ImportError:
+            return
+        while not self._stop:
+            try:
+                await self._book_session()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._book_failures += 1
+                self._book_active = False
+                self._book_subscribed.clear()
+            if not self._stop:
+                delay = (SLOW_RETRY_SECONDS if self._book_failures >= FAILURES_BEFORE_BACKOFF
+                         else FAST_RETRY_SECONDS)
+                await asyncio.sleep(delay)
+
+    async def _book_session(self) -> None:
+        import websockets
+
+        streams = self._book_stream_names()
+        if not streams:
+            await asyncio.sleep(FAST_RETRY_SECONDS)
+            return
+        url = FSTREAM_BASE + PUBLIC_COMBINED_PATH.format(streams="/".join(streams))
+        kwargs: dict[str, object] = {
+            "open_timeout": 15.0,
+            "ping_interval": 20.0,
+            "ping_timeout": 20.0,
+            "proxy": _proxy(),
+        }
+        async with websockets.connect(url, **kwargs) as ws:  # type: ignore[arg-type]
+            self._book_subscribed = set(streams)
+            first = await asyncio.wait_for(ws.recv(), timeout=FIRST_FRAME_TIMEOUT)
+            self._handle_book_frame(first)
+            self._book_failures = 0
+            self._book_active = True
+            while not self._stop:
+                raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                self._handle_book_frame(raw)
+
     async def _session(self) -> None:
         import websockets  # 延迟导入：不需要推送时不强制依赖
 
-        streams = self._stream_names()
+        streams = self._market_stream_names()
         if not streams:
             await asyncio.sleep(FAST_RETRY_SECONDS)
             return
@@ -141,7 +233,7 @@ class PriceStream:
         kwargs["proxy"] = _proxy()
 
         async with websockets.connect(url, **kwargs) as ws:  # type: ignore[arg-type]
-            self._subscribed = set(self._wanted_symbols())
+            self._subscribed = set(streams)
             # 首帧超时是识别"能握手但收不到数据"的唯一手段
             first_frame = await asyncio.wait_for(ws.recv(), timeout=FIRST_FRAME_TIMEOUT)
             self._handle_frame(first_frame)
@@ -179,9 +271,22 @@ class PriceStream:
         except (json.JSONDecodeError, TypeError):
             return
         data = payload.get("data") or {}
+        self._last_frame_at = time.time()
+        self._messages += 1
+        event = str(data.get("e") or "")
         symbol = data.get("s")
-        # ticker 事件用 c（最新成交价）；24hTicker 也带 c，语义一致
-        price = data.get("c")
+        price = None
+        if event == "24hrTicker" or ("c" in data and "k" not in data):
+            push_ticker(data)
+            price = data.get("c")
+        elif event == "markPriceUpdate":
+            push_mark(data)
+            price = data.get("p")
+        elif event == "kline" or isinstance(data.get("k"), dict):
+            push_kline_event(data)
+            body = data.get("k") or {}
+            symbol = body.get("s") or symbol
+            price = body.get("c")
         if not symbol or price is None:
             return
         try:
@@ -192,6 +297,18 @@ class PriceStream:
         if self._state != "live":
             self._state = "live"
 
+    def _handle_book_frame(self, raw: str) -> None:
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return
+        data = payload.get("data") or {}
+        if not data.get("s") or data.get("b") is None or data.get("a") is None:
+            return
+        push_book(data)
+        self._book_last_frame_at = time.time()
+        self._book_active = True
+
     # ---- 订阅管理 ----
     def _wanted_symbols(self) -> set[str]:
         try:
@@ -201,10 +318,23 @@ class PriceStream:
         return {str(s).upper() for s in symbols if s}
 
     def _stream_names(self) -> list[str]:
+        """兼容旧调用：返回每个白名单标的的24h ticker流。"""
         return [f"{s.lower()}@ticker" for s in sorted(self._wanted_symbols())]
 
+    def _market_stream_names(self) -> list[str]:
+        """返回常规行情组合流；一次连接覆盖价格、标记价格和全部决策周期K线。"""
+        streams: list[str] = []
+        for symbol in sorted(self._wanted_symbols()):
+            lower = symbol.lower()
+            streams.extend((f"{lower}@ticker", f"{lower}@markPrice"))
+            streams.extend(f"{lower}@kline_{interval}" for interval in self._kline_intervals)
+        return streams
+
+    def _book_stream_names(self) -> list[str]:
+        return [f"{s.lower()}@bookTicker" for s in sorted(self._wanted_symbols())]
+
     async def _sync_subscriptions(self, ws) -> None:
-        wanted = self._wanted_symbols()
+        wanted = set(self._market_stream_names())
         if wanted == self._subscribed:
             return
         if not wanted:
@@ -216,13 +346,13 @@ class PriceStream:
             if add:
                 await ws.send(json.dumps({
                     "method": "SUBSCRIBE",
-                    "params": [f"{s.lower()}@ticker" for s in add],
+                    "params": add,
                     "id": int(time.time()),
                 }))
             if remove:
                 await ws.send(json.dumps({
                     "method": "UNSUBSCRIBE",
-                    "params": [f"{s.lower()}@ticker" for s in remove],
+                    "params": remove,
                     "id": int(time.time()),
                 }))
             self._subscribed = wanted
@@ -233,6 +363,7 @@ class PriceStream:
     # ---- 失败处理 ----
     async def _note_failure(self) -> None:
         self._failures += 1
+        self._reconnects += 1
         self._subscribed = set()
         if self._failures >= FAILURES_BEFORE_BACKOFF:
             # 达到阈值才认定被挡住，避免偶发抖动就把链路判死

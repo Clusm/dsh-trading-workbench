@@ -1,6 +1,7 @@
 """只读情报侧车回归：临时库 + 模拟公开响应，不访问账户和订单。"""
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+os.environ.setdefault("MTA_BINANCE_WEIGHT_BUDGET_1M", "60000")
 
 from audit.database import AuditDatabase  # noqa: E402
 from intel.service import ReadOnlyIntelService  # noqa: E402
@@ -86,7 +88,7 @@ class RetryClient:
     def __init__(self):
         self.calls = 0
 
-    def get(self, url, params=None):
+    def get(self, url, params=None, timeout=None):
         self.calls += 1
         request = httpx.Request("GET", url)
         if self.calls == 1:

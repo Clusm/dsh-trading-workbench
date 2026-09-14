@@ -16,7 +16,8 @@ from typing import Any
 import httpx
 
 from data.binance_public import get_all_24h_tickers
-from data.rate_limit import cooldown_remaining, throttle
+from data.binance_transport import request_json
+from data.market_stream_cache import get_tickers
 
 PUBLIC_BASE = "https://fapi.binance.com"
 
@@ -75,13 +76,26 @@ class MarketUniverse:
         os.replace(tmp, self.state_file)
 
     def _fetch_all_prices(self) -> dict[str, float]:
-        if cooldown_remaining() > 0:
-            raise RuntimeError("Binance 公开行情冷却中")
-        throttle(0.20)
-        r = httpx.get(f"{PUBLIC_BASE}/fapi/v1/ticker/price", timeout=10.0)
-        r.raise_for_status()
+        streamed = get_tickers(self.core_symbols, max_age=30.0)
+        if streamed:
+            prices: dict[str, float] = {}
+            for row in streamed:
+                try:
+                    symbol = str(row.get("symbol") or "")
+                    price = float(row.get("lastPrice") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if symbol and price > 0:
+                    prices[symbol] = price
+            if len(prices) == len(self.core_symbols):
+                return prices
+        with httpx.Client(timeout=10.0) as client:
+            rows = request_json(
+                client, "/fapi/v1/ticker/price", timeout=10.0,
+                attempts=2, priority="background", base_url=PUBLIC_BASE,
+            )
         out: dict[str, float] = {}
-        for item in r.json() or []:
+        for item in rows or []:
             symbol = str(item.get("symbol") or "")
             if symbol.endswith("USDT"):
                 try:
@@ -122,7 +136,7 @@ class MarketUniverse:
 
     def _full_scan(self, now: datetime) -> list[str]:
         try:
-            tickers = get_all_24h_tickers()
+            tickers = get_all_24h_tickers(symbols=self.core_symbols)
         except Exception as e:
             if self.db:
                 self.db.log_risk_event(event_type="market_universe_full_scan_fail", severity="warn",

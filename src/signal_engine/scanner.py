@@ -22,6 +22,7 @@ import pandas as pd
 from audit.database import AuditDatabase
 import strategy_runtime
 from data.binance_public import _get_json
+from data.kline_store import get_klines
 
 PUBLIC_BASE = "https://fapi.binance.com"
 TF_MINUTES: dict[str, int] = {
@@ -90,9 +91,9 @@ def fetch_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
         return cached
 
     with httpx.Client(timeout=20.0) as client:
-        rows = _get_json(client, "/fapi/v1/klines", {
-            "symbol": symbol.upper(), "interval": interval, "limit": int(limit),
-        })
+        rows = get_klines(
+            client, symbol.upper(), interval, int(limit), fetcher=_get_json,
+        )
     if not isinstance(rows, list) or not rows:
         raise RuntimeError(f"{symbol} {interval} K线为空或格式错误")
 

@@ -13,12 +13,14 @@ import re
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 
+from data.binance_transport import request_json
+from data.market_stream_cache import get_books, get_marks
+from data.rate_limit import PublicMarketBudgetDeferred, PublicMarketCooldown
 from intel.models import FuturesFeature, IntelEvent
 
 
@@ -187,32 +189,11 @@ class ReadOnlyIntelService:
         return list(dict.fromkeys(selected))
 
     def _get_json(self, client: httpx.Client, path: str, params: dict[str, Any] | None = None) -> Any:
-        last_error: Exception | None = None
-        for attempt in range(3):
-            try:
-                response = client.get(f"{PUBLIC_BASE_URL}{path}", params=params)
-                # 公开行情只对瞬时限流和服务端错误重试；其它4xx通常是契约错误。
-                if response.status_code == 429 or response.status_code >= 500:
-                    response.raise_for_status()
-                response.raise_for_status()
-                payload = response.json()
-                if isinstance(payload, dict) and payload.get("code") not in (None, 0):
-                    raise RuntimeError(
-                        f"Binance {path}: {payload.get('msg') or payload.get('code')}")
-                return payload
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                status = exc.response.status_code
-                if status != 429 and status < 500:
-                    raise
-                retry_after = _safe_float(exc.response.headers.get("Retry-After")) or 0.0
-                time.sleep(min(2.0, max(retry_after, 0.25 * (2 ** attempt))))
-            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as exc:
-                last_error = exc
-                time.sleep(0.25 * (2 ** attempt))
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError(f"Binance {path}: empty retry state")
+        """后台情报也必须经过共享权重预算；429/418由传输层立即熔断。"""
+        return request_json(
+            client, path, params, timeout=8.0, attempts=2,
+            priority="background", base_url=PUBLIC_BASE_URL,
+        )
 
     def _fetch_ratios(self, symbol: str) -> tuple[dict[str, float | None], int | None, list[str]]:
         values: dict[str, float | None] = {}
@@ -228,6 +209,8 @@ class ReadOnlyIntelService:
                     timestamp = int(row.get("timestamp") or 0)
                     if timestamp:
                         event_ms = max(event_ms or 0, timestamp)
+                except (PublicMarketCooldown, PublicMarketBudgetDeferred):
+                    raise
                 except Exception as exc:
                     values[name] = None
                     errors.append(f"{name}:{type(exc).__name__}")
@@ -237,21 +220,35 @@ class ReadOnlyIntelService:
                 oi_ms = int(oi.get("time") or 0)
                 if oi_ms:
                     event_ms = max(event_ms or 0, oi_ms)
+            except (PublicMarketCooldown, PublicMarketBudgetDeferred):
+                raise
             except Exception as exc:
                 values["open_interest"] = None
                 errors.append(f"open_interest:{type(exc).__name__}")
             try:
-                depth = self._get_json(client, "/fapi/v1/depth", {"symbol": symbol, "limit": 20})
-                bids = depth.get("bids") or []
-                asks = depth.get("asks") or []
-                best_bid = _safe_float(bids[0][0]) if bids else None
-                best_ask = _safe_float(asks[0][0]) if asks else None
-                bid_qty = sum(float(row[1]) for row in bids)
-                ask_qty = sum(float(row[1]) for row in asks)
+                books = get_books([symbol], max_age=15.0)
+                if books:
+                    book = books[0]
+                    best_bid = _safe_float(book.get("bidPrice"))
+                    best_ask = _safe_float(book.get("askPrice"))
+                    bid_qty = _safe_float(book.get("bidQty")) or 0.0
+                    ask_qty = _safe_float(book.get("askQty")) or 0.0
+                    depth_update_id = None
+                else:
+                    depth = self._get_json(client, "/fapi/v1/depth", {"symbol": symbol, "limit": 20})
+                    bids = depth.get("bids") or []
+                    asks = depth.get("asks") or []
+                    best_bid = _safe_float(bids[0][0]) if bids else None
+                    best_ask = _safe_float(asks[0][0]) if asks else None
+                    bid_qty = sum(float(row[1]) for row in bids)
+                    ask_qty = sum(float(row[1]) for row in asks)
+                    depth_update_id = int(depth.get("lastUpdateId") or 0) or None
                 mid = (best_bid + best_ask) / 2 if best_bid and best_ask else None
                 values["spread_bps"] = ((best_ask - best_bid) / mid * 10000) if mid else None
                 values["depth_imbalance"] = ((bid_qty - ask_qty) / (bid_qty + ask_qty)) if bid_qty + ask_qty > 0 else None
-                values["depth_update_id"] = int(depth.get("lastUpdateId") or 0) or None
+                values["depth_update_id"] = depth_update_id
+            except (PublicMarketCooldown, PublicMarketBudgetDeferred):
+                raise
             except Exception as exc:
                 values["spread_bps"] = None
                 values["depth_imbalance"] = None
@@ -263,18 +260,16 @@ class ReadOnlyIntelService:
         selected = self._selected_symbols()
         received = datetime.now(timezone.utc)
         fresh_until = received + timedelta(seconds=self.fresh_seconds)
-        with httpx.Client(timeout=httpx.Timeout(8.0, connect=5.0)) as client:
-            premium_rows = self._get_json(client, "/fapi/v1/premiumIndex")
+        premium_rows = get_marks(selected, max_age=30.0)
+        if not premium_rows:
+            with httpx.Client(timeout=httpx.Timeout(8.0, connect=5.0)) as client:
+                premium_rows = self._get_json(client, "/fapi/v1/premiumIndex")
         premium_by = {str(row.get("symbol")): row for row in premium_rows if isinstance(row, dict)}
+        # 情报属于可丢弃的P3流量，顺序轮转可避免每五分钟同时制造35个请求。
+        # 任何全局冷却都向上终止整轮，不能在同一轮继续尝试其它标的。
         ratios: dict[str, tuple[dict[str, float | None], int | None, list[str]]] = {}
-        with ThreadPoolExecutor(max_workers=min(6, max(1, len(selected)))) as pool:
-            futures = {pool.submit(self._fetch_ratios, symbol): symbol for symbol in selected}
-            for future in as_completed(futures):
-                symbol = futures[future]
-                try:
-                    ratios[symbol] = future.result()
-                except Exception as exc:
-                    ratios[symbol] = ({}, None, [f"collector:{type(exc).__name__}"])
+        for symbol in selected:
+            ratios[symbol] = self._fetch_ratios(symbol)
 
         rows: list[dict[str, Any]] = []
         errors: list[str] = []

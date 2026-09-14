@@ -27,7 +27,8 @@ from core.channels import ChannelManager
 from core.db_backup import DatabaseBackupManager
 from data.market_universe import MarketUniverse
 from data.market_query import get_live_prices
-from data.rate_limit import configure_rate_limit_state
+from data.kline_store import configure_kline_store
+from data.rate_limit import configure_rate_limit_budget, configure_rate_limit_state
 from core.intel_cache import IntelCache
 from core.instance_lock import InstanceLock
 from core.quotas import TradeQuotaManager
@@ -73,8 +74,16 @@ class TradingService:
         # 在不同时间覆写基线/通道台账，且可能重复提交订单。
         self._instance_lock = InstanceLock(settings.project_root / "data" / "trading_service.lock")
         self._instance_lock.acquire()
+        market_data_cfg = settings.raw_settings.get("binance_market_data", {}) or {}
+        configure_rate_limit_budget(
+            weight_limit_1m=int(market_data_cfg.get("weight_limit_1m", 2400)),
+            local_budget_1m=int(market_data_cfg.get("local_weight_budget_1m", 600)),
+            background_defer_ratio=float(market_data_cfg.get("background_defer_ratio", 0.75)),
+            normal_defer_ratio=float(market_data_cfg.get("normal_defer_ratio", 0.90)),
+        )
         # Binance 429/418 冷却必须跨服务重启保留；否则重启会立即再次撞被封禁的共享出口。
         configure_rate_limit_state(settings.project_root / "data" / "public_rate_limit_state.json")
+        configure_kline_store(settings.project_root / "data" / "cache" / "klines")
         self.db = AuditDatabase(settings.db_file)
         # 新实例已成功取得单实例锁，说明上一次“等待在途决策”的关闭过程已经结束；
         # 原告警保留在事件流水中，但不应继续显示为当前未恢复事故。

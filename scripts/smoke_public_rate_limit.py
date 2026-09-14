@@ -1,6 +1,7 @@
 """公开行情 429/418 与全量 ticker 单飞缓存离线回归。"""
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -8,15 +9,20 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
+os.environ.setdefault("MTA_BINANCE_WEIGHT_BUDGET_1M", "60000")
 
 from data import binance_public, rate_limit  # noqa: E402
+from data.binance_transport import endpoint_weight, request_json  # noqa: E402
 
 
 class Response:
-    def __init__(self, status: int, payload=None, retry_after: str | None = None):
+    def __init__(self, status: int, payload=None, retry_after: str | None = None,
+                 headers: dict | None = None):
         self.status_code = status
         self._payload = payload
-        self.headers = {"Retry-After": retry_after} if retry_after is not None else {}
+        self.headers = dict(headers or {})
+        if retry_after is not None:
+            self.headers["Retry-After"] = retry_after
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -115,6 +121,25 @@ assert concurrent_client.calls == 1, concurrent_client.calls
 assert rate_limit.rate_limit_status()["event_count"] == 1
 print("  PASS  八个并发调用只有首个到达交易所")
 
+print("\n[5] 动态端点权重与响应头水位保护")
+rate_limit._reset_for_test()
+assert endpoint_weight("/fapi/v1/klines", {"limit": 80}) == 1
+assert endpoint_weight("/fapi/v1/klines", {"limit": 600}) == 5
+assert endpoint_weight("/fapi/v1/ticker/24hr", {}) == 40
+assert endpoint_weight("/fapi/v1/ticker/24hr", {"symbol": "BTCUSDT"}) == 1
+high = Client(Response(200, {"ok": True}, headers={"X-MBX-USED-WEIGHT-1M": "1900"}))
+assert request_json(high, "/fapi/v1/time", priority="background") == {"ok": True}
+blocked = Client(Response(200, {"ok": True}))
+try:
+    request_json(blocked, "/fapi/v1/time", priority="background")
+    raise AssertionError("75%以上后台请求应被主动延后")
+except rate_limit.PublicMarketBudgetDeferred:
+    pass
+assert blocked.calls == 0
+status = rate_limit.rate_limit_status()
+assert status["observed_weight_1m"] == 1900 and status["blocked_requests"] >= 1
+print("  PASS  大请求按权重排队，后台流量在高水位发送前被拦截")
+
 rate_limit._reset_for_test()
 binance_public._ALL_TICKERS_CACHE = (0.0, [])
-print("\n结果：PASS 4 / FAIL 0")
+print("\n结果：PASS 5 / FAIL 0")

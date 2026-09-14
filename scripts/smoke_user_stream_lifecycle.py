@@ -26,7 +26,7 @@ def check(name: str, condition: bool) -> None:
 
 
 class FakePriceStream:
-    def __init__(self, _provider):
+    def __init__(self, _provider, **_kwargs):
         self.active = False
         self._stop = False
 

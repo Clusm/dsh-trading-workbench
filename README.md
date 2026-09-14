@@ -50,10 +50,12 @@ Copy-Item .env.example .env
 - Position Guardian 独立复核已有 AI 仓位的结构无效点，当前保持 `shadow`；
   数据不可验证时显示 `REVIEW_DUE`，不会猜测退出。
 - 市场情报覆盖 20 个明确配置的 USD-M 合约；AI 单轮行情查询预算为 4 次。
-- 公共行情遇到 429/418 会立即按服务端节奏冷却；全量 24h ticker 在进程内单飞复用，
-  避免市场池与简报并发重复消耗权重。冷却期间不会用陈旧证据开新仓。
-- `/api/health` 的 `public_market_rate_limit` 会显示当前冷却状态和最近限流码，便于区分
-  “策略没有信号”与“公共行情暂时不可用”。
+- 公共行情统一经过权重感知网关；市场简报、扫描器、市场池、Web页面和只读情报不得
+  各自重试。429/418 会立即触发共享熔断，排队请求在发送前统一短路。
+- 20币白名单通过新版 Binance `/market` 与 `/public` WebSocket 获取 ticker、markPrice、
+  bookTicker、1m和15m K线；高周期在本地聚合，REST只负责首次回补、断线补洞及低频情报。
+- `/api/health` 的 `public_market_rate_limit` 会显示冷却、实际分钟权重、估算权重和端点调用；
+  `public_market_stream` 会显示订阅、数据新鲜度及K线缓存状态。
 - 公共行情冷却保存在 `data/public_rate_limit_state.json`，服务重启仍会遵守未到期封禁；
   该无凭据状态随完整恢复包保存，但不会进入 Git。
 
@@ -126,5 +128,6 @@ USD-M 回放位于 `src/core/usdm_replay.py` 和 `src/core/strategy_evaluation.p
 - [问题盘点与整改状态](docs/项目问题盘点与优化计划_2026-09-07.md)
 - [代码维护规范](docs/代码维护规范.md)
 - [稳定性与 AI 情报升级计划](docs/USD-M合约系统稳定性与AI情报升级开发计划_2026-09-05.md)
+- [Binance行情接入与418治理](docs/Binance行情接入与418治理_2026-09-14.md)
 
 本项目不保证盈利。Demo 测试通过不代表实盘安全，也不构成投资建议。

@@ -17,6 +17,8 @@ import httpx
 
 from agents.models import RiskVerdict, TradeDecision, TradeIntent
 from audit.database import AuditDatabase, utc_now
+from data.binance_transport import endpoint_weight
+from data.rate_limit import note_418, note_rate_limit, observe_response
 from exchange.order_outbox import OrderOutbox
 from exchange.protection_mirror import ProtectionOrderMirror
 from exchange.protocol import normalize_algo_orders_payload, parse_iso as _parse_iso, parse_iso_ms
@@ -102,7 +104,30 @@ class BinanceFuturesBroker:
         """
         with self._client_lock:
             try:
-                return self._client.request(method, url, **kwargs)
+                response = self._client.request(method, url, **kwargs)
+                parsed = urllib.parse.urlparse(url)
+                # 只有生产 USD-M 执行与公开行情共享 fapi.binance.com 的 IP 权重池；
+                # demo/testnet 属于独立环境，不能用它们的响应头覆盖生产公开预算。
+                if parsed.hostname == "fapi.binance.com":
+                    path = parsed.path
+                    params = kwargs.get("params") if isinstance(kwargs.get("params"), dict) else {}
+                    observe_response(
+                        response.headers, path=path,
+                        weight=endpoint_weight(path, params),
+                    )
+                    if response.status_code == 418:
+                        try:
+                            retry_after = float(response.headers.get("Retry-After") or 480.0)
+                        except (TypeError, ValueError):
+                            retry_after = 480.0
+                        note_418(min(604800.0, max(60.0, retry_after)))
+                    elif response.status_code == 429 and response.headers.get("Retry-After"):
+                        try:
+                            retry_after = float(response.headers.get("Retry-After") or 60.0)
+                        except (TypeError, ValueError):
+                            retry_after = 60.0
+                        note_rate_limit(min(3600.0, max(5.0, retry_after)), status=429)
+                return response
             except httpx.TransportError:
                 old_client = self._client
                 self._client = self._new_client()

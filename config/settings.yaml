@@ -161,6 +161,19 @@ decision_cycle:
 intel_cache:
   ttl_seconds: 3600
 
+# Binance USD-M 行情接入层：不改变策略或风险档，只约束数据请求方式。
+binance_market_data:
+  # Binance USD-M 当前公开 REQUEST_WEIGHT 分钟额度；运行时仍以响应头为准。
+  weight_limit_1m: 2400
+  # 本项目最多主动使用25%，为执行对账及共享出口的未知流量保留余量。
+  local_weight_budget_1m: 600
+  background_defer_ratio: 0.75
+  normal_defer_ratio: 0.90
+  websocket_first: true
+  stream_all_core_symbols: true
+  # 只订阅基础周期；1h/2h/4h/8h/1d由本地聚合，避免数百帧/秒。
+  kline_intervals: [1m, 15m]
+
 # 只读情报侧车：不持有交易密钥，不进入下单图，初始阶段仅展示和影子评估。
 web3_intel:
   enabled: true

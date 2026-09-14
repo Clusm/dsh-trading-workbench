@@ -11,14 +11,10 @@ from typing import Any
 import httpx
 
 from agents.models import MarketBrief
+from data.binance_transport import request_json
 from data.cache import SnapshotCache
-from data.rate_limit import (
-    backoff_seconds,
-    cooldown_remaining,
-    note_418,
-    note_rate_limit,
-    throttle,
-)
+from data.kline_store import get_klines
+from data.market_stream_cache import get_books, get_marks, get_tickers
 
 BASE_URL = "https://fapi.binance.com"
 CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "cache"
@@ -54,55 +50,22 @@ _ALL_TICKERS_TTL_SECONDS = 30.0
 
 def _get_json(client: httpx.Client, path: str, params: dict[str, Any] | None = None,
               timeout: float = 15.0, attempts: int = 4) -> Any:
-    # 冷却期内直接短路，不再发请求，由上层走缓存/降级
-    cool = cooldown_remaining()
-    if cool > 0:
-        raise RuntimeError(f"Binance 公开行情冷却中（剩余 {cool:.0f}s），本轮跳过请求")
-    last_err: Exception | None = None
-    for i in range(attempts):
-        throttle(0.20)
-        # 多线程可能同时通过函数入口检查后排队等待 throttle。前一个请求若已触发
-        # 429/418，后续排队线程必须在真正发 HTTP 前再次短路，避免同批请求继续撞额度。
-        cool = cooldown_remaining()
-        if cool > 0:
-            raise RuntimeError(f"Binance 公开行情冷却中（剩余 {cool:.0f}s），本轮跳过请求")
-        status: int | None = None
-        try:
-            r = client.get(f"{BASE_URL}{path}", params=params, timeout=timeout)
-            status = r.status_code
-            if status == 418:
-                try:
-                    retry_after = float(r.headers.get("Retry-After") or 480.0)
-                except (TypeError, ValueError):
-                    retry_after = 480.0
-                retry_after = min(604800.0, max(60.0, retry_after))
-                note_418(retry_after)
-                raise RuntimeError(
-                    f"HTTP 418: Binance temporary IP ban; retry after {retry_after:g}s"
-                )
-            if status == 429:
-                # 429 后继续快速重试会升级成 418 长封禁。尊重 Retry-After，缺失时至少
-                # 冷却 60 秒，并立即结束本次调用；上层只能使用带年龄标记的缓存或 no_trade。
-                try:
-                    retry_after = float(r.headers.get("Retry-After") or 60.0)
-                except (TypeError, ValueError):
-                    retry_after = 60.0
-                retry_after = min(3600.0, max(5.0, retry_after))
-                note_rate_limit(retry_after, status=429)
-                raise RuntimeError(f"HTTP 429: Binance rate limit; retry after {retry_after:g}s")
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            last_err = e
-            if status in {418, 429}:
-                break
-            if i < attempts - 1:
-                time.sleep(backoff_seconds(i, status))
-    raise last_err if last_err else RuntimeError("request failed")
+    """兼容旧调用签名，实际发送统一委托给权重感知传输层。"""
+    return request_json(
+        client, path, params, timeout=timeout, attempts=attempts,
+        priority="normal", base_url=BASE_URL,
+    )
 
 
-def get_all_24h_tickers(client: httpx.Client | None = None) -> list[dict[str, Any]]:
+def get_all_24h_tickers(client: httpx.Client | None = None,
+                        symbols: list[str] | None = None) -> list[dict[str, Any]]:
     global _ALL_TICKERS_CACHE
+    # 白名单行情流覆盖完整时直接使用推送快照。没有明确白名单的旧调用仍走全市场REST，
+    # 避免把20币快照误当成交易所全部合约。
+    if symbols:
+        streamed = get_tickers(symbols, max_age=30.0)
+        if streamed:
+            return streamed
     with _ALL_TICKERS_LOCK:
         cached_at, cached_rows = _ALL_TICKERS_CACHE
         if cached_rows and time.monotonic() - cached_at < _ALL_TICKERS_TTL_SECONDS:
@@ -288,11 +251,11 @@ def analyze_symbol(client: httpx.Client, symbol: str,
     except (TypeError, ValueError):
         pct_24h = 0.0
 
-    k1m = _get_json(client, "/fapi/v1/klines", {"symbol": symbol, "interval": "1m", "limit": 600})
-    k15 = _get_json(client, "/fapi/v1/klines", {"symbol": symbol, "interval": "15m", "limit": 80})
-    k1h = _get_json(client, "/fapi/v1/klines", {"symbol": symbol, "interval": "1h", "limit": 60})
-    k4h = _get_json(client, "/fapi/v1/klines", {"symbol": symbol, "interval": "4h", "limit": 60})
-    k1d = _get_json(client, "/fapi/v1/klines", {"symbol": symbol, "interval": "1d", "limit": 30})
+    k1m = get_klines(client, symbol, "1m", 600, fetcher=_get_json)
+    k15 = get_klines(client, symbol, "15m", 80, fetcher=_get_json)
+    k1h = get_klines(client, symbol, "1h", 60, fetcher=_get_json)
+    k4h = get_klines(client, symbol, "4h", 60, fetcher=_get_json)
+    k1d = get_klines(client, symbol, "1d", 30, fetcher=_get_json)
     observed_at_ms = int(time.time() * 1000)
     k1m, _, quality1m = prepare_closed_klines(k1m, "1m", observed_at_ms)
     k15, _, quality15 = prepare_closed_klines(k15, "15m", observed_at_ms)
@@ -352,13 +315,21 @@ def analyze_symbol(client: httpx.Client, symbol: str,
     spread_pct = None
     bid_imbalance = None
     try:
-        depth = _get_json(client, "/fapi/v1/depth", {"symbol": symbol, "limit": 20})
-        bid = float(depth["bids"][0][0]) if depth.get("bids") else 0.0
-        ask = float(depth["asks"][0][0]) if depth.get("asks") else 0.0
+        books = get_books([symbol], max_age=15.0)
+        if books:
+            book = books[0]
+            bid = float(book.get("bidPrice") or 0.0)
+            ask = float(book.get("askPrice") or 0.0)
+            bid_qty = float(book.get("bidQty") or 0.0)
+            ask_qty = float(book.get("askQty") or 0.0)
+        else:
+            depth = _get_json(client, "/fapi/v1/depth", {"symbol": symbol, "limit": 20})
+            bid = float(depth["bids"][0][0]) if depth.get("bids") else 0.0
+            ask = float(depth["asks"][0][0]) if depth.get("asks") else 0.0
+            bid_qty = sum(float(x[1]) for x in depth.get("bids", []))
+            ask_qty = sum(float(x[1]) for x in depth.get("asks", []))
         if bid > 0 and ask > 0:
             spread_pct = (ask - bid) / bid * 100
-        bid_qty = sum(float(x[1]) for x in depth.get("bids", []))
-        ask_qty = sum(float(x[1]) for x in depth.get("asks", []))
         if bid_qty + ask_qty > 0:
             bid_imbalance = (bid_qty - ask_qty) / (bid_qty + ask_qty)
     except Exception:
@@ -383,7 +354,9 @@ def analyze_symbol(client: httpx.Client, symbol: str,
     mark_price = None
     oi_usd = None
     try:
-        premium = _get_json(client, "/fapi/v1/premiumIndex", {"symbol": symbol})
+        marks = get_marks([symbol], max_age=30.0)
+        premium = (marks[0] if marks else
+                   _get_json(client, "/fapi/v1/premiumIndex", {"symbol": symbol}))
         funding_rate = float(premium.get("lastFundingRate") or 0.0)
         mark_price = float(premium.get("markPrice") or 0.0)
     except Exception:
@@ -443,7 +416,7 @@ def build_market_brief(top_n: int = 40, analyze_top: int = 10,
     cache = SnapshotCache(CACHE_DIR)
     with httpx.Client(timeout=20.0) as client:
         try:
-            tickers = get_all_24h_tickers(client)
+            tickers = get_all_24h_tickers(client, symbols=list(core_symbols or []))
             cache.save("market_tickers", {"ts": time.time(), "tickers": tickers})
         except Exception as e:
             errors.append(f"ticker全量接口: {type(e).__name__} {e}")
