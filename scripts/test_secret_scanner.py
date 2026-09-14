@@ -31,7 +31,8 @@ check("结果不含匹配值", all(provider_token not in repr(hit) for hit in hi
 
 print("\n[3] 私钥和Bearer凭据被发现")
 bearer = "Bearer " + ("y" * 30)
-hits = find_secret_hits("-----BEGIN PRIVATE KEY-----\n" + bearer + "\n")
+private_key_marker = "-----BEGIN " + "PRIVATE KEY-----"
+hits = find_secret_hits(private_key_marker + "\n" + bearer + "\n")
 check("私钥标记被发现", any(hit.rule == "private-key" for hit in hits))
 check("Bearer凭据被发现", any(hit.rule == "bearer-token" for hit in hits))
 
