@@ -23,6 +23,7 @@ from data.rate_limit import (
     PublicMarketCooldown,
     note_418,
     note_rate_limit,
+    observe_failure,
     observe_response,
     reserve_request,
 )
@@ -110,9 +111,10 @@ class BinanceFuturesBroker:
         请求执行期间关闭连接池。公开行情仍走独立客户端，不受此锁影响。
         """
         with self._client_lock:
+            request_id: str | None = None
+            response_received = False
             try:
                 parsed = urllib.parse.urlparse(url)
-                request_id: str | None = None
                 params = kwargs.get("params") if isinstance(kwargs.get("params"), dict) else {}
                 # 只有生产 fapi 与公共行情共用出口 IP，必须在发送前加入同一预算/冷却
                 # 临界区。Demo/Testnet 走独立主机，保持原有模拟盘行为不受公共池影响。
@@ -124,33 +126,47 @@ class BinanceFuturesBroker:
                         environment=str(getattr(self, "environment", "live") or "live"),
                     )
                 response = self._client.request(method, url, **kwargs)
+                response_received = True
                 # 只有生产 USD-M 执行与公开行情共享 fapi.binance.com 的 IP 权重池；
                 # demo/testnet 属于独立环境，不能用它们的响应头覆盖生产公开预算。
                 if parsed.hostname == "fapi.binance.com":
                     path = parsed.path
-                    observe_response(
-                        response.headers, path=path,
-                        weight=endpoint_weight(path, params), request_id=request_id,
-                        status=response.status_code,
-                    )
+                    retry_after = None
                     if response.status_code == 418:
                         try:
                             retry_after = float(response.headers.get("Retry-After") or 480.0)
                         except (TypeError, ValueError):
                             retry_after = 480.0
-                        note_418(min(604800.0, max(60.0, retry_after)))
-                    elif response.status_code == 429 and response.headers.get("Retry-After"):
+                        retry_after = min(604800.0, max(60.0, retry_after))
+                    elif response.status_code == 429:
                         try:
                             retry_after = float(response.headers.get("Retry-After") or 60.0)
                         except (TypeError, ValueError):
                             retry_after = 60.0
-                        note_rate_limit(min(3600.0, max(5.0, retry_after)), status=429)
+                        retry_after = min(3600.0, max(5.0, retry_after))
+                    observe_response(
+                        response.headers, path=path,
+                        weight=endpoint_weight(path, params), request_id=request_id,
+                        status=response.status_code,
+                        retry_after_seconds=retry_after,
+                        error_code=response.status_code if response.status_code >= 400 else None,
+                        error_message=getattr(response, "text", None),
+                    )
+                    if response.status_code == 418:
+                        note_418(retry_after)
+                    elif response.status_code == 429 and response.headers.get("Retry-After"):
+                        note_rate_limit(retry_after, status=429)
                 if response.status_code in {418, 429}:
                     raise ExecutionRateLimited(
                         f"HTTP {response.status_code}: signed Binance request rate limited"
                     )
                 return response
-            except httpx.TransportError:
+            except httpx.TransportError as exc:
+                if request_id is not None and not response_received:
+                    observe_failure(
+                        request_id, path=parsed.path, weight=endpoint_weight(parsed.path, params),
+                        error_type=type(exc).__name__, error_message=exc,
+                    )
                 old_client = self._client
                 self._client = self._new_client()
                 try:

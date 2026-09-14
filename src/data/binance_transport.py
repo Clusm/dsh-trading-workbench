@@ -16,6 +16,7 @@ from data.rate_limit import (
     check_available,
     note_418,
     note_rate_limit,
+    observe_failure,
     observe_response,
     reserve_request,
     throttle,
@@ -86,6 +87,8 @@ def request_json(client: Any, path: str, params: dict[str, Any] | None = None,
     weight = endpoint_weight(path, params)
     last_error: Exception | None = None
     for attempt in range(max(1, int(attempts))):
+        request_id: str | None = None
+        response_received = False
         try:
             # 发送锁覆盖最后一次冷却检查、HTTP和限流响应登记，确保后续排队者
             # 不会在首个429/418已经返回但尚未登记的窗口中穿透。
@@ -100,13 +103,21 @@ def request_json(client: Any, path: str, params: dict[str, Any] | None = None,
                 response = client.get(
                     f"{base_url}{path}", params=params, timeout=timeout,
                 )
+                response_received = True
                 status = int(getattr(response, "status_code", 0) or 0)
+                retry_after = None
+                if status == 418:
+                    retry_after = _retry_after(response.headers, 480.0, 604800.0)
+                elif status == 429:
+                    retry_after = _retry_after(response.headers, 60.0, 3600.0)
                 observe_response(
                     getattr(response, "headers", None), path=path, weight=weight,
                     request_id=request_id, status=status,
+                    retry_after_seconds=retry_after,
+                    error_code=status if status >= 400 else None,
+                    error_message=getattr(response, "text", None),
                 )
                 if status == 418:
-                    retry_after = _retry_after(response.headers, 480.0, 604800.0)
                     note_418(retry_after)
                     raise PublicMarketCooldown(
                         f"HTTP 418: Binance temporary IP ban; retry after {retry_after:g}s"
@@ -127,6 +138,11 @@ def request_json(client: Any, path: str, params: dict[str, Any] | None = None,
         except (PublicMarketCooldown, PublicMarketBudgetDeferred):
             raise
         except Exception as exc:
+            if request_id is not None and not response_received:
+                observe_failure(
+                    request_id, path=path, weight=weight,
+                    error_type=type(exc).__name__, error_message=exc,
+                )
             last_error = exc
             text = str(exc).lower()
             if "http 418" in text or "http 429" in text or "公开行情冷却" in text:

@@ -19,6 +19,7 @@ from data.rate_limit import (
     cooldown_remaining,
     note_418,
     note_rate_limit,
+    observe_failure,
     observe_response,
     reserve_request,
 )
@@ -203,19 +204,24 @@ class BinanceUserDataStream:
         if self.environment != "live":
             return
         path = "/fapi/v1/listenKey"
+        retry_after = None
+        if response.status_code in {418, 429}:
+            default = 480.0 if response.status_code == 418 else 60.0
+            maximum = 604800.0 if response.status_code == 418 else 3600.0
+            try:
+                retry_after = float(response.headers.get("Retry-After") or default)
+            except (TypeError, ValueError):
+                retry_after = default
+            retry_after = min(maximum, max(5.0, retry_after))
         observe_response(
             response.headers, path=path, weight=endpoint_weight(path),
             request_id=request_id, status=response.status_code,
+            retry_after_seconds=retry_after,
+            error_code=response.status_code if response.status_code >= 400 else None,
+            error_message=getattr(response, "text", None),
         )
         if response.status_code not in {418, 429}:
             return
-        default = 480.0 if response.status_code == 418 else 60.0
-        maximum = 604800.0 if response.status_code == 418 else 3600.0
-        try:
-            retry_after = float(response.headers.get("Retry-After") or default)
-        except (TypeError, ValueError):
-            retry_after = default
-        retry_after = min(maximum, max(5.0, retry_after))
         if response.status_code == 418:
             note_418(retry_after)
         else:
@@ -230,10 +236,18 @@ class BinanceUserDataStream:
                 endpoint_group="signed_execution", source="user_stream",
                 environment=self.environment,
             )
-        response = await self._client.request(
-            method, f"{self.rest_base_url}{path}",
-            headers={"X-MBX-APIKEY": self.api_key},
-        )
+        try:
+            response = await self._client.request(
+                method, f"{self.rest_base_url}{path}",
+                headers={"X-MBX-APIKEY": self.api_key},
+            )
+        except httpx.TransportError as exc:
+            if request_id is not None:
+                observe_failure(
+                    request_id, path=path, weight=endpoint_weight(path),
+                    error_type=type(exc).__name__, error_message=exc,
+                )
+            raise
         self._observe_rest_response(response, request_id=request_id)
         if response.status_code in {418, 429}:
             raise ExecutionRateLimited(

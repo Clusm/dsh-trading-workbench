@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from collections import Counter
@@ -38,8 +39,14 @@ _NEXT_REQUEST_AT = 0.0
 _OBSERVED_WEIGHT_1M: int | None = None
 _OBSERVED_WEIGHT_AT: float | None = None
 _OBSERVED_MINUTE: int | None = None
+_OBSERVED_ORDER_COUNT_10S: int | None = None
+_OBSERVED_ORDER_COUNT_1M: int | None = None
+_OBSERVED_ORDER_AT: float | None = None
 _REQUEST_COUNT = 0
 _REQUEST_WEIGHT = 0
+_ATTEMPT_COUNT = 0
+_RESPONSE_COUNT = 0
+_FAILURE_COUNT = 0
 _BLOCKED_COUNT = 0
 _REQUESTS_BY_PATH: Counter[str] = Counter()
 _RESPONSE_STATUS_COUNTS: Counter[str] = Counter()
@@ -49,6 +56,65 @@ _TELEMETRY_EVENT_LIMIT = 2000
 _DATA_WINDOW_SECONDS = 300
 _DATA_REQUEST_BUDGET_5M = 800
 _DATA_BLOCKED_COUNT = 0
+
+
+def _safe_telemetry_text(value: Any, limit: int = 180) -> str | None:
+    """清理可进入审计遥测的错误摘要，绝不保存凭据或查询参数。"""
+    if value is None:
+        return None
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    if not text:
+        return None
+    text = re.sub(
+        r"(?i)(api[-_ ]?key|secret|signature|listen[-_ ]?key|token|password)"
+        r"\s*[=:]\s*[^&\s,;]+",
+        r"\1=<redacted>", text,
+    )
+    # URL 查询串可能没有常见字段名；只保留路径/错误摘要，避免把签名串落盘。
+    if "?" in text:
+        text = text.split("?", 1)[0]
+    return text[:limit]
+
+
+def _header_int(headers: Mapping[str, Any] | None, name: str) -> int | None:
+    """读取指定的非敏感整数响应头；忽略缺失、异常和负值。"""
+    expected = str(name).upper()
+    for key, value in dict(headers or {}).items():
+        if str(key).upper() != expected:
+            continue
+        raw = str(value or "").strip()
+        if not raw.isdigit():
+            return None
+        return int(raw)
+    return None
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    """将状态文件中的计数安全转换为非负整数。"""
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return default
+
+
+def _merge_observed_order_payload(payload: dict[str, Any], latest: Mapping[str, Any]) -> None:
+    """按观测时间合并订单计数，避免旧进程覆盖新窗口的水位。"""
+    latest_at = latest.get("observed_order_at")
+    if latest_at is None:
+        return
+    try:
+        latest_at = float(latest_at)
+    except (TypeError, ValueError):
+        return
+    try:
+        existing_at = float(payload.get("observed_order_at") or 0.0)
+    except (TypeError, ValueError):
+        existing_at = 0.0
+    if latest_at < existing_at:
+        return
+    payload["observed_order_count_10s"] = latest.get("observed_order_count_10s")
+    payload["observed_order_count_1m"] = latest.get("observed_order_count_1m")
+    payload["observed_order_at"] = latest_at
 
 
 class PublicMarketCooldown(RuntimeError):
@@ -156,6 +222,13 @@ def _state_snapshot() -> tuple[Path | None, dict[str, Any]]:
             "last_status": _LAST_LIMIT_STATUS,
             "last_limited_at": _LAST_LIMITED_AT,
             "event_count": _LIMIT_EVENT_COUNT,
+            "attempt_count": _ATTEMPT_COUNT,
+            "response_count": _RESPONSE_COUNT,
+            "failure_count": _FAILURE_COUNT,
+            "responses_by_status": dict(_RESPONSE_STATUS_COUNTS),
+            "observed_order_count_10s": _OBSERVED_ORDER_COUNT_10S,
+            "observed_order_count_1m": _OBSERVED_ORDER_COUNT_1M,
+            "observed_order_at": _OBSERVED_ORDER_AT,
             "request_events": _prune_events(list(_REQUEST_EVENTS)),
         }
         return _STATE_FILE, payload
@@ -189,8 +262,21 @@ def _persist_state() -> None:
             existing_cooldown = float(existing.get("cooldown_until") or 0.0)
             merged["cooldown_until"] = max(existing_cooldown,
                                             float(local.get("cooldown_until") or 0.0))
-            merged["event_count"] = max(int(existing.get("event_count") or 0),
-                                         int(local.get("event_count") or 0))
+            merged["event_count"] = max(_safe_int(existing.get("event_count")),
+                                         _safe_int(local.get("event_count")))
+            for key in ("attempt_count", "response_count", "failure_count"):
+                merged[key] = max(_safe_int(existing.get(key)),
+                                  _safe_int(local.get(key)))
+            existing_statuses = existing.get("responses_by_status")
+            existing_statuses = existing_statuses if isinstance(existing_statuses, dict) else {}
+            local_statuses = local.get("responses_by_status")
+            local_statuses = local_statuses if isinstance(local_statuses, dict) else {}
+            merged["responses_by_status"] = {
+                str(status): max(_safe_int(existing_statuses.get(status)),
+                                 _safe_int(local_statuses.get(status)))
+                for status in set(existing_statuses) | set(local_statuses)
+            }
+            _merge_observed_order_payload(merged, local)
             merged["request_events"] = _prune_events(list(by_id.values()))
             _write_payload_locked(merged, path)
     except OSError:
@@ -209,6 +295,9 @@ def _refresh_external_state() -> None:
     with _LOCK:
         global _COOLDOWN_UNTIL, _LAST_LIMIT_STATUS, _LAST_LIMITED_AT
         global _LIMIT_EVENT_COUNT, _REQUEST_EVENTS
+        global _ATTEMPT_COUNT, _RESPONSE_COUNT, _FAILURE_COUNT
+        global _RESPONSE_STATUS_COUNTS
+        global _OBSERVED_ORDER_COUNT_10S, _OBSERVED_ORDER_COUNT_1M, _OBSERVED_ORDER_AT
         try:
             persisted_until = float(payload.get("cooldown_until") or 0.0)
         except (TypeError, ValueError):
@@ -232,6 +321,38 @@ def _refresh_external_state() -> None:
         except (TypeError, ValueError):
             persisted_events = 0
         _LIMIT_EVENT_COUNT = max(_LIMIT_EVENT_COUNT, persisted_events)
+        for key, target in (("attempt_count", "_ATTEMPT_COUNT"),
+                            ("response_count", "_RESPONSE_COUNT"),
+                            ("failure_count", "_FAILURE_COUNT")):
+            value = _safe_int(payload.get(key))
+            if target == "_ATTEMPT_COUNT":
+                _ATTEMPT_COUNT = max(_ATTEMPT_COUNT, value)
+            elif target == "_RESPONSE_COUNT":
+                _RESPONSE_COUNT = max(_RESPONSE_COUNT, value)
+            else:
+                _FAILURE_COUNT = max(_FAILURE_COUNT, value)
+        persisted_statuses = payload.get("responses_by_status")
+        if isinstance(persisted_statuses, dict):
+            for status, count in persisted_statuses.items():
+                try:
+                    _RESPONSE_STATUS_COUNTS[str(status)] = max(
+                        _RESPONSE_STATUS_COUNTS[str(status)], _safe_int(count))
+                except (TypeError, ValueError):
+                    continue
+        try:
+            persisted_order_at = float(payload.get("observed_order_at") or 0.0)
+        except (TypeError, ValueError):
+            persisted_order_at = 0.0
+        if persisted_order_at >= float(_OBSERVED_ORDER_AT or 0.0) and persisted_order_at:
+            _OBSERVED_ORDER_COUNT_10S = (
+                _safe_int(payload.get("observed_order_count_10s"))
+                if payload.get("observed_order_count_10s") is not None else None
+            )
+            _OBSERVED_ORDER_COUNT_1M = (
+                _safe_int(payload.get("observed_order_count_1m"))
+                if payload.get("observed_order_count_1m") is not None else None
+            )
+            _OBSERVED_ORDER_AT = persisted_order_at
         _REQUEST_EVENTS = _prune_events(events)
 
 
@@ -239,6 +360,9 @@ def configure_rate_limit_state(path: Path) -> None:
     """绑定项目运行状态文件，并恢复尚未到期的公共行情冷却。"""
     global _STATE_FILE, _STATE_LOCK_FILE, _COOLDOWN_UNTIL
     global _LAST_LIMIT_STATUS, _LAST_LIMITED_AT, _LIMIT_EVENT_COUNT
+    global _ATTEMPT_COUNT, _RESPONSE_COUNT, _FAILURE_COUNT
+    global _RESPONSE_STATUS_COUNTS
+    global _OBSERVED_ORDER_COUNT_10S, _OBSERVED_ORDER_COUNT_1M, _OBSERVED_ORDER_AT
     global _REQUEST_EVENTS
     state_path = Path(path)
     with _LOCK:
@@ -252,7 +376,32 @@ def configure_rate_limit_state(path: Path) -> None:
             _LAST_LIMIT_STATUS = int(status) if status is not None else None
             limited_at = payload.get("last_limited_at")
             _LAST_LIMITED_AT = float(limited_at) if limited_at is not None else None
-            _LIMIT_EVENT_COUNT = max(_LIMIT_EVENT_COUNT, int(payload.get("event_count") or 0))
+            _LIMIT_EVENT_COUNT = max(_LIMIT_EVENT_COUNT, _safe_int(payload.get("event_count")))
+            _ATTEMPT_COUNT = max(_ATTEMPT_COUNT, _safe_int(payload.get("attempt_count")))
+            _RESPONSE_COUNT = max(_RESPONSE_COUNT, _safe_int(payload.get("response_count")))
+            _FAILURE_COUNT = max(_FAILURE_COUNT, _safe_int(payload.get("failure_count")))
+            persisted_statuses = payload.get("responses_by_status")
+            if isinstance(persisted_statuses, dict):
+                for status, count in persisted_statuses.items():
+                    try:
+                        _RESPONSE_STATUS_COUNTS[str(status)] = max(
+                            _RESPONSE_STATUS_COUNTS[str(status)], _safe_int(count))
+                    except (TypeError, ValueError):
+                        continue
+            try:
+                persisted_order_at = float(payload.get("observed_order_at") or 0.0)
+            except (TypeError, ValueError):
+                persisted_order_at = 0.0
+            if persisted_order_at >= float(_OBSERVED_ORDER_AT or 0.0) and persisted_order_at:
+                _OBSERVED_ORDER_COUNT_10S = (
+                    _safe_int(payload.get("observed_order_count_10s"))
+                    if payload.get("observed_order_count_10s") is not None else None
+                )
+                _OBSERVED_ORDER_COUNT_1M = (
+                    _safe_int(payload.get("observed_order_count_1m"))
+                    if payload.get("observed_order_count_1m") is not None else None
+                )
+                _OBSERVED_ORDER_AT = persisted_order_at
             _REQUEST_EVENTS = _prune_events([
                 event for event in payload.get("request_events", [])
                 if isinstance(event, dict)
@@ -346,7 +495,7 @@ def reserve_request(path: str, *, weight: int = 1, priority: str = "normal",
     多进程一起穿透 1000/5m 数据端点窗口。critical 只绕过本地软预算，不绕过 418/429
     硬冷却，避免把已被封禁的出口继续打穿。
     """
-    global _REQUEST_COUNT, _REQUEST_WEIGHT, _BLOCKED_COUNT
+    global _REQUEST_COUNT, _REQUEST_WEIGHT, _ATTEMPT_COUNT, _BLOCKED_COUNT
     global _DATA_BLOCKED_COUNT, _COOLDOWN_UNTIL
     global _REQUEST_EVENTS
     normalized_path = str(path or "unknown").split("?", 1)[0]
@@ -361,6 +510,10 @@ def reserve_request(path: str, *, weight: int = 1, priority: str = "normal",
         "source": str(source or "unknown")[:32],
         "environment": str(environment or "unknown")[:16],
         "status": None,
+        "outcome": "pending",
+        "retry_after_seconds": None,
+        "error_type": None,
+        "error_message": None,
     }
     _refresh_external_state()
     path_state = _STATE_FILE
@@ -398,6 +551,10 @@ def reserve_request(path: str, *, weight: int = 1, priority: str = "normal",
                     )
                 events.append(event)
                 payload["request_events"] = _prune_events(events, now)
+                try:
+                    payload["attempt_count"] = int(payload.get("attempt_count") or 0) + 1
+                except (TypeError, ValueError):
+                    payload["attempt_count"] = 1
                 _write_payload_locked(payload, path_state)
         except (PublicMarketCooldown, PublicMarketBudgetDeferred):
             raise
@@ -408,20 +565,26 @@ def reserve_request(path: str, *, weight: int = 1, priority: str = "normal",
         _REQUEST_EVENTS = _prune_events(_REQUEST_EVENTS + [event])
         _REQUEST_COUNT += 1
         _REQUEST_WEIGHT += event["weight"]
+        _ATTEMPT_COUNT += 1
         _REQUESTS_BY_PATH[normalized_path] += 1
     return str(event["id"])
 
 
 def observe_response(headers: Mapping[str, Any] | None, *, path: str,
                      weight: int, request_id: str | None = None,
-                     status: int | None = None) -> None:
-    """记录响应头、状态码和 Binance 返回的 IP 分钟权重。
+                     status: int | None = None,
+                     retry_after_seconds: float | None = None,
+                     error_code: Any = None,
+                     error_message: Any = None) -> None:
+    """记录响应头、状态码、错误摘要和 Binance 返回的 IP 分钟权重。
 
     没有 request_id 时兼容旧调用方，将其视为一次未预留的请求；统一传输入口会
-    传入 request_id，避免一次请求被遥测计数两次。
+    传入 request_id，避免一次请求被遥测计数两次。响应只保存脱敏错误摘要，绝不
+    保存查询参数、签名、API Key 或 listenKey。
     """
     global _OBSERVED_WEIGHT_1M, _OBSERVED_WEIGHT_AT, _OBSERVED_MINUTE
-    global _REQUEST_COUNT, _REQUEST_WEIGHT
+    global _OBSERVED_ORDER_COUNT_10S, _OBSERVED_ORDER_COUNT_1M, _OBSERVED_ORDER_AT
+    global _REQUEST_COUNT, _REQUEST_WEIGHT, _ATTEMPT_COUNT
     normalized_path = str(path or "unknown").split("?", 1)[0]
     used: int | None = None
     for key, value in dict(headers or {}).items():
@@ -431,54 +594,179 @@ def observe_response(headers: Mapping[str, Any] | None, *, path: str,
             except (TypeError, ValueError):
                 used = None
             break
-    with _LOCK:
-        if request_id is None:
+    observed_order_10s = _header_int(headers, "X-MBX-ORDER-COUNT-10S")
+    observed_order_1m = _header_int(headers, "X-MBX-ORDER-COUNT-1M")
+    unreserved_request = request_id is None
+    if unreserved_request:
+        request_id = uuid4().hex
+        with _LOCK:
             event = {
-                "id": uuid4().hex, "at": time.time(), "path": normalized_path,
+                "id": request_id, "at": time.time(), "path": normalized_path,
                 "group": "general", "weight": max(1, int(weight)),
                 "priority": "unknown", "source": "unclassified",
-                "environment": "unknown", "status": status,
+                "environment": "unknown", "status": None,
+                "outcome": "pending", "retry_after_seconds": None,
+                "error_type": None, "error_message": None,
             }
             _REQUEST_EVENTS[:] = _prune_events(_REQUEST_EVENTS + [event])
             _REQUEST_COUNT += 1
             _REQUEST_WEIGHT += max(1, int(weight))
+            _ATTEMPT_COUNT += 1
             _REQUESTS_BY_PATH[normalized_path] += 1
-        if status is not None:
-            _RESPONSE_STATUS_COUNTS[str(int(status))] += 1
+    with _LOCK:
         if used is not None:
             _OBSERVED_WEIGHT_1M = used
             _OBSERVED_WEIGHT_AT = time.time()
             _OBSERVED_MINUTE = int(time.time() // 60)
-    if request_id is not None:
-        _update_request_event(request_id, status)
+        if observed_order_10s is not None or observed_order_1m is not None:
+            _OBSERVED_ORDER_COUNT_10S = observed_order_10s
+            _OBSERVED_ORDER_COUNT_1M = observed_order_1m
+            _OBSERVED_ORDER_AT = time.time()
+    _update_request_event(
+        request_id,
+        path=normalized_path,
+        weight=weight,
+        status=status,
+        outcome="response_error" if status is not None and status >= 400 else "response",
+        retry_after_seconds=retry_after_seconds,
+        error_code=error_code,
+        error_message=error_message,
+        count_response=True,
+        count_failure=status is not None and status >= 400,
+        count_attempt=unreserved_request,
+    )
 
 
-def _update_request_event(request_id: str, status: int | None) -> None:
-    """把响应状态写回对应请求事件，且不暴露查询参数或凭据。"""
+def observe_failure(request_id: str | None, *, path: str, weight: int,
+                    error_type: str, error_message: Any = None) -> None:
+    """记录没有收到 HTTP 响应的传输失败，并与发送前预留关联。"""
+    global _REQUEST_COUNT, _REQUEST_WEIGHT, _ATTEMPT_COUNT
+    normalized_path = str(path or "unknown").split("?", 1)[0]
+    if request_id is None:
+        request_id = uuid4().hex
+        with _LOCK:
+            _REQUEST_EVENTS.append({
+                "id": request_id, "at": time.time(), "path": normalized_path,
+                "group": "general", "weight": max(1, int(weight)),
+                "priority": "unknown", "source": "unclassified",
+                "environment": "unknown", "status": None,
+                "outcome": "pending", "retry_after_seconds": None,
+                "error_type": None, "error_message": None,
+            })
+            _REQUEST_EVENTS[:] = _prune_events(_REQUEST_EVENTS)
+            _REQUEST_COUNT += 1
+            _REQUEST_WEIGHT += max(1, int(weight))
+            _ATTEMPT_COUNT += 1
+            _REQUESTS_BY_PATH[normalized_path] += 1
+    _update_request_event(
+        request_id,
+        path=normalized_path,
+        weight=weight,
+        status=None,
+        outcome="transport_error",
+        error_code=None,
+        error_message=error_message,
+        error_type=error_type,
+        count_failure=True,
+        count_attempt=False,
+    )
+
+
+def _update_request_event(request_id: str, *, path: str, weight: int,
+                          status: int | None, outcome: str,
+                          retry_after_seconds: float | None = None,
+                          error_code: Any = None, error_message: Any = None,
+                          error_type: str | None = None,
+                          count_response: bool = False,
+                          count_failure: bool = False,
+                          count_attempt: bool = False) -> None:
+    """把请求结果写回内存和状态文件；更新采用同一跨进程文件锁。"""
+    global _RESPONSE_COUNT, _FAILURE_COUNT, _ATTEMPT_COUNT
+    normalized_path = str(path or "unknown").split("?", 1)[0]
+    normalized_weight = max(1, int(weight))
     with _LOCK:
-        for event in _REQUEST_EVENTS:
-            if str(event.get("id")) == str(request_id):
-                event["status"] = int(status) if status is not None else None
-                break
-    path = _STATE_FILE
-    if path is None:
+        target = next((event for event in _REQUEST_EVENTS
+                       if str(event.get("id")) == str(request_id)), None)
+        was_pending = target is None or target.get("outcome") in {None, "pending"}
+        if target is None:
+            target = {
+                "id": str(request_id), "at": time.time(), "path": normalized_path,
+                "group": "general", "weight": normalized_weight,
+                "priority": "unknown", "source": "unclassified",
+                "environment": "unknown",
+            }
+            _REQUEST_EVENTS.append(target)
+        target["status"] = int(status) if status is not None else None
+        target["outcome"] = outcome
+        target["retry_after_seconds"] = (
+            round(max(0.0, float(retry_after_seconds)), 3)
+            if retry_after_seconds is not None else None)
+        target["error_type"] = str(error_type)[:80] if error_type else (
+            str(error_code)[:80] if error_code is not None and status and status >= 400 else None)
+        target["error_message"] = _safe_telemetry_text(error_message)
+        _REQUEST_EVENTS[:] = _prune_events(_REQUEST_EVENTS)
+        if count_response and was_pending:
+            _RESPONSE_COUNT += 1
+            if status is not None:
+                _RESPONSE_STATUS_COUNTS[str(int(status))] += 1
+        if count_failure and was_pending:
+            _FAILURE_COUNT += 1
+        if count_attempt and was_pending:
+            _ATTEMPT_COUNT += 1
+    with _LOCK:
+        observed_order = {
+            "observed_order_count_10s": _OBSERVED_ORDER_COUNT_10S,
+            "observed_order_count_1m": _OBSERVED_ORDER_COUNT_1M,
+            "observed_order_at": _OBSERVED_ORDER_AT,
+        }
+    path_state = _STATE_FILE
+    if path_state is None:
         return
     try:
-        with _state_file_lock(path):
-            payload = {}
-            if path.exists():
+        with _state_file_lock(path_state):
+            payload: dict[str, Any] = {}
+            if path_state.exists():
                 try:
-                    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+                    loaded = json.loads(path_state.read_text(encoding="utf-8-sig"))
+                    payload = loaded if isinstance(loaded, dict) else {}
                 except (OSError, TypeError, ValueError, json.JSONDecodeError):
                     payload = {}
             events = [event for event in payload.get("request_events", [])
                       if isinstance(event, dict)]
-            for event in events:
-                if str(event.get("id")) == str(request_id):
-                    event["status"] = int(status) if status is not None else None
-                    break
+            persisted = next((event for event in events
+                              if str(event.get("id")) == str(request_id)), None)
+            persisted_pending = persisted is None or persisted.get("outcome") in {None, "pending"}
+            if persisted is None:
+                persisted = {
+                    "id": str(request_id), "at": time.time(), "path": normalized_path,
+                    "group": "general", "weight": normalized_weight,
+                    "priority": "unknown", "source": "unclassified",
+                    "environment": "unknown",
+                }
+                events.append(persisted)
+            persisted["status"] = int(status) if status is not None else None
+            persisted["outcome"] = outcome
+            persisted["retry_after_seconds"] = (
+                round(max(0.0, float(retry_after_seconds)), 3)
+                if retry_after_seconds is not None else None)
+            persisted["error_type"] = str(error_type)[:80] if error_type else (
+                str(error_code)[:80] if error_code is not None and status and status >= 400 else None)
+            persisted["error_message"] = _safe_telemetry_text(error_message)
             payload["request_events"] = _prune_events(events)
-            _write_payload_locked(payload, path)
+            if count_attempt and persisted_pending:
+                payload["attempt_count"] = _safe_int(payload.get("attempt_count")) + 1
+            if count_response and persisted_pending:
+                payload["response_count"] = _safe_int(payload.get("response_count")) + 1
+                if status is not None:
+                    statuses = payload.get("responses_by_status")
+                    statuses = statuses if isinstance(statuses, dict) else {}
+                    key = str(int(status))
+                    statuses[key] = _safe_int(statuses.get(key)) + 1
+                    payload["responses_by_status"] = statuses
+            if count_failure and persisted_pending:
+                payload["failure_count"] = _safe_int(payload.get("failure_count")) + 1
+            _merge_observed_order_payload(payload, observed_order)
+            _write_payload_locked(payload, path_state)
     except OSError:
         return
 
@@ -527,6 +815,11 @@ def rate_limit_status() -> dict[str, Any]:
             "local_budget_1m": _LOCAL_WEIGHT_BUDGET_1M,
             "requests": _REQUEST_COUNT,
             "estimated_weight": _REQUEST_WEIGHT,
+            "attempts": _ATTEMPT_COUNT,
+            "responses": _RESPONSE_COUNT,
+            "failures": _FAILURE_COUNT,
+            "failure_rate": round(_FAILURE_COUNT / _ATTEMPT_COUNT, 6)
+            if _ATTEMPT_COUNT else 0.0,
             "blocked_requests": _BLOCKED_COUNT,
             "data_endpoint_window": {
                 "window_seconds": _DATA_WINDOW_SECONDS,
@@ -537,6 +830,9 @@ def rate_limit_status() -> dict[str, Any]:
             },
             "requests_by_path": dict(_REQUESTS_BY_PATH.most_common(12)),
             "responses_by_status": dict(_RESPONSE_STATUS_COUNTS),
+            "observed_order_count_10s": _OBSERVED_ORDER_COUNT_10S,
+            "observed_order_count_1m": _OBSERVED_ORDER_COUNT_1M,
+            "observed_order_at": _OBSERVED_ORDER_AT,
             "telemetry": {
                 "retained_events": len(_REQUEST_EVENTS),
                 "max_events": _TELEMETRY_EVENT_LIMIT,
@@ -550,7 +846,9 @@ def _reset_for_test() -> None:
     global _LAST_REQUEST_TS, _COOLDOWN_UNTIL, _NEXT_REQUEST_AT
     global _LAST_LIMIT_STATUS, _LAST_LIMITED_AT, _LIMIT_EVENT_COUNT, _STATE_FILE
     global _OBSERVED_WEIGHT_1M, _OBSERVED_WEIGHT_AT, _OBSERVED_MINUTE
-    global _REQUEST_COUNT, _REQUEST_WEIGHT, _BLOCKED_COUNT
+    global _OBSERVED_ORDER_COUNT_10S, _OBSERVED_ORDER_COUNT_1M, _OBSERVED_ORDER_AT
+    global _REQUEST_COUNT, _REQUEST_WEIGHT, _ATTEMPT_COUNT, _RESPONSE_COUNT
+    global _FAILURE_COUNT, _BLOCKED_COUNT
     global _RESPONSE_STATUS_COUNTS, _REQUEST_EVENTS, _STATE_LOCK_FILE
     global _DATA_BLOCKED_COUNT
     with _LOCK:
@@ -565,8 +863,14 @@ def _reset_for_test() -> None:
         _OBSERVED_WEIGHT_1M = None
         _OBSERVED_WEIGHT_AT = None
         _OBSERVED_MINUTE = None
+        _OBSERVED_ORDER_COUNT_10S = None
+        _OBSERVED_ORDER_COUNT_1M = None
+        _OBSERVED_ORDER_AT = None
         _REQUEST_COUNT = 0
         _REQUEST_WEIGHT = 0
+        _ATTEMPT_COUNT = 0
+        _RESPONSE_COUNT = 0
+        _FAILURE_COUNT = 0
         _BLOCKED_COUNT = 0
         _REQUESTS_BY_PATH.clear()
         _RESPONSE_STATUS_COUNTS.clear()

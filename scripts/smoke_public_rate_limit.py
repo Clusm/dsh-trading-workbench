@@ -50,7 +50,10 @@ rate_limit._reset_for_test()
 state_dir = Path(tempfile.mkdtemp(prefix="mta-rate-limit-"))
 state_file = state_dir / "state.json"
 rate_limit.configure_rate_limit_state(state_file)
-client_429 = Client(Response(429, retry_after="12"))
+client_429 = Client(Response(
+    429, retry_after="12",
+    headers={"X-MBX-ORDER-COUNT-10S": "2", "X-MBX-ORDER-COUNT-1M": "7"},
+))
 try:
     binance_public._get_json(client_429, "/fapi/v1/ticker/24hr", attempts=4)
     raise AssertionError("429 应抛出")
@@ -62,13 +65,23 @@ assert 10 <= remaining <= 12.1, remaining
 status = rate_limit.rate_limit_status()
 assert status["active"] is True and status["last_status"] == 429
 assert status["event_count"] == 1
+assert status["attempts"] == 1 and status["responses"] == 1 and status["failures"] == 1
+assert status["observed_order_count_10s"] == 2
+assert status["observed_order_count_1m"] == 7
 assert state_file.is_file()
+event_429 = __import__("json").loads(
+    state_file.read_text(encoding="utf-8"))["request_events"][0]
+assert event_429["outcome"] == "response_error"
+assert event_429["retry_after_seconds"] == 12.0
 rate_limit._reset_for_test()
 rate_limit.configure_rate_limit_state(state_file)
 restored = rate_limit.rate_limit_status()
 assert restored["active"] is True and restored["last_status"] == 429
+assert restored["observed_order_count_10s"] == 2
+assert restored["observed_order_count_1m"] == 7
 print("  PASS  只请求一次，未把429重试升级为418")
 print("  PASS  重启后仍保留未到期冷却")
+print("  PASS  重启后仍保留订单计数水位")
 
 print("\n[2] 418 同样立即停止并进入长冷却")
 rate_limit._reset_for_test()
@@ -174,6 +187,31 @@ assert len(events) == 2 and all("symbol" not in event and event["status"] == 200
 print("  PASS  futures/data达到本地安全预算后不再发HTTP")
 print("  PASS  发送前预留和响应状态写入有界脱敏遥测")
 
+print("\n[6b] 传输失败按发送尝试计数并与端点关联")
+rate_limit._reset_for_test()
+
+
+class FailingClient:
+    calls = 0
+
+    def get(self, *args, **kwargs):
+        self.calls += 1
+        raise OSError("simulated transport failure")
+
+
+failing = FailingClient()
+try:
+    request_json(failing, "/fapi/v1/time", attempts=2, priority="background")
+    raise AssertionError("传输故障应抛出")
+except OSError:
+    pass
+failure_status = rate_limit.rate_limit_status()
+assert failing.calls == 2
+assert failure_status["attempts"] == 2 and failure_status["responses"] == 0
+assert failure_status["failures"] == 2 and failure_status["failure_rate"] == 1.0
+print("  PASS  无HTTP响应的两次尝试均进入失败计数")
+print("  PASS  失败遥测不记录请求参数")
+
 rate_limit._reset_for_test()
 binance_public._ALL_TICKERS_CACHE = (0.0, [])
-print("\n结果：PASS 7 / FAIL 0")
+print("\n结果：PASS 9 / FAIL 0")
