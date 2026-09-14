@@ -993,7 +993,7 @@ class AuditDatabase:
                 "trade_decisions", "trade_intents", "orders", "positions",
                 "signal_events", "signal_tickets", "shadow_decisions",
                 "portfolio_snapshots", "risk_events", "execution_fills",
-                "position_lifecycles", "trade_reconciliation_jobs",
+                "position_lifecycles", "trade_reconciliation_jobs", "order_outbox",
             }
             for table in sorted(release_only | scoped):
                 existing = {

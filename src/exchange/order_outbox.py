@@ -80,11 +80,12 @@ class OrderOutbox:
             try:
                 self.db.conn.execute(
                     """INSERT INTO order_outbox(
-                        client_order_id,environment,business_key,symbol,side,position_side,
+                        client_order_id,release_id,environment,business_key,symbol,side,position_side,
                         order_type,purpose,qty,price,reduce_only,endpoint,status,request_json,
                         attempt_count,created_at,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (client_order_id, self.environment, key, symbol.upper(), side.upper(),
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (client_order_id, getattr(self.db, "release_id", "legacy"), self.environment,
+                     key, symbol.upper(), side.upper(),
                      (position_side or "BOTH").upper(), order_type.upper(), purpose.upper(),
                      float(qty), price, int(reduce_only), endpoint, "SUBMITTING",
                      json.dumps(request, ensure_ascii=False, separators=(",", ":")),
