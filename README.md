@@ -27,6 +27,20 @@ Copy-Item .env.example .env
 
 控制台地址：`http://127.0.0.1:8000`。
 
+正式无人值守运行使用 Windows SCM 托管入口，不与 `run_web.py`、Popen/WMI 入口并行：
+
+```powershell
+.venv\Scripts\python.exe scripts\validate_windows_service_plan.py `
+  --config config\windows_service.json --require-files --print-install
+# 在受控管理员终端人工执行上一步打印的 sc.exe 命令
+sc.exe query MultiAgentTrader
+```
+
+SCM 服务复用 `scripts/run_web.py` 的统一生命周期；`start_web_detached.py`、
+`run_web_service.py` 仅用于隔离诊断。托管配置不包含凭据、代理或执行模式覆盖，日志在
+`data/web_console.log` 达到上限后有限轮转。完整停止、恢复、回滚和严格发布门禁见
+[`docs/运行与故障恢复手册_2026-09-06.md`](docs/运行与故障恢复手册_2026-09-06.md)。
+
 执行环境由 `.env` 中的 `EXECUTION_MODE` 决定：
 
 - `demo`：币安模拟盘，主网行情与虚拟资金，当前默认模式；
