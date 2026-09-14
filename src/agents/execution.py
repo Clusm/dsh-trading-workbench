@@ -250,7 +250,12 @@ class PaperBroker:
         if getattr(self, "require_pipeline_authorization", False):
             from core.decision_pipeline import filter_unauthorized_opens
             decision, verdict = filter_unauthorized_opens(
-                decision, verdict, db, getattr(self, "_pipeline_secret", None))
+                decision, verdict, db, getattr(self, "_pipeline_secret", None),
+                {
+                    "environment": getattr(self, "environment", None),
+                    "scope_hash": getattr(getattr(self, "trading_scope", None), "scope_hash", None),
+                    "runtime_instance_id": getattr(self, "runtime_instance_id", None),
+                })
         # 每轮先处理待成交限价单（成交/过期），即使本轮 no_trade 也要处理；
         # 市场快照里可能没有挂单 symbol，这里实时补齐。
         pending_symbols = []

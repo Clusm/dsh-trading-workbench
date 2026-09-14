@@ -139,6 +139,14 @@ class TradeDecision(BaseModel):
     pipeline_authorized: bool = False
     # 风控调整完成后由运行时密钥签发；排除审计序列化，防止日志成为旁路凭据。
     pipeline_signature: str | None = Field(default=None, exclude=True)
+    # 以下字段把一次性开仓授权绑定到决策、环境、scope 和当前进程；退出动作不依赖它们。
+    pipeline_authorization_id: str | None = None
+    pipeline_decision_id: str | None = None
+    pipeline_authorized_at: float | None = None
+    pipeline_authorization_expires_at: float | None = None
+    pipeline_scope_hash: str | None = None
+    pipeline_environment: str | None = None
+    pipeline_runtime_instance_id: str | None = None
     channel: Literal["strategy", "ai", "merged"] = "ai"
 
 

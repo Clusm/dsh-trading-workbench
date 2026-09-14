@@ -1809,6 +1809,10 @@ def create_app(service: TradingService) -> FastAPI:
                     reasons.append("order_outbox_submitting")
             except Exception:
                 reasons.append("order_outbox_unavailable")
+        # /api/ready 与执行图必须使用同一判定器；上面的组件状态仍用于组成响应，
+        # 但最终原因以 service 的只读 ReadinessSnapshot 为准，避免 UI 自己发明闸门。
+        readiness = service.entry_readiness()
+        reasons = list(readiness.get("blocking_reasons") or [])
         payload = {
             "ready": not reasons,
             "reasons": list(dict.fromkeys(reasons)),
@@ -1816,6 +1820,7 @@ def create_app(service: TradingService) -> FastAPI:
             "control_state": service.control.state,
             "startup_safety": safety,
             "account_risk": account_risk,
+            "entry_readiness": readiness,
             "order_mirror": order_mirror_status,
             "protection_order_mirror": protection_status,
             "public_market_rate_limit": market_rate,

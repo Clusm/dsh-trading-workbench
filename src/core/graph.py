@@ -1,7 +1,7 @@
 """阶段 0 最小多 Agent 图：三个情报源 -> 策略库 -> 主Agent -> 风控。"""
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any, Callable, TypedDict
 
 from pathlib import Path
 import uuid
@@ -120,7 +120,8 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 execution_feedback: dict[str, Any] | None = None,
                 query_budget: int = 8, execution_mode: str = "paper",
                 llm_total_timeout_seconds: float = 240.0,
-                trading_scope: TradingScope | None = None) -> Any:
+                trading_scope: TradingScope | None = None,
+                entry_readiness_provider: Callable[[], Any] | None = None) -> Any:
     # 生产服务显式注入 TradingScope；离线阶段脚本仍可只传旧参数。
     # 有 risk_config 范围时也尝试构造一个只读副本，保证直接调用 build_graph 的
     # 入口不会重新退回全市场开仓。
@@ -544,8 +545,22 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
             if item.get("stage") == "risk_guard":
                 item["status"] = "PASS" if verdict.verdict in ("approved", "reduced") else "BLOCK"
         checked_decision = decision.model_copy(update={"pipeline_trace": trace})
+        authorization_context = None
+        if entry_readiness_provider is not None and any(
+                item.action == "open" for item in (verdict.adjusted_intents or decision.intents)):
+            try:
+                gate = entry_readiness_provider()
+                if getattr(gate, "new_entry_allowed", False):
+                    authorization_context = gate.authorization_context(
+                        decision_id=state.get("decision_id"))
+            except Exception as exc:
+                # 不能在授权上下文不可读时继续签发 open；退出仍由原路径保留。
+                db.log_risk_event(
+                    event_type="entry_readiness_unavailable", severity="critical",
+                    details=f"{type(exc).__name__}: {exc}", action_taken="block open authorization")
         checked_decision = sign_execution(
-            checked_decision, verdict, getattr(broker, "_pipeline_secret", None))
+            checked_decision, verdict, getattr(broker, "_pipeline_secret", None),
+            authorization_context)
         return {"decision": checked_decision,
                 "risk_verdict": verdict, "execution_prices": prices}
 
@@ -563,21 +578,62 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
             db.log_risk_event(event_type="paper_missing", severity="warn",
                               details="未配置纸面执行器", action_taken="skip")
         elif exec_verdict.verdict in ("approved", "reduced"):
+            def _drop_opens(intents: list[Any]) -> tuple[list[Any], int]:
+                kept: list[Any] = []
+                dropped = 0
+                for it in intents:
+                    action = str(getattr(it, "action", "") or exec_decision.decision or "")
+                    if action == "open":
+                        dropped += 1
+                    else:
+                        kept.append(it)
+                return kept, dropped
+
+            def _decision_for(intents: list[Any]) -> str:
+                if any(getattr(it, "action", "") == "open" for it in intents):
+                    return "open"
+                if any(getattr(it, "action", "") in {"close", "reduce"} for it in intents):
+                    return "close"
+                if any(getattr(it, "action", "") == "adjust" for it in intents):
+                    return "adjust"
+                return "no_trade"
+
+            # LLM 运行期间可能发生 cooldown、镜像失配、UNKNOWN 或控制状态变化。
+            # 执行前重新消费同一判定器；readiness 不可读也按 fail closed 处理。
+            if entry_readiness_provider is not None and any(
+                    item.action == "open"
+                    for item in (exec_verdict.adjusted_intents or exec_decision.intents)):
+                try:
+                    gate = entry_readiness_provider()
+                    gate_allowed = bool(getattr(gate, "new_entry_allowed", False))
+                    gate_reasons = list(getattr(gate, "blocking_reasons", ()) or ())
+                except Exception as exc:
+                    gate_allowed = False
+                    gate_reasons = [f"READINESS_UNAVAILABLE:{type(exc).__name__}"]
+                if not gate_allowed:
+                    new_adj, dropped_adj = _drop_opens(list(exec_verdict.adjusted_intents))
+                    new_intents, dropped_raw = _drop_opens(list(exec_decision.intents))
+                    dropped = dropped_adj + dropped_raw
+                    if dropped:
+                        reason = "；".join(gate_reasons) or "READINESS_BLOCKED"
+                        exec_verdict = exec_verdict.model_copy(update={
+                            "adjusted_intents": new_adj,
+                            "reasons": list(exec_verdict.reasons) + [
+                                f"统一就绪闸门执行前拦截 {dropped} 笔开仓 intent：{reason}"],
+                        })
+                        exec_decision = exec_decision.model_copy(update={
+                            "intents": new_intents,
+                            "decision": _decision_for(new_intents),
+                        })
+                        db.log_risk_event(
+                            event_type="entry_readiness_block_open", severity="warn",
+                            details=f"执行前拦截 {dropped} 笔开仓 intent：{reason}",
+                            action_taken="skip open intents; preserve exits")
             # 决策周期可能长达数分钟，期间用户可能已触发 emergency/pause。
             # 执行前重读控制状态：非 normal 时丢弃所有 open intent（平仓/减仓仍放行），
             # 避免「决策时允许、执行时已被禁止」的在途开仓。
             cur_control = control.state if control is not None else "normal"
             if cur_control != "normal" and exec_decision.decision != "no_trade":
-                def _drop_opens(intents: list[Any]) -> tuple[list[Any], int]:
-                    kept: list[Any] = []
-                    dropped = 0
-                    for it in intents:
-                        action = str(getattr(it, "action", "") or exec_decision.decision or "")
-                        if action == "open":
-                            dropped += 1
-                        else:
-                            kept.append(it)
-                    return kept, dropped
                 new_adj, dropped_adj = _drop_opens(list(exec_verdict.adjusted_intents))
                 new_intents, dropped_raw = _drop_opens(list(exec_decision.intents))
                 dropped = dropped_adj + dropped_raw
@@ -587,7 +643,10 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                         "reasons": list(exec_verdict.reasons) + [
                             f"控制状态={cur_control}，执行前拦截 {dropped} 笔开仓 intent"],
                     })
-                    exec_decision = exec_decision.model_copy(update={"intents": new_intents})
+                    exec_decision = exec_decision.model_copy(update={
+                        "intents": new_intents,
+                        "decision": _decision_for(new_intents),
+                    })
                     db.log_risk_event(event_type="control_block_open", severity="warn",
                                       details=f"控制状态为 {cur_control}，执行前丢弃 {dropped} 笔开仓 intent",
                                       action_taken="skip open intents")

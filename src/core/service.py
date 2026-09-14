@@ -21,6 +21,7 @@ from core.graph import build_graph
 from core.decision_pipeline import authorize_decision, sign_execution
 from core.position_guardian import evaluate_positions
 from core.trading_scope import scope_from_settings
+from core.entry_readiness import ReadinessSnapshot, evaluate_entry_readiness
 from llm.factory import build_llm_for_agent
 from exchange.factory import create_broker
 from core.capital import CapitalManager
@@ -110,8 +111,12 @@ class TradingService:
         # 不能像旧逻辑一样退回全市场。该对象随后注入 Broker、策略和 AI 三条路径。
         mu_cfg = settings.raw_settings.get("market_universe", {}) or {}
         self.trading_scope = scope_from_settings(settings.raw_settings)
+        self.runtime_instance_id = uuid.uuid4().hex
         self.broker = create_broker(settings, self.db)
         self.broker.trading_scope = self.trading_scope
+        self.broker.runtime_instance_id = self.runtime_instance_id
+        if not getattr(self.broker, "environment", None):
+            self.broker.environment = str(getattr(self.broker, "mode", "paper") or "paper")
         self.paper_broker = self.broker  # 兼容旧名称
         # 不在构造阶段同步仓位：外部平仓补记会回查多笔 userTrades，网络波动时
         # 可阻塞数分钟，导致 Uvicorn 尚未监听、资金页面无法打开。后台慢循环会
@@ -223,6 +228,33 @@ class TradingService:
         # 这些字段仅供健康接口展示，不参与风控阈值或开仓授权。
         self._last_latest_refresh_at: float | None = None
         self._last_latest_refresh_error: str | None = None
+        # 先以“未完成核验”初始化；首次慢/快循环会写入真实事实。
+        # UI 冷启动可以看到明确原因，不能把空快照误报为可开仓。
+        self._entry_readiness_facts: dict[str, Any] = {
+            "service_accepting": True,
+            "control_state": self.control.state,
+            "equity_available": False,
+            "account_risk_allow_new": False,
+            "startup_safety_ready": False,
+            "order_submission_ready": False,
+            "market_cooldown_active": None,
+            "data_budget_available": False,
+            "order_mirror_ok": True if self.broker.environment == "paper" else None,
+            "protection_mirror_ok": True if self.broker.environment == "paper" else None,
+            "unknown_orders": 0,
+            "submitting_orders": 0,
+            "scope_hash": self.trading_scope.scope_hash,
+            "persistence_available": True,
+            "environment": self.broker.environment,
+            "runtime_instance_id": self.runtime_instance_id,
+            "component_versions": {"readiness": 1, "scope": 1},
+        }
+        self._entry_readiness_snapshot: ReadinessSnapshot = evaluate_entry_readiness(
+            self._entry_readiness_facts,
+            scope=self.trading_scope,
+            runtime_instance_id=self.runtime_instance_id,
+            environment=self.broker.environment,
+        )
         self._purge_old_logs()
 
     def _purge_old_logs(self, keep_days: int = 7) -> None:
@@ -445,6 +477,96 @@ class TradingService:
                 "started_at": self._started_at,
             }
 
+    def _mirror_fact(self, table: str, environment: str,
+                     *, protection: bool = False) -> bool | None:
+        """读取最近一次镜像对账结果；没有记录时返回 None 而不是假定成功。"""
+        try:
+            columns = "matched" if protection else "initialized,matched"
+            row = self.db.fetch_one(
+                f"SELECT {columns} FROM {table} WHERE environment=? "
+                "ORDER BY id DESC LIMIT 1", (environment,))
+        except Exception:
+            return None
+        if not row:
+            return None
+        if protection:
+            return bool(row["matched"])
+        return bool(row["matched"] or row["initialized"])
+
+    def _collect_entry_readiness_facts(self) -> dict[str, Any]:
+        """只读收集当前开仓闸门事实；严禁在这里发交易所网络请求。"""
+        environment = str(getattr(self.broker, "environment", "paper") or "paper")
+        facts = dict(self._entry_readiness_facts)
+        facts.update({
+            "service_accepting": bool(getattr(self, "_accepting_work", True)),
+            "control_state": self.control.state,
+            "scope_hash": self.trading_scope.scope_hash,
+            "environment": environment,
+            "runtime_instance_id": self.runtime_instance_id,
+        })
+        market_rate = rate_limit_status()
+        data_window = market_rate.get("data_endpoint_window") or {}
+        try:
+            budget_available = int(data_window.get("requests", 0) or 0) < int(
+                data_window.get("budget", 1) or 1)
+        except (TypeError, ValueError):
+            budget_available = False
+        facts["market_cooldown_active"] = bool(market_rate.get("active"))
+        facts["data_budget_available"] = budget_available
+        try:
+            facts["order_submission_ready"] = bool(self.broker.order_submission_ready())
+        except Exception:
+            facts["order_submission_ready"] = False
+        outbox = getattr(self.broker, "order_outbox", None)
+        if outbox is not None:
+            try:
+                status = outbox.status()
+                facts["unknown_orders"] = int(status.get("unknown_orders", 0) or 0)
+                facts["submitting_orders"] = int(status.get("submitting_orders", 0) or 0)
+            except Exception:
+                facts["unknown_orders"] = 1
+                facts["submitting_orders"] = 1
+        if environment == "paper":
+            # PaperBroker 没有交易所镜像，自己的持久化账本就是已验证事实。
+            facts["order_mirror_ok"] = True
+            facts["protection_mirror_ok"] = True
+        else:
+            facts["order_mirror_ok"] = self._mirror_fact(
+                "order_mirror_reconciliations", environment)
+            facts["protection_mirror_ok"] = self._mirror_fact(
+                "protection_reconciliations", environment, protection=True)
+        try:
+            self.db.fetch_one("SELECT 1")
+            facts["persistence_available"] = True
+        except Exception:
+            facts["persistence_available"] = False
+        return facts
+
+    def _refresh_entry_readiness(self, updates: dict[str, Any] | None = None
+                                 ) -> ReadinessSnapshot:
+        """更新共享事实并生成新快照；调用方应在网络操作之外使用。"""
+        facts = self._collect_entry_readiness_facts()
+        if updates:
+            facts.update(updates)
+        snapshot = evaluate_entry_readiness(
+            facts,
+            scope=self.trading_scope,
+            runtime_instance_id=self.runtime_instance_id,
+            environment=str(getattr(self.broker, "environment", "paper") or "paper"),
+        )
+        with self._lock:
+            self._entry_readiness_facts = facts
+            self._entry_readiness_snapshot = snapshot
+        return snapshot
+
+    def entry_readiness_snapshot(self) -> ReadinessSnapshot:
+        """执行图使用的轻量复核入口；只读 DB/内存/限流文件，不发交易所请求。"""
+        return self._refresh_entry_readiness()
+
+    def entry_readiness(self) -> dict[str, Any]:
+        """看板使用的共享开仓就绪判定。"""
+        return self.entry_readiness_snapshot().as_dict()
+
     def _run_once_inner(self) -> dict[str, Any]:
         run_id = str(uuid.uuid4())
         decision_id = str(uuid.uuid4())
@@ -494,6 +616,34 @@ class TradingService:
         if latest_protection and not bool(latest_protection["matched"]):
             allow_new = False
             allow_new_reason = "保护单镜像与持仓不一致，仅允许继续管理已有仓位"
+        # 唯一开仓就绪判定：把上面已采集的事实收敛成可复核快照，供看板和
+        # 执行节点复用。原因码只阻断 open，保护/退出仍走原有路径。
+        try:
+            data_budget_available = int(data_window.get("requests", 0) or 0) < int(
+                data_window.get("budget", 1) or 1)
+        except (TypeError, ValueError):
+            data_budget_available = False
+        readiness = self._refresh_entry_readiness({
+            "service_accepting": bool(getattr(self, "_accepting_work", True)),
+            "control_state": self.control.state,
+            "equity_available": equity_available,
+            "account_risk_allow_new": bool(account_risk.get("allow_new", False)),
+            "startup_safety_ready": bool(startup_safety.get("ready", False)),
+            "order_submission_ready": bool(order_submission_ready),
+            "market_cooldown_active": bool(market_rate.get("active")),
+            "data_budget_available": data_budget_available,
+            "order_mirror_ok": (True if environment == "paper" else
+                                 bool(latest_order["matched"] or latest_order["initialized"])
+                                 if latest_order else None),
+            "protection_mirror_ok": (True if environment == "paper" else
+                                      bool(latest_protection["matched"])
+                                      if latest_protection else None),
+            "persistence_available": True,
+            "scope_hash": self.trading_scope.scope_hash,
+        })
+        allow_new = readiness.new_entry_allowed
+        if readiness.blocking_reasons:
+            allow_new_reason = "；".join(readiness.blocking_reasons)
         # 先同步双通道资金状态（60/40 日切重算、AI 熔断、通道保证金上限）
         broker_state = self.broker.state if isinstance(self.broker.state, dict) else {}
         position_symbols = [str(p.get("symbol")) for p in broker_state.get("positions", [])]
@@ -550,6 +700,7 @@ class TradingService:
                               or {}).get("query_budget", 8)),
             execution_mode=str(getattr(self.broker, "mode", "paper") or "paper"),
             trading_scope=self.trading_scope,
+            entry_readiness_provider=self.entry_readiness_snapshot,
             llm_total_timeout_seconds=float(
                 (self.settings.raw_settings.get("llm", {}) or {}).get(
                     "total_timeout_seconds", 240.0)),
@@ -593,6 +744,7 @@ class TradingService:
             "control_state": self.control.state,
             "account_risk": account_risk,
             "startup_safety": startup_safety,
+            "entry_readiness": readiness.as_dict(),
             "quota_state": self.quota.status(),
             "channel_state": channel_status,
             "intel_cache": self.intel_cache.stats(),

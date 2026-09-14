@@ -4,30 +4,57 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from typing import Any
+from typing import Any, Mapping
 
 from agents.models import TradeDecision
+from core.entry_readiness import authorization_matches_context
 
 
 def _execution_payload(decision: Any, verdict: Any) -> bytes:
     intents = verdict.adjusted_intents if verdict.adjusted_intents else decision.intents
     opens = [item.model_dump(mode="json") for item in intents if item.action == "open"]
-    return json.dumps(opens, ensure_ascii=False, sort_keys=True,
+    authorization = {
+        "authorization_id": getattr(decision, "pipeline_authorization_id", None),
+        "decision_id": getattr(decision, "pipeline_decision_id", None),
+        "authorized_at": getattr(decision, "pipeline_authorized_at", None),
+        "expires_at": getattr(decision, "pipeline_authorization_expires_at", None),
+        "scope_hash": getattr(decision, "pipeline_scope_hash", None),
+        "environment": getattr(decision, "pipeline_environment", None),
+        "runtime_instance_id": getattr(decision, "pipeline_runtime_instance_id", None),
+    }
+    return json.dumps({"opens": opens, "authorization": authorization},
+                      ensure_ascii=False, sort_keys=True,
                       separators=(",", ":")).encode("utf-8")
 
 
-def sign_execution(decision: Any, verdict: Any, secret: str | None) -> Any:
+def sign_execution(decision: Any, verdict: Any, secret: str | None,
+                   authorization_context: Mapping[str, Any] | None = None) -> Any:
     """在 RiskGuard 之后签署实际开仓集合；无开仓不需要签名。"""
     if not secret or not any(item.action == "open" for item in
                              (verdict.adjusted_intents or decision.intents)):
         return decision
+    updates: dict[str, Any] = {}
+    if authorization_context:
+        updates = {
+            "pipeline_authorization_id": authorization_context.get("authorization_id"),
+            "pipeline_decision_id": authorization_context.get("decision_id"),
+            "pipeline_authorized_at": authorization_context.get("authorized_at"),
+            "pipeline_authorization_expires_at": authorization_context.get("expires_at"),
+            "pipeline_scope_hash": authorization_context.get("scope_hash"),
+            "pipeline_environment": authorization_context.get("environment"),
+            "pipeline_runtime_instance_id": authorization_context.get("runtime_instance_id"),
+        }
+        decision = decision.model_copy(update=updates)
     signature = hmac.new(secret.encode("utf-8"), _execution_payload(decision, verdict),
                          hashlib.sha256).hexdigest()
     return decision.model_copy(update={"pipeline_signature": signature})
 
 
-def _has_valid_signature(decision: Any, verdict: Any, secret: str | None) -> bool:
+def _has_valid_signature(decision: Any, verdict: Any, secret: str | None,
+                         authorization_context: Mapping[str, Any] | None = None) -> bool:
     if not secret or not decision.pipeline_signature:
+        return False
+    if not authorization_matches_context(decision, authorization_context):
         return False
     expected = hmac.new(secret.encode("utf-8"), _execution_payload(decision, verdict),
                         hashlib.sha256).hexdigest()
@@ -35,9 +62,12 @@ def _has_valid_signature(decision: Any, verdict: Any, secret: str | None) -> boo
 
 
 def filter_unauthorized_opens(decision: Any, verdict: Any, db: Any,
-                              secret: str | None = None) -> tuple[Any, Any]:
+                              secret: str | None = None,
+                              authorization_context: Mapping[str, Any] | None = None
+                              ) -> tuple[Any, Any]:
     """同时检查原始与风控调整集合；拦截开仓后仍让退出及挂单维护继续。"""
-    if decision.pipeline_authorized and _has_valid_signature(decision, verdict, secret):
+    if (decision.pipeline_authorized
+            and _has_valid_signature(decision, verdict, secret, authorization_context)):
         return decision, verdict
     raw = list(decision.intents)
     adjusted = list(verdict.adjusted_intents)
