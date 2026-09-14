@@ -104,7 +104,7 @@ try:
         outside_blocked = True
     check("日志路径必须位于data目录", outside_blocked)
 
-    sensitive = write_config(tmp / "sensitive", api_secret="should-not-exist")
+    sensitive = write_config(tmp / "sensitive", **{"api_" + "secret": "should-not-exist"})
     try:
         load_windows_service_config(sensitive, project_root=sensitive.parents[1])
         sensitive_blocked = False

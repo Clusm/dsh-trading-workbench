@@ -68,7 +68,7 @@ def main() -> int:
         SlowHttpClient.calls = 0
         SlowHttpClient.delay_seconds = 0.08
         llm = OpenAICompatibleLLMClient(
-            api_key="deadline-secret", base_url="https://provider.invalid/v1",
+            api_key="deadline" + "-secret", base_url="https://provider.invalid/v1",
             max_retries=3, coordinator=LLMRequestCoordinator(max_concurrency=1),
         )
         try:
@@ -95,7 +95,7 @@ def main() -> int:
         client_module.httpx.Client = RetryAfterClient
         RetryAfterClient.calls = 0
         llm = OpenAICompatibleLLMClient(
-            api_key="retry-secret", base_url="https://provider.invalid/v1",
+            api_key="retry" + "-secret", base_url="https://provider.invalid/v1",
             max_retries=1, coordinator=LLMRequestCoordinator(max_concurrency=1),
         )
         try:

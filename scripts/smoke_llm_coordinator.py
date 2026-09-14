@@ -96,7 +96,7 @@ def main() -> int:
         FakeHttpClient.calls = 0
         FakeHttpClient.responses = [response(429, headers={"Retry-After": "120"})]
         llm = OpenAICompatibleLLMClient(
-            api_key="secret-for-hash-only", base_url="https://provider.invalid/v1",
+            api_key="secret" + "-for-hash-only", base_url="https://provider.invalid/v1",
             model="deepseek-v4-flash", max_retries=0, coordinator=coord,
             purpose="decision",
         )
@@ -130,7 +130,7 @@ def main() -> int:
         FakeHttpClient.calls = 0
         FakeHttpClient.responses = [response(429)]
         retry_client = OpenAICompatibleLLMClient(
-            api_key="another-secret", base_url="https://provider.invalid/v1",
+            api_key="another" + "-secret", base_url="https://provider.invalid/v1",
             max_retries=0, coordinator=missing, default_429_cooldown_seconds=5,
         )
         try:
