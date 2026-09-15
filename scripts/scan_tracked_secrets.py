@@ -87,19 +87,40 @@ def find_secret_hits(text: str) -> list[SecretFinding]:
     return [SecretFinding(line=line, rule=rule) for line, rule in sorted(findings)]
 
 
-def _tracked_files(root: Path) -> list[Path]:
-    """获取 Git 索引中的文件，避免扫描未纳入发布范围的本地运行时目录。"""
+def _git_files(root: Path, *extra_args: str) -> list[Path]:
+    """按给定视图列出文件；``--exclude-standard`` 保证被忽略的运行时目录不会进入。"""
     result = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=root, check=True,
+        ["git", "ls-files", "-z", *extra_args], cwd=root, check=True,
         capture_output=True,
     )
     return [root / item.decode("utf-8") for item in result.stdout.split(b"\0") if item]
 
 
+def _tracked_files(root: Path) -> list[Path]:
+    """获取 Git 索引中的文件，避免扫描未纳入发布范围的本地运行时目录。"""
+    return _git_files(root)
+
+
+def scannable_files(root: Path) -> list[Path]:
+    """返回待扫描文件 = 已跟踪文件 + 未跟踪但未被忽略的文件。
+
+    2026-09-15 修正：旧实现只扫 Git 索引。这样"新增但尚未提交"的脚本在校验时
+    完全隐形，而它们随后就会被提交——密钥门禁的作用是在**提交之前**拦下来，
+    不是等进了索引才看。未跟踪文件同样排除 .gitignore 命中的运行时目录
+    （``data/``、``.env``、``.venv/`` 等），因此不会扫到本机真实凭据。
+    """
+    tracked = _git_files(root)
+    untracked = _git_files(root, "--others", "--exclude-standard")
+    merged: dict[str, Path] = {}
+    for path in [*tracked, *untracked]:
+        merged[str(path)] = path
+    return sorted(merged.values())
+
+
 def scan_tracked_files(root: Path = PROJECT_ROOT) -> list[tuple[Path, SecretFinding]]:
-    """扫描所有可解码的 Git 跟踪文本文件，不读取或打印二进制内容。"""
+    """扫描所有可解码的待扫描文本文件，不读取或打印二进制内容。"""
     hits: list[tuple[Path, SecretFinding]] = []
-    for path in _tracked_files(root):
+    for path in scannable_files(root):
         try:
             raw = path.read_bytes()
             if b"\0" in raw:
@@ -119,7 +140,7 @@ def main() -> int:
             print(f"SECRET SCAN FAIL {path.relative_to(PROJECT_ROOT)}:{finding.line} "
                   f"rule={finding.rule}")
         return 1
-    print(f"SECRET SCAN OK files={len(_tracked_files(PROJECT_ROOT))}")
+    print(f"SECRET SCAN OK files={len(scannable_files(PROJECT_ROOT))}")
     return 0
 
 
