@@ -49,6 +49,34 @@ def main() -> int:
                 position_mode if isinstance(position_mode, dict) else None,
                 positions, orders, algos,
             )
+            equity = float(account.get("totalMarginBalance") or 0.0)
+            max_margin_usage = float(settings.raw_risk.get(
+                "strong_max_margin_usage",
+                settings.raw_risk.get("max_margin_usage", 0.80),
+            ))
+            total_margin = sum(broker._margin_from_position(row) for row in positions)
+            margin_limit = equity * max_margin_usage
+            margin_breached = equity <= 0 or total_margin > margin_limit
+            margin_reason = (
+                "账户权益不可用，无法核验总保证金上限" if equity <= 0 else
+                f"存量总保证金 {total_margin:.2f}U 超过风险档上限 {margin_limit:.2f}U"
+                if margin_breached else ""
+            )
+            takeover["margin_cap"] = {
+                "evaluated": equity > 0,
+                "breached": margin_breached,
+                "equity": equity,
+                "total_margin": total_margin,
+                "limit": margin_limit,
+                "max_margin_usage": max_margin_usage,
+                "reason": margin_reason,
+            }
+            if margin_breached:
+                takeover["ok"] = False
+                takeover["reason"] = "；".join(
+                    value for value in (str(takeover.get("reason") or ""), margin_reason)
+                    if value
+                )
             result = {
                 "ok": True, "environment": "live", "can_trade": account.get("canTrade"),
                 "wallet_balance": account.get("totalWalletBalance"),

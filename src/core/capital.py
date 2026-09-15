@@ -37,12 +37,14 @@ class CapitalManager:
     """
     def __init__(self, state_file: Path, broker: Any, db: AuditDatabase,
                  initial_equity: float = 200.0, bankruptcy_threshold: float = 1.0,
-                 reset_on_bankruptcy: bool = True, max_margin_usage: float = 0.80):
+                 reset_on_bankruptcy: bool = True, max_margin_usage: float = 0.80,
+                 anchor_live_to_actual: bool = False):
         self.state_file = Path(state_file)
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self.broker = broker
         self.db = db
-        self.initial_equity = float(initial_equity)
+        self.configured_initial_equity = float(initial_equity)
+        self.initial_equity = self.configured_initial_equity
         self.threshold = float(bankruptcy_threshold)
         self.reset_on_bankruptcy = bool(reset_on_bankruptcy)
         self.max_margin_usage = float(max_margin_usage)
@@ -56,7 +58,49 @@ class CapitalManager:
         self.last_reset: dict[str, Any] | None = None
         self._last_exchange_equity: float | None = None
         self._equity_stale = False
+        self._anchor_live_to_actual = bool(anchor_live_to_actual)
+        self._live_anchor_ready = not self._anchor_live_to_actual
+        if self._anchor_live_to_actual:
+            self._initialize_live_anchor()
         self.baseline = self._load_or_init_baseline()
+
+    def _initialize_live_anchor(self) -> None:
+        """实盘首次接入以真实账户权益为起点，后续重启沿用同一锚点。
+
+        Demo 的 500U 是模拟资金口径，不能套到余额不足 500U 的实盘账户；否则
+        页面会显示虚假的巨额亏损，且风险比例的分母失真。只有带明确来源标记的
+        实盘锚点才会跨重启复用，旧版无标记状态会在升级时一次性迁移。
+        """
+        if self._mode() != "live":
+            self._live_anchor_ready = True
+            return
+        try:
+            data = json.loads(self.state_file.read_text(encoding="utf-8-sig"))
+            stored = float(data.get("initial_equity") or 0.0)
+            if (data.get("mode") == "live"
+                    and data.get("anchor_source") == "live_account_equity"
+                    and stored > 0):
+                self.initial_equity = stored
+                self._live_anchor_ready = True
+                return
+        except Exception:
+            pass
+        exchange_eq = self._exchange_equity()
+        if exchange_eq <= 0 or self._equity_stale:
+            return
+        self.initial_equity = exchange_eq
+        self._live_anchor_ready = True
+        self.last_reset = {
+            "reason": "live_account_anchor",
+            "configured_initial_equity": self.configured_initial_equity,
+            "session_equity_after_reset": exchange_eq,
+        }
+        self.db.log_risk_event(
+            event_type="baseline_reanchored", severity="warn",
+            details=(f"实盘资金口径已按接管时真实权益 {exchange_eq:.8f}U 建立；"
+                     f"Demo 配置起点 {self.configured_initial_equity:.2f}U 不用于实盘"),
+            action_taken="anchor live ledger to actual account equity",
+        )
 
     def _mode(self) -> str:
         return str(getattr(self.broker, "mode", "paper") or "paper")
@@ -183,6 +227,11 @@ class CapitalManager:
                 "mode": self._mode(),
                 "anchored_at": datetime.now(timezone.utc).isoformat(),
             })
+            if self._anchor_live_to_actual and self._live_anchor_ready:
+                payload.update({
+                    "configured_initial_equity": self.configured_initial_equity,
+                    "anchor_source": "live_account_equity",
+                })
             tmp = self.state_file.with_name(
                 f"{self.state_file.stem}.tmp-{os.getpid()}-{threading.get_ident()}")
             tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -219,13 +268,45 @@ class CapitalManager:
             pass
         return 0.0
 
-    def sync(self, prices: dict[str, float] | None = None) -> dict[str, Any]:
+    def margin_cap_status(self) -> dict[str, Any]:
+        """只读计算总保证金硬上限状态，供接管预检在任何自动平仓前使用。"""
+        exchange_eq = self._exchange_equity()
+        if exchange_eq <= 0 or self._equity_stale:
+            return {
+                "evaluated": False, "breached": False, "equity": exchange_eq,
+                "total_margin": None, "limit": None,
+                "max_margin_usage": self.max_margin_usage,
+                "reason": "账户权益不可用，无法核验总保证金上限",
+            }
+        total_margin = self._total_margin()
+        limit = exchange_eq * self.max_margin_usage
+        breached = total_margin > limit
+        return {
+            "evaluated": True, "breached": breached, "equity": exchange_eq,
+            "total_margin": total_margin, "limit": limit,
+            "max_margin_usage": self.max_margin_usage,
+            "reason": (f"存量总保证金 {total_margin:.2f}U 超过风险档上限 {limit:.2f}U"
+                       if breached else ""),
+        }
+
+    def sync(self, prices: dict[str, float] | None = None, *,
+             enforce_actions: bool = True) -> dict[str, Any]:
         """同步权益并执行资金级硬保护。
 
         可能的副作用包括全平、重锚和写风险事件。权益为旧缓存时跳过破产及保证金处置，
         返回 ``equity_available=False``，由上层阻断新开仓。
         """
         mode = self._mode()
+        if self._anchor_live_to_actual and not self._live_anchor_ready:
+            exchange_eq = self._exchange_equity()
+            if exchange_eq > 0 and not self._equity_stale:
+                self.initial_equity = exchange_eq
+                self.baseline = 0.0
+                self._live_anchor_ready = True
+                self._save(self.baseline)
+            else:
+                return {"session_equity": self.initial_equity, "reset": False,
+                        "equity_available": False, "live_anchor_ready": False}
         exchange_eq = self._exchange_equity()
         if getattr(self, "_equity_stale", False):
             session_eq = round(exchange_eq - self.baseline, 2) if exchange_eq > 0 else self.session_equity()
@@ -242,7 +323,7 @@ class CapitalManager:
         if session_eq > 0:
             total_margin = self._total_margin()
             limit = session_eq * self.max_margin_usage
-            if total_margin > limit:
+            if total_margin > limit and enforce_actions:
                 try:
                     self.broker.close_all(prices or {}, self.db)
                 except Exception as e:
@@ -252,6 +333,13 @@ class CapitalManager:
                                        details=f"总保证金 {total_margin:.2f} > {limit:.2f}，已全平恢复资金约束",
                                        action_taken="close_all")
                 session_eq = self.session_equity()
+            elif total_margin > limit:
+                result = {
+                    "session_equity": session_eq, "reset": False,
+                    "equity_available": True, "margin_cap_breach": True,
+                    "margin_cap_enforced": False,
+                }
+                return result
         result = {"session_equity": session_eq, "reset": False, "equity_available": True}
         if session_eq <= self.threshold and self.reset_on_bankruptcy:
             # 重置前必须再确认一次权益是新鲜的：用失效/缓存权益算出的基线一旦

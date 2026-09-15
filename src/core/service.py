@@ -175,6 +175,9 @@ class TradingService:
                 "strong_max_margin_usage",
                 settings.raw_risk.get("max_margin_usage", 0.80),
             )),
+            # Demo 继续使用配置的 500U 起点；实盘必须以首次接管时的真实权益
+            # 建立独立资金锚点，不能把模拟本金当作实盘资产。
+            anchor_live_to_actual=settings.profile_name == "live",
         )
         stability_cfg = settings.raw_settings.get("stability", {}) or {}
         self.risk_guard = AccountRiskGuard(
@@ -209,6 +212,10 @@ class TradingService:
             channel_max_margin_usage=float(ch_cfg.get("channel_max_margin_usage", 0.80)),
             ai_daily_loss_stop=float(ch_cfg.get("ai_daily_loss_stop", 0.30)),
         )
+        if ((self.capital.last_reset or {}).get("reason") == "live_account_anchor"):
+            # 新的实盘资金锚点代表新的核算周期。同步重建通道日初基准，避免旧版
+            # 错误的 500U 口径或接管前成交继续触发 AI 当日亏损熔断。
+            self.channels.reset_day_start(self.capital.session_equity())
         self.llm, self.model = build_llm_for_agent(settings, "ai_trader")
         self.agent_llms: dict[str, tuple[LLMClient, str]] = {}
         for name in ["market_agent", "macro_agent", "onchain_agent"]:
@@ -726,10 +733,14 @@ class TradingService:
     def _run_once_inner(self) -> dict[str, Any]:
         run_id = str(uuid.uuid4())
         decision_id = str(uuid.uuid4())
-        capital_result = self.capital.sync()
+        # 接管核验必须先于任何可能自动平仓的资金硬保护。存量仓位若不符合当前
+        # 风险档，系统先补保护并明确阻断，由运营者决定如何处理，绝不在首屏尚未
+        # 就绪时静默 close_all；核验通过后，日常运行仍按原风险档自动执行硬保护。
+        startup_safety = self._verify_startup_safety()
+        capital_result = self.capital.sync(
+            enforce_actions=bool(startup_safety.get("ready", False)))
         equity_available = bool(capital_result.get("equity_available", True))
         session_equity = self.capital.session_equity()
-        startup_safety = self._verify_startup_safety()
         account_risk = self._sync_account_risk(session_equity, equity_available)
         try:
             order_submission_ready = (
@@ -953,6 +964,25 @@ class TradingService:
                     self._startup_safety = result
                     self.db.log_risk_event(event_type="startup_safety_block", severity="critical",
                                            details=result["reason"], action_taken="block new opens")
+                    return result
+            if str(getattr(self.broker, "environment", "paper") or "paper") == "live":
+                margin_cap = self.capital.margin_cap_status()
+                if compatibility is not None:
+                    compatibility = dict(compatibility)
+                    compatibility["margin_cap"] = margin_cap
+                if not margin_cap.get("evaluated", False) or margin_cap.get("breached", False):
+                    result = {
+                        "ready": False,
+                        "reason": str(margin_cap.get("reason") or "无法核验实盘总保证金上限"),
+                        "checked_at": now,
+                        "takeover": compatibility,
+                    }
+                    self._startup_safety = result
+                    self.db.log_risk_event_once_while_open(
+                        event_type="startup_takeover_block", severity="critical",
+                        details=result["reason"],
+                        action_taken="protect positions; block automatic risk close and new opens",
+                    )
                     return result
             # 外部增仓挂单不受本进程 close_only 控制。允许上面的现仓保护同步继续，
             # 但绝不能把实例标为可恢复开仓；由运营者核对后撤单或显式纳管。
