@@ -38,6 +38,18 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _open_immutable_readonly(path: Path) -> sqlite3.Connection:
+    """打开恢复快照时绝不在介质旁生成 WAL/SHM 文件。
+
+    恢复包中的数据库由 SQLite backup API 生成，清单只允许主数据库文件。普通
+    ``mode=ro`` 连接在数据库头仍是 WAL 模式时仍可能创建共享内存文件；这会让
+    一次 dry-run 污染只读介质，并使下一次白名单校验 fail-closed。``immutable=1``
+    适用于这类已冻结快照，既保留完整性检查能力，也保证校验无写入副作用。
+    """
+    uri = f"{Path(path).resolve().as_uri()}?mode=ro&immutable=1"
+    return sqlite3.connect(uri, uri=True)
+
+
 def _safe_member(bundle: Path, relative: str) -> Path:
     member = Path(relative)
     if member.is_absolute() or ".." in member.parts or not member.parts:
@@ -101,7 +113,7 @@ def verify_recovery_bundle(bundle_dir: Path,
         raise ValueError(f"恢复包包含未列入白名单的文件: {', '.join(extras)}")
 
     database = verified["database"]
-    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    connection = _open_immutable_readonly(database)
     try:
         check = connection.execute("PRAGMA quick_check").fetchone()
         if not check or str(check[0]).lower() != "ok":
@@ -181,7 +193,9 @@ def restore_to_new_directory(bundle_dir: Path, target_dir: Path, *, execute: boo
         (stage / "restore_receipt.json").write_text(
             json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8", newline="\n")
-        check = sqlite3.connect(stage / "data" / "agent_trader.sqlite")
+        # 恢复后的快照同样按不可变只读方式复核；不要把空 WAL/SHM 一并带入
+        # 最终恢复目录，避免恢复演练本身改变快照的文件集合。
+        check = _open_immutable_readonly(stage / "data" / "agent_trader.sqlite")
         try:
             if str(check.execute("PRAGMA quick_check").fetchone()[0]).lower() != "ok":
                 raise ValueError("恢复后数据库 quick_check 失败")

@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from create_recovery_bundle import create_recovery_bundle  # noqa: E402
 from restore_recovery_bundle import (  # noqa: E402
+    _open_immutable_readonly,
     restore_to_new_directory,
     verify_recovery_bundle,
 )
@@ -26,6 +27,7 @@ data = project / "data"
 (project / "config").mkdir(parents=True)
 data.mkdir()
 db = sqlite3.connect(data / "agent_trader.sqlite")
+db.execute("PRAGMA journal_mode=WAL")
 db.execute("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT)")
 db.execute("INSERT INTO schema_migrations VALUES(15, 'test')")
 db.commit()
@@ -52,8 +54,11 @@ assert (bundle / "manifest.sha256").is_file()
 assert manifest["files"]["database"]["schema_version"] == 15
 assert all((bundle / "state" / name).is_file() for name in states)
 assert not (bundle / ".env").exists()
-assert sqlite3.connect(bundle / "agent_trader.sqlite").execute(
-    "PRAGMA quick_check").fetchone()[0] == "ok"
+bundle_check = _open_immutable_readonly(bundle / "agent_trader.sqlite")
+try:
+    assert bundle_check.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+finally:
+    bundle_check.close()
 print("  PASS  数据库与关键状态进入同一恢复包并通过校验")
 print("  PASS  .env及凭据未进入恢复包")
 
@@ -81,9 +86,13 @@ print("  PASS  确认死亡的陈旧PID锁可安全接管且完成后释放")
 media = tmp / "independent_media" / bundle.name
 media.parent.mkdir()
 shutil.copytree(bundle, media)
+sidecars = [media / "agent_trader.sqlite-wal", media / "agent_trader.sqlite-shm"]
+assert not any(path.exists() for path in sidecars)
 verified = verify_recovery_bundle(media, expected_environment="demo")
 assert verified["database_schema"] == 15
+assert not any(path.exists() for path in sidecars)
 print("  PASS  独立介质副本通过清单/哈希/SQLite校验")
+print("  PASS  WAL快照dry-run不在介质旁生成边车文件")
 target = tmp / "restore_target"
 preview = restore_to_new_directory(media, target, expected_environment="demo")
 assert preview["status"] == "dry_run" and not target.exists()
@@ -96,9 +105,15 @@ assert (target / "data" / "agent_trader.sqlite").is_file()
 assert (target / "data" / "capital_state.json").is_file()
 assert (target / "config" / "risk_profile.lock.json").is_file()
 assert (target / "restore_receipt.json").is_file()
-assert sqlite3.connect(target / "data" / "agent_trader.sqlite").execute(
-    "PRAGMA quick_check").fetchone()[0] == "ok"
+assert not (target / "data" / "agent_trader.sqlite-wal").exists()
+assert not (target / "data" / "agent_trader.sqlite-shm").exists()
+restored_check = _open_immutable_readonly(target / "data" / "agent_trader.sqlite")
+try:
+    assert restored_check.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+finally:
+    restored_check.close()
 print("  PASS  只恢复到全新目录并生成恢复回执")
+print("  PASS  恢复后校验不夹带SQLite边车文件")
 try:
     restore_to_new_directory(media, target, execute=True)
     overwrite_blocked = False
