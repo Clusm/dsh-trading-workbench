@@ -585,6 +585,20 @@ def reserve_request(path: str, *, weight: int = 1, priority: str = "normal",
                     item for item in payload.get("request_events", [])
                     if isinstance(item, dict)
                 ], now)
+                # 同一出口的两个控制台必须原子共享分钟权重。
+                # 在文件锁内累计发送前的预留，超时请求同样占额度；
+                # critical 保留原有保护/恢复优先级，不受软预算阻断。
+                minute_weight = sum(
+                    _safe_int(item.get("weight")) for item in events
+                    if _event_time(item) > now - 60
+                )
+                if (normalized_priority != "critical"
+                        and minute_weight + event["weight"] > _LOCAL_WEIGHT_BUDGET_1M):
+                    with _LOCK:
+                        _BLOCKED_COUNT += 1
+                    raise PublicMarketBudgetDeferred(
+                        f"Binance 跨进程分钟权重预算已用尽（{_LOCAL_WEIGHT_BUDGET_1M}），请求延后"
+                    )
                 group = str(endpoint_group or "general")
                 if (group == "futures_data_5m" and normalized_priority != "critical"
                         and _data_group_count(events, group) >= _DATA_REQUEST_BUDGET_5M):

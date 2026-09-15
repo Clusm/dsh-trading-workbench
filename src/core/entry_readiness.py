@@ -121,8 +121,16 @@ def evaluate_entry_readiness(
     scope_hash = scope.scope_hash if scope is not None else None
     if scope is None:
         reasons.append("SCOPE_UNAVAILABLE")
-    elif facts.get("scope_hash") not in (None, scope.scope_hash):
+    elif not facts.get("scope_hash"):
+        reasons.append("SCOPE_HASH_UNPROVEN")
+    elif facts.get("scope_hash") != scope.scope_hash:
         reasons.append("SCOPE_HASH_MISMATCH")
+    effective_runtime_id = str(runtime_instance_id or facts.get("runtime_instance_id") or "")
+    effective_environment = str(environment or facts.get("environment") or "")
+    if not effective_runtime_id:
+        reasons.append("RUNTIME_INSTANCE_UNPROVEN")
+    if not effective_environment:
+        reasons.append("ENVIRONMENT_UNPROVEN")
     if _fact_bool(facts, "persistence_available") is not True:
         reasons.append("PERSISTENCE_UNAVAILABLE")
 
@@ -132,8 +140,8 @@ def evaluate_entry_readiness(
     expires_at = observed_at + ttl if allowed else None
     return ReadinessSnapshot(
         snapshot_id=str(uuid.uuid4()),
-        runtime_instance_id=str(runtime_instance_id or facts.get("runtime_instance_id") or ""),
-        environment=str(environment or facts.get("environment") or ""),
+        runtime_instance_id=effective_runtime_id,
+        environment=effective_environment,
         observed_at=observed_at,
         new_entry_allowed=allowed,
         blocking_reasons=unique_reasons,
@@ -147,14 +155,15 @@ def authorization_matches_context(decision: Any, context: Mapping[str, Any] | No
                                  *, now: float | None = None) -> bool:
     """验证签名之外的授权时效/环境/scope/进程绑定。"""
     expires_at = getattr(decision, "pipeline_authorization_expires_at", None)
-    if expires_at is not None:
-        try:
-            if float(expires_at) <= float(time.time() if now is None else now):
-                return False
-        except (TypeError, ValueError):
+    if expires_at is None:
+        return False
+    try:
+        if float(expires_at) <= float(time.time() if now is None else now):
             return False
+    except (TypeError, ValueError):
+        return False
     if not context:
-        return True
+        return False
     checks = {
         "environment": "pipeline_environment",
         "scope_hash": "pipeline_scope_hash",
@@ -163,6 +172,6 @@ def authorization_matches_context(decision: Any, context: Mapping[str, Any] | No
     for expected_key, decision_attr in checks.items():
         expected = context.get(expected_key)
         actual = getattr(decision, decision_attr, None)
-        if expected is not None and actual != expected:
+        if not expected or actual != expected:
             return False
     return True

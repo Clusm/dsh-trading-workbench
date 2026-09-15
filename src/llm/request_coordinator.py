@@ -7,12 +7,15 @@
 from __future__ import annotations
 
 import hashlib
+import errno
+import os
 import threading
 import time
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 
@@ -22,6 +25,58 @@ class LLMAdmissionError(RuntimeError):
 
 class LLMAdmissionTimeout(LLMAdmissionError):
     """排队或供应商冷却超出本次请求剩余预算。"""
+
+
+def _cross_process_lock_path(scope: str) -> Path:
+    """同供应商凭据映射到同一匿名锁文件，不在路径中暴露 Key。"""
+    configured = os.getenv("MTA_LLM_COORDINATION_DIR", "").strip()
+    root = (Path(configured) if configured else
+            Path(__file__).resolve().parents[2] / "data" / "shared" / "llm_coordination")
+    digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:24]
+    return root / f"provider-{digest}.lock"
+
+
+@contextmanager
+def _cross_process_permit(scope: str, *, deadline: float,
+                          poll_seconds: float) -> Iterator[None]:
+    """在两个控制台之间串行供应商请求；进程退出时系统自动释放文件锁。"""
+    path = _cross_process_lock_path(scope)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"0")
+        handle.flush()
+    locked = False
+    try:
+        while not locked:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:  # pragma: no cover - Windows 为生产环境，保留 CI 兼容
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LLMAdmissionTimeout("LLM cross-process admission deadline exceeded") from exc
+                time.sleep(min(max(0.01, poll_seconds), remaining))
+        yield
+    finally:
+        if locked:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:  # pragma: no cover
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def parse_retry_after(headers: Mapping[str, Any] | None, *, default: float = 0.0,
@@ -144,7 +199,15 @@ class LLMRequestCoordinator:
                     wait_for = min(wait_for, cooldown)
                 self._condition.wait(timeout=max(0.01, wait_for))
         try:
-            yield permit
+            with _cross_process_permit(
+                scope, deadline=effective_deadline,
+                poll_seconds=self.queue_poll_seconds,
+            ):
+                yield permit
+        except LLMAdmissionTimeout:
+            with self._condition:
+                self._state(scope).rejected += 1
+            raise
         finally:
             with self._condition:
                 state = self._state(scope)

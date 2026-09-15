@@ -62,7 +62,10 @@ def main() -> None:
         facts = _facts(scope)
         facts[key] = None if key == "order_mirror_ok" else (
             True if key == "market_cooldown_active" else False)
-        blocked = evaluate_entry_readiness(facts, now=now, scope=scope)
+        blocked = evaluate_entry_readiness(
+            facts, now=now, scope=scope,
+            runtime_instance_id="runtime-a", environment="demo",
+        )
         assert not blocked.new_entry_allowed, (key, blocked.as_dict())
         assert reason in blocked.blocking_reasons, (key, blocked.as_dict())
 
@@ -86,6 +89,26 @@ def main() -> None:
     )
     assert verified.intents == [intent]
 
+    missing_expiry = signed.model_copy(update={"pipeline_authorization_expires_at": None})
+    missing_expiry_result, _ = filter_unauthorized_opens(
+        missing_expiry, verdict, db, "secret",
+        {"environment": "demo", "scope_hash": scope.scope_hash,
+         "runtime_instance_id": "runtime-a"},
+    )
+    assert missing_expiry_result.intents == []
+
+    no_context_result, _ = filter_unauthorized_opens(signed, verdict, db, "secret", None)
+    assert no_context_result.intents == []
+
+    missing_scope = _facts(scope)
+    missing_scope.pop("scope_hash")
+    unproven = evaluate_entry_readiness(
+        missing_scope, now=now, scope=scope,
+        runtime_instance_id="runtime-a", environment="demo",
+    )
+    assert not unproven.new_entry_allowed
+    assert "SCOPE_HASH_UNPROVEN" in unproven.blocking_reasons
+
     expired = signed.model_copy(update={"pipeline_authorization_expires_at": now - 1})
     expired_result, _ = filter_unauthorized_opens(
         expired, verdict, db, "secret",
@@ -93,7 +116,7 @@ def main() -> None:
          "runtime_instance_id": "runtime-a"},
     )
     assert expired_result.intents == []
-    assert db.events.count("pipeline_bypass_blocked") == 1
+    assert db.events.count("pipeline_bypass_blocked") == 3
 
     print("PASS entry readiness: shared gate, missing evidence, expiry and context binding")
 

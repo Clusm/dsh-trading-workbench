@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 
-def _worker(state_file: str, gate: Any, output: Any) -> None:
+def _worker(state_file: str, gate: Any, output: Any, minute_test: bool = False) -> None:
     """两个独立 Python 进程竞争同一个五分钟预算槽位。"""
     from data.rate_limit import (
         PublicMarketBudgetDeferred,
@@ -32,9 +32,9 @@ def _worker(state_file: str, gate: Any, output: Any) -> None:
     try:
         reserve_request(
             "/futures/data/topLongShortAccountRatio",
-            weight=1,
+            weight=400 if minute_test else 1,
             priority="background",
-            endpoint_group="futures_data_5m",
+            endpoint_group="general" if minute_test else "futures_data_5m",
             source="multiprocess_smoke",
             environment="demo",
         )
@@ -71,7 +71,20 @@ def main() -> int:
         payload = Path(state_file).read_text(encoding="utf-8")
         check("请求遥测已持久化", '"group": "futures_data_5m"' in payload)
 
-    print("\n结果: 3 通过 / 0 失败")
+        minute_state = str(Path(temp_dir) / "minute.json")
+        minute_gate = ctx.Barrier(2)
+        workers = [ctx.Process(target=_worker, args=(minute_state, minute_gate, output, True))
+                   for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        results = [output.get(timeout=20) for _ in workers]
+        for worker in workers:
+            worker.join(timeout=10)
+        check("分钟预算进程正常退出", all(worker.exitcode == 0 for worker in workers))
+        check("双进程共享600权重，两个400请求只放行一个",
+              sorted(results) == ["accepted", "deferred"])
+
+    print("\n结果: 5 通过 / 0 失败")
     return 0
 
 

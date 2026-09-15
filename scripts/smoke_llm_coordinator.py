@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import sys
+import multiprocessing
+import os
+import tempfile
 import threading
 import time
 from email.utils import format_datetime
@@ -51,6 +54,19 @@ class FakeHttpClient:
         if not type(self).responses:
             raise AssertionError("fake response exhausted")
         return type(self).responses.pop(0)
+
+
+def cross_process_worker(lock_dir: str, gate, output) -> None:
+    os.environ["MTA_LLM_COORDINATION_DIR"] = lock_dir
+    coordinator = LLMRequestCoordinator(
+        max_concurrency=1, queue_poll_seconds=0.01,
+        default_queue_deadline_seconds=2.0,
+    )
+    gate.wait(timeout=5)
+    with coordinator.admit("same-provider#key:anonymous", deadline=time.monotonic() + 2):
+        started = time.monotonic()
+        time.sleep(0.15)
+        output.put((started, time.monotonic()))
 
 
 def response(status: int, *, headers: dict[str, str] | None = None) -> httpx.Response:
@@ -157,7 +173,22 @@ def main() -> int:
     print("\n[4] 凭据只以匿名hash进入可观测标识")
     scope = provider_scope("https://provider.invalid/v1", "top-secret")
     check("provider scope不含密钥原文", "top-secret" not in scope and "key:" in scope, scope)
-    print("\n结果：PASS 8 / FAIL 0")
+
+    print("\n[5] 两个独立进程共享一个供应商并发槽")
+    ctx = multiprocessing.get_context("spawn")
+    with tempfile.TemporaryDirectory(prefix="mta-llm-coordination-") as lock_dir:
+        gate = ctx.Barrier(2)
+        output = ctx.Queue()
+        workers = [ctx.Process(target=cross_process_worker, args=(lock_dir, gate, output))
+                   for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        intervals = sorted([output.get(timeout=5) for _ in workers])
+        for worker in workers:
+            worker.join(timeout=5)
+        check("两个进程均正常退出", all(worker.exitcode == 0 for worker in workers))
+        check("跨进程请求没有重叠", intervals[1][0] >= intervals[0][1] - 0.005, intervals)
+    print("\n结果：PASS 10 / FAIL 0")
     return 0
 
 

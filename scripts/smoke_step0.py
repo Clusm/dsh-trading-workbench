@@ -1,8 +1,11 @@
-"""Step 0 冒烟测试：校验器 / 结构化截断 / intent 落库（含旧库迁移）。"""
+"""Step 0 冒烟测试：校验器 / 结构化截断 / intent 落库（含旧库迁移）。
+
+旧库迁移用临时目录里合成的迁移前旧库验证，不读取仓库真实 data 目录。
+"""
 from __future__ import annotations
 
 import json
-import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -150,25 +153,69 @@ check("被拒原因落库", dict(rows[1])["blocked_reason"].startswith("已跳�
 check("raw_json 可解析", json.loads(r0["raw_json"])["ai_reason_type"] == "breakout")
 db.close()
 
-print("\n[8] 旧库迁移：在真实库的副本上加列，不能破坏已有数据")
-src_db = ROOT / "data" / "agent_trader.sqlite"
-if src_db.exists():
-    copy_db = Path(tempfile.mkdtemp()) / "agent_trader.sqlite"
-    shutil.copy2(src_db, copy_db)
-    db2 = AuditDatabase(copy_db)
-    cols2 = {r["name"] for r in db2.conn.execute("PRAGMA table_info(trade_intents)").fetchall()}
-    check("旧库迁移补上新列", need <= cols2, f"缺 {need - cols2}")
-    before = db2.fetch_one("SELECT COUNT(*) c FROM trade_decisions")["c"]
-    check("已有 decision 数据未丢失", before > 0, f"count={before}")
-    before_intents = db2.fetch_one("SELECT COUNT(*) c FROM trade_intents")["c"]
-    db2.log_trade_intent(intent_id="mig1", decision_id="d", run_id="r",
-                         intent=it, status="approved")
-    after_intents = db2.fetch_one("SELECT COUNT(*) c FROM trade_intents")["c"]
-    check("迁移后写入正常", after_intents == before_intents + 1,
-          f"before={before_intents}, after={after_intents}")
-    db2.close()
-else:
-    print("  SKIP  未找到 data/agent_trader.sqlite")
+print("\n[8] 旧库迁移：合成旧库补列，不能破坏已有数据（不碰真实 data 目录）")
+legacy_path = Path(tempfile.mkdtemp(prefix="mta-step0-legacy-")) / "agent_trader.sqlite"
+legacy = sqlite3.connect(legacy_path)
+# 只手工造「迁移前」的旧表结构与两条历史记录，绝不打开/复制真实运行库。
+legacy.executescript(
+    """
+    CREATE TABLE trade_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        decision_id TEXT NOT NULL UNIQUE,
+        run_id TEXT,
+        created_at TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        reasoning TEXT,
+        raw_json TEXT NOT NULL
+    );
+    CREATE TABLE trade_intents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        intent_id TEXT NOT NULL UNIQUE,
+        decision_id TEXT,
+        created_at TEXT NOT NULL,
+        symbol TEXT,
+        side TEXT,
+        qty REAL,
+        leverage INTEGER,
+        order_type TEXT,
+        stop_loss REAL,
+        take_profit REAL,
+        expected_holding_minutes INTEGER,
+        confidence REAL,
+        status TEXT NOT NULL,
+        raw_json TEXT NOT NULL
+    );
+    INSERT INTO trade_decisions(decision_id, run_id, created_at, decision, reasoning, raw_json)
+    VALUES('legacy-d1', 'legacy-r1', '2026-01-01T00:00:00.000+00:00', 'no_trade',
+           '旧库历史决策', '{}');
+    INSERT INTO trade_intents(intent_id, decision_id, created_at, symbol, side, qty,
+                              status, raw_json)
+    VALUES('legacy-i1', 'legacy-d1', '2026-01-01T00:00:00.000+00:00', 'BTCUSDT', 'LONG',
+           0.01, 'approved', '{}');
+    """
+)
+legacy.commit()
+legacy_cols = {row[1] for row in legacy.execute("PRAGMA table_info(trade_intents)")}
+legacy.close()
+check("合成旧库确实缺少新增列", not (need & legacy_cols), f"旧库已有 {need & legacy_cols}")
+
+db2 = AuditDatabase(legacy_path)
+cols2 = {r["name"] for r in db2.conn.execute("PRAGMA table_info(trade_intents)").fetchall()}
+check("旧库迁移补上新列", need <= cols2, f"缺 {need - cols2}")
+before = db2.fetch_one("SELECT COUNT(*) c FROM trade_decisions")["c"]
+check("已有 decision 数据未丢失", before == 1, f"count={before}")
+old_intent = db2.fetch_one("SELECT * FROM trade_intents WHERE intent_id='legacy-i1'")
+check("旧 intent 记录保留且新列可空",
+      old_intent["symbol"] == "BTCUSDT" and old_intent["qty"] == 0.01 and
+      old_intent["invalidation"] is None and old_intent["blocked_reason"] is None,
+      str(dict(old_intent)))
+before_intents = db2.fetch_one("SELECT COUNT(*) c FROM trade_intents")["c"]
+db2.log_trade_intent(intent_id="mig1", decision_id="d", run_id="r",
+                     intent=it, status="approved")
+after_intents = db2.fetch_one("SELECT COUNT(*) c FROM trade_intents")["c"]
+check("迁移后写入正常", after_intents == before_intents + 1,
+      f"before={before_intents}, after={after_intents}")
+db2.close()
 
 print(f"\n{'=' * 46}\n通过 {ok} / 失败 {fail}\n{'=' * 46}")
 sys.exit(1 if fail else 0)

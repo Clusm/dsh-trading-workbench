@@ -10,18 +10,31 @@
 本脚本在 Windows 上用 DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP 让服务进程
 脱离父进程独立存活，启动后立即返回。
 
+profile 与端口
+--------------
+--profile 是默认端口与日志位置的唯一来源：
+
+    profile  默认端口  日志
+    demo     8000      data/web_console.log
+    live     8001      data/live/web_console.log
+
+显式 --port 优先于 profile 默认值。端口只解析一次，子进程始终收到显式的
+--profile 与解析后的 --port，不依赖子进程自身的默认值，避免
+「启动器探活 A 端口、子进程监听 B 端口」这类 profile/端口歧义。
+
 用法
 ----
-    python scripts/start_web_detached.py                     # 默认 127.0.0.1:8000
+    python scripts/start_web_detached.py                             # demo，127.0.0.1:8000
+    python scripts/start_web_detached.py --profile live              # live，127.0.0.1:8001
+    python scripts/start_web_detached.py --profile live --port 9001  # 显式端口覆盖默认值
     python scripts/start_web_detached.py --proxy http://127.0.0.1:10808
-    python scripts/start_web_detached.py --no-proxy           # 不设代理，直连
-
-日志写在 data/web_console.log。
+    python scripts/start_web_detached.py --no-proxy                  # 不设代理，直连
 """
 from __future__ import annotations
 
 import argparse
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -29,9 +42,26 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+# profile 是默认端口的唯一来源，避免启动器与子进程各持一套默认值
+PROFILE_DEFAULT_PORTS = {"demo": 8000, "live": 8001}
+
 # Windows 进程创建标志
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+
+def resolve_port(profile: str, port: int | None) -> int:
+    """解析实际端口：显式 --port 优先，未指定时由 profile 唯一决定。"""
+    if port is not None:
+        return port
+    return PROFILE_DEFAULT_PORTS[profile]
+
+
+def log_path_for(project_root: Path, profile: str) -> Path:
+    """profile 决定日志文件，demo 与 live 两个实例的日志互不覆盖。"""
+    if profile == "live":
+        return project_root / "data" / "live" / "web_console.log"
+    return project_root / "data" / "web_console.log"
 
 
 def build_env(proxy: str | None) -> dict[str, str]:
@@ -62,44 +92,50 @@ def build_env(proxy: str | None) -> dict[str, str]:
 
 
 def already_listening(port: int) -> bool:
+    """探测解析后的实际端口；启动前跳过与启动后确认共用同一端口来源。"""
     try:
-        import socket
         with socket.create_connection(("127.0.0.1", port), timeout=1.0):
             return True
     except OSError:
         return False
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="脱离父进程启动 Web 控制台")
+    parser.add_argument("--profile", choices=("demo", "live"), default="demo",
+                        help="运行档位：demo=端口 8000 / live=端口 8001（默认 demo）")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=None,
+                        help="显式端口；未指定时由 --profile 决定")
     parser.add_argument("--proxy", default="http://127.0.0.1:10808",
                         help="HTTP(S) 出口代理，默认 http://127.0.0.1:10808")
     parser.add_argument("--no-proxy", action="store_true", help="不设置代理，直连")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    if already_listening(args.port):
-        print(f"端口 {args.port} 已在监听，跳过启动")
+    port = resolve_port(args.profile, args.port)
+
+    if already_listening(port):
+        print(f"profile={args.profile} 端口 {port} 已在监听，跳过启动")
         return 0
 
-    log_dir = PROJECT_ROOT / "data"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "web_console.log"
+    log_path = log_path_for(PROJECT_ROOT, args.profile)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
     python_exe = sys.executable
-    # 走旧版 run_web_service.py 包装，把 stdout/stderr 落盘到
-    # data/web_console.log；代理由本启动器的环境和统一 run_web.py 解析。
+    # 走旧版 run_web_service.py 包装，把 stdout/stderr 落盘到 profile 对应的
+    # 日志；代理由本启动器的环境和统一 run_web.py 解析。
     wrapper = PROJECT_ROOT / "scripts" / "run_web_service.py"
     entry = wrapper if wrapper.exists() else (PROJECT_ROOT / "scripts" / "run_web.py")
+    # 子进程必须显式拿到 --profile 与解析后的 --port，禁止再走子进程默认值
     cmd = [python_exe, "-u", str(entry),
-           "--host", args.host, "--port", str(args.port)]
+           "--profile", args.profile, "--host", args.host, "--port", str(port)]
 
     env = build_env(None if args.no_proxy else args.proxy)
 
     # 日志以追加方式打开，避免重启丢失历史
     log_file = open(log_path, "a", encoding="utf-8")
     log_file.write(f"\n===== 启动 {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                   f"profile={args.profile} port={port} "
                    f"proxy={'none' if args.no_proxy else args.proxy} =====\n")
     log_file.flush()
 
@@ -122,8 +158,8 @@ def main() -> int:
     # 等待端口起来，最多 40 秒
     for _ in range(80):
         time.sleep(0.5)
-        if already_listening(args.port):
-            print(f"服务已启动 PID={proc.pid}  http://{args.host}:{args.port}")
+        if already_listening(port):
+            print(f"服务已启动 PID={proc.pid}  http://{args.host}:{port}  profile={args.profile}")
             print(f"日志: {log_path}")
             return 0
         if proc.poll() is not None:

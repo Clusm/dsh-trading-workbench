@@ -18,6 +18,7 @@ from agents.models import (  # noqa: E402
 
 
 calls = {"risk": 0, "execute": 0}
+graph_module.get_live_prices = lambda symbols: {symbol: 60000.0 for symbol in symbols}
 intent = TradeIntent(symbol="BTCUSDT", side="LONG", qty=0.001)
 
 # 把所有外部依赖替换为进程内 stub，只测试 LangGraph 的分支调度行为。

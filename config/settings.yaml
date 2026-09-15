@@ -2,6 +2,12 @@ app_name: multi-agent-trader
 stage: phase3
 log_level: INFO
 
+profiles:
+  live:
+    channels:
+      strategy_weight: 0.0
+      ai_weight: 1.0
+
 paths:
   data_dir: data
   db_file: data/agent_trader.sqlite

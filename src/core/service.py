@@ -82,7 +82,7 @@ class TradingService:
         self.settings = settings
         # 单实例是资金安全约束而非便利功能：两个进程会各自持有旧内存状态，
         # 在不同时间覆写基线/通道台账，且可能重复提交订单。
-        self._instance_lock = InstanceLock(settings.project_root / "data" / "trading_service.lock")
+        self._instance_lock = InstanceLock(settings.runtime_path("data/trading_service.lock"))
         self._instance_lock.acquire()
         market_data_cfg = settings.raw_settings.get("binance_market_data", {}) or {}
         configure_rate_limit_budget(
@@ -94,8 +94,8 @@ class TradingService:
             data_request_budget_5m=int(market_data_cfg.get("data_endpoint_budget_5m", 800)),
         )
         # Binance 429/418 冷却必须跨服务重启保留；否则重启会立即再次撞被封禁的共享出口。
-        configure_rate_limit_state(settings.project_root / "data" / "public_rate_limit_state.json")
-        configure_kline_store(settings.project_root / "data" / "cache" / "klines")
+        configure_rate_limit_state(settings.rate_limit_state)
+        configure_kline_store(settings.runtime_path("data/cache/klines"))
         self.db = AuditDatabase(settings.db_file)
         # 新实例已成功取得单实例锁，说明上一次“等待在途决策”的关闭过程已经结束；
         # 原告警保留在事件流水中，但不应继续显示为当前未恢复事故。
@@ -103,7 +103,7 @@ class TradingService:
         backup_cfg = settings.raw_settings.get("database_backup", {}) or {}
         self.db_backup = DatabaseBackupManager(
             self.db,
-            settings.project_root / str(backup_cfg.get("directory", "data/backups")),
+            settings.runtime_path(str(backup_cfg.get("directory", "data/backups"))),
             enabled=bool(backup_cfg.get("enabled", True)),
             interval_hours=float(backup_cfg.get("interval_hours", 24)),
             keep_days=int(backup_cfg.get("keep_days", 14)),
@@ -145,7 +145,7 @@ class TradingService:
         if reconciliation_book is not None:
             reconciliation_book.release_id = self.release_id
         try:
-            write_manifest(settings.project_root / "data" / "release_manifest.json",
+            write_manifest(settings.runtime_path("data/release_manifest.json"),
                            self.release_manifest_obj)
         except Exception as exc:
             # 清单写失败不改变交易风险档，但必须留下可见事故，发布报告也会因
@@ -163,7 +163,7 @@ class TradingService:
         self.intel_cache = IntelCache(ttl_seconds=intel_ttl)
         cap_cfg = settings.raw_settings.get("capital", {})
         self.capital = CapitalManager(
-            state_file=settings.project_root / cap_cfg.get("state_file", "data/capital_state.json"),
+            state_file=settings.runtime_path(cap_cfg.get("state_file", "data/capital_state.json")),
             broker=self.broker,
             db=self.db,
             initial_equity=float(cap_cfg.get("initial_equity", 200)),
@@ -178,14 +178,14 @@ class TradingService:
         )
         stability_cfg = settings.raw_settings.get("stability", {}) or {}
         self.risk_guard = AccountRiskGuard(
-            state_file=settings.project_root / "data" / "account_risk_state.json",
+            state_file=settings.runtime_path("data/account_risk_state.json"),
             daily_loss_stop=float(settings.raw_risk.get("daily_loss_stop", 0.15)),
             max_drawdown=float(settings.raw_risk.get("max_drawdown_from_peak", 0.30)),
             mode=str(stability_cfg.get("risk_guard_mode", "audit_only")),
         )
         ch_cfg = settings.raw_settings.get("channels", {}) or {}
         self.universe = MarketUniverse(
-            state_file=settings.project_root / str(mu_cfg.get("state_file", "data/market_universe_state.json")),
+            state_file=settings.runtime_path(str(mu_cfg.get("state_file", "data/market_universe_state.json"))),
             core_symbols=mu_cfg.get("core_symbols") or [],
             quick_core_top=mu_cfg.get("quick_core_top", 3),
             quick_anomaly_top=mu_cfg.get("quick_anomaly_top", 2),
@@ -201,7 +201,7 @@ class TradingService:
             symbols=list(mu_cfg.get("core_symbols") or []),
         )
         self.channels = ChannelManager(
-            state_file=settings.project_root / str(ch_cfg.get("state_file", "data/channel_state.json")),
+            state_file=settings.runtime_path(str(ch_cfg.get("state_file", "data/channel_state.json"))),
             broker=self.broker,
             db=self.db,
             strategy_weight=float(ch_cfg.get("strategy_weight", 0.6)),
@@ -215,7 +215,12 @@ class TradingService:
             client, m = build_llm_for_agent(settings, name)
             if not isinstance(client, MockLLMClient):
                 self.agent_llms[name] = (client, m)
-        self.control = ControlState(settings.project_root / "data/control_state.json")
+        control_path = settings.runtime_path("data/control_state.json")
+        first_live_start = settings.profile_name == "live" and not control_path.exists()
+        self.control = ControlState(control_path)
+        if first_live_start:
+            # 首次接入先保护和核对已有仓位；运营确认后通过控制台恢复新增仓位。
+            self.control.set_state("close_only")
         if self.control.recovery_required:
             self.db.log_risk_event(
                 event_type="control_state_corrupt", severity="critical",
@@ -324,7 +329,7 @@ class TradingService:
     def _signal_scanner_config(self) -> dict[str, Any]:
         cfg = dict(self.settings.raw_settings.get("signal_scanner", {}) or {})
         cfg["signal_state_file"] = str(
-            self.settings.project_root / str(cfg.get("signal_state_file", "data/signal_scanner_state.json"))
+            self.settings.runtime_path(str(cfg.get("signal_state_file", "data/signal_scanner_state.json")))
         )
         mu = getattr(self, "universe", None)
         cfg["scan_pool"] = mu.get_scan_pool() if mu is not None else None
@@ -618,6 +623,7 @@ class TradingService:
                 "llm_coordinator": coordinator_status(),
                 "trade_reconciliation": self._trade_reconciliation_status(),
                 "release_id": getattr(self, "release_id", "legacy"),
+                "profile": getattr(getattr(self, "settings", None), "profile_name", None),
                 "release_manifest": {
                     key: (getattr(self, "release_manifest", {}) or {}).get(key)
                     for key in ("git_commit", "content_hash", "schema_version",
@@ -832,7 +838,7 @@ class TradingService:
                                  or None),
             tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip() or None,
             etherscan_api_key=os.getenv("ETHERSCAN_API_KEY", "").strip() or None,
-            cache_dir=self.settings.project_root / "data/cache",
+            cache_dir=self.settings.runtime_path("data/cache"),
             enable_live_data=True,
             intel_cache=self.intel_cache,
             intel_cache_ttl=self.intel_cache.default_ttl_seconds,

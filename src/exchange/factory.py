@@ -26,7 +26,7 @@ VALID_MODES = ("paper", "demo", "testnet", "live")
 def _paper_broker(settings: Settings):
     cap_cfg = settings.raw_settings.get("capital", {}) or {}
     broker = PaperBroker(
-        settings.project_root / "data/paper_portfolio.json",
+        settings.runtime_path("data/paper_portfolio.json"),
         initial_equity=float(cap_cfg.get("initial_equity", 200)),
     )
     broker.require_pipeline_authorization = True
@@ -37,7 +37,7 @@ def _paper_broker(settings: Settings):
 def create_broker(settings: Settings, db: AuditDatabase):
     cfg = settings.raw_settings.get("execution", {})
     raw_mode = os.getenv(cfg.get("mode_env", "EXECUTION_MODE"), "").strip().lower()
-    mode = raw_mode or str(cfg.get("default_mode", "demo")).strip().lower()
+    mode = settings.profile_name or raw_mode or str(cfg.get("default_mode", "demo")).strip().lower()
     if mode not in VALID_MODES:
         db.log_risk_event(event_type="broker_unknown_mode", severity="critical",
                           details=f"未知 EXECUTION_MODE={raw_mode or cfg.get('default_mode')} "
@@ -62,6 +62,7 @@ def create_broker(settings: Settings, db: AuditDatabase):
                 base_url=cfg.get("base_url_map", BASE_URLS).get(mode, BASE_URLS[mode]),
                 db=db,
                 environment=mode,
+                ledger_file=settings.runtime_path("data/futures_source_ledger.json"),
                 protection_mirror_enabled=bool(
                     (settings.raw_settings.get("protection_order_mirror", {}) or {}).get(
                         "enabled", False)
@@ -74,7 +75,7 @@ def create_broker(settings: Settings, db: AuditDatabase):
                               details=f"execution broker={mode} base_url={broker.base_url}",
                               action_taken="connected")
             return broker
-        if bool(cfg.get("allow_paper_fallback", False)):
+        if settings.profile_name is None and bool(cfg.get("allow_paper_fallback", False)):
             db.log_risk_event(event_type="broker_fallback_paper", severity="warn",
                               details=f"EXECUTION_MODE={mode} 但缺少 {key_env}/{secret_env}；"
                                       "配置显式允许回退纸面执行",

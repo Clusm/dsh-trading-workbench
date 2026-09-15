@@ -30,6 +30,7 @@ def check(name: str, condition: bool) -> None:
 
 
 class FakeSettings:
+    profile_name = None
     raw_settings = {"decision_cycle": {"interval_minutes": 10}}
 
 
@@ -77,7 +78,7 @@ original_create_app = run_web.create_app
 original_config = run_web.uvicorn.Config
 original_server = run_web.uvicorn.Server
 run_web.TradingService = FakeService
-run_web.load_settings = lambda _root: FakeSettings()
+run_web.load_settings = lambda _root, **_kwargs: FakeSettings()
 run_web.create_app = lambda _service: object()
 run_web.uvicorn.Config = FakeConfig
 run_web.uvicorn.Server = FakeServer

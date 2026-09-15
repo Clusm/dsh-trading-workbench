@@ -203,10 +203,14 @@ check("保护对账过期被识别", "protection_reconcile_stale" in stale_reaso
 
 print("\n[5] 事件页路由（TestClient）")
 from fastapi.testclient import TestClient  # noqa: E402
-from core.config_loader import load_settings  # noqa: E402
+from core.config_loader import Settings  # noqa: E402
+import yaml  # noqa: E402
 import os  # noqa: E402
 os.environ["EXECUTION_MODE"] = "paper"
-settings = load_settings(ROOT)
+settings = Settings(ROOT,
+                    yaml.safe_load((ROOT / "config/settings.yaml").read_text(encoding="utf-8")),
+                    yaml.safe_load((ROOT / "config/agents.yaml").read_text(encoding="utf-8")),
+                    yaml.safe_load((ROOT / "config/risk_learning.yaml").read_text(encoding="utf-8")))
 # 隔离状态文件：测试服务不得读写真实 data/ 下的 capital/channel/control
 # 状态（曾发生 paper 测试把 baseline=0 覆写进真实 capital_state.json）。
 # db/logs/artifacts 均由 project_root 派生，指向临时目录即可整体隔离。
@@ -257,6 +261,11 @@ check("健康接口暴露公共行情限流状态",
 real_svc._last_latest_refresh_error = None
 r_api = client.get("/api/mode")
 check("/api/mode 返回当前模式", r_api.json().get("current") == "paper", r_api.text[:120])
+real_svc.settings.profile_name = "demo"
+check("独立控制台暴露模式锁", client.get("/api/mode").json().get("mode_locked") is True)
+locked_mode = client.post("/api/mode", json={"mode": "live"}, headers=token_headers)
+check("独立控制台拒绝串改账户模式", locked_mode.status_code == 409)
+real_svc.settings.profile_name = None
 r_noauth = client.post("/api/capital/reset", headers={"Content-Type": "application/json"})
 check("写接口无 token 被拒(403)", r_noauth.status_code == 403, f"got {r_noauth.status_code}")
 r_csrf = client.post("/api/capital/reset", headers={"X-Console-Token": token, "Content-Type": "text/plain"})

@@ -10,7 +10,7 @@
       <span class="badge {{ 'err' if broker_mode == 'live' else ('ok' if broker_mode == 'demo' else ('warn' if broker_mode == 'testnet' else 'muted')) }}" id="mode-badge" style="font-size:13px">
         {{ broker_mode|mode_cn }}{% if broker_mode == 'live' %} · 真实资金{% endif %}
       </span>
-      <select id="mode-select" style="width:auto" onchange="onModeChange(this.value)">
+      <select id="mode-select" style="width:auto" onchange="onModeChange(this.value)" {{ 'disabled' if profile else '' }}>
         {% for m, info in mode_options.items() %}
         <option value="{{ m }}" {{ 'selected' if m == broker_mode else '' }} {{ '' if info.configured else 'disabled' }}>
           {{ info.label }}{% if not info.configured %}（未配置 Key）{% endif %}
@@ -19,6 +19,7 @@
       </select>
       <button id="mode-apply" class="secondary" style="display:none" onclick="switchMode()">应用切换</button>
       <span class="muted" id="mode-hint" style="align-self:center"></span>
+      {% if profile %}<span class="muted">独立账户控制台 · {{ profile }}</span>{% endif %}
     </div>
   </div>
   {# 控制按钮按「频率 × 危险度」分层：

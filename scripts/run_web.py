@@ -41,15 +41,17 @@ from dashboard.app import create_app  # noqa: E402
 
 
 def run_web_app(
-    *, host: str, port: int, interval_minutes: float | None = None,
+    *, host: str, port: int | None, interval_minutes: float | None = None,
     no_autostart: bool = False, stop_event: threading.Event | None = None,
+    profile: str | None = None,
 ) -> None:
     """运行统一 Web 入口；可由控制台或 Windows SCM 托管入口复用。
 
     ``stop_event`` 只由托管层设置，服务本身仍通过 Uvicorn 的有界关闭流程退出，
     从而让 TradingService 的 ``finally`` 执行资源排空、数据库关闭和实例锁释放。
     """
-    settings = load_settings(PROJECT_ROOT)
+    settings = load_settings(PROJECT_ROOT, profile=profile)
+    port = settings.console_port if port is None else port
     service = TradingService(settings)
     if not no_autostart:
         interval = interval_minutes or float(
@@ -67,7 +69,7 @@ def run_web_app(
         threading.Thread(
             target=request_shutdown, name="windows-service-stop-watcher", daemon=True,
         ).start()
-    print(f"console: http://{host}:{port}")
+    print(f"console: http://{host}:{port} profile={settings.profile_name or 'legacy'}")
     try:
         server.run()
     finally:
@@ -77,7 +79,8 @@ def run_web_app(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--profile", choices=("demo", "live"), default=None)
     parser.add_argument("--interval-minutes", type=float, default=None)
     parser.add_argument("--no-autostart", action="store_true", help="不自动运行决策循环")
     args = parser.parse_args()
@@ -88,6 +91,7 @@ def main() -> None:
     run_web_app(
         host=args.host, port=args.port, interval_minutes=args.interval_minutes,
         no_autostart=args.no_autostart,
+        profile=args.profile,
     )
 
 

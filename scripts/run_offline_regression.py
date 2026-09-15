@@ -55,12 +55,32 @@ SCRIPTS = (
     "scripts/smoke_windows_service_lifecycle.py",
     "scripts/smoke_release_package.py",
     "scripts/smoke_ui.py",
+    # 以下为审计后补入的冒烟脚本：全程离线、只写临时目录，不读真实
+    # data/.env、不构造真实 Broker、不发网络请求。
+    "scripts/smoke_step0.py",
+    "scripts/smoke_db_backup.py",
+    "scripts/smoke_exchange_event_inbox.py",
+    "scripts/smoke_account_mirror.py",
+    "scripts/smoke_exchange_safety_monitor.py",
+    "scripts/smoke_protection_mirror.py",
+    "scripts/smoke_user_stream_transport.py",
+    "scripts/smoke_user_stream_lifecycle.py",
+    "scripts/smoke_snapshot_guard.py",
+    "scripts/smoke_graph_barrier.py",
+    "scripts/smoke_force_submit.py",
+    "scripts/smoke_p2.py",
+    "scripts/smoke_profile_isolation.py",
+    "scripts/smoke_detached_profiles.py",
 )
+# 有意排除 scripts/smoke_p0c.py：第[6]节直接调用 query_symbol_detail /
+# query_symbol_cards 打公共行情接口，无网环境必然以退出码 1 失败。
+# 待该节改为离线替身后再纳入统一回归。
 
 
 def main() -> int:
     env = os.environ.copy()
     env["EXECUTION_MODE"] = "paper"
+    env.pop("MTA_PROFILE", None)
     env["MTA_NO_PROXY"] = "1"
     # GitHub Windows runner 默认可能是 CP1252；冒烟脚本包含中文测试名，
     # 强制 UTF-8，避免仅因控制台编码而把通过的逻辑误报为失败。

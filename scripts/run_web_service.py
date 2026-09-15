@@ -13,9 +13,9 @@ job 影响。本包装不再硬编码或覆盖代理；统一入口 ``run_web.py
 用法
 ----
     python scripts/run_web_service.py                 # 默认 127.0.0.1:8000
-    python scripts/run_web_service.py --port 8001     # 透传 run_web.py 参数
+    python scripts/run_web_service.py --profile live  # 实盘，默认端口 8001
 
-日志追加到 data/web_console.log。
+日志按 profile 分别追加到 data/web_console.log 或 data/live/web_console.log。
 """
 import os
 import runpy
@@ -25,9 +25,22 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 os.environ["PYTHONUNBUFFERED"] = "1"
 
-_log_path = os.path.join(ROOT, "data", "web_console.log")
+def _profile_from_argv(argv: list[str]) -> str:
+    """在业务模块加载前解析日志归属；完整参数仍由 run_web.py 校验。"""
+    if "--profile" not in argv:
+        return "demo"
+    index = argv.index("--profile")
+    if index + 1 >= len(argv) or argv[index + 1] not in {"demo", "live"}:
+        return "demo"
+    return argv[index + 1]
+
+
+_profile = _profile_from_argv(sys.argv[1:])
+_log_dir = os.path.join(ROOT, "data", "live") if _profile == "live" else os.path.join(ROOT, "data")
+os.makedirs(_log_dir, exist_ok=True)
+_log_path = os.path.join(_log_dir, "web_console.log")
 _log = open(_log_path, "a", encoding="utf-8", buffering=1)
-print("\n===== legacy detached entry =====", file=_log, flush=True)
+print(f"\n===== legacy detached entry profile={_profile} =====", file=_log, flush=True)
 sys.stdout = _log
 sys.stderr = _log
 

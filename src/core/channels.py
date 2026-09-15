@@ -432,7 +432,8 @@ class ChannelManager:
             # 此处不再覆盖，避免把实时盈亏渗进基准造成 day_pnl 双计
             margin = self._margin_used(channel)
             cap = eq * self.channel_max_margin_usage
-            allow_new = margin <= cap
+            weight = self.strategy_weight if channel == "strategy" else self.ai_weight
+            allow_new = weight > 0 and cap > 0 and margin <= cap
             status[channel] = {
                 "equity": eq,
                 "day_start_equity": day_start,

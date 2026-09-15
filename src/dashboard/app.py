@@ -995,8 +995,8 @@ def _baseline_just_reanchored(service: TradingService) -> bool:
     """
     try:
         cap_cfg = service.settings.raw_settings.get("capital", {}) or {}
-        path = service.settings.project_root / str(
-            cap_cfg.get("state_file", "data/capital_state.json"))
+        path = service.settings.runtime_path(str(
+            cap_cfg.get("state_file", "data/capital_state.json")))
         if not path.exists():
             return False
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1413,6 +1413,7 @@ def create_app(service: TradingService) -> FastAPI:
             "console_token": _write_token,
             "broker_mode": broker_mode,
             "mode_options": mode_options,
+            "profile": service.settings.profile_name,
             "quota_total": quota_total,
         })
 
@@ -2118,12 +2119,16 @@ def create_app(service: TradingService) -> FastAPI:
             available[m] = {"label": _mode_cn(m), "configured": configured}
         return {
             "current": current,
-            "pending": pending if pending and pending != current else None,
+            "profile": service.settings.profile_name,
+            "mode_locked": service.settings.profile_name is not None,
+            "pending": pending if not service.settings.profile_name and pending and pending != current else None,
             "available": available,
         }
 
     @app.post("/api/mode")
     def api_mode_set(payload: dict[str, Any]):
+        if service.settings.profile_name is not None:
+            raise HTTPException(status_code=409, detail="独立控制台已绑定账户模式，请打开对应的 Demo 或实盘控制台")
         mode = str(payload.get("mode", ""))
         if mode not in SWITCHABLE_MODES:
             raise HTTPException(status_code=400, detail=f"未知模式：{mode}")

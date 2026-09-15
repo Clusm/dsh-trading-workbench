@@ -163,5 +163,13 @@ restored = corrupt_manager.sync(session_equity=500.0)
 check("显式重置后恢复", not restored.get("recovery_required")
       and restored["strategy"]["allow_new"] and restored["ai"]["allow_new"], str(restored))
 
+print("\n[5] 实盘全部资金分配给 AI，保证金使用上限保持原值")
+ai_only = ChannelManager(tmp / "ai_only.json", FlatBroker(), db,
+                         strategy_weight=0.0, ai_weight=1.0)
+ai_status = ai_only.sync(session_equity=500.0)
+check("AI取得500，策略分配为0", ai_status["ai"]["equity"] == 500.0
+      and ai_status["strategy"]["equity"] == 0.0)
+check("策略不允许新增仓位", ai_status["strategy"]["allow_new"] is False)
+check("AI保证金上限仍是80%", ai_status["ai"]["margin_cap"] == 400.0)
 print(f"\n结果: {ok} 通过 / {fail} 失败")
 raise SystemExit(1 if fail else 0)

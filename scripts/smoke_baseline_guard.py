@@ -182,10 +182,10 @@ check("会话权益 = 532.14", abs(cap9.session_equity() - 532.1355) < 0.01, str
 print("\n[10] 执行模式白名单：未知模式拒绝启动")
 import os  # noqa: E402
 
-from core.config_loader import load_settings  # noqa: E402
+from core.config_loader import Settings  # noqa: E402
 from exchange.factory import VALID_MODES, create_broker  # noqa: E402
 
-settings = load_settings(ROOT)
+settings = Settings(tmp, {}, {}, {})
 dbf = new_db(tmp, "t10")
 old_mode = os.environ.get("EXECUTION_MODE")
 os.environ["EXECUTION_MODE"] = "mainnet"
@@ -238,8 +238,7 @@ from unittest.mock import MagicMock  # noqa: E402
 from dashboard.app import _baseline_just_reanchored  # noqa: E402
 
 svc = MagicMock()
-svc.settings.raw_settings = {"capital": {"state_file": "data/capital_state.json"}}
-svc.settings.project_root = tmp
+svc.settings = Settings(tmp, {"capital": {"state_file": "data/capital_state.json"}}, {}, {})
 (tmp / "data").mkdir(exist_ok=True)
 (tmp / "data" / "capital_state.json").write_text(
     json.dumps({"anchored_at": "2026-09-05T05:13:29+00:00"}), encoding="utf-8")

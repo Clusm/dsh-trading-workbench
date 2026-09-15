@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,9 +103,22 @@ forged, forged_verdict = filter_unauthorized_opens(
     approved_verdict, db, "runtime-secret",
 )
 check("仅伪造布尔授权仍被拦截", not forged.intents and not forged_verdict.adjusted_intents)
-signed = sign_execution(authorized, approved_verdict, "runtime-secret")
+authorization_context = {
+    "authorization_id": "snapshot-test",
+    "decision_id": "decision-test",
+    "authorized_at": time.time(),
+    "expires_at": time.time() + 90,
+    "scope_hash": "scope-test",
+    "environment": "paper",
+    "runtime_instance_id": "runtime-test",
+}
+signed = sign_execution(
+    authorized, approved_verdict, "runtime-secret", authorization_context,
+)
 verified, verified_verdict = filter_unauthorized_opens(
     signed, approved_verdict, db, "runtime-secret",
+    {"scope_hash": "scope-test", "environment": "paper",
+     "runtime_instance_id": "runtime-test"},
 )
 check("正确签名的实际集合获准", verified.intents == [intent]
       and verified_verdict.adjusted_intents == [intent])
@@ -113,6 +127,8 @@ tampered_verdict = approved_verdict.model_copy(update={
 })
 tampered, tampered_result = filter_unauthorized_opens(
     signed, tampered_verdict, db, "runtime-secret",
+    {"scope_hash": "scope-test", "environment": "paper",
+     "runtime_instance_id": "runtime-test"},
 )
 check("风控后篡改数量使签名失效", not tampered.intents
       and not tampered_result.adjusted_intents)
