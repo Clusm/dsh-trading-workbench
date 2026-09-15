@@ -38,6 +38,7 @@ SCRIPTS = (
     "scripts/smoke_position_guardian.py",
     "scripts/smoke_usdm_replay.py",
     "scripts/smoke_strategy_evaluation.py",
+    "scripts/smoke_strategy_prefix_invariance.py",
     "scripts/smoke_decision_pipeline.py",
     "scripts/smoke_entry_readiness.py",
     "scripts/smoke_llm_coordinator.py",
