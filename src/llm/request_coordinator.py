@@ -39,14 +39,19 @@ def _cross_process_lock_path(scope: str) -> Path:
 @contextmanager
 def _cross_process_permit(scope: str, *, deadline: float,
                           poll_seconds: float) -> Iterator[None]:
-    """在两个控制台之间串行供应商请求；进程退出时系统自动释放文件锁。"""
+    """在两个控制台之间串行供应商请求；进程退出时系统自动释放文件锁。
+
+    Windows 的字节区间锁语义与 POSIX 不同：**锁冲突时对同一区间的写入不会阻塞，
+    而是直接抛 EACCES**。旧实现把"文件为空则写入 0"放在加锁之前（open 之后立即
+    flush），于是两个进程同时对着空锁文件初始化时，后到的一方在 flush() 上拿到
+    PermissionError，整个准入直接失败而不是排队等待。
+
+    现在改为：先按重试循环拿到锁，再在锁内保证文件至少 1 字节。锁内写入不会被
+    其它进程竞争，因此 flush 不再可能因区间锁冲突失败。
+    """
     path = _cross_process_lock_path(scope)
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = path.open("a+b")
-    handle.seek(0, os.SEEK_END)
-    if handle.tell() == 0:
-        handle.write(b"0")
-        handle.flush()
     locked = False
     try:
         while not locked:
@@ -66,17 +71,31 @@ def _cross_process_permit(scope: str, *, deadline: float,
                 if remaining <= 0:
                     raise LLMAdmissionTimeout("LLM cross-process admission deadline exceeded") from exc
                 time.sleep(min(max(0.01, poll_seconds), remaining))
+        # 已持有独占锁：此时写入/刷新只与 OS 交互，不会因他人持锁而报 EACCES。
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
         yield
     finally:
-        if locked:
-            handle.seek(0)
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:  # pragma: no cover
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        try:
+            if locked:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:  # pragma: no cover
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            # 解锁失败不应掩盖正在传播的原始异常；句柄关闭时 OS 会释放锁。
+            pass
+        finally:
+            handle.close()
 
 
 def parse_retry_after(headers: Mapping[str, Any] | None, *, default: float = 0.0,

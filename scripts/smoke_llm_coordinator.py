@@ -69,6 +69,29 @@ def cross_process_worker(lock_dir: str, gate, output) -> None:
         output.put((started, time.monotonic()))
 
 
+def contended_worker(lock_dir: str, gate, rounds: int, output) -> None:
+    """在全新锁目录上并发初始化并反复准入。
+
+    回传异常类型而不是让它变成子进程 traceback：父进程曾因拿不到队列结果而只看到
+    一个 `_queue.Empty`，无法定位到真正的 `PermissionError`。
+    """
+    os.environ["MTA_LLM_COORDINATION_DIR"] = lock_dir
+    coordinator = LLMRequestCoordinator(
+        max_concurrency=1, queue_poll_seconds=0.005,
+        default_queue_deadline_seconds=5.0,
+    )
+    gate.wait(timeout=15)
+    try:
+        for _ in range(rounds):
+            with coordinator.admit("race-provider#key:anonymous",
+                                   deadline=time.monotonic() + 5):
+                time.sleep(0.01)
+    except BaseException as exc:
+        output.put(f"{type(exc).__name__}: {exc}")
+        raise
+    output.put("ok")
+
+
 def response(status: int, *, headers: dict[str, str] | None = None) -> httpx.Response:
     request = httpx.Request("POST", "https://provider.invalid/v1/chat/completions")
     payload = {"choices": [{"message": {"content": "ok"}}], "model": "fake"}
@@ -183,12 +206,48 @@ def main() -> int:
                    for _ in range(2)]
         for worker in workers:
             worker.start()
-        intervals = sorted([output.get(timeout=5) for _ in workers])
+        results = []
+        for _ in workers:
+            try:
+                results.append(output.get(timeout=8))
+            except Exception as exc:  # queue.Empty：子进程没回传，单独报出来
+                results.append(None)
+                print(f"        ! 子进程未在时限内回传: {type(exc).__name__}")
         for worker in workers:
-            worker.join(timeout=5)
-        check("两个进程均正常退出", all(worker.exitcode == 0 for worker in workers))
-        check("跨进程请求没有重叠", intervals[1][0] >= intervals[0][1] - 0.005, intervals)
-    print("\n结果：PASS 10 / FAIL 0")
+            worker.join(timeout=8)
+        check("两个进程均正常退出", all(worker.exitcode == 0 for worker in workers),
+              f"exitcodes={[worker.exitcode for worker in workers]}")
+        check("两个进程均回传结果", all(item is not None for item in results))
+        intervals = sorted(item for item in results if item is not None)
+        check("跨进程请求没有重叠",
+              len(intervals) == 2 and intervals[1][0] >= intervals[0][1] - 0.005, intervals)
+
+    print("\n[6] 全新锁文件下多进程首次并发初始化不因锁竞争失败")
+    # 旧实现把「文件为空则写入 0」放在加锁之前，Windows 上后到进程会在 flush()
+    # 拿到 EACCES 并让整次准入失败。多进程同时打一个全新的锁文件即可复现。
+    with tempfile.TemporaryDirectory(prefix="mta-llm-race-") as lock_dir:
+        racing = 6
+        gate = ctx.Barrier(racing)
+        output = ctx.Queue()
+        workers = [ctx.Process(target=contended_worker, args=(lock_dir, gate, 3, output))
+                   for _ in range(racing)]
+        for worker in workers:
+            worker.start()
+        results = []
+        for _ in workers:
+            try:
+                results.append(output.get(timeout=30))
+            except Exception as exc:
+                results.append(f"NO_RESULT:{type(exc).__name__}")
+        for worker in workers:
+            worker.join(timeout=10)
+        failures = [item for item in results if item != "ok"]
+        check("并发初始化未出现权限错误", not failures, f"failures={failures[:3]} results={results}")
+        check("所有竞争进程正常退出",
+              all(worker.exitcode == 0 for worker in workers),
+              f"exitcodes={[worker.exitcode for worker in workers]}")
+
+    print("\n结果：PASS 13 / FAIL 0")
     return 0
 
 
