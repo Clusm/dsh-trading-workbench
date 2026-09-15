@@ -221,6 +221,76 @@ def _time_clause(column: str, start: datetime | None, end: datetime | None) -> t
     return (" AND ".join(clauses) if clauses else "1=1"), params
 
 
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def window_rate_limit_counts(
+    observations: Sequence[Mapping[str, Any]], window_start: datetime | None,
+) -> tuple[int, int, int, dict[str, Any]]:
+    """统计发布观察窗口内**新增**的限流事件。
+
+    为什么不能直接取 `responses_by_status` 的 max：该字段是限流器自进程启动以来的
+    **累计**计数器（rate_limit.py 的会话级 `responses_by_status`），不是窗口内计数。
+    直接取 max 会把窗口开始前就已发生的 418 计入本次发布候选。
+
+    为什么不能逐行累加 sticky 的 `last_status`：`last_status` 一旦变成 418 就不会
+    自动复原，逐行 +1 会随观察条数线性放大（55 条观测 → 虚报 65 次）。
+
+    因此这里以「累计计数器首尾差值」为窗口内新增数，并用绝对时间戳
+    `last_limited_at` 交叉校验：仅当它落在窗口起点之后才计入本次发布。进程重启会让
+    累计计数器归零，此时用时间戳兜底补计一次，避免真实事件被漏掉。
+
+    返回 (新增418, 新增429, 协调不可用样本数, 诊断明细)。诊断明细包含窗口外的最近
+    一次限流时间，只用于排查展示，不参与门禁判定。
+    """
+    first_counts: dict[str, int] = {}
+    last_counts: dict[str, int] = {}
+    coordination_bad = 0
+    newest_limited_at: float | None = None
+    latest_status = ""
+    for row in observations:
+        rate = _json_object(row.get("rate_limit_json"))
+        statuses = rate.get("responses_by_status")
+        if isinstance(statuses, Mapping):
+            for code in ("418", "429"):
+                value = _as_int(statuses.get(code))
+                first_counts.setdefault(code, value)
+                last_counts[code] = value
+        if rate.get("coordination_available") is False:
+            coordination_bad += 1
+        stamp = rate.get("last_limited_at")
+        if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+            newest_limited_at = max(newest_limited_at or 0.0, float(stamp))
+        status = str(rate.get("last_status") or "")
+        if status in {"418", "429"}:
+            latest_status = status
+
+    in_window = {code: max(0, last_counts.get(code, 0) - first_counts.get(code, 0))
+                 for code in ("418", "429")}
+    window_limited_at: float | None = None
+    pre_window_limited_at: float | None = None
+    if newest_limited_at is not None and window_start is not None:
+        if newest_limited_at >= window_start.timestamp():
+            window_limited_at = newest_limited_at
+            if latest_status in in_window and in_window[latest_status] == 0:
+                in_window[latest_status] = 1
+        else:
+            pre_window_limited_at = newest_limited_at
+
+    detail = {
+        "latest_status": latest_status or None,
+        "in_window_limited_at": window_limited_at,
+        "pre_window_limited_at": pre_window_limited_at,
+        "cumulative_418": last_counts.get("418", 0),
+        "cumulative_429": last_counts.get("429", 0),
+    }
+    return in_window["418"], in_window["429"], coordination_bad, detail
+
+
 def _open_read_only(db_path: Path) -> sqlite3.Connection:
     resolved = Path(db_path).resolve()
     if not resolved.is_file():
@@ -352,20 +422,9 @@ def build_release_readiness_report(
             entry_gate = _gate(FAIL, actual=False, required=True,
                                reason="最新观察仍阻断新开仓", blocking_reasons=latest_entry.get("blocking_reasons", []))
 
-        limited_418 = 0
-        limited_429 = 0
-        coordination_bad = 0
-        for row in observations:
-            rate = _json_object(row.get("rate_limit_json"))
-            statuses = rate.get("responses_by_status")
-            if isinstance(statuses, Mapping):
-                limited_418 = max(limited_418, int(statuses.get("418", 0) or 0))
-                limited_429 = max(limited_429, int(statuses.get("429", 0) or 0))
-            if rate.get("last_status") in {418, "418", 429, "429"}:
-                limited_418 += 1 if str(rate.get("last_status")) == "418" else 0
-                limited_429 += 1 if str(rate.get("last_status")) == "429" else 0
-            if rate.get("coordination_available") is False:
-                coordination_bad += 1
+        limited_418, limited_429, coordination_bad, rate_limit_detail = window_rate_limit_counts(
+            observations, window_start,
+        )
         if not observations:
             network_gate = _gate(NO_DATA, actual=None, required="zero 418/429 and coordination available",
                                  reason="没有当前发布的网络观察")
@@ -375,13 +434,15 @@ def build_release_readiness_report(
                               "coordination_unavailable_samples": coordination_bad},
                 required={"http_418": 0, "http_429": 0, "coordination_unavailable_samples": 0},
                 reason="当前发布观察含限流/封禁或跨进程协调不可用",
+                window_limited_at=rate_limit_detail,
             )
         else:
             network_gate = _gate(PASS, actual={"http_418": 0, "http_429": 0,
                                                 "coordination_unavailable_samples": 0},
                                  required={"http_418": 0, "http_429": 0,
                                            "coordination_unavailable_samples": 0},
-                                 reason="观察窗口内无 418/429 且协调可用")
+                                 reason="观察窗口内无 418/429 且协调可用",
+                                 window_limited_at=rate_limit_detail)
 
         gates = {
             "schema_version": _gate(

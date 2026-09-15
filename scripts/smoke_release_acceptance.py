@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -12,7 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from audit.database import AuditDatabase  # noqa: E402
-from core.release_evidence import build_release_readiness_report, observation_coverage  # noqa: E402
+from core.release_evidence import (  # noqa: E402
+    build_release_readiness_report,
+    observation_coverage,
+    window_rate_limit_counts,
+)
 
 
 def check(name: str, condition: bool) -> None:
@@ -145,4 +150,72 @@ gap = observation_coverage(
 )
 check("观察缺口被门禁识别", gap["state"] == "FAIL" and gap["missing_count"] == 4)
 
-print("\n结果: 10 通过 / 0 失败")
+# --- 网络门禁口径：只统计窗口内新增限流，且不随观察条数放大 ---
+def rate_rows(count, *, cum418, cum429=0, last_status="", limited_at=None, coord=True):
+    return [
+        {"rate_limit_json": json.dumps({
+            "responses_by_status": {"418": cum418, "429": cum429},
+            "last_status": last_status, "last_limited_at": limited_at,
+            "coordination_available": coord,
+        })}
+        for _ in range(count)
+    ]
+
+
+pre_window_stamp = start.timestamp() - 600
+in_window_stamp = start.timestamp() + 600
+
+# 生产现场复现：累计 418=11 全部发生在窗口之前，55 条观测的 last_status 全是 sticky 418。
+a418, a429, a_bad, a_detail = window_rate_limit_counts(
+    rate_rows(55, cum418=11, last_status="418", limited_at=pre_window_stamp), start)
+check("窗口前的历史418不计入本次发布", a418 == 0 and a429 == 0 and a_bad == 0)
+check("窗口外限流时间作为诊断保留",
+      a_detail["pre_window_limited_at"] == pre_window_stamp
+      and a_detail["in_window_limited_at"] is None)
+
+# 窗口内新增 2 次：必须按累计差值计数，而不是被 55 条观测逐行放大成 55+。
+rows = rate_rows(55, cum418=13, last_status="418", limited_at=in_window_stamp)
+rows[0] = {"rate_limit_json": json.dumps({
+    "responses_by_status": {"418": 11, "429": 0}, "last_status": "418",
+    "last_limited_at": in_window_stamp, "coordination_available": True})}
+b418, b429, _, b_detail = window_rate_limit_counts(rows, start)
+check("窗口内新增418按累计差值计数", b418 == 2 and b429 == 0)
+check("窗口内限流时间被记录", b_detail["in_window_limited_at"] == in_window_stamp)
+
+# 进程重启会让累计计数器归零；此时靠时间戳兜底，不能漏掉真实限流。
+c418, _, _, _ = window_rate_limit_counts(
+    rate_rows(3, cum418=0, last_status="418", limited_at=in_window_stamp), start)
+check("计数器归零时限流事件仍被计入", c418 == 1)
+
+# 协调不可用按样本逐条计数，与 418 相互独立。
+d418, _, d_bad, _ = window_rate_limit_counts(rate_rows(4, cum418=0, coord=False), start)
+check("协调不可用样本被逐条计数", d_bad == 4 and d418 == 0)
+
+# 端到端：把 fixture 的观测改成「历史 418 + sticky last_status」，报告仍须 GO。
+with sqlite3.connect(db_path) as connection:
+    connection.execute(
+        "UPDATE release_observations SET rate_limit_json=?",
+        (json.dumps({"responses_by_status": {"418": 11, "429": 1}, "last_status": "418",
+                     "last_limited_at": pre_window_stamp, "coordination_available": True}),),
+    )
+sticky = build_release_readiness_report(
+    db_path, manifest, environment="demo", since=iso(start), until=iso(end),
+)
+check("历史418不再阻断网络门禁", sticky["gates"]["network_rate_limit"]["state"] == "PASS")
+check("历史418场景整体仍可GO", sticky["release_readiness"] == "GO")
+
+# 反向保护：窗口内真的发生限流时必须仍然 FAIL。
+with sqlite3.connect(db_path) as connection:
+    connection.execute(
+        "UPDATE release_observations SET rate_limit_json=?",
+        (json.dumps({"responses_by_status": {"418": 12, "429": 0}, "last_status": "418",
+                     "last_limited_at": in_window_stamp, "coordination_available": True}),),
+    )
+live_limit = build_release_readiness_report(
+    db_path, manifest, environment="demo", since=iso(start), until=iso(end),
+)
+check("窗口内限流仍判FAIL且整体NO_GO",
+      live_limit["gates"]["network_rate_limit"]["state"] == "FAIL"
+      and live_limit["release_readiness"] == "NO_GO")
+
+print("\n结果: 17 通过 / 0 失败")
