@@ -922,6 +922,25 @@ class TradingService:
         """开仓前核验交易所仓位与保护单；未知状态默认禁止开仓。"""
         now = datetime.now(timezone.utc).isoformat()
         try:
+            compatibility: dict[str, Any] | None = None
+            if hasattr(self.broker, "takeover_compatibility"):
+                compatibility = self.broker.takeover_compatibility()
+                # 当前来源台账不能区分同 symbol 的 LONG/SHORT 双边仓位。必须在
+                # sync_positions/sync_protections 产生本地写入、撤单或补单之前停止。
+                if not compatibility.get("position_mode_supported", False):
+                    result = {
+                        "ready": False,
+                        "reason": str(compatibility.get("reason") or "账户持仓模式不兼容"),
+                        "checked_at": now,
+                        "takeover": compatibility,
+                    }
+                    self._startup_safety = result
+                    self.db.log_risk_event_once_while_open(
+                        event_type="startup_takeover_block", severity="critical",
+                        details=result["reason"],
+                        action_taken="block before ledger/protection mutation",
+                    )
+                    return result
             if hasattr(self.broker, "sync_positions"):
                 self.broker.sync_positions()
             if hasattr(self.broker, "sync_protections"):
@@ -935,10 +954,25 @@ class TradingService:
                     self.db.log_risk_event(event_type="startup_safety_block", severity="critical",
                                            details=result["reason"], action_taken="block new opens")
                     return result
+            # 外部增仓挂单不受本进程 close_only 控制。允许上面的现仓保护同步继续，
+            # 但绝不能把实例标为可恢复开仓；由运营者核对后撤单或显式纳管。
+            if compatibility is not None and not compatibility.get("ok", False):
+                result = {
+                    "ready": False,
+                    "reason": str(compatibility.get("reason") or "存在未纳管增仓挂单"),
+                    "checked_at": now,
+                    "takeover": compatibility,
+                }
+                self._startup_safety = result
+                self.db.log_risk_event_once_while_open(
+                    event_type="startup_takeover_block", severity="critical",
+                    details=result["reason"], action_taken="protect positions; block new opens",
+                )
+                return result
             result = {"ready": True, "reason": "", "checked_at": now}
             resolver = getattr(self.db, "resolve_risk_incidents_by_type", None)
             if callable(resolver):
-                resolver("startup_safety_block")
+                resolver("startup_safety_block", "startup_takeover_block")
         except Exception as e:
             result = {"ready": False, "reason": f"{type(e).__name__}: {e}", "checked_at": now}
             self.db.log_risk_event(event_type="startup_safety_block", severity="critical",

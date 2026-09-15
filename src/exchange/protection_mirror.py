@@ -24,9 +24,10 @@ def _bool(value: Any) -> bool:
 class ProtectionOrderMirror:
     """只读镜像 USD-M Algo 止损/止盈单并核对持仓覆盖。
 
-    对每个非零白名单仓位，安全覆盖要求恰好一张同方向、同数量、reduce-only 且触发价
-    有效的 STOP_MARKET 和 TAKE_PROFIT_MARKET。镜像本身不撤单或补单，只向上层报告
-    missing/orphan/direction/quantity/unsafe 分类结果。
+    对每个非零白名单仓位，安全覆盖要求恰好一张同方向、同 positionSide 且触发价
+    有效的 STOP_MARKET 和 TAKE_PROFIT_MARKET。One-way 使用同数量 reduce-only；
+    Hedge Mode 使用官方要求的 closePosition=true（不发送 quantity/reduceOnly）。
+    镜像本身不撤单或补单，只向上层报告异常分类。
     """
     def __init__(self, db: AuditDatabase, *, environment: str,
                  allowed_symbols: Iterable[str] = ()) -> None:
@@ -56,15 +57,17 @@ class ProtectionOrderMirror:
     def reconcile_snapshot(self, positions: list[dict[str, Any]],
                            algos: list[dict[str, Any]]) -> dict[str, Any]:
         """对给定快照做确定性覆盖检查，并原子写入镜像与对账记录。"""
-        held: dict[str, float] = {}
+        held: dict[tuple[str, str], float] = {}
         for row in positions or []:
             symbol = str(row.get("symbol") or "").upper()
             amount = _float(row.get("positionAmt"))
             if self._allowed(symbol) and abs(amount) > 1e-12:
-                held[symbol] = amount
+                explicit_side = str(row.get("positionSide") or "BOTH").upper()
+                position_side = explicit_side if explicit_side in {"LONG", "SHORT"} else "BOTH"
+                held[(symbol, position_side)] = amount
 
         valid: list[dict[str, Any]] = []
-        by_symbol: dict[str, list[dict[str, Any]]] = {}
+        by_position: dict[tuple[str, str], list[dict[str, Any]]] = {}
         orphan: list[str] = []
         direction: list[str] = []
         quantity: list[str] = []
@@ -77,33 +80,38 @@ class ProtectionOrderMirror:
             normalized = dict(row)
             normalized["symbol"] = symbol
             valid.append(normalized)
-            by_symbol.setdefault(symbol, []).append(normalized)
+            position_side = str(row.get("positionSide") or "BOTH").upper()
+            position_key = (symbol, position_side)
+            by_position.setdefault(position_key, []).append(normalized)
             algo_id = str(row.get("algoId") or "")
-            amount = held.get(symbol)
+            amount = held.get(position_key)
             if amount is None:
                 orphan.append(algo_id)
                 continue
             expected_side = "SELL" if amount > 0 else "BUY"
             if str(row.get("side") or "").upper() != expected_side:
                 direction.append(algo_id)
-            if abs(_float(row.get("quantity")) - abs(amount)) > max(
+            close_all = _bool(row.get("closePosition"))
+            if not close_all and abs(_float(row.get("quantity")) - abs(amount)) > max(
                     1e-9, abs(amount) * 0.000001):
                 quantity.append(algo_id)
-            if not _bool(row.get("reduceOnly")) or _float(row.get("triggerPrice")) <= 0:
+            if (not (_bool(row.get("reduceOnly")) or close_all)
+                    or _float(row.get("triggerPrice")) <= 0):
                 unsafe.append(algo_id)
 
         missing: list[str] = []
-        for symbol, amount in held.items():
+        for (symbol, position_side), amount in held.items():
             expected_side = "SELL" if amount > 0 else "BUY"
-            matching = [row for row in by_symbol.get(symbol, [])
+            matching = [row for row in by_position.get((symbol, position_side), [])
                         if str(row.get("side") or "").upper() == expected_side and
-                        abs(_float(row.get("quantity")) - abs(amount)) <= max(
-                            1e-9, abs(amount) * 0.000001) and
-                        _bool(row.get("reduceOnly")) and
+                        (_bool(row.get("closePosition")) or (
+                            abs(_float(row.get("quantity")) - abs(amount)) <= max(
+                                1e-9, abs(amount) * 0.000001) and
+                            _bool(row.get("reduceOnly")))) and
                         _float(row.get("triggerPrice")) > 0]
             types = [str(row.get("orderType") or "").upper() for row in matching]
             if types.count("STOP_MARKET") != 1 or types.count("TAKE_PROFIT_MARKET") != 1:
-                missing.append(symbol)
+                missing.append(symbol if position_side == "BOTH" else f"{symbol}:{position_side}")
 
         details = {
             "orphan_orders": sorted(orphan),

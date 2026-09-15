@@ -48,13 +48,19 @@ def _request_purpose(method: str, path: str, params: dict[str, Any]) -> str:
     if normalized_path in {"/fapi/v1/time", "/fapi/v1/exchangeInfo"}:
         return "startup"
     if normalized_path in {"/fapi/v1/account", "/fapi/v2/account", "/fapi/v3/account",
-                           "/fapi/v1/positionRisk", "/fapi/v2/positionRisk"}:
+                           "/fapi/v1/positionRisk", "/fapi/v2/positionRisk",
+                           "/fapi/v1/positionSide/dual"}:
         return "account_reconcile"
     if normalized_path in {"/fapi/v1/userTrades"}:
         return "trade_reconcile"
     if normalized_path in {"/fapi/v1/openOrders", "/fapi/v1/order"}:
+        position_side = str(params.get("positionSide") or "").upper()
+        order_side = str(params.get("side") or "").upper()
+        hedge_exit = ((position_side == "LONG" and order_side == "SELL") or
+                      (position_side == "SHORT" and order_side == "BUY"))
         return "order_reconcile" if normalized_method == "GET" else (
-            "exit" if params.get("reduceOnly") or params.get("closePosition") else "entry")
+            "exit" if params.get("reduceOnly") or params.get("closePosition") or hedge_exit
+            else "entry")
     if normalized_path in {"/fapi/v1/openAlgoOrders", "/fapi/v1/algoOrder"}:
         return "protection_reconcile" if normalized_method == "GET" else "protect"
     if normalized_path in {"/fapi/v1/marginType", "/fapi/v1/leverage",
@@ -63,6 +69,104 @@ def _request_purpose(method: str, path: str, params: dict[str, Any]) -> str:
     if normalized_path == "/fapi/v1/listenKey":
         return "user_stream"
     return "normal"
+
+
+def _exchange_bool(value: Any) -> bool:
+    """兼容 Binance 在不同接口中返回的 bool、数字与字符串布尔值。"""
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def assess_takeover_compatibility(
+    position_mode: Mapping[str, Any] | None,
+    positions: list[dict[str, Any]],
+    orders: list[dict[str, Any]],
+    algo_orders: list[dict[str, Any]],
+    *,
+    local_entry_client_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    """纯函数评估实盘接管是否兼容，绝不修改交易所或本地账本。
+
+    当前执行器的来源台账以 ``symbol`` 为唯一键，因此允许账户保持 Hedge Mode，
+    但同一合约出现 LONG/SHORT 双边仓位时必须在任何撤单或补保护前 fail-closed。
+    外部增仓挂单不能被 ``close_only`` 阻止成交，必须保留为显式上线阻断项；
+    系统自己的本地 LIMIT 挂单通过 client id 排除。
+    """
+    payload = dict(position_mode or {})
+    mode_known = "dualSidePosition" in payload
+    hedge_mode = _exchange_bool(payload.get("dualSidePosition")) if mode_known else None
+    explicit_sides = sorted({
+        str(row.get("positionSide") or "").upper()
+        for row in positions
+        if str(row.get("positionSide") or "").upper() in {"LONG", "SHORT"}
+    })
+    sides_by_symbol: dict[str, set[str]] = {}
+    malformed_hedge_symbols: set[str] = set()
+    for row in positions:
+        symbol = str(row.get("symbol") or "").upper()
+        side = str(row.get("positionSide") or "").upper()
+        if not symbol:
+            continue
+        if hedge_mode and side not in {"LONG", "SHORT"}:
+            malformed_hedge_symbols.add(symbol)
+        elif side in {"LONG", "SHORT"}:
+            sides_by_symbol.setdefault(symbol, set()).add(side)
+    duplicate_hedge_symbols = sorted(
+        symbol for symbol, sides in sides_by_symbol.items() if len(sides) > 1
+    )
+    # 账户可以保持 Hedge Mode，但当前系统只支持“每个 symbol 最多一个方向”。
+    # 这样所有本地来源账本仍能以 symbol 为键，同时订单必须携带 positionSide。
+    position_mode_supported = bool(
+        mode_known
+        and not malformed_hedge_symbols
+        and not duplicate_hedge_symbols
+        and (hedge_mode or not explicit_sides)
+    )
+    local_ids = {str(value) for value in (local_entry_client_ids or set()) if value}
+
+    unmanaged_entries: list[dict[str, Any]] = []
+    for kind, rows in (("order", orders), ("algo", algo_orders)):
+        for row in rows:
+            if _exchange_bool(row.get("reduceOnly")) or _exchange_bool(row.get("closePosition")):
+                continue
+            client_id = str(
+                row.get("clientOrderId") or row.get("origClientOrderId")
+                or row.get("clientAlgoId") or ""
+            )
+            if client_id and client_id in local_ids:
+                continue
+            unmanaged_entries.append({
+                "kind": kind,
+                "symbol": str(row.get("symbol") or ""),
+                "side": str(row.get("side") or ""),
+                "position_side": str(row.get("positionSide") or "BOTH"),
+                "type": str(row.get("type") or row.get("orderType") or ""),
+                "client_id": client_id,
+            })
+
+    reasons: list[str] = []
+    if not mode_known:
+        reasons.append("无法证明账户持仓模式")
+    elif malformed_hedge_symbols:
+        reasons.append("Hedge Mode 仓位缺少明确 positionSide")
+    elif duplicate_hedge_symbols:
+        reasons.append("同一合约存在 LONG/SHORT 双边仓位，当前执行器禁止接管")
+    elif not hedge_mode and explicit_sides:
+        reasons.append("账户持仓模式与仓位 positionSide 不一致")
+    if unmanaged_entries:
+        symbols = ", ".join(sorted({row["symbol"] for row in unmanaged_entries if row["symbol"]}))
+        reasons.append(f"存在 {len(unmanaged_entries)} 个未纳管增仓挂单" +
+                       (f"（{symbols}）" if symbols else ""))
+    return {
+        "ok": position_mode_supported and not unmanaged_entries,
+        "position_mode": "hedge" if hedge_mode else "one_way" if mode_known else "unknown",
+        "position_mode_supported": position_mode_supported,
+        "explicit_position_sides": explicit_sides,
+        "duplicate_hedge_symbols": duplicate_hedge_symbols,
+        "unmanaged_entry_orders": unmanaged_entries,
+        "reason": "；".join(reasons),
+    }
 
 
 class BinanceFuturesBroker:
@@ -120,6 +224,9 @@ class BinanceFuturesBroker:
         self._cache_lock = threading.RLock()
         self._account_cache: tuple[float, dict[str, Any]] = (0.0, {})
         self._positions_cache: tuple[float, list[dict[str, Any]]] = (0.0, [])
+        # None 表示尚未用签名接口证明账户持仓模式。任何真实下单前都会惰性读取；
+        # takeover_compatibility 在启动核验阶段会先填充该值。
+        self._hedge_mode: bool | None = None
         # 来源台账锁：dashboard 线程（紧急平仓/资金重置）与交易循环（挂单/平仓收口）
         # 并发 load-modify-save 之前会互相覆盖丢更新。RLock 允许锁内重入调用
         # _record/_remove 等辅助方法。所有 ledger 读→改→写必须全程持锁。
@@ -325,7 +432,8 @@ class BinanceFuturesBroker:
                                 margin_mode: str = "ISOLATED",
                                 qty: float | None = None,
                                 entry: float | None = None,
-                                open_client_order_id: str | None = None) -> dict[str, Any]:
+                                open_client_order_id: str | None = None,
+                                position_side: str | None = None) -> dict[str, Any]:
         """把交易所真实仓位快照写入来源台账（纯本地写，全程持台账锁）。
 
         qty/entry 由调用方提供（多数调用点手上已有仓位快照）。之前这里内部
@@ -346,6 +454,8 @@ class BinanceFuturesBroker:
                     "ticket_id": ticket_id or old.get("ticket_id"),
                     "open_client_order_id": (open_client_order_id
                                              or old.get("open_client_order_id")),
+                    "position_side": (str(position_side or old.get("position_side") or "BOTH")
+                                      .upper()),
                     "qty": float(qty if qty is not None else (old.get("qty") or 0.0)),
                     "entry_price": float(entry if entry is not None else (old.get("entry_price") or 0.0)),
                     "margin_mode": margin_mode,
@@ -483,9 +593,11 @@ class BinanceFuturesBroker:
                 position_side=str(request.get("positionSide") or "BOTH"),
                 order_type=str(request.get("type") or "UNKNOWN"), purpose=purpose,
                 qty=float(request.get("quantity") or 0.0),
-                price=float(request["triggerprice"])
-                if request.get("triggerprice") is not None else None,
-                reduce_only=str(request.get("reduceonly", "false")).lower() == "true",
+                price=float(request.get("triggerPrice", request.get("triggerprice")))
+                if request.get("triggerPrice", request.get("triggerprice")) is not None else None,
+                reduce_only=_exchange_bool(
+                    request.get("reduceOnly", request.get("reduceonly", False)))
+                or _exchange_bool(request.get("closePosition")),
                 endpoint="/fapi/v1/algoOrder", request=request,
             )
         try:
@@ -695,12 +807,33 @@ class BinanceFuturesBroker:
 
     def _position_margin(self, symbol: str) -> float:
         try:
-            pos = next((p for p in self.positions() if p["symbol"] == symbol), None)
+            pos = self._single_symbol_position(symbol)
             if pos:
-                return float(pos.get("isolatedMargin") or pos.get("isolatedWallet") or 0.0)
+                return self._margin_from_position(pos)
         except Exception:
             pass
         return 0.0
+
+    @staticmethod
+    def _margin_from_position(position: Mapping[str, Any]) -> float:
+        """统一估算仓位初始保证金，覆盖 isolated 与 cross 两种返回结构。"""
+        for key in ("isolatedMargin", "isolatedWallet", "positionInitialMargin"):
+            try:
+                value = float(position.get(key) or 0.0)
+                if value > 0:
+                    return value
+            except (TypeError, ValueError):
+                continue
+        try:
+            leverage = max(1.0, float(position.get("leverage") or 1.0))
+            notional = abs(float(position.get("notional") or 0.0))
+            if notional <= 0:
+                qty = abs(float(position.get("positionAmt") or 0.0))
+                mark = float(position.get("markPrice") or position.get("entryPrice") or 0.0)
+                notional = qty * mark
+            return notional / leverage
+        except (TypeError, ValueError):
+            return 0.0
 
     # ---------- 账户 ----------
     def _invalidate_cache(self) -> None:
@@ -747,6 +880,72 @@ class BinanceFuturesBroker:
         data = self._signed("GET", "/fapi/v1/openAlgoOrders", {})
         return self._normalize_algo_orders_payload(data)
 
+    def takeover_compatibility(self) -> dict[str, Any]:
+        """读取接管前事实；仅 GET，未知状态或双向持仓一律 fail-closed。"""
+        position_mode = self._signed("GET", "/fapi/v1/positionSide/dual", {})
+        if not isinstance(position_mode, Mapping) or "dualSidePosition" not in position_mode:
+            self._hedge_mode = None
+        else:
+            self._hedge_mode = _exchange_bool(position_mode.get("dualSidePosition"))
+        positions = self.positions(force=True)
+        orders = self.open_orders()
+        algo_orders = self.open_algo_orders()
+        ledger = self._load_ledger()
+        local_ids = {
+            str(row.get("client_order_id") or "")
+            for row in ledger.get("pending_limits", [])
+            if row.get("client_order_id")
+        }
+        return assess_takeover_compatibility(
+            position_mode if isinstance(position_mode, Mapping) else None,
+            positions, orders, algo_orders,
+            local_entry_client_ids=local_ids,
+        )
+
+    def _is_hedge_mode(self) -> bool:
+        """返回已验证的持仓模式；未知时只读查询，失败不得猜测。"""
+        # 仅兼容通过 __new__ 构造的离线替身；正式实例在 __init__ 中总有该字段。
+        if not hasattr(self, "_hedge_mode"):
+            return False
+        if self._hedge_mode is None:
+            payload = self._signed("GET", "/fapi/v1/positionSide/dual", {})
+            if not isinstance(payload, Mapping) or "dualSidePosition" not in payload:
+                raise RuntimeError("无法证明 Binance 持仓模式")
+            self._hedge_mode = _exchange_bool(payload.get("dualSidePosition"))
+        return self._hedge_mode
+
+    @staticmethod
+    def _position_side(position: Mapping[str, Any]) -> str:
+        explicit = str(position.get("positionSide") or "").upper()
+        if explicit in {"LONG", "SHORT"}:
+            return explicit
+        return "LONG" if float(position.get("positionAmt") or 0.0) > 0 else "SHORT"
+
+    def _single_symbol_position(self, symbol: str, *, force: bool = False) -> dict[str, Any] | None:
+        """返回该合约唯一仓位；同 symbol 双边时拒绝猜测应操作哪一侧。"""
+        matches = [
+            row for row in self.positions(force=force)
+            if str(row.get("symbol") or "") == symbol
+            and abs(float(row.get("positionAmt") or 0.0)) > 1e-12
+        ]
+        if len(matches) > 1:
+            sides = ",".join(sorted({self._position_side(row) for row in matches}))
+            raise RuntimeError(f"{symbol} 存在双边仓位({sides})，拒绝自动操作")
+        return matches[0] if matches else None
+
+    def _standard_order_mode_params(self, position_side: str, *, reduce: bool) -> dict[str, str]:
+        """生成与账户模式一致的普通订单参数。
+
+        Binance 明确禁止 Hedge Mode 发送 reduceOnly；此时 positionSide 本身限定
+        被操作的仓位方向。One-way Mode 则继续使用 reduceOnly 防止平仓单反向开仓。
+        """
+        if self._is_hedge_mode():
+            side = str(position_side or "").upper()
+            if side not in {"LONG", "SHORT"}:
+                raise RuntimeError("Hedge Mode 下单缺少 LONG/SHORT positionSide")
+            return {"positionSide": side}
+        return {"reduceOnly": "true" if reduce else "false"}
+
     def order_submission_ready(self) -> bool:
         """UNKNOWN/SUBMITTING存在时禁止新开仓；减仓和平仓不受此门禁影响。"""
         order_outbox = getattr(self, "order_outbox", None)
@@ -766,7 +965,7 @@ class BinanceFuturesBroker:
                 source = str(ledger.get(p["symbol"], {}).get("source", "ai") or "ai")
                 if channel is not None and source != channel:
                     continue
-                total += float(p.get("isolatedMargin") or p.get("isolatedWallet") or 0.0)
+                total += self._margin_from_position(p)
             return total
         except Exception:
             return 0.0
@@ -825,12 +1024,13 @@ class BinanceFuturesBroker:
                         {
                             "symbol": p["symbol"],
                             "side": "LONG" if float(p.get("positionAmt") or 0) > 0 else "SHORT",
+                            "position_side": self._position_side(p),
                             "qty": abs(float(p.get("positionAmt") or 0)),
                             "entry_price": float(p.get("entryPrice") or 0),
                             "mark_price": float(p.get("markPrice") or 0),
                             "upnl": float(p.get("unRealizedProfit") or 0),
                             "leverage": int(float(p.get("leverage") or 1)),
-                            "margin": float(p.get("isolatedMargin") or p.get("isolatedWallet") or 0.0),
+                            "margin": self._margin_from_position(p),
                             "stop_loss": algo_by_symbol.get(p["symbol"], {}).get("STOP_MARKET"),
                             "take_profit": algo_by_symbol.get(p["symbol"], {}).get("TAKE_PROFIT_MARKET"),
                             "source": str(ledger.get("positions", {}).get(p["symbol"], {}).get("source", "ai") or "ai"),
@@ -967,7 +1167,7 @@ class BinanceFuturesBroker:
 
             if executed_qty > 0:
                 # 部分或全部成交：先把真实仓位记入来源台账并补保护
-                ex_pos = next((x for x in self.positions() if x["symbol"] == symbol), None)
+                ex_pos = self._single_symbol_position(symbol)
                 self._record_ledger_position(
                     symbol,
                     str(order.get("source", "ai") or "ai"),
@@ -977,6 +1177,10 @@ class BinanceFuturesBroker:
                     qty=abs(float((ex_pos or {}).get("positionAmt") or 0.0)),
                     entry=float((ex_pos or {}).get("entryPrice") or 0.0),
                     open_client_order_id=cid,
+                    position_side=self._position_side(ex_pos or {
+                        "positionAmt": executed_qty if str(order.get("side")) == "LONG"
+                        else -executed_qty,
+                    }),
                 )
                 if order.get("ticket_id") and self.db:
                     self.db.update_signal_ticket(ticket_id=str(order["ticket_id"]), status="filled")
@@ -1043,6 +1247,21 @@ class BinanceFuturesBroker:
                 self.db.log_risk_event(event_type="futures_unsupported_symbol", severity="warn",
                                        details=f"{symbol} 不在当前交易所支持列表中，跳过开仓",
                                        action_taken="skip")
+            return None
+        # 来源账本以 symbol 为键，执行语义也只允许一个合约一个方向。即使账户
+        # 开启 Hedge Mode，也不能通过 open 给现有 symbol 叠加或建立反向仓位。
+        existing_positions = [
+            row for row in self.positions()
+            if str(row.get("symbol") or "") == symbol
+            and abs(float(row.get("positionAmt") or 0.0)) > 1e-12
+        ]
+        if existing_positions:
+            if self.db:
+                self.db.log_risk_event(
+                    event_type="futures_symbol_position_open_blocked", severity="warn",
+                    details=f"{symbol} 已有仓位，禁止再次 open 或建立双边仓位",
+                    action_taken="skip open",
+                )
             return None
         margin_mode = str(getattr(intent, "margin_mode", "ISOLATED") or "ISOLATED").upper()
         try:
@@ -1120,8 +1339,9 @@ class BinanceFuturesBroker:
             cid = base_cid if len(chunks) == 1 else f"{base_cid}-{order_count}"
             order_params: dict[str, Any] = {
                 "symbol": symbol, "side": side, "type": intent.order_type, "quantity": qty,
-                "newClientOrderId": cid, "reduceOnly": "false",
+                "newClientOrderId": cid,
             }
+            order_params.update(self._standard_order_mode_params(str(intent.side), reduce=False))
             if intent.order_type == "LIMIT":
                 limit_price = float(getattr(intent, "limit_price", 0.0) or 0.0)
                 if limit_price <= 0:
@@ -1192,11 +1412,13 @@ class BinanceFuturesBroker:
                 qty=float(total_qty),
                 entry=price if price > 0 else None,
                 open_client_order_id=first_cid,
+                position_side=str(intent.side),
             )
             try:
                 self._ensure_lifecycle_from_snapshot(
                     {"symbol": symbol, "positionAmt": total_qty,
-                     "entryPrice": price, "leverage": int(intent.leverage)},
+                     "entryPrice": price, "leverage": int(intent.leverage),
+                     "positionSide": str(intent.side)},
                     {"source": order_source,
                      "strategy_id": getattr(intent, "strategy_id", None),
                      "ticket_id": getattr(intent, "ticket_id", None),
@@ -1220,6 +1442,7 @@ class BinanceFuturesBroker:
                     "exchange_order_id": str(first_exchange_id or ""),
                     "symbol": symbol,
                     "side": intent.side,
+                    "position_side": str(intent.side),
                     "qty": float(total_qty),
                     "limit_price": float(getattr(intent, "limit_price", 0.0) or 0.0),
                     "leverage": int(intent.leverage),
@@ -1277,25 +1500,34 @@ class BinanceFuturesBroker:
           triggerprice=触发价
         """
         cid = f"mta-{tag}-{uuid.uuid4().hex[:28]}"
-        data = self._submit_algo_order({
+        position_side = "LONG" if close_side == "SELL" else "SHORT"
+        params: dict[str, Any] = {
             "symbol": symbol,
             "clientAlgoId": cid,
             "side": close_side,
             "type": order_type,
-            "quantity": qty,
-            "triggerprice": self._format_price(symbol, trigger_price),
-            "algotype": "CONDITIONAL",
-            "reduceonly": "true",
-            "timeinforce": "GTC",
+            "triggerPrice": self._format_price(symbol, trigger_price),
+            "algoType": "CONDITIONAL",
+            "timeInForce": "GTC",
             "workingType": "MARK_PRICE",
             "priceProtect": "true",
-        }, purpose="PROTECTION")
+        }
+        if self._is_hedge_mode():
+            # 官方接口禁止 Hedge Mode 发送 reduceOnly。closePosition=true 会在触发时
+            # 关闭指定 positionSide 的全部当前数量，也天然覆盖后续部分减仓变化。
+            params.update({"positionSide": position_side, "closePosition": "true"})
+        else:
+            params.update({"quantity": qty, "reduceOnly": "true"})
+        data = self._submit_algo_order(params, purpose="PROTECTION")
         algo_id = str(data.get("algoId") or "")
         self._log_order(symbol=symbol, side=log_side, order_type=order_type,
                         qty=float(qty), price=float(trigger_price), status="NEW",
                         exchange_id=algo_id,
-                        raw={"mode": self.environment, "action": "algo_protection",
-                             "algoType": "CONDITIONAL", "algoId": algo_id}, client_id=cid)
+                         raw={"mode": self.environment, "action": "algo_protection",
+                              "algoType": "CONDITIONAL", "algoId": algo_id,
+                              "positionSide": position_side,
+                              "closePosition": bool(params.get("closePosition"))},
+                         client_id=cid)
 
     def _open_algos(self, symbol: str | None = None) -> list[dict[str, Any]] | None:
         """查询未触发 Algo 单。接口失败时返回 None（区别于"确实无挂单"的 []）：
@@ -1451,7 +1683,7 @@ class BinanceFuturesBroker:
         if old_prices is None:
             old_prices = {}
 
-        pos = next((p for p in self.positions() if p["symbol"] == symbol), None)
+        pos = self._single_symbol_position(symbol)
         if not pos or abs(float(pos.get("positionAmt") or 0)) <= 0:
             if existing:
                 self._cancel_symbol_algos(symbol)
@@ -1505,7 +1737,13 @@ class BinanceFuturesBroker:
                 if a.get("orderType") != otype:
                     continue
                 try:
-                    qty_ok = abs(float(a.get("quantity") or 0) - qty_f) <= float(qty_eps)
+                    if self._is_hedge_mode():
+                        qty_ok = (_exchange_bool(a.get("closePosition")) and
+                                  str(a.get("positionSide") or "").upper() ==
+                                  ("LONG" if close_side == "SELL" else "SHORT"))
+                    else:
+                        qty_ok = (abs(float(a.get("quantity") or 0) - qty_f)
+                                  <= float(qty_eps) and _exchange_bool(a.get("reduceOnly")))
                     price_ok = abs(float(a.get("triggerPrice") or 0) - float(target)) <= price_tol
                     if qty_ok and price_ok:
                         n += 1
@@ -1560,7 +1798,7 @@ class BinanceFuturesBroker:
 
     def _close_or_reduce(self, intent: Any) -> dict[str, Any] | None:
         symbol = intent.symbol
-        pos = next((p for p in self.positions() if p["symbol"] == symbol), None)
+        pos = self._single_symbol_position(symbol)
         if not pos:
             if self.db:
                 self.db.log_risk_event(event_type="futures_close_nopos", severity="warn",
@@ -1568,7 +1806,7 @@ class BinanceFuturesBroker:
             return None
         current = abs(float(pos.get("positionAmt") or 0))
         close_qty = min(float(intent.qty), current)
-        pos_side = "LONG" if float(pos.get("positionAmt") or 0) > 0 else "SHORT"
+        pos_side = self._position_side(pos)
         side = "SELL" if pos_side == "LONG" else "BUY"
         entry = float(pos.get("entryPrice") or 0.0)
         ledger_source, ledger_meta = self._ledger_source(symbol)
@@ -1606,10 +1844,12 @@ class BinanceFuturesBroker:
         for chunk in chunks:
             qty = self._format_qty(symbol, chunk)
             cid = base_cid if len(chunks) == 1 else f"{base_cid}-{order_count}"
-            data = self._submit_standard_order({
+            order_params: dict[str, Any] = {
                 "symbol": symbol, "side": side, "type": intent.order_type,
-                "quantity": qty, "reduceOnly": "true", "newClientOrderId": cid,
-            }, purpose="EXIT")
+                "quantity": qty, "newClientOrderId": cid,
+            }
+            order_params.update(self._standard_order_mode_params(pos_side, reduce=True))
+            data = self._submit_standard_order(order_params, purpose="EXIT")
             if intent.order_type == "MARKET":
                 data = self._wait_fill(symbol, data.get("orderId")) or data
             chunk_confirmed = self._fill_confirmed(data)
@@ -1662,7 +1902,7 @@ class BinanceFuturesBroker:
                 action_taken="flag for reconcile")
         self._invalidate_cache()
         # 同步来源台账：剩余仓位继续保留来源；清仓则移除
-        remaining_pos = next((x for x in self.positions(force=True) if x["symbol"] == symbol), None)
+        remaining_pos = self._single_symbol_position(symbol, force=True)
         remaining_qty = abs(float(remaining_pos.get("positionAmt") or 0)) if remaining_pos else 0.0
         lifecycle_result = None
         if not close_unconfirmed and reconciler is not None:
@@ -1737,6 +1977,7 @@ class BinanceFuturesBroker:
                 str(ledger_meta.get("margin_mode", "ISOLATED") or "ISOLATED"),
                 qty=remaining_qty,
                 entry=float(remaining_pos.get("entryPrice") or 0.0),
+                position_side=pos_side,
             )
         self._resync_protection(symbol, intent=intent)
         return {"order_id": first_cid, "action": "close", "symbol": symbol,
@@ -1745,7 +1986,7 @@ class BinanceFuturesBroker:
 
     def _adjust(self, intent: Any) -> dict[str, Any] | None:
         symbol = intent.symbol
-        pos = next((p for p in self.positions() if p["symbol"] == symbol), None)
+        pos = self._single_symbol_position(symbol)
         if not pos or abs(float(pos.get("positionAmt") or 0)) <= 0:
             if self.db:
                 self.db.log_risk_event(event_type="futures_adjust_skip", severity="info",
@@ -1775,6 +2016,7 @@ class BinanceFuturesBroker:
             if amt <= 0:
                 continue
             side = "SELL" if float(pos.get("positionAmt") or 0) > 0 else "BUY"
+            pos_side = self._position_side(pos)
             entry = float(pos.get("entryPrice") or 0.0)
             try:
                 reconciler = getattr(self, "trade_reconciliation", None)
@@ -1804,10 +2046,12 @@ class BinanceFuturesBroker:
                 for chunk in chunks:
                     qty = self._format_qty(symbol, chunk)
                     cid = f"mta-{uuid.uuid4().hex[:28]}"
-                    data = self._submit_standard_order({
+                    order_params: dict[str, Any] = {
                         "symbol": symbol, "side": side, "type": "MARKET",
-                        "quantity": qty, "reduceOnly": "true", "newClientOrderId": cid,
-                    }, purpose="EXIT")
+                        "quantity": qty, "newClientOrderId": cid,
+                    }
+                    order_params.update(self._standard_order_mode_params(pos_side, reduce=True))
+                    data = self._submit_standard_order(order_params, purpose="EXIT")
                     data = self._wait_fill(symbol, data.get("orderId")) or data
                     chunk_confirmed = self._fill_confirmed(data)
                     close_all_unconfirmed = close_all_unconfirmed or not chunk_confirmed
@@ -1846,7 +2090,6 @@ class BinanceFuturesBroker:
                                     ticket_id=meta.get("ticket_id"),
                                     margin_mode=str(meta.get("margin_mode", "ISOLATED") or "ISOLATED"))
                 lifecycle_result = None
-                pos_side = "LONG" if float(pos.get("positionAmt") or 0) > 0 else "SHORT"
                 if not close_all_unconfirmed and reconciler is not None:
                     try:
                         lifecycle_result = self._reconcile_stored_lifecycle(
@@ -2072,15 +2315,25 @@ class BinanceFuturesBroker:
     def sync_positions(self) -> None:
         try:
             pos = self.positions()
+            counts: dict[str, int] = {}
+            for row in pos:
+                symbol = str(row.get("symbol") or "")
+                counts[symbol] = counts.get(symbol, 0) + 1
+            duplicate_symbols = sorted(symbol for symbol, count in counts.items() if count > 1)
+            if duplicate_symbols:
+                raise RuntimeError(
+                    "同一合约存在双边仓位，拒绝同步来源台账: " + ", ".join(duplicate_symbols))
             ledger = self._load_ledger()
             exchange_symbols = {p["symbol"] for p in pos}
             # 交易所里有、台账没有的旧仓位归为 AI legacy，避免误判成无主仓位
             for p in pos:
                 if p["symbol"] not in ledger.get("positions", {}):
                     self._record_ledger_position(
-                        p["symbol"], "ai", None, None, "ISOLATED",
+                        p["symbol"], "ai", None, None,
+                        str(p.get("marginType") or "ISOLATED").upper(),
                         qty=abs(float(p.get("positionAmt") or 0.0)),
-                        entry=float(p.get("entryPrice") or 0.0))
+                        entry=float(p.get("entryPrice") or 0.0),
+                        position_side=self._position_side(p))
                     if self.db:
                         self.db.log_risk_event(
                             event_type="futures_ledger_adopt_legacy", severity="warn",

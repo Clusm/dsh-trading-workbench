@@ -270,7 +270,7 @@ check("fill_confirmed 标记为 False", raw.get("fill_confirmed") is False)
 
 print("\n[P1-7] 下单 POST 超时后按 clientOrderId 对账")
 b4 = _make_broker()
-state_box = {"post_calls": 0}
+state_box = {"post_calls": 0, "filled": False}
 reconciled_order = {"orderId": "12345", "status": "FILLED", "executedQty": "0.1",
                     "origQty": "0.1", "avgPrice": "100000.0"}
 
@@ -278,6 +278,8 @@ reconciled_order = {"orderId": "12345", "status": "FILLED", "executedQty": "0.1"
 def signed_mock(method, path, params=None, attempts=2):
     if method == "POST" and path == "/fapi/v1/order":
         state_box["post_calls"] += 1
+        # 模拟请求已在交易所成交但响应丢失；后续 GET 对账和仓位读取均看到成交事实。
+        state_box["filled"] = True
         raise RuntimeError("read timeout")
     if method == "GET" and path == "/fapi/v1/order":
         return reconciled_order
@@ -295,9 +297,10 @@ b4._market_max_qty = lambda symbol: 5000.0  # type: ignore[method-assign]
 b4._invalidate_cache = lambda: None  # type: ignore[method-assign]
 b4._place_protection = lambda symbol, intent: True  # type: ignore[method-assign]
 b4._log_order = lambda **kw: logged.append(kw)  # type: ignore[method-assign]
-b4.positions = lambda force=False: [  # type: ignore[method-assign]
+b4.positions = lambda force=False: ([  # type: ignore[method-assign]
     {"symbol": "BTCUSDT", "positionAmt": "0.1", "entryPrice": "100000.0",
      "markPrice": "100000.0", "leverage": "10"}]
+    if state_box["filled"] else [])
 open_intent = TI(symbol="BTCUSDT", action="open", side="LONG", qty=0.1,
                  leverage=10, order_type="MARKET", order_source="ai",
                  stop_loss=98000.0, take_profit=104000.0)

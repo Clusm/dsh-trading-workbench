@@ -71,6 +71,7 @@ SCRIPTS = (
     "scripts/smoke_p2.py",
     "scripts/smoke_profile_isolation.py",
     "scripts/smoke_detached_profiles.py",
+    "scripts/smoke_takeover_compatibility.py",
 )
 # 有意排除 scripts/smoke_p0c.py：第[6]节直接调用 query_symbol_detail /
 # query_symbol_cards 打公共行情接口，无网环境必然以退出码 1 失败。

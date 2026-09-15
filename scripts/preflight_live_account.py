@@ -13,7 +13,10 @@ sys.path.insert(0, str(ROOT / "src"))
 from core.config_loader import load_settings  # noqa: E402
 from core.net_env import apply_proxy_env  # noqa: E402
 from data.rate_limit import configure_rate_limit_state  # noqa: E402
-from exchange.binance_futures import BinanceFuturesBroker  # noqa: E402
+from exchange.binance_futures import (  # noqa: E402
+    BinanceFuturesBroker,
+    assess_takeover_compatibility,
+)
 
 
 class ReadOnlyBroker(BinanceFuturesBroker):
@@ -41,6 +44,11 @@ def main() -> int:
             positions = broker.positions(force=True)
             orders = broker.open_orders()
             algos = broker.open_algo_orders()
+            position_mode = broker._signed("GET", "/fapi/v1/positionSide/dual", {})
+            takeover = assess_takeover_compatibility(
+                position_mode if isinstance(position_mode, dict) else None,
+                positions, orders, algos,
+            )
             result = {
                 "ok": True, "environment": "live", "can_trade": account.get("canTrade"),
                 "wallet_balance": account.get("totalWalletBalance"),
@@ -55,6 +63,7 @@ def main() -> int:
                 "algo_orders": [{k: p.get(k) for k in (
                     "symbol", "side", "positionSide", "orderType", "quantity",
                     "triggerPrice", "reduceOnly", "closePosition", "algoStatus") } for p in algos],
+                "takeover": takeover,
             }
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0

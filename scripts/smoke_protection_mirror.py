@@ -101,6 +101,19 @@ status = mirror.status()
 check("健康状态标记read_enabled", status["read_enabled"] is True)
 check("最新对账与活动单数量可观测", status["active_orders"] == 4 and
       status["last_reconciliation"]["matched"] == 1)
+
+hedge_positions = [
+    {"symbol": "BTCUSDT", "positionSide": "LONG", "positionAmt": "0.1"},
+]
+hedge_algos = [
+    dict(algo(11, "BTCUSDT", "STOP_MARKET", "SELL", "0", "59000"),
+         positionSide="LONG", reduceOnly=False, closePosition=True),
+    dict(algo(12, "BTCUSDT", "TAKE_PROFIT_MARKET", "SELL", "0", "62000"),
+         positionSide="LONG", reduceOnly=False, closePosition=True),
+]
+hedge_result = mirror.reconcile_snapshot(hedge_positions, hedge_algos)
+check("Hedge closePosition保护无需quantity/reduceOnly也算完整覆盖",
+      hedge_result["ok"] is True)
 versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
 check("数据库迁移版本1到16完整", versions == list(range(1, 17)))
