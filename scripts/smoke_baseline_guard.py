@@ -251,5 +251,62 @@ check("无历史快照 -> 视为刚重锚", _baseline_just_reanchored(svc) is Tr
 (tmp / "data" / "capital_state.json").write_text(json.dumps({}), encoding="utf-8")
 check("状态文件无锚点时间 -> 不豁免", _baseline_just_reanchored(svc) is False)
 
+print("\n[13] 实盘首次接入：以真实权益建账，不继承 Demo 的 500U 起点")
+
+
+class FakeLiveBroker(FakeExchangeBroker):
+    def __init__(self, equity_value: float, margin: float = 0.0):
+        super().__init__(equity_value=equity_value)
+        self.mode = "live"
+        self.margin = margin
+
+    @property
+    def state(self):
+        return {
+            "cash": self._equity,
+            "initial_equity": self._equity,
+            "positions": ([{"symbol": "BTCUSDT", "margin": self.margin}]
+                          if self.margin > 0 else []),
+            "wallet_balance": self._equity,
+        }
+
+
+db13 = new_db(tmp, "t13")
+state13 = tmp / "cap13.json"
+live13 = FakeLiveBroker(6.19649879)
+cap13 = CapitalManager(
+    state13, broker=live13, db=db13, initial_equity=INITIAL,
+    max_margin_usage=0.95, anchor_live_to_actual=True,
+)
+saved13 = json.loads(state13.read_text(encoding="utf-8"))
+check("实盘初始权益等于接管时真实权益",
+      abs(cap13.initial_equity - 6.19649879) < 1e-8, str(cap13.initial_equity))
+check("实盘会话权益不再显示 -98% 假亏损",
+      abs(cap13.session_equity() - cap13.initial_equity) < 0.01, str(cap13.session_equity()))
+check("实盘锚点来源已持久化",
+      saved13.get("anchor_source") == "live_account_equity", str(saved13))
+cap13_restart = CapitalManager(
+    state13, broker=FakeLiveBroker(7.5), db=db13, initial_equity=INITIAL,
+    max_margin_usage=0.95, anchor_live_to_actual=True,
+)
+check("重启沿用首次实盘起点",
+      abs(cap13_restart.initial_equity - 6.19649879) < 1e-8,
+      str(cap13_restart.initial_equity))
+
+print("\n[14] 接管未就绪：超上限仓位只报告，不得静默全平")
+db14 = new_db(tmp, "t14")
+live14 = FakeLiveBroker(6.45, margin=8.36)
+cap14 = CapitalManager(
+    tmp / "cap14.json", broker=live14, db=db14, initial_equity=INITIAL,
+    max_margin_usage=0.95, anchor_live_to_actual=True,
+)
+margin14 = cap14.margin_cap_status()
+check("接管预检识别存量保证金超档", margin14.get("breached") is True, str(margin14))
+result14 = cap14.sync(enforce_actions=False)
+check("接管闸门关闭自动动作时未平仓", live14.closed is False, str(result14))
+check("返回值明确标记未执行硬平仓",
+      result14.get("margin_cap_breach") is True
+      and result14.get("margin_cap_enforced") is False, str(result14))
+
 print(f"\n{'=' * 46}\n通过 {ok} / 失败 {fail}\n{'=' * 46}")
 sys.exit(1 if fail else 0)

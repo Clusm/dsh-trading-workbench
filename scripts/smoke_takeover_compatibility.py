@@ -119,4 +119,54 @@ assert blocked["ready"] is False
 assert service.broker.calls == ["compatibility"], service.broker.calls
 assert service.db.events == ["startup_takeover_block"]
 
+
+class _CompatibleLiveBroker:
+    environment = "live"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def takeover_compatibility(self) -> dict[str, object]:
+        self.calls.append("compatibility")
+        return {"ok": True, "position_mode_supported": True, "reason": ""}
+
+    def sync_positions(self) -> None:
+        self.calls.append("sync_positions")
+
+    def sync_protections(self) -> None:
+        self.calls.append("sync_protections")
+
+    def protection_coverage(self) -> dict[str, object]:
+        self.calls.append("protection_coverage")
+        return {"ok": True}
+
+
+class _MarginCap:
+    @staticmethod
+    def margin_cap_status() -> dict[str, object]:
+        return {
+            "evaluated": True,
+            "breached": True,
+            "equity": 6.45,
+            "total_margin": 8.36,
+            "limit": 6.13,
+            "max_margin_usage": 0.95,
+            "reason": "存量总保证金 8.36U 超过风险档上限 6.13U",
+        }
+
+
+service2 = object.__new__(TradingService)
+service2.broker = _CompatibleLiveBroker()
+service2.capital = _MarginCap()
+service2.db = _Db()
+service2._startup_safety = {}
+blocked2 = TradingService._verify_startup_safety(service2)
+assert blocked2["ready"] is False
+assert "超过风险档上限" in str(blocked2["reason"])
+assert service2.broker.calls == [
+    "compatibility", "sync_positions", "sync_protections", "protection_coverage",
+]
+assert blocked2["takeover"]["margin_cap"]["breached"] is True
+assert service2.db.events == ["startup_takeover_block"]
+
 print("SMOKE TAKEOVER COMPATIBILITY PASS")
