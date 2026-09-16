@@ -41,6 +41,22 @@ class AtomicAccountBroker(ActiveBroker):
         return {"totalUnrealizedProfit": 4.0}
 
 
+class OverMarginBroker(FlatBroker):
+    """模拟 AI 通道保证金超限，验证只读同步不会触发市价平仓。"""
+
+    def __init__(self) -> None:
+        self.close_calls: list[str] = []
+
+    @staticmethod
+    def margin_used(channel: str) -> float:
+        return 450.0 if channel == "ai" else 0.0
+
+    def close_source(self, channel: str, _prices: dict[str, float],
+                     _db: AuditDatabase) -> list[dict]:
+        self.close_calls.append(channel)
+        return []
+
+
 ok = fail = 0
 
 
@@ -171,5 +187,18 @@ check("AI取得500，策略分配为0", ai_status["ai"]["equity"] == 500.0
       and ai_status["strategy"]["equity"] == 0.0)
 check("策略不允许新增仓位", ai_status["strategy"]["allow_new"] is False)
 check("AI保证金上限仍是80%", ai_status["ai"]["margin_cap"] == 400.0)
+
+print("\n[6] 接管阻断期通道超限只展示、不自动平仓")
+over_margin_broker = OverMarginBroker()
+over_margin = ChannelManager(tmp / "over_margin.json", over_margin_broker, db,
+                             strategy_weight=0.0, ai_weight=1.0)
+blocked_status = over_margin.sync(session_equity=500.0, read_only=True)
+check("只读同步仍展示保证金超限",
+      blocked_status["ai"]["margin_used"] > blocked_status["ai"]["margin_cap"])
+check("只读同步不调用 close_source", over_margin_broker.close_calls == [],
+      str(over_margin_broker.close_calls))
+over_margin.sync(session_equity=500.0, read_only=False)
+check("接管核验通过后保留原通道强平行为",
+      over_margin_broker.close_calls == ["ai"], str(over_margin_broker.close_calls))
 print(f"\n结果: {ok} 通过 / {fail} 失败")
 raise SystemExit(1 if fail else 0)

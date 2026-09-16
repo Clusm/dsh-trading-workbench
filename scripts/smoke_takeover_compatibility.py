@@ -186,4 +186,34 @@ assert service3.broker.calls == [
 ]
 assert service3.db.events == ["startup_takeover_block"]
 
+
+class _CycleCapital:
+    @staticmethod
+    def session_equity() -> float:
+        return 6.21
+
+
+class _CycleChannels:
+    def __init__(self) -> None:
+        self.read_only_values: list[bool] = []
+
+    def sync(self, _prices: dict[str, float], *, session_equity: float,
+             read_only: bool) -> dict[str, object]:
+        assert session_equity == 6.21
+        self.read_only_values.append(read_only)
+        return {"read_only": read_only}
+
+
+# 接管阻断期只读计算通道状态，不能触发 close_source；核验恢复后保持原自动风控行为。
+service4 = object.__new__(TradingService)
+service4.capital = _CycleCapital()
+service4.channels = _CycleChannels()
+blocked_channels = TradingService._sync_channels_for_cycle(
+    service4, {"BTCUSDT": 50000.0}, {"ready": False})
+ready_channels = TradingService._sync_channels_for_cycle(
+    service4, {"BTCUSDT": 50000.0}, {"ready": True})
+assert blocked_channels["read_only"] is True
+assert ready_channels["read_only"] is False
+assert service4.channels.read_only_values == [True, False]
+
 print("SMOKE TAKEOVER COMPATIBILITY PASS")

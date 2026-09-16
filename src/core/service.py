@@ -758,6 +758,21 @@ class TradingService:
         """看板使用的共享开仓就绪判定。"""
         return self.entry_readiness_snapshot().as_dict()
 
+    def _sync_channels_for_cycle(
+        self, prices: dict[str, float], startup_safety: dict[str, Any],
+    ) -> dict[str, Any]:
+        """同步通道状态，并让通道自动处置服从接管安全闸门。
+
+        启动核验未通过时仍需计算通道权益与保证金，供看板和告警展示；但不得执行
+        ``close_source``、日切重分或熔断状态写入。否则存量仓位可能在“仅保护、禁止
+        新开”的接管阻断期被通道保证金逻辑静默市价平仓。
+        """
+        return self.channels.sync(
+            prices,
+            session_equity=self.capital.session_equity(),
+            read_only=not bool(startup_safety.get("ready", False)),
+        )
+
     def _run_once_inner(self) -> dict[str, Any]:
         run_id = str(uuid.uuid4())
         decision_id = str(uuid.uuid4())
@@ -843,7 +858,7 @@ class TradingService:
         broker_state = self.broker.state if isinstance(self.broker.state, dict) else {}
         position_symbols = [str(p.get("symbol")) for p in broker_state.get("positions", [])]
         pre_prices = get_live_prices(position_symbols) if position_symbols else {}
-        channel_status = self.channels.sync(pre_prices, session_equity=self.capital.session_equity())
+        channel_status = self._sync_channels_for_cycle(pre_prices, startup_safety)
         risk_config = dict(self.settings.raw_risk)
         ch_cfg = self.settings.raw_settings.get("channels", {}) or {}
         risk_config["channel_max_margin_usage"] = float(ch_cfg.get("channel_max_margin_usage", 0.80))
