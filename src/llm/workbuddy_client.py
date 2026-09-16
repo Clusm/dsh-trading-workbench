@@ -11,7 +11,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import tempfile
 import time
 import uuid
 from typing import Any, Callable
@@ -117,6 +116,32 @@ class WorkBuddyLLMClient(LLMClient):
         ]
 
     @staticmethod
+    def _bounded_conversation(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """压缩传给 CLI 的上下文，始终留出 Windows 命令行长度余量。
+
+        CodeBuddy CLI 的 ``--print`` 在 ``--system-prompt-file`` 组合下会退化成
+        interactive session。为避免该路径，把提示作为末尾位置参数传入；Windows 的命令
+        行有约 32K 字符上限，因此只保留每轮决策真正必要的结构化证据。底层 Validator
+        不依赖这里的裁剪文本，任何开仓仍必须通过原始 query evidence 校验。
+        """
+        caps = {"system": 5000, "user": 6500, "assistant": 1200, "tool": 3000}
+        compact: list[dict[str, Any]] = []
+        for item in messages:
+            role = str(item.get("role") or "user")
+            copy = dict(item)
+            content = copy.get("content")
+            if isinstance(content, str):
+                cap = caps.get(role, 2000)
+                if len(content) > cap:
+                    copy["content"] = content[:cap] + "\n[内容已压缩；以本轮工具结果为准]"
+            # 不把上轮模型的 reasoning / 冗余 raw 字段带回去；tool_calls 本身足够让
+            # orchestrator 保持工具协议顺序。
+            if role == "assistant":
+                copy.pop("reasoning_content", None)
+            compact.append(copy)
+        return compact
+
+    @staticmethod
     def _parse_output(stdout: str) -> dict[str, Any]:
         try:
             decoded = json.loads(stdout)
@@ -130,15 +155,7 @@ class WorkBuddyLLMClient(LLMClient):
 
     def _invoke(self, *, prompt: str, schema: dict[str, Any], timeout: float) -> dict[str, Any]:
         self._require_runtime()
-        # 把市场数据放入临时系统提示文件，既避免 Windows 命令行长度上限，也不让模型取得
-        # 任何文件读取能力。文件只在子进程运行窗口内存在，finally 中立即删除。
-        prompt_file: str | None = None
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", suffix=".txt", delete=False,
-            ) as handle:
-                handle.write(prompt)
-                prompt_file = handle.name
             command = [
                 str(self.node_path), str(self.cli_path),
                 "--print", "--model", self.model, "--effort", self.effort,
@@ -150,12 +167,13 @@ class WorkBuddyLLMClient(LLMClient):
                 "--setting-sources", "user", "--no-session-persistence",
                 "--max-turns", "1", "--output-format", "json",
                 "--json-schema", json.dumps(schema, ensure_ascii=False),
-                "--system-prompt-file", prompt_file,
-                "基于系统提示内提供的对话与函数定义，立即调用 StructuredOutput。",
+                # 必须作为末尾位置参数。实测 system-prompt-file 组合会忽略 --print
+                # 并开启交互会话，导致生产慢循环无限等待。
+                prompt,
             ]
             completed = self._runner(
                 command,
-                cwd=tempfile.gettempdir(),
+                cwd=os.getenv("TEMP", r"C:\Windows\Temp"),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -165,13 +183,6 @@ class WorkBuddyLLMClient(LLMClient):
             )
         except subprocess.TimeoutExpired as exc:
             raise LLMTimeBudgetExceeded("WorkBuddy 决策调用超时") from exc
-        finally:
-            if prompt_file:
-                try:
-                    Path(prompt_file).unlink(missing_ok=True)
-                except OSError:
-                    # 文件清理失败不影响 fail-closed 决策；临时目录由系统后续回收。
-                    pass
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip().replace("\n", " ")
             raise WorkBuddyProtocolError(
@@ -199,8 +210,12 @@ class WorkBuddyLLMClient(LLMClient):
             "ALLOWED_FUNCTIONS:\n"
             + json.dumps(self._tool_summaries(tools, names), ensure_ascii=False)
             + "\n\nCONVERSATION:\n"
-            + json.dumps(messages, ensure_ascii=False)
+            + json.dumps(self._bounded_conversation(messages), ensure_ascii=False)
         )
+        # 明确小于 Windows CreateProcess 的 32K UTF-16 命令行上限；超限时宁可安全
+        # 降级，不让 CLI 误解析为交互会话或截断参数。
+        if len(prompt) > 24000:
+            raise WorkBuddyProtocolError("WorkBuddy 决策上下文超过安全命令行上限")
         started = time.monotonic()
         payload = self._invoke(
             prompt=prompt, schema=self._structured_schema(names), timeout=remaining,

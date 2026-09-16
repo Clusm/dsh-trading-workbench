@@ -40,8 +40,7 @@ def test_structured_output_translation() -> None:
     def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         captured["command"] = command
         captured["cwd"] = kwargs.get("cwd")
-        prompt_path = Path(str(command[command.index("--system-prompt-file") + 1]))
-        captured["prompt"] = prompt_path.read_text(encoding="utf-8")
+        captured["prompt"] = command[-1]
         return subprocess.CompletedProcess(
             command, 0,
             stdout=json.dumps([{"type": "result", "structured_output": {
@@ -63,7 +62,7 @@ def test_structured_output_translation() -> None:
     check("仅开放 StructuredOutput", command[command.index("--tools") + 1] == "StructuredOutput")
     check("不加载项目级 WorkBuddy 配置", command[command.index("--setting-sources") + 1] == "user")
     check("禁用外部 MCP", "--strict-mcp-config" in command and "--mcp-config" in command)
-    check("提示文件在调用后删除", not Path(str(command[command.index("--system-prompt-file") + 1])).exists())
+    check("提示作为末尾非交互参数传入", "--system-prompt-file" not in command and command[-1] == captured["prompt"])
     check("模型输入包含既有会话", "CONVERSATION" in str(captured["prompt"]))
 
 
