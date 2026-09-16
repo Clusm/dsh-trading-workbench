@@ -31,10 +31,11 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 
 RISK_CFG = {
     "max_leverage": 20, "ai_max_leverage": 20, "strong_max_leverage": 50,
-    "strong_confidence_threshold": 0.75, "max_open_positions": 8,
+    "strong_confidence_threshold": 0.85, "max_open_positions": 8,
     "max_position_notional": 100000, "max_margin_usage": 0.80,
     "max_risk_per_trade": 0.02, "strong_max_notional": 200000,
-    "strong_max_margin_usage": 0.95,
+    "strong_max_margin_usage": 0.90, "strong_max_risk_per_trade": 0.10,
+    "strong_min_risk_reward": 2.0,
     "supported_symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
 }
 PRICES = {"BTCUSDT": 60000.0, "ETHUSDT": 3000.0, "SOLUSDT": 150.0}
@@ -215,6 +216,25 @@ v2 = evaluate_risk(TradeDecision(decision="open", intents=[
     prices=PRICES, available_cash=200.0, portfolio=portfolio)
 check("全批被拒时 verdict=rejected", v2.verdict == "rejected", v2.verdict)
 check("拒绝原因来自 ActionSpace", any("方向错误" in r for r in v2.reasons), str(v2.reasons))
+
+strong = good_open.model_copy(update={
+    "confidence": 0.90, "qty": 0.01, "stop_loss": 58000.0, "take_profit": 64000.0,
+})
+v_strong = evaluate_risk(
+    TradeDecision(decision="open", intents=[strong]), RISK_CFG, db, rec,
+    "r-strong", "d-strong", True, prices=PRICES, available_cash=200.0,
+    portfolio=portfolio)
+check("强信心档使用10%单笔风险上限", v_strong.verdict == "approved"
+      and abs(v_strong.adjusted_intents[0].qty - 0.01) < 1e-9,
+      f"{v_strong.verdict} {v_strong.reasons}")
+poor_rr = strong.model_copy(update={"take_profit": 63000.0})
+v_poor_rr = evaluate_risk(
+    TradeDecision(decision="open", intents=[poor_rr]), RISK_CFG, db, rec,
+    "r-poor-rr", "d-poor-rr", True, prices=PRICES, available_cash=200.0,
+    portfolio=portfolio)
+check("强信心档RR不足2时拒绝", v_poor_rr.verdict == "rejected"
+      and any("不得使用重仓档" in r for r in v_poor_rr.reasons),
+      f"{v_poor_rr.verdict} {v_poor_rr.reasons}")
 
 print("\n[11] 禁开仓时 risk.py 也应拦住 open，但放行平仓")
 v3 = evaluate_risk(TradeDecision(decision="open", intents=[good_open]), RISK_CFG, db, rec,

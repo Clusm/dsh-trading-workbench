@@ -34,8 +34,11 @@ def evaluate_risk(decision: TradeDecision, risk_config: dict[str, Any],
         strong_threshold = float(risk_config.get("strong_confidence_threshold", 0.75))
         strong_max_leverage = int(risk_config.get("strong_max_leverage", 50))
         strong_max_notional = float(risk_config.get("strong_max_position_notional", 200000))
-        strong_max_margin_usage = float(risk_config.get("strong_max_margin_usage", 0.95))
+        strong_max_margin_usage = float(risk_config.get("strong_max_margin_usage", 0.90))
         max_risk_per_trade = float(risk_config.get("max_risk_per_trade", 0.02))
+        strong_max_risk_per_trade = float(
+            risk_config.get("strong_max_risk_per_trade", max_risk_per_trade))
+        strong_min_risk_reward = float(risk_config.get("strong_min_risk_reward", 2.0))
         ai_max_leverage = int(risk_config.get("ai_max_leverage", 20))
         channel_status = risk_config.get("channel_status") or {}
         needs_reduction = False
@@ -212,12 +215,20 @@ def evaluate_risk(decision: TradeDecision, risk_config: dict[str, Any],
             if risk_per_unit <= 0:
                 failures.append(f"{intent.symbol} 止损方向错误：{intent.side} 入场参考价 {entry_ref}，止损 {intent.stop_loss}")
                 continue
+            reward_per_unit = (tp - entry_ref) if intent.side == "LONG" else (entry_ref - tp)
+            actual_risk_reward = reward_per_unit / risk_per_unit
+            if strong and actual_risk_reward < strong_min_risk_reward:
+                failures.append(
+                    f"{intent.symbol} 强信心档实际风险收益比 {actual_risk_reward:.2f} "
+                    f"低于最低 {strong_min_risk_reward:.2f}，不得使用重仓档")
+                continue
             risk_amount = float(intent.qty) * risk_per_unit
+            risk_limit = strong_max_risk_per_trade if strong else max_risk_per_trade
             if available_cash is not None and available_cash > 0:
                 risk_equity = available_cash
                 if isinstance(ch, dict) and float(ch.get("equity") or 0.0) > 0:
                     risk_equity = min(available_cash, float(ch["equity"]))
-                max_risk_amount = risk_equity * max_risk_per_trade
+                max_risk_amount = risk_equity * risk_limit
                 if risk_amount > max_risk_amount:
                     allowed_qty = max_risk_amount / risk_per_unit
                     if allowed_qty <= 0:
@@ -238,7 +249,11 @@ def evaluate_risk(decision: TradeDecision, risk_config: dict[str, Any],
                 continue
             if downgrade_note:
                 reasons.append(downgrade_note)
-            reasons.append(f"{intent.symbol} 通过({tier_label}, action={action}, confidence={intent.confidence})：价格={price}，名义={notional:.2f}，保证金={margin:.2f}，leverage={intent.leverage}")
+            reasons.append(
+                f"{intent.symbol} 通过({tier_label}, action={action}, confidence={intent.confidence})："
+                f"价格={price}，名义={notional:.2f}，保证金={margin:.2f}，"
+                f"leverage={intent.leverage}，RR={actual_risk_reward:.2f}，"
+                f"单笔风险上限={risk_limit:.1%}")
             adjusted.append(intent)
 
         if adjusted:

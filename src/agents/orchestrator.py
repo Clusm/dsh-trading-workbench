@@ -80,6 +80,7 @@ def _slim_risk_envelope(risk_envelope: dict[str, Any] | None) -> dict[str, Any]:
     keep = {
         "max_leverage", "ai_max_leverage", "ai_strong_max_leverage",
         "strong_max_leverage", "strong_confidence_threshold",
+        "strong_max_risk_per_trade", "strong_min_risk_reward",
         "max_open_positions", "max_risk_per_trade", "allow_bare_position",
     }
     return {k: v for k, v in (risk_envelope or {}).items() if k in keep}
@@ -467,7 +468,7 @@ intents 仅在 decision != no_trade 时填写。每个 intent 字段：
 4. trade_level: 15分钟及以上级别交易填 "short"，小时及以上级别交易填 "hourly"。系统不做 1 分钟级高频，不要试图开分钟级短线仓。
 5. trading_quota 只是已成交统计，不是目标、下限或催单信号；不得为了提高交易次数而降低证据标准。
 6. no_trade 与 open/close/reduce/adjust 同等有效。没有完整、相互一致且新鲜的证据时必须 no_trade；不得因连续空窗、模拟盘或查询预算尚有剩余而凑单。
-7. 强信心档：如果你对某个机会有强烈信心（confidence >= 0.75），可以使用更高杠杆和更高仓位（参考 risk_envelope 里的 strong_max_*），但必须同时设置止损 stop_loss；没有设置止损时只能按常规限制执行。
+7. 强信心档：只有 confidence 达到 risk_envelope.strong_confidence_threshold、设置有效止损止盈且实际风险收益比达到 strong_min_risk_reward，才可使用 strong_max_risk_per_trade；否则只能使用常规档，禁止为了扩大仓位虚报 confidence。
 8. 新开仓必须同时设置初始止损 stop_loss 和初始止盈 take_profit，且方向正确：LONG 需 stop_loss<入场价<take_profit，SHORT 需 take_profit<入场价<stop_loss。缺止盈或止损的单会被风控直接拒绝。
 8.1 止盈止损必须基于明确的技术分析理论给出，禁止拍脑袋填数字。可选依据（任选其一并在 reasoning 里写明）：ATR 波动止损（如 1.5~2 倍 ATR）、前高/前低结构位、关键支撑/阻力位、斐波那契回撤位、移动平均线、布林带上下轨、成交密集区/流动性区间。reasoning 必须写清「用什么理论 + 为什么这个价位」。
 8.2 已有持仓的止损止盈不要无意义微调：只有当价格突破了某个关键技术位、趋势结构发生实质变化、或持仓盈亏/时间因素需要收紧保护时，才允许用 adjust 调整 SL/TP。单纯因为「价格动了一点」就去重设一个几乎相同的止损，属于无效操作，禁止这样做。若你认为当前止损仍然有效，position_reviews 应给 hold，不要发 adjust intent。

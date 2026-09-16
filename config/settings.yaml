@@ -137,10 +137,10 @@ channels:
   rebalance_time_utc: "00:00"
   daily_tz: UTC
   # 通道保证金上限 = 通道权益 * channel_max_margin_usage
-  channel_max_margin_usage: 0.80
+  channel_max_margin_usage: 0.90
   # AI 自决策通道当日亏损熔断线（按 UTC 日，相对当日初始权益）
   ai_daily_loss_stop: 0.30
-  # AI 单杠杆由 AI 自己选择：常规档 20x 封顶；强信心档（confidence>=阈值且带止损）最高 25x
+  # AI 单杠杆由 AI 自己选择：常规档 20x 封顶；强信心档（confidence>=0.85、带止损且RR>=2）最高 25x
   ai_max_leverage: 20
   ai_strong_max_leverage: 25
   # AI 决策单默认逐仓
