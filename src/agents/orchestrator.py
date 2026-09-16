@@ -473,7 +473,7 @@ intents 仅在 decision != no_trade 时填写。每个 intent 字段：
 8.1 止盈止损必须基于明确的技术分析理论给出，禁止拍脑袋填数字。可选依据（任选其一并在 reasoning 里写明）：ATR 波动止损（如 1.5~2 倍 ATR）、前高/前低结构位、关键支撑/阻力位、斐波那契回撤位、移动平均线、布林带上下轨、成交密集区/流动性区间。reasoning 必须写清「用什么理论 + 为什么这个价位」。
 8.2 已有持仓的止损止盈不要无意义微调：只有当价格突破了某个关键技术位、趋势结构发生实质变化、或持仓盈亏/时间因素需要收紧保护时，才允许用 adjust 调整 SL/TP。单纯因为「价格动了一点」就去重设一个几乎相同的止损，属于无效操作，禁止这样做。若你认为当前止损仍然有效，position_reviews 应给 hold，不要发 adjust intent。
 9. 你可以下限价单：order_type=LIMIT 时必须同时给出 limit_price 和 limit_expires_at（ISO8601 UTC），例如 2025-08-31T12:00:00Z；否则会被拒绝。
-10. 所有你产出的订单 order_source 一律填 "ai"，margin_mode 默认填 "ISOLATED"。单笔最大风险不超过会话权益的 2%，超过时风控会自动缩减数量。
+10. 所有你产出的订单 order_source 一律填 "ai"，margin_mode 默认填 "ISOLATED"。普通档单笔风险上限由 max_risk_per_trade 决定；只有满足强信心档全部条件时才可使用 strong_max_risk_per_trade，超过时风控会自动缩减数量。
 11. 如果 portfolio 中某 symbol 已经存在 source=strategy 的仓位，本轮不要对该 symbol 开新仓，避免与策略通道冲突。
 12. 如果 supported_symbols 列表非空，你只能交易该列表内的 symbol；列表为空时也以 query_top_symbols / 实际下单结果为准，不要使用无法成交的虚构 symbol。
 13. 每轮必须通过 submit_decision 的 position_reviews 字段对当前每个持仓明确表态
@@ -819,6 +819,20 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
     query_details: dict[str, dict[str, Any]] = {}
     force_submit = False
     decision_was_downgraded = False
+    # 空仓且允许开仓时启用最低研究流程。提示词里的“先查询”只是软约束，模型可能
+    # 直接 submit no_trade，形成“因为没细节所以不查、因为没查所以永远没细节”的闭环。
+    # 这里把宽扫与至少一次逐币深挖变成工具协议级阶段门禁；研究完成后仍完全允许
+    # no_trade，不把“必须研究”偷换成“必须下单”。持仓管理轮不强制研究，避免延误退出。
+    portfolio_positions = list((portfolio or {}).get("positions") or [])
+    minimum_research_required = bool(
+        action_space is not None
+        and action_space.allow_new
+        and not portfolio_positions
+        and query_budget >= 2
+    )
+    research_cards_done = False
+    research_detail_done = False
+    research_failed = False
 
     for round_no in range(MAX_ROUNDS):
         started = time.monotonic()
@@ -835,8 +849,14 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                     f"LLM total time budget exceeded ({total_timeout_seconds:g}s)"
                 )
             # 预算耗尽后把模型钉死在 submit_decision 上，保证本轮一定有结论而不是拖成 no_trade
-            choice: Any = ({"type": "function", "function": {"name": "submit_decision"}}
-                           if (force_submit or is_final_round) else "auto")
+            if force_submit or is_final_round:
+                choice: Any = {"type": "function", "function": {"name": "submit_decision"}}
+            elif minimum_research_required and not research_failed and not research_cards_done:
+                choice = {"type": "function", "function": {"name": "query_symbol_cards"}}
+            elif minimum_research_required and not research_failed and not research_detail_done:
+                choice = {"type": "function", "function": {"name": "query_symbol_detail"}}
+            else:
+                choice = "auto"
             raw = call_chat(
                 llm, messages, tools=tools, tool_choice=choice,
                 deadline=deadline, purpose="decision",
@@ -986,18 +1006,25 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                             if s and s not in queried:
                                 queried.append(s)
                         if isinstance(result, dict) and not result.get("error"):
+                            if fname == "query_symbol_cards":
+                                research_cards_done = True
                             if fname == "query_symbol_detail":
                                 symbol = str(result.get("symbol") or "").strip().upper()
                                 quality = result.get("data_quality")
                                 if symbol and isinstance(quality, dict):
                                     query_evidence[symbol] = dict(quality)
                                     query_details[symbol] = dict(result)
+                                    research_detail_done = True
                             result["_budget"] = {
                                 "used": query_used,
                                 "limit": query_budget,
                                 "queried": list(queried),
                                 "note": "以上为本轮已查询品种，直接复用结论，不要重复查询",
                             }
+                        elif fname in {"query_symbol_cards", "query_symbol_detail"}:
+                            # 查询失败时不把模型困在强制查询循环里；下一轮开放安全提交，
+                            # 任何 open 仍会被 query provenance 硬校验拒绝。
+                            research_failed = True
                         if time.monotonic() >= deadline:
                             force_submit = True
                             result = {

@@ -24,8 +24,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 SRC = ROOT / "src" / "agents" / "orchestrator.py"
 
-OLD_LINE = 'if (force_submit or is_final_round) else "auto")'
-NEW_LINE = 'if force_submit else "auto")'
+OLD_LINE = "if force_submit or is_final_round:"
+NEW_LINE = "if force_submit:"
 OLD_STRICT = "strict = submit_attempts <= MAX_STRICT_SUBMITS and not is_final_round"
 NEW_STRICT = "strict = submit_attempts <= MAX_STRICT_SUBMITS"
 
