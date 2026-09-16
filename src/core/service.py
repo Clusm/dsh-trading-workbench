@@ -271,6 +271,7 @@ class TradingService:
         self._account_risk_status: dict[str, Any] = {}
         self._started_at = time.time()
         self._last_release_observation_minute: str | None = None
+        self._evidence_thread: threading.Thread | None = None
         self._last_fast_cycle_at: float | None = None
         self._last_fast_cycle_error: str | None = None
         self._last_fast_cycle_duration_ms: float | None = None
@@ -344,8 +345,32 @@ class TradingService:
         cfg["release_id"] = getattr(self, "release_id", "legacy")
         return cfg
 
+    def _fast_cycle_freshness(self, fast_at: float | None, fast_error: str | None) -> str:
+        """按 stability 阈值判定快循环时效，与看板 ``dashboard.health`` 同一口径。
+
+        原来的判定只看心跳字段是否存在，快循环停摆十分钟也会写成 healthy —— 发布
+        门禁只统计 ``health_state='healthy'`` 的分钟，于是停摆期会被记成有效证据。
+        这里改为比较心跳时间：超过 ``stability.fast_cycle_stale_seconds`` 记为
+        ``stale``；从未完成且已超出 ``startup_grace_seconds`` 记为 ``missing``。
+        """
+        if fast_error:
+            return "degraded"
+        stability_cfg = self.settings.raw_settings.get("stability", {}) or {}
+        now = time.time()
+        if fast_at is not None:
+            limit = max(1.0, float(stability_cfg.get("fast_cycle_stale_seconds", 120)))
+            return "healthy" if now - float(fast_at) <= limit else "stale"
+        grace = max(1.0, float(stability_cfg.get("startup_grace_seconds", 120)))
+        started = float(getattr(self, "_started_at", now))
+        # 启动宽限期内尚未完成过快循环属正常启动过程，不作为失健康证据。
+        return "unknown" if now - started <= grace else "missing"
+
     def _record_release_observation(self) -> None:
-        """每个 UTC 分钟保存一次运行证据；只读采集内存/状态，不发网络请求。"""
+        """每个 UTC 分钟保存一次运行证据；只读采集内存/状态，不发网络请求。
+
+        健康判定取自真实心跳，因此采样本身准时并不等于证据有效：快循环停摆的分钟
+        会记为 degraded 并从覆盖率里剔除，符合“缺失分钟不得记为健康”。
+        """
         writer = getattr(self.db, "log_release_observation", None)
         if not callable(writer):
             return
@@ -369,14 +394,17 @@ class TradingService:
                 self.db.fetch_one("SELECT 1")
             except Exception:
                 persistence_ok = False
+            fast_state = self._fast_cycle_freshness(fast_at, fast_error)
             components = {
                 "service": "stopped" if closed else "healthy",
-                "fast_cycle": "degraded" if fast_error else ("healthy" if fast_at else "unknown"),
+                "fast_cycle": fast_state,
                 "slow_cycle": "degraded" if slow_error else ("healthy" if slow_at else "unknown"),
                 "persistence": "healthy" if persistence_ok else "degraded",
             }
+            # 与看板时效判定保持同源：宽限期内的 unknown 不算失健康，stale/missing 算。
             health_state = "healthy" if (
-                not closed and persistence_ok and not fast_error and not slow_error
+                not closed and persistence_ok and not slow_error
+                and fast_state in {"healthy", "unknown"}
             ) else "degraded"
             scope = getattr(self, "trading_scope", None)
             scope_hash = getattr(scope, "scope_hash", "unknown")
@@ -1070,6 +1098,12 @@ class TradingService:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._loop, args=(interval_minutes,), daemon=True)
         self._thread.start()
+        # 发布证据采样独立成线程并与分钟边界对齐：挂在交易快循环上会随循环变慢而
+        # 整分钟丢样本，使 7 天覆盖率门禁在结构上不可达。
+        if not (self._evidence_thread and self._evidence_thread.is_alive()):
+            self._evidence_thread = threading.Thread(
+                target=self._evidence_loop, name="release-evidence", daemon=True)
+            self._evidence_thread.start()
         if self.intel_sidecar.enabled and not (self._intel_thread and self._intel_thread.is_alive()):
             self._intel_thread = threading.Thread(
                 target=self._intel_loop, name="readonly-intel-sidecar", daemon=True)
@@ -1115,14 +1149,49 @@ class TradingService:
                 and review_worker.is_alive()):
             review_worker.join(timeout=max(0.0, deadline - time.monotonic()))
         review_alive = bool(review_worker and review_worker.is_alive())
-        return not scheduler_alive and not worker_alive and not intel_alive and not review_alive
+        # 采样线程在 _stop_event 上等待，停止信号已置位，正常情况下立即退出。
+        evidence_worker = getattr(self, "_evidence_thread", None)
+        if (evidence_worker and evidence_worker is not threading.current_thread()
+                and evidence_worker.is_alive()):
+            evidence_worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        evidence_alive = bool(evidence_worker and evidence_worker.is_alive())
+        return (not scheduler_alive and not worker_alive and not intel_alive
+                and not review_alive and not evidence_alive)
+
+    @staticmethod
+    def _next_evidence_boundary(now: datetime) -> float:
+        """返回距离下一个 UTC 分钟边界的秒数，用于把采样对齐到分钟。
+
+        采样对齐是覆盖率门禁成立的前提：原实现挂在交易快循环上，循环一慢就整分钟
+        没有采样（实测出现过 123 秒间隔，直接缺掉 16:06 整分钟）。门禁要求 7 天
+        ≥99.9%，即 10080 分钟里最多缺 10 分钟，任何分钟级抖动都会超标。
+        """
+        boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        return max(0.05, (boundary - now).total_seconds())
+
+    def _evidence_loop(self) -> None:
+        """独立线程按分钟边界采集发布证据；失败不终止线程。
+
+        与交易快循环解耦，使证据频率不再受单轮快循环耗时影响。采样准时不代表证据
+        有效：健康状态仍由 ``_record_release_observation`` 依据真实心跳判定。
+        """
+        while not self._stop_event.is_set():
+            if self._stop_event.wait(self._next_evidence_boundary(datetime.now(timezone.utc))):
+                return
+            try:
+                self._record_release_observation()
+            except Exception:
+                # 证据采集失败不得终止线程，也不得影响交易循环；单次失败会体现在
+                # 缺失分钟上，由覆盖率门禁暴露。
+                continue
 
     def _loop(self, interval_minutes: float) -> None:
         fast_interval = float(self.settings.raw_settings.get("decision_cycle", {}).get("fast_interval_seconds", 30))
         next_slow = time.monotonic()
         while not self._stop_event.is_set():
             # 发布门禁依赖连续、按版本隔离的运行证据；该写入只读内存/状态，
-            # 不会触发行情、账户或订单网络请求。
+            # 不会触发行情、账户或订单网络请求。主责采样在 _evidence_loop，
+            # 这里保留一次作为冗余（同分钟写入由 observed_minute 幂等去重）。
             self._record_release_observation()
             # SQLite在线备份包含WAL内容；频率门禁在manager内部，循环检查成本近似为零。
             self.db_backup.maybe_backup()
