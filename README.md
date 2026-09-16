@@ -4,11 +4,18 @@
 白名单，默认连接 Binance Demo Trading；AI 生成候选决策，确定性代码负责风控、幂等
 下单、保护单、账户对账和完整审计。
 
-当前资金核算以 500 U 为会话起点。Web3 与市场微观结构情报处于只读影子阶段，执行权重
-固定为 0，不会改变现有风险档或交易决策。
+Demo 资金核算以 500 U 为会话起点；live 使用首次接管时的真实账户权益独立建账，不继承
+Demo 基线。Web3 与市场微观结构情报处于只读影子阶段，执行权重固定为 0，不会改变现有
+风险档或交易决策。
 
 LLM 默认通过 SenseNova OpenAI 兼容网关调用 `deepseek-v4-flash`。本机凭据建议放在
 `.env.local`；该文件后加载并覆盖 `.env`，两者均不会进入 Git。
+
+实盘 `ai_trader` 可通过显式进程变量临时切换到 WorkBuddy 内置
+`deepseek-v4.1-flash`。该适配器只开放结构化输出，不向 WorkBuddy 提供文件、终端、MCP、
+浏览器或 Binance 权限；行情查询、证据校验、风控、签名和下单仍由本系统确定性链路完成。
+技术与回退说明见
+[`docs/WorkBuddy_DeepSeek_V4.1_实盘决策适配说明_2026-09-16.md`](docs/WorkBuddy_DeepSeek_V4.1_实盘决策适配说明_2026-09-16.md)。
 
 ## 快速开始
 
@@ -25,9 +32,11 @@ Copy-Item .env.example .env
 维护重构前后可用 `scripts/benchmark_runtime_baseline.py` 做同机离线性能对照；结果不代表
 交易所网络性能，也不会改变风险或执行阈值。
 
-控制台地址：`http://127.0.0.1:8000`。
+双控制台地址：Demo 为 `http://127.0.0.1:8000`，live 为
+`http://127.0.0.1:8001`。两个 profile 使用独立账本；同一出口的公共行情限流状态有意共享。
 
-正式无人值守运行使用 Windows SCM 托管入口，不与 `run_web.py`、Popen/WMI 入口并行：
+正式无人值守运行应使用 Windows SCM 托管入口，不与 `run_web.py`、Popen/WMI 入口并行。
+当前项目按用户决定暂缓 SCM 安装，现有双控制台属于受监控的临时运行方式：
 
 ```powershell
 .venv\Scripts\python.exe scripts\validate_windows_service_plan.py `
@@ -57,7 +66,8 @@ SCM 服务复用 `scripts/run_web.py` 的统一生命周期；`start_web_detache
 - 快循环每 30 秒运行：账户/订单/保护单对账与存量仓位安全检查。
 - `strategy` 通道消费内置策略运行时生成的确定性策略票据；研究仓库不参与生产导入。
 - `ai` 通道使用 LLM 和白名单行情工具形成候选决策。
-- 当前所有实际 LLM 节点统一使用 `deepseek-v4-flash`；Risk/Execution 是确定性代码。
+- 默认 LLM 节点使用 `deepseek-v4-flash`；实盘试用时仅 `ai_trader` 可显式切换到
+  WorkBuddy `deepseek-v4.1-flash`，Risk/Execution 始终是确定性代码。
 - AI 决策节点使用 SenseNova 支持的最高 `xhigh` 推理档；其他节点按职责使用 low/high。
 - 所有新开仓必须携带初始止损和止盈，并依次经过证据契约、影子决策质量、
   组合状态、ActionSpace、RiskGuard、运行时签名和 Outbox。Broker 会拒绝未签名开仓。
@@ -109,6 +119,11 @@ SCM 服务复用 `scripts/run_web.py` 的统一生命周期；`start_web_detache
 # 显式联网验证 LLM 文本与 Function Calling（会产生一次小额 API 调用）
 .venv\Scripts\python.exe scripts\verify_llm_provider.py
 
+# 显式验证 WorkBuddy 的受限工具协议（不读取账户、不调用 Binance、不下单）
+$env:MTA_AI_DECISION_PROVIDER="workbuddy"
+.venv\Scripts\python.exe scripts\verify_llm_provider.py
+Remove-Item Env:MTA_AI_DECISION_PROVIDER
+
 # 安装精确锁定的运行依赖和开发工具
 .venv\Scripts\pip.exe install -r requirements-dev-lock.txt
 ```
@@ -129,6 +144,9 @@ SCM 服务复用 `scripts/run_web.py` 的统一生命周期；`start_web_detache
   `diag_*`、`verify_*_live` 不进入默认 CI，`cleanup_*`/`repair_*` 必须先预览并做后置核验；
 - `docs`：架构、运行恢复、维护规范和历史设计记录。
 
+文档入口与新旧状态以 [`docs/文档索引.md`](docs/文档索引.md) 为准；日期型计划和事故报告
+用于保留决策背景，不应覆盖 README、项目说明书和运行手册中的当前行为。
+
 USD-M 回放位于 `src/core/usdm_replay.py` 和 `src/core/strategy_evaluation.py`，支持重复
 开仓加权、部分平仓余量、费用/资金费/滑点及信号到成交延迟归因。事故夹具必须去敏、
 带内容哈希并显式声明数据覆盖。仓库同时保留合成边界样本与 9 月 7 日真实审计成交导出的
@@ -137,6 +155,7 @@ USD-M 回放位于 `src/core/usdm_replay.py` 和 `src/core/strategy_evaluation.p
 
 进一步阅读：
 
+- [文档索引](docs/文档索引.md)
 - [项目说明书](docs/项目说明书.md)
 - [运行与故障恢复手册](docs/运行与故障恢复手册_2026-09-06.md)
 - [问题盘点与整改状态](docs/项目问题盘点与优化计划_2026-09-07.md)
