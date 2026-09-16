@@ -12,7 +12,7 @@
     "risk.max_drawdown_from_peak": 0.3,
     "risk.allow_bare_position": true,
     "risk.stale_data_block_seconds": 60,
-    "risk.strong_confidence_threshold": 0.85,
+    "risk.strong_confidence_threshold": 0.65,
     "risk.strong_max_leverage": 50,
     "risk.strong_max_margin_usage": 0.9,
     "risk.strong_max_position_notional": 200000,
@@ -54,5 +54,5 @@
       "DOTUSDT"
     ]
   },
-  "sha256": "efa4823555c93fc9a5e85f11e920c8ebf88a4e8a349b47858fcf4adfab3df03e"
+  "sha256": "333d6a6b1e324cfa6721bc7a3b2dc56f5997530633903f4605e386e6bf392a61"
 }

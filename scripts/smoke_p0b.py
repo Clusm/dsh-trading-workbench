@@ -31,7 +31,7 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 
 RISK_CFG = {
     "max_leverage": 20, "ai_max_leverage": 20, "strong_max_leverage": 50,
-    "strong_confidence_threshold": 0.85, "max_open_positions": 8,
+    "strong_confidence_threshold": 0.65, "max_open_positions": 8,
     "max_position_notional": 100000, "max_margin_usage": 0.80,
     "max_risk_per_trade": 0.02, "strong_max_notional": 200000,
     "strong_max_margin_usage": 0.90, "strong_max_risk_per_trade": 0.10,
