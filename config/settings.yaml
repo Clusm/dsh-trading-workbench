@@ -88,6 +88,13 @@ llm:
     queue_poll_seconds: 0.25
     queue_deadline_seconds: 30
   default_429_cooldown_seconds: 5
+  # WorkBuddy 的 DeepSeek 仅能经 MTA_AI_DECISION_PROVIDER=workbuddy 显式启用，且只
+  # 作用于 ai_trader。它没有任何项目文件、终端、浏览器或 Binance 工具权限，输出仍须
+  # 经过本系统的行情证据、ActionSpace、风控和订单执行门禁。
+  workbuddy:
+    model: deepseek-v4.1-flash
+    timeout_seconds: 90
+    effort: max
 
 execution:
   default_mode: demo

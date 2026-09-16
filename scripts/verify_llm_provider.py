@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -15,10 +16,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from core.config_loader import load_settings  # noqa: E402
 from llm.factory import build_llm_for_agent  # noqa: E402
 from llm.mock_client import MockLLMClient  # noqa: E402
+from llm.workbuddy_client import WorkBuddyLLMClient  # noqa: E402
 
 
 def main() -> int:
-    """校验所有 LLM 节点模型一致，并完成一次强制工具调用。"""
+    """校验默认提供方，或显式 WorkBuddy 决策适配器的工具协议。"""
     settings = load_settings(PROJECT_ROOT)
     agent_names = [
         "strategy_trader",
@@ -30,15 +32,26 @@ def main() -> int:
     ]
     clients = {name: build_llm_for_agent(settings, name) for name in agent_names}
     models = {model for _, model in clients.values()}
-    if models != {"deepseek-v4-flash"}:
-        raise RuntimeError(f"LLM 模型未统一：{sorted(models)}")
     client = clients["ai_trader"][0]
+    workbuddy_enabled = os.getenv("MTA_AI_DECISION_PROVIDER", "").strip().lower() == "workbuddy"
+    if workbuddy_enabled:
+        if not isinstance(client, WorkBuddyLLMClient):
+            raise RuntimeError("已请求 WorkBuddy，但 ai_trader 没有载入受限适配器")
+        if clients["ai_trader"][1] != "deepseek-v4.1-flash":
+            raise RuntimeError(f"WorkBuddy 模型不正确：{clients['ai_trader'][1]}")
+        # 只允许自主决策通道切换；其它节点必须继续沿用原供应商，避免一次试用扩大范围。
+        others = {model for name, (_, model) in clients.items() if name != "ai_trader"}
+        if others != {"deepseek-v4-flash"}:
+            raise RuntimeError(f"WorkBuddy 试用意外影响其它 Agent：{sorted(others)}")
+    elif models != {"deepseek-v4-flash"}:
+        raise RuntimeError(f"LLM 模型未统一：{sorted(models)}")
     if isinstance(client, MockLLMClient):
         raise RuntimeError("当前配置回退到 Mock，请检查本机 SenseNova 凭据")
-    # 验收只需确认协议能力，不应沿用生产 Agent 的大输出预算。
-    client.max_tokens = 128
-    if client.reasoning_effort != "xhigh":
-        raise RuntimeError(f"AI 决策推理档不是 xhigh：{client.reasoning_effort}")
+    if not workbuddy_enabled:
+        # 验收只需确认协议能力，不应沿用生产 Agent 的大输出预算。
+        client.max_tokens = 128
+        if client.reasoning_effort != "xhigh":
+            raise RuntimeError(f"AI 决策推理档不是 xhigh：{client.reasoning_effort}")
 
     response = client.chat(
         [{"role": "user", "content": "调用工具检查 BTCUSDT"}],
@@ -62,9 +75,12 @@ def main() -> int:
     if not calls:
         raise RuntimeError("供应商返回成功，但没有生成要求的工具调用")
     echoed_model = str(response.get("model") or "")
-    if echoed_model and echoed_model != "deepseek-v4-flash":
+    expected_model = "deepseek-v4.1-flash" if workbuddy_enabled else "deepseek-v4-flash"
+    if echoed_model and echoed_model != expected_model:
         raise RuntimeError(f"供应商模型回显不一致：{echoed_model}")
-    print(f"LLM PROVIDER OK model=deepseek-v4-flash agents={len(agent_names)} tool_calls={len(calls)}")
+    provider = "workbuddy" if workbuddy_enabled else "sensenova"
+    print(f"LLM PROVIDER OK provider={provider} model={expected_model} "
+          f"agents={len(agent_names)} tool_calls={len(calls)}")
     return 0
 
 

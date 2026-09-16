@@ -9,6 +9,7 @@ from llm.base import LLMClient
 from llm.mock_client import MockLLMClient
 from llm.openai_compatible_client import OpenAICompatibleLLMClient
 from llm.request_coordinator import configure_default_coordinator
+from llm.workbuddy_client import WorkBuddyLLMClient
 
 
 def _agent_cfg(settings: Settings, agent_name: str) -> dict[str, Any]:
@@ -20,6 +21,18 @@ def _agent_cfg(settings: Settings, agent_name: str) -> dict[str, Any]:
 
 def build_llm_for_agent(settings: Settings, agent_name: str) -> tuple[LLMClient, str]:
     base = settings.llm_config
+    # WorkBuddy 是桌面端编码 Agent，不可作为通用供应商替换。仅当明确的进程环境变量
+    # 开启时，才把 ai_trader 接到其受限 StructuredOutput 适配器；这让 Demo、情报摘要
+    # 与复盘仍使用原有 SenseNova 链路，也避免配置文件误改后静默进入实盘。
+    decision_provider = os.getenv("MTA_AI_DECISION_PROVIDER", "").strip().lower()
+    if agent_name == "ai_trader" and decision_provider == "workbuddy":
+        wb_cfg = base.get("workbuddy", {}) or {}
+        client = WorkBuddyLLMClient(
+            model=str(wb_cfg.get("model", "deepseek-v4.1-flash")),
+            timeout_seconds=float(wb_cfg.get("timeout_seconds", 90)),
+            effort=str(wb_cfg.get("effort", "max")),
+        )
+        return client, client.model
     coordinator_cfg = base.get("coordinator", {}) or {}
     coordinator = configure_default_coordinator(
         max_concurrency=int(coordinator_cfg.get("max_concurrency", 1)),
