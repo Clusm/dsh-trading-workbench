@@ -25,8 +25,8 @@ profile 与端口
 用法
 ----
     python scripts/start_web_detached.py                             # demo，127.0.0.1:8000
-    python scripts/start_web_detached.py --profile live              # live，127.0.0.1:8001
-    python scripts/start_web_detached.py --profile live --port 9001  # 显式端口覆盖默认值
+    python scripts/start_web_detached.py --profile live --egress-id 162.248.75.128
+    python scripts/start_web_detached.py --profile live --port 9001 --egress-id 162.248.75.128
     python scripts/start_web_detached.py --proxy http://127.0.0.1:10808
     python scripts/start_web_detached.py --no-proxy                  # 不设代理，直连
 """
@@ -64,7 +64,7 @@ def log_path_for(project_root: Path, profile: str) -> Path:
     return project_root / "data" / "web_console.log"
 
 
-def build_env(proxy: str | None) -> dict[str, str]:
+def build_env(proxy: str | None, egress_id: str | None = None) -> dict[str, str]:
     """构造子进程环境。
 
     代理必须显式写进环境：项目里所有 httpx 调用都靠 trust_env 读环境变量，
@@ -88,6 +88,9 @@ def build_env(proxy: str | None) -> dict[str, str]:
     env["NO_PROXY"] = "127.0.0.1,localhost"
     env["no_proxy"] = "127.0.0.1,localhost"
     env["PYTHONUNBUFFERED"] = "1"
+    if egress_id:
+        # 公开出口标识进入发布清单，供 418/429 观察窗按出口归因；不是交易凭据。
+        env["MTA_EGRESS_ID"] = str(egress_id).strip()
     return env
 
 
@@ -110,9 +113,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--proxy", default="http://127.0.0.1:10808",
                         help="HTTP(S) 出口代理，默认 http://127.0.0.1:10808")
     parser.add_argument("--no-proxy", action="store_true", help="不设置代理，直连")
+    parser.add_argument(
+        "--egress-id", default=None,
+        help="已核验的公网出口标识；live 必填，也可由 MTA_EGRESS_ID 提供",
+    )
     args = parser.parse_args(argv)
 
     port = resolve_port(args.profile, args.port)
+    egress_id = str(args.egress_id or os.getenv("MTA_EGRESS_ID", "")).strip()
+    if args.profile == "live" and not egress_id:
+        parser.error("live 启动必须提供 --egress-id 或 MTA_EGRESS_ID，禁止发布清单使用 unknown")
 
     if already_listening(port):
         print(f"profile={args.profile} 端口 {port} 已在监听，跳过启动")
@@ -130,13 +140,14 @@ def main(argv: list[str] | None = None) -> int:
     cmd = [python_exe, "-u", str(entry),
            "--profile", args.profile, "--host", args.host, "--port", str(port)]
 
-    env = build_env(None if args.no_proxy else args.proxy)
+    env = build_env(None if args.no_proxy else args.proxy, egress_id or None)
 
     # 日志以追加方式打开，避免重启丢失历史
     log_file = open(log_path, "a", encoding="utf-8")
     log_file.write(f"\n===== 启动 {time.strftime('%Y-%m-%d %H:%M:%S')} "
                    f"profile={args.profile} port={port} "
-                   f"proxy={'none' if args.no_proxy else args.proxy} =====\n")
+                   f"proxy={'none' if args.no_proxy else args.proxy} "
+                   f"egress_id={egress_id or 'unknown'} =====\n")
     log_file.flush()
 
     creationflags = 0

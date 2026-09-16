@@ -159,6 +159,7 @@ service2 = object.__new__(TradingService)
 service2.broker = _CompatibleLiveBroker()
 service2.capital = _MarginCap()
 service2.db = _Db()
+service2.release_manifest = {"egress_id": "test-egress"}
 service2._startup_safety = {}
 blocked2 = TradingService._verify_startup_safety(service2)
 assert blocked2["ready"] is False
@@ -168,5 +169,21 @@ assert service2.broker.calls == [
 ]
 assert blocked2["takeover"]["margin_cap"]["breached"] is True
 assert service2.db.events == ["startup_takeover_block"]
+
+# live 可继续同步持仓与保护，但出口身份未知时必须阻止新增仓位，避免把不同公网出口的
+# 418/429 观察证据混在同一个发布批次里。
+service3 = object.__new__(TradingService)
+service3.broker = _CompatibleLiveBroker()
+service3.capital = _MarginCap()
+service3.db = _Db()
+service3.release_manifest = {"egress_id": "unknown"}
+service3._startup_safety = {}
+blocked3 = TradingService._verify_startup_safety(service3)
+assert blocked3["ready"] is False
+assert "MTA_EGRESS_ID" in str(blocked3["reason"])
+assert service3.broker.calls == [
+    "compatibility", "sync_positions", "sync_protections", "protection_coverage",
+]
+assert service3.db.events == ["startup_takeover_block"]
 
 print("SMOKE TAKEOVER COMPATIBILITY PASS")

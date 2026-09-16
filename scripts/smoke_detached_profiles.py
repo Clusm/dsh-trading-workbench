@@ -257,7 +257,10 @@ check("子进程无缓冲输出", demo.env.get("PYTHONUNBUFFERED") == "1")
 check("端口确认采用 0.5 秒轮询", demo.sleeps == [0.5], str(demo.sleeps))
 
 print("\n[2] live 默认：端口 8001、日志 data/live/web_console.log")
-live = run_launcher(["--profile", "live"], responses=[False, True])
+live = run_launcher(
+    ["--profile", "live", "--egress-id", "162.248.75.128"],
+    responses=[False, True],
+)
 check("live 启动返回 0", live.code == 0, str(live.code))
 check("命令行显式携带 --profile live", flag_value(live.cmd, "--profile") == "live", str(live.cmd))
 check("live 默认端口 8001 显式传给子进程", flag_value(live.cmd, "--port") == "8001")
@@ -271,9 +274,16 @@ check("live 日志头标注 profile 与端口",
 check("输出 live 日志绝对路径",
       str(live.root / "data" / "live" / "web_console.log") in live.stdout)
 check("输出 live 访问地址", "http://127.0.0.1:8001" in live.stdout)
+check("live 出口标识注入子进程环境",
+      live.env.get("MTA_EGRESS_ID") == "162.248.75.128")
+check("live 日志标注出口身份",
+      "egress_id=162.248.75.128" in (live.live_log or ""))
 
 print("\n[3] 显式 --port 覆盖 profile 默认端口")
-override = run_launcher(["--profile", "live", "--port", "9123"], responses=[False, True])
+override = run_launcher(
+    ["--profile", "live", "--port", "9123", "--egress-id", "test-egress"],
+    responses=[False, True],
+)
 check("显式端口透传给子进程", flag_value(override.cmd, "--port") == "9123", str(override.cmd))
 check("端口参数唯一且未被追加默认值", override.cmd.count("--port") == 1)
 check("探活使用显式端口 9123",
@@ -289,7 +299,8 @@ check("日志仍在 data/web_console.log",
       demo_port.demo_log is not None and demo_port.live_log is None)
 
 print("\n[5] 已在监听：按解析后的实际端口跳过启动")
-already = run_launcher(["--profile", "live"], responses=[True])
+already = run_launcher(
+    ["--profile", "live", "--egress-id", "test-egress"], responses=[True])
 check("已监听时返回 0", already.code == 0, str(already.code))
 check("只探活一次且端口为 8001", already.attempts == [("127.0.0.1", 8001)],
       str(already.attempts))
@@ -307,7 +318,10 @@ check("错误信息列出可选档位",
       "invalid choice" in invalid.stderr and "paper" in invalid.stderr, invalid.stderr)
 
 print("\n[7] 子进程提前退出：返回 1 并指向 live 日志")
-exited = run_launcher(["--profile", "live"], responses=[False, False], returncode=1)
+exited = run_launcher(
+    ["--profile", "live", "--egress-id", "test-egress"],
+    responses=[False, False], returncode=1,
+)
 check("子进程退出时启动器返回 1", exited.code == 1, str(exited.code))
 check("提示退出码与 live 日志路径",
       "进程已退出" in exited.stdout
@@ -325,5 +339,14 @@ check("直连开关显式置 1", direct.env.get("MTA_NO_PROXY") == "1")
 check("四种代理变量全部清除", all(key not in direct.env for key in PROXY_KEYS))
 check("回环地址仍排除代理", direct.env.get("NO_PROXY") == "127.0.0.1,localhost")
 check("日志头记录 proxy=none", "proxy=none" in (direct.demo_log or ""))
+
+print("\n[9] live 缺少出口身份在创建进程前 fail-closed")
+with proxy_env(MTA_EGRESS_ID=""):
+    missing_egress = run_launcher(["--profile", "live"], responses=[])
+check("缺出口身份以参数错误拒绝", missing_egress.code == 2, str(missing_egress.code))
+check("缺出口身份不探端口也不创建子进程",
+      not missing_egress.attempts and not missing_egress.calls)
+check("错误信息明确要求 MTA_EGRESS_ID",
+      "MTA_EGRESS_ID" in missing_egress.stderr, missing_egress.stderr)
 
 print(f"\n结果: {passed} 通过 / 0 失败")

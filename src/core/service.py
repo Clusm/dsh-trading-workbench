@@ -994,6 +994,23 @@ class TradingService:
                                            details=result["reason"], action_taken="block new opens")
                     return result
             if str(getattr(self.broker, "environment", "paper") or "paper") == "live":
+                egress_id = str(
+                    (getattr(self, "release_manifest", {}) or {}).get("egress_id") or "unknown"
+                ).strip()
+                if not egress_id or egress_id.lower() == "unknown":
+                    result = {
+                        "ready": False,
+                        "reason": "实盘发布清单缺少已核验出口标识 MTA_EGRESS_ID",
+                        "checked_at": now,
+                        "takeover": compatibility,
+                    }
+                    self._startup_safety = result
+                    self.db.log_risk_event_once_while_open(
+                        event_type="startup_takeover_block", severity="critical",
+                        details=result["reason"],
+                        action_taken="protect positions; block new opens until egress is identified",
+                    )
+                    return result
                 margin_cap = self.capital.margin_cap_status()
                 if compatibility is not None:
                     compatibility = dict(compatibility)
