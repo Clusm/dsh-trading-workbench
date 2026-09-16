@@ -32,9 +32,17 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(target)
 
 
+def _default_db(environment: str) -> Path:
+    """按运行剖面选择只读报告默认账本，避免 live 误读 Demo 库。"""
+    if str(environment or "").strip().lower() == "live":
+        return ROOT / "data" / "live" / "agent_trader.sqlite"
+    return ROOT / "data" / "agent_trader.sqlite"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="只读生成按 release_id 隔离的上线门禁报告")
-    parser.add_argument("--db", type=Path, default=ROOT / "data" / "agent_trader.sqlite")
+    parser.add_argument("--db", type=Path, default=None,
+                        help="数据库路径；省略时按 environment 选择 Demo/Live 账本")
     parser.add_argument("--manifest", type=Path, default=None,
                         help="由 release_manifest 生成的 JSON 清单")
     parser.add_argument("--environment", default="demo")
@@ -45,17 +53,18 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=None,
                         help="可选报告输出路径；只写报告，不写数据库")
     args = parser.parse_args()
+    db_path = args.db if args.db is not None else _default_db(args.environment)
     try:
         if args.manifest is None:
             if args.strict:
                 raise ValueError("--strict requires --manifest")
             from report_demo_acceptance import build_report
-            report = build_report(args.db)
+            report = build_report(db_path)
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0
         manifest = _load_json(args.manifest)
         report = build_release_readiness_report(
-            args.db, manifest, environment=args.environment,
+            db_path, manifest, environment=args.environment,
             since=args.since, until=args.until,
         )
         if args.out:
