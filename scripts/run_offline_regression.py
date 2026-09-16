@@ -44,6 +44,7 @@ SCRIPTS = (
     "scripts/smoke_llm_coordinator.py",
     "scripts/smoke_llm_deadline.py",
     "scripts/smoke_workbuddy_adapter.py",
+    "scripts/smoke_minimum_research_gate.py",
     "scripts/smoke_review_worker.py",
     "scripts/smoke_trade_reconciliation.py",
     "scripts/smoke_trade_lifecycle.py",
@@ -78,12 +79,46 @@ SCRIPTS = (
     "scripts/smoke_detached_profiles.py",
     "scripts/smoke_takeover_compatibility.py",
 )
-# 有意排除 scripts/smoke_p0c.py：第[6]节直接调用 query_symbol_detail /
-# query_symbol_cards 打公共行情接口，无网环境必然以退出码 1 失败。
-# 待该节改为离线替身后再纳入统一回归。
+EXCLUDED_SMOKE_SCRIPTS = {
+    # 第[6]节直接调用 query_symbol_detail/query_symbol_cards 打公共行情接口，
+    # 无网环境必然失败；待改为离线替身后再纳入统一回归。
+    "scripts/smoke_p0c.py",
+}
+
+
+def _validate_smoke_manifest() -> None:
+    """确保新增冒烟脚本不会悄悄逃离统一离线回归。"""
+    discovered = {
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for path in (PROJECT_ROOT / "scripts").glob("smoke_*.py")
+        if path.is_file()
+    }
+    listed = {
+        Path(name).as_posix()
+        for name in SCRIPTS
+        if Path(name).name.startswith("smoke_")
+    }
+    excluded = {Path(name).as_posix() for name in EXCLUDED_SMOKE_SCRIPTS}
+    problems: list[str] = []
+    missing = sorted(discovered - listed - excluded)
+    stale = sorted(listed - discovered)
+    stale_exclusions = sorted(excluded - discovered)
+    overlap = sorted(listed & excluded)
+    if missing:
+        problems.append("未登记冒烟脚本: " + ", ".join(missing))
+    if stale:
+        problems.append("清单引用不存在: " + ", ".join(stale))
+    if stale_exclusions:
+        problems.append("例外引用不存在: " + ", ".join(stale_exclusions))
+    if overlap:
+        problems.append("同时登记和排除: " + ", ".join(overlap))
+    if problems:
+        raise RuntimeError("；".join(problems))
+    print(f"SMOKE MANIFEST OK included={len(listed)} excluded={len(excluded)}")
 
 
 def main() -> int:
+    _validate_smoke_manifest()
     env = os.environ.copy()
     env["EXECUTION_MODE"] = "paper"
     env.pop("MTA_PROFILE", None)
