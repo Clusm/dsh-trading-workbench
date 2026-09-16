@@ -205,13 +205,23 @@ def probe_disk(data_root: Path, db_file: Path) -> dict[str, Any]:
         return {"available": False, "detail": f"{type(exc).__name__}: {exc}"}
 
 
-def probe_latest_observation(conn: sqlite3.Connection) -> dict[str, Any] | None:
+def probe_latest_observation(
+    conn: sqlite3.Connection, environment: str | None = None,
+) -> dict[str, Any] | None:
     """读取最新一条运行证据（observed_at / 快循环状态 / 就绪快照）。"""
     try:
-        row = conn.execute(
-            "SELECT observed_at, component_status_json, entry_readiness_json, environment "
-            "FROM release_observations ORDER BY observed_at DESC LIMIT 1"
-        ).fetchone()
+        if environment:
+            row = conn.execute(
+                "SELECT observed_at, component_status_json, entry_readiness_json, environment "
+                "FROM release_observations WHERE environment=? "
+                "ORDER BY observed_at DESC LIMIT 1",
+                (str(environment).lower(),),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT observed_at, component_status_json, entry_readiness_json, environment "
+                "FROM release_observations ORDER BY observed_at DESC LIMIT 1"
+            ).fetchone()
     except Exception:
         return None
     if not row:
@@ -271,7 +281,8 @@ def _fast_cycle_reasons(obs: dict[str, Any] | None) -> list[str]:
 
 
 def _protection_reasons(conn: sqlite3.Connection, environment: str,
-                         config: HealthWatchConfig, now: float) -> list[str]:
+                         config: HealthWatchConfig, now: float,
+                         service_started_at: float | None = None) -> list[str]:
     """数据过期（保护单对账）：复用 ``freshness_health_reasons`` 与
     ``protection_reconcile_stale_seconds`` 阈值。paper 环境无交易所镜像，恒为已验证，
     不触发（与 service._mirror_fact 对 paper 返回 True 一致）。
@@ -290,10 +301,12 @@ def _protection_reasons(conn: sqlite3.Connection, environment: str,
         "last_reconcile_at": protection["last_reconcile_at"],
         "last_error": protection["error"],
     }
-    # runtime 传「早已启动」的 started_at：本函数只关心 protection 段的原因码，
-    # 但 started_at 必须早过 startup_grace，否则 freshness_health_reasons 会把
-    # 「从未对账」抑制为宽限期内正常启动（与长期运行的服务语义一致）。
-    runtime = {"started_at": now - max(3600.0, 10.0 * config.startup_grace_seconds)}
+    # 有可验证的进程启动时间时复用 Dashboard 的启动宽限；只有锁文件缺失/损坏时
+    # 才按长期运行处理。这样刚启动、首轮保护对账尚未完成时不会误发故障告警。
+    started_at = service_started_at
+    if started_at is None:
+        started_at = now - max(3600.0, 10.0 * config.startup_grace_seconds)
+    runtime = {"started_at": started_at}
     reasons = freshness_health_reasons(runtime, protection_dict, stability, now=now)
     return [r for r in reasons if r.startswith("protection_reconcile_")]
 
@@ -362,9 +375,19 @@ def evaluate_health(config: HealthWatchConfig, *, now: float | None = None) -> H
             disk = {"available": False, "detail": f"{type(exc).__name__}: {exc}"}
         if conn is not None:
             try:
-                obs = probe_latest_observation(conn)
+                obs = probe_latest_observation(conn, config.environment)
                 if obs is not None:
                     observed_at = obs.get("observed_at")
+
+                started_at = proc.get("started_at") if proc.get("alive") is True else None
+                startup_age = (
+                    now - float(started_at)
+                    if isinstance(started_at, (int, float)) else None
+                )
+                in_startup_grace = bool(
+                    startup_age is not None
+                    and 0.0 <= startup_age <= max(0.0, config.startup_grace_seconds)
+                )
 
                 fc = _fast_cycle_reasons(obs)
                 if fc:
@@ -372,9 +395,12 @@ def evaluate_health(config: HealthWatchConfig, *, now: float | None = None) -> H
 
                 protection = probe_protection(conn, config.environment)
                 de: list[str] = list(
-                    _protection_reasons(conn, config.environment, config, now))
+                    _protection_reasons(
+                        conn, config.environment, config, now,
+                        service_started_at=(float(started_at) if started_at is not None else None),
+                    ))
                 # 证据流自身过期（独立探针）：服务挂起但未释放锁也会落入此分支。
-                if obs is None:
+                if obs is None and not in_startup_grace:
                     de.append("observation_stale")
                 elif observed_at is not None and (now - observed_at) > config.observation_stale_seconds:
                     de.append("observation_stale")

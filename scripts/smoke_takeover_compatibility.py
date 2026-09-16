@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from core.service import TradingService  # noqa: E402
+from core.release_manifest import build_release_manifest  # noqa: E402
 from exchange.binance_futures import (  # noqa: E402
     BinanceFuturesBroker,
     assess_takeover_compatibility,
@@ -215,5 +217,15 @@ ready_channels = TradingService._sync_channels_for_cycle(
 assert blocked_channels["read_only"] is True
 assert ready_channels["read_only"] is False
 assert service4.channels.read_only_values == [True, False]
+
+# 出口身份属于网络稳定性观察窗口的一部分；更换出口必须自动生成新发布批次，
+# 不能把两个公网出口的 418/429 证据拼接在同一 release_id 下。
+with tempfile.TemporaryDirectory(prefix="mta-release-egress-") as tmp:
+    release_root = Path(tmp)
+    first_release = build_release_manifest(
+        release_root, environment="live", egress_id="162.248.75.128")
+    second_release = build_release_manifest(
+        release_root, environment="live", egress_id="203.0.113.8")
+assert first_release.release_id != second_release.release_id
 
 print("SMOKE TAKEOVER COMPATIBILITY PASS")

@@ -164,12 +164,12 @@ def build_release_manifest(
     model_hash = _normalised_file_hash(root, model_files)
     schema_version = _schema_version(Path(db_file) if db_file else None)
     safe_account_ref = account_reference(env, account_ref)
+    safe_egress_id = str(egress_id or "unknown").strip()[:160]
     release_seed = "|".join((
         env, content_hash, dependency_hash, strategy_hash, model_hash,
-        str(schema_version), str(threshold_version),
+        str(schema_version), str(threshold_version), safe_egress_id,
     ))
     safe_release_id = str(release_id or f"rel-{_sha256_bytes(release_seed.encode('utf-8'))[:20]}")[:160]
-    safe_egress_id = str(egress_id or "unknown").strip()[:160]
     return ReleaseManifest(
         manifest_schema=1,
         release_id=safe_release_id,

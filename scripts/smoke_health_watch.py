@@ -119,13 +119,14 @@ def _insert_protection(conn, *, checked_at, matched, environment="live"):
     conn.commit()
 
 
-def _write_lock(data_live: Path, *, pid: int | None):
+def _write_lock(data_live: Path, *, pid: int | None, started_at: float | None = None):
     if pid is None:
         if data_live.joinpath("trading_service.lock").exists():
             data_live.joinpath("trading_service.lock").unlink()
         return
     data_live.joinpath("trading_service.lock").write_text(
-        json.dumps({"pid": pid, "started_at": _iso_str(time.time())}),
+        json.dumps({"pid": pid, "started_at": _iso_str(
+            time.time() if started_at is None else started_at)}),
         encoding="utf-8")
 
 
@@ -226,7 +227,7 @@ def main() -> None:
     _insert_observation(conn, observed_at=now, fast_cycle="healthy")
     # 不插入 protection_reconciliations 行 -> 从未对账
     conn.close()
-    _write_lock(data_live, pid=os.getpid())
+    _write_lock(data_live, pid=os.getpid(), started_at=now - 1000)
     res = evaluate_health(_base_config(project))
     check("保护单从未对账 触发 protection_reconcile_never_completed",
           "protection_reconcile_never_completed" in res.reasons, str(res.reasons))
@@ -238,6 +239,30 @@ def main() -> None:
     _write_lock(data_live, pid=os.getpid())
     res = evaluate_health(_base_config(project))
     check("证据流过期 触发 observation_stale",
+          "observation_stale" in res.reasons, str(res.reasons))
+
+    conn = _fresh_db(data_live)
+    conn.close()  # 刚启动，首条观察和首次保护对账都尚未写入
+    _write_lock(data_live, pid=os.getpid(), started_at=now)
+    res = evaluate_health(_base_config(project), now=now + 10)
+    check("启动宽限内空证据库不误报 observation_stale",
+          "observation_stale" not in res.reasons, str(res.reasons))
+    check("启动宽限内未完成保护对账不误报",
+          "protection_reconcile_never_completed" not in res.reasons, str(res.reasons))
+
+    _write_lock(data_live, pid=os.getpid(), started_at=now - 1000)
+    res = evaluate_health(_base_config(project), now=now)
+    check("启动宽限结束后空证据库 fail-closed",
+          {"observation_stale", "protection_reconcile_never_completed"}.issubset(res.reasons),
+          str(res.reasons))
+
+    conn = _fresh_db(data_live)
+    _insert_observation(conn, observed_at=now, fast_cycle="healthy", environment="demo")
+    _insert_protection(conn, checked_at=now, matched=1, environment="live")
+    conn.close()
+    _write_lock(data_live, pid=os.getpid(), started_at=now - 1000)
+    res = evaluate_health(_base_config(project), now=now)
+    check("不同环境的证据不能串入 live 健康判定",
           "observation_stale" in res.reasons, str(res.reasons))
 
     # --- 4. 磁盘不可用 ------------------------------------------------------
