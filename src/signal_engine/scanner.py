@@ -263,7 +263,7 @@ class SignalScanner:
 
     def scan(self, now: datetime | None = None,
              scan_symbols: list[str] | None = None) -> list[dict[str, Any]]:
-        """扫描全部 final 策略卡，返回新触发的 ticket dict 列表。"""
+        """扫描全部 final 策略卡，并返回本轮所有仍可评估的 ticket。"""
         self._load_strategy_lab()
         now = now or utc_now()
         state = self._load_state()
@@ -288,6 +288,18 @@ class SignalScanner:
         # 发射的 open ticket 永久滞留。扫描开始时统一收口历史过期票据。
         expire = getattr(self.db, "expire_open_signal_tickets", None)
         expired_tickets = int(expire(now.isoformat())) if callable(expire) else 0
+        fetch_open = getattr(self.db, "fetch_open_signal_tickets", None)
+        if callable(fetch_open):
+            active = fetch_open(now.isoformat())
+            # scan_symbols 是业务开仓白名单；历史 ticket 也不能绕过它。
+            tickets.extend(
+                ticket for ticket in active
+                if scan_symbols is None
+                or str(ticket.get("symbol") or "").upper().strip() in allowed_symbols
+            )
+        active_ticket_ids = {
+            str(ticket.get("ticket_id") or "") for ticket in tickets if ticket.get("ticket_id")
+        }
 
         for card in cards:
             if not card.get("indicatorized"):
@@ -311,7 +323,7 @@ class SignalScanner:
                     symbol = str(raw).upper().strip()
                     if not symbol.endswith("USDT"):
                         continue
-                    if allowed_symbols and symbol not in allowed_symbols:
+                    if scan_symbols is not None and symbol not in allowed_symbols:
                         continue
                     if symbol not in symbols_to_scan:
                         symbols_to_scan.append(symbol)
@@ -379,7 +391,7 @@ class SignalScanner:
                         ticket = self._make_ticket(card, symbol, tf, side,
                                                    signal_id, signal_price,
                                                    signal_time, bar_open_ms, f)
-                        if ticket is None:
+                        if ticket is None or datetime.fromisoformat(ticket["expires_at"]) <= now:
                             continue
 
                         if self.db:
@@ -413,12 +425,18 @@ class SignalScanner:
                                     status="open",
                                     raw=ticket,
                                 )
+                            else:
+                                # 已有信号只能由上面的 open 查询回灌，不能重建已关闭票据。
+                                seen[dedup_key] = {"signal_id": signal_id, "ts": utc_now().isoformat()}
+                                continue
                             seen[dedup_key] = {"signal_id": signal_id, "ts": utc_now().isoformat()}
                             state["seen"] = seen
                             self._save_state(state)
                         else:
                             seen[dedup_key] = {"signal_id": signal_id, "ts": utc_now().isoformat()}
-                        tickets.append(ticket)
+                        if str(ticket.get("ticket_id") or "") not in active_ticket_ids:
+                            tickets.append(ticket)
+                            active_ticket_ids.add(str(ticket.get("ticket_id") or ""))
                     except Exception as e:
                         scan_had_error = True
                         scan_errors.append(

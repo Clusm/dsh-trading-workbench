@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
+from core.signal_ticket import ticket_order_id, valid_signal_ticket
+
 from audit.normalization import clean_price, risk_incident_identity, strongest_severity
 from audit.migrations import apply_migration
 
@@ -1931,11 +1933,58 @@ class AuditDatabase:
         with self.lock:
             cursor = self.conn.execute(
                 """UPDATE signal_tickets SET status='expired', updated_at=?
-                   WHERE status='open' AND expires_at < ?""",
+                   WHERE status='open' AND (julianday(expires_at) <= julianday(?)
+                       OR julianday(expires_at) IS NULL)""",
                 (utc_now(), now),
             )
             self.conn.commit()
         return int(cursor.rowcount)
+
+    def signal_ticket_has_order(self, ticket_id: str) -> bool:
+        """Any persisted submission consumes the ticket, including UNKNOWN and terminal orders."""
+        cid = ticket_order_id(ticket_id)
+        return bool(self.fetch_one(
+            "SELECT 1 FROM orders WHERE ticket_id=? OR client_order_id=? "
+            "OR client_order_id GLOB ? LIMIT 1", (ticket_id, cid, cid + "-[0-9]*"),
+        ) or self.fetch_one(
+            "SELECT 1 FROM order_outbox WHERE client_order_id=? "
+            "OR client_order_id GLOB ? LIMIT 1", (cid, cid + "-[0-9]*"),
+        ))
+
+    def fetch_open_signal_tickets(self, now_iso: str | None = None) -> list[dict[str, Any]]:
+        """读取仍有效的 open ticket，供后续扫描周期继续评估入场区。
+
+        ticket 的完整运行时结构保存在 raw_json；数据库列覆盖其中的生命周期字段，
+        防止旧 raw 与 status/价格区间更新不一致。损坏的 raw_json 按 fail-closed 跳过。
+        """
+        now = str(now_iso or utc_now())
+        rows = self.fetch_all(
+            """SELECT ticket_id,signal_id,strategy_id,symbol,side,signal_time,signal_price,
+                      entry_zone_low,entry_zone_high,expires_at,stop_loss_pct,
+                      take_profit_pct,time_stop_hours,status,raw_json
+                 FROM signal_tickets
+                WHERE status='open' AND julianday(expires_at) > julianday(?)
+                ORDER BY id ASC""",
+            (now,),
+        )
+        tickets: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["raw_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            for key in (
+                "ticket_id", "signal_id", "strategy_id", "symbol", "side",
+                "signal_time", "signal_price", "entry_zone_low", "entry_zone_high",
+                "expires_at", "stop_loss_pct", "take_profit_pct", "time_stop_hours",
+            ):
+                payload[key] = row[key]
+            if (valid_signal_ticket(payload, datetime.fromisoformat(now.replace("Z", "+00:00")))
+                    and not self.signal_ticket_has_order(str(payload["ticket_id"]))):
+                tickets.append(payload)
+        return tickets
 
     def update_order(self, *, client_order_id: str, status: str,
                      price: float | None = None) -> None:

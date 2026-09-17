@@ -95,6 +95,20 @@ llm:
     model: deepseek-v4.1-flash
     timeout_seconds: 90
     effort: max
+  # 仅 ai_trader 可显式启用的备用供应商。默认关闭；开启时主供应商不做内部重试，
+  # 429/5xx/网络故障会在同一绝对 deadline 内切到 OpenCode Zen。鉴权/参数错误不切换。
+  decision_fallback:
+    provider_env: MTA_AI_DECISION_FALLBACK_PROVIDER
+    api_key_env: OPENCODE_API_KEY
+    base_url_env: OPENCODE_BASE_URL
+    model_env: OPENCODE_MODEL
+    default_base_url: https://opencode.ai/zen/v1
+    default_model: union-alpha
+    primary_max_retries: 0
+    max_retries: 0
+    timeout_seconds: 90
+    min_remaining_seconds: 15
+    default_429_cooldown_seconds: 5
 
 execution:
   default_mode: demo

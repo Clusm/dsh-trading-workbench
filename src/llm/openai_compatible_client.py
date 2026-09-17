@@ -94,6 +94,11 @@ class OpenAICompatibleLLMClient(LLMClient):
                     self.provider_scope, purpose=request_purpose,
                     priority=priority, deadline=deadline,
                 ):
+                    if deadline is not None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise LLMTimeBudgetExceeded("LLM total time budget exceeded during admission")
+                        request_timeout = min(request_timeout, remaining)
                     with httpx.Client(
                         timeout=request_timeout,
                         trust_env=self._trust_env,

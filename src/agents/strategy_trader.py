@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from audit.database import AuditDatabase
+from core.signal_ticket import ticket_order_id, valid_signal_ticket
 from data.market_query import get_live_prices
 
 from .models import ChannelDecision, TradeIntent
@@ -31,9 +32,9 @@ def _not_expired(ticket: dict[str, Any], now: datetime | None = None) -> bool:
     now = now or utc_now()
     try:
         expires = datetime.fromisoformat(str(ticket["expires_at"]).replace("Z", "+00:00"))
-    except Exception:
-        return True
-    return expires >= now
+        return expires.tzinfo is not None and expires > now
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def build_intent_from_ticket(ticket: dict[str, Any], price: float,
@@ -68,6 +69,7 @@ def build_intent_from_ticket(ticket: dict[str, Any], price: float,
         strategy_id=str(ticket.get("strategy_id", "")),
         signal_id=str(ticket.get("signal_id", "")),
         ticket_id=str(ticket.get("ticket_id", "")),
+        client_order_id=ticket_order_id(str(ticket["ticket_id"])),
         entry_mode="market",
         sl_pct=sl_pct,
         tp_pct=tp_pct,
@@ -108,6 +110,8 @@ def run_strategy_trader(*, tickets: list[dict[str, Any]],
     margin_cap = strategy_equity * 0.80
 
     now = utc_now()
+    tickets = [ticket for ticket in tickets if valid_signal_ticket(ticket, now)
+               and (db is None or not db.signal_ticket_has_order(str(ticket["ticket_id"])))]
     allowed_set = ({str(s).strip().upper() for s in allowed_symbols if s}
                    if allowed_symbols is not None else None)
     symbols = [str(t["symbol"]).strip().upper() for t in tickets

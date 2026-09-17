@@ -6,8 +6,10 @@ import json
 import sys
 import tempfile
 import warnings
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
 import numpy as np
@@ -19,10 +21,13 @@ warnings.filterwarnings("ignore", category=PerformanceWarning)
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from agents.strategy_trader import _not_expired, run_strategy_trader  # noqa: E402
 from audit.database import AuditDatabase  # noqa: E402
 from core.config_loader import load_settings  # noqa: E402
+from core.signal_ticket import ticket_order_id  # noqa: E402
 from data.market_universe import MarketUniverse  # noqa: E402
 from data.rate_limit import PublicMarketCooldown  # noqa: E402
+from exchange.order_outbox import OrderOutbox  # noqa: E402
 from signal_engine import SignalScanner  # noqa: E402
 import signal_engine.scanner as scanner_module  # noqa: E402
 
@@ -68,7 +73,8 @@ def no_signal(frame: pd.DataFrame, _params: dict) -> pd.DataFrame:
 
 
 def main() -> None:
-    settings = load_settings(ROOT)
+    with patch("core.config_loader.load_dotenv"):
+        settings = load_settings(ROOT)
     with tempfile.TemporaryDirectory(prefix="mta-signal-smoke-") as tmp:
         scanner = SignalScanner(
             knowledge_dir=settings.knowledge_dir,
@@ -282,6 +288,100 @@ def main() -> None:
         assert db.expire_open_signal_tickets("2026-09-07T00:00:00+00:00") == 1
         row = db.fetch_one("SELECT status FROM signal_tickets WHERE ticket_id='old-ticket'")
         assert row["status"] == "expired"
+        db.close()
+    # 跨周期回灌、白名单、严格过期和丢失扫描状态后的数据库去重。
+    with tempfile.TemporaryDirectory(prefix="mta-signal-replay-") as tmp:
+        root = Path(tmp)
+        card = {"id": "replay", "indicatorized": True, "signal_fn": "trigger",
+                "symbols": ["BTCUSDT"], "timeframes": ["1h"],
+                "exits": {"sl_pct": 0.03, "tp_pct": 0.08}}
+        (root / "strategy_cards.json").write_text(json.dumps({"cards": [card]}), encoding="utf-8")
+        db = AuditDatabase(root / "audit.sqlite")
+        replay = SignalScanner(knowledge_dir=root, strategy_lab_src="unused",
+                               state_file=root / "state.json", db=db)
+        replay._registry = {"trigger": lambda frame, _: pd.DataFrame(
+            {"signal": 1, "side": "LONG"}, index=frame.index)}
+        replay._features_mod = SimpleNamespace(
+            clear_feature_cache=lambda: None,
+            build_features=lambda frame: frame.assign(
+                adx_14=20.0, rsi_14=50.0, ema_200=3000.0, macd_signal=1.0, atr_14=10.0))
+        frame = scanner_ohlcv()
+        now = (frame.index[-1] + pd.Timedelta(hours=1)).to_pydatetime()
+        with patch.object(scanner_module, "fetch_klines", return_value=frame) as fetch:
+            first = replay.scan(now=now, scan_symbols=["BTCUSDT"])
+            assert len(first) == 1, first
+            ticket = first[0]
+            for _ in range(2):
+                assert replay.scan(now=now, scan_symbols=[" btcusdt "]) == first
+            assert replay.scan(now=now, scan_symbols=["ETHUSDT"]) == []
+            fetch.reset_mock()
+            assert replay.scan(now=now, scan_symbols=[]) == []
+            fetch.assert_not_called()
+            (root / "state.json").unlink()
+            assert replay.scan(now=now, scan_symbols=["BTCUSDT"]) == first
+            assert db.fetch_one("SELECT COUNT(*) n FROM signal_tickets")["n"] == 1
+            for status in ["consumed", "expired", "rejected"]:
+                db.update_signal_ticket(ticket_id=ticket["ticket_id"], status=status)
+                (root / "state.json").unlink()
+                assert replay.scan(now=now, scan_symbols=["BTCUSDT"]) == []
+            db.update_signal_ticket(ticket_id=ticket["ticket_id"], status="open")
+            # scan_symbols=None 不做白名单过滤，open 票据照常回灌。
+            assert replay.scan(now=now, scan_symbols=None) == first
+            # 已递交订单（orders 行或 outbox UNKNOWN）的 ticket 不得再次回灌执行。
+            cid = ticket_order_id(ticket["ticket_id"])
+            future = dict(ticket, expires_at=(datetime.now(timezone.utc)
+                                              + timedelta(hours=1)).isoformat())
+            prices = {"BTCUSDT": float(future["signal_price"])}
+            assert run_strategy_trader(tickets=[future], prices=prices, db=db).intents
+            db.log_order(client_order_id=cid, exchange_order_id=None, symbol="BTCUSDT",
+                         side="LONG", order_type="MARKET", qty=0.01, price=3000.0,
+                         status="NEW", order_source="strategy", strategy_id="replay",
+                         ticket_id=future["ticket_id"])
+            assert db.signal_ticket_has_order(future["ticket_id"])
+            assert db.fetch_open_signal_tickets(now.isoformat()) == []
+            (root / "state.json").unlink()
+            assert replay.scan(now=now, scan_symbols=["BTCUSDT"]) == []
+            assert run_strategy_trader(tickets=[future], prices=prices, db=db).intents == []
+            db.conn.execute("DELETE FROM orders")
+            db.conn.commit()
+            outbox = OrderOutbox(db, environment="demo")
+            outbox.prepare(client_order_id=f"{cid}-1", symbol="BTCUSDT", side="LONG",
+                           position_side="LONG", order_type="MARKET", purpose="ENTRY",
+                           qty=0.01, price=None, reduce_only=False,
+                           endpoint="/fapi/v1/order", request={"newClientOrderId": f"{cid}-1"})
+            outbox.mark_unknown(f"{cid}-1", RuntimeError("offline"))
+            assert db.signal_ticket_has_order(future["ticket_id"])
+            assert db.fetch_open_signal_tickets(now.isoformat()) == []
+            assert run_strategy_trader(tickets=[future], prices=prices, db=db).intents == []
+            db.conn.execute("DELETE FROM order_outbox")
+            db.conn.commit()
+            assert replay.scan(now=now, scan_symbols=["BTCUSDT"]) == first
+            # 无时区或无法解析的失效时间必须 fail-closed。
+            assert not _not_expired(dict(future, expires_at="2030-01-01T00:00:00"))
+            assert not _not_expired({"expires_at": "not-a-time"})
+            expiry = pd.Timestamp(ticket["expires_at"]).to_pydatetime()
+            assert replay.scan(now=expiry, scan_symbols=["BTCUSDT"]) == []
+            assert db.fetch_one("SELECT status FROM signal_tickets")["status"] == "expired"
+            (root / "state.json").unlink()
+            assert replay.scan(now=expiry, scan_symbols=["BTCUSDT"]) == []
+        # 带时区偏移的绝对时间必须正确比较，损坏 raw 不能作为票据回灌。
+        db.conn.execute("UPDATE signal_tickets SET status='open', expires_at=?",
+                        ((pd.Timestamp(now) + pd.Timedelta(hours=1)).tz_convert("Asia/Shanghai").isoformat(),))
+        db.conn.commit()
+        assert len(db.fetch_open_signal_tickets(now.isoformat())) == 1
+        db.conn.execute("UPDATE signal_tickets SET raw_json='not-json'")
+        db.conn.commit()
+        assert db.fetch_open_signal_tickets(now.isoformat()) == []
+        # 无时区或损坏的失效时间不回灌；无法解析的时间在收口时按过期关闭。
+        db.conn.execute("UPDATE signal_tickets SET raw_json=?, expires_at='2030-01-01T00:00:00'",
+                        (json.dumps(ticket),))
+        db.conn.commit()
+        assert db.fetch_open_signal_tickets(now.isoformat()) == []
+        db.conn.execute("UPDATE signal_tickets SET expires_at='not-a-time'")
+        db.conn.commit()
+        assert db.fetch_open_signal_tickets(now.isoformat()) == []
+        assert db.expire_open_signal_tickets(now.isoformat()) == 1
+        assert db.fetch_one("SELECT status FROM signal_tickets")["status"] == "expired"
         db.close()
     print(f"SIGNAL_SCANNER_INTEGRATION_OK functions={len(checked)} runtime=bundled")
 
