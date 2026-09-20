@@ -1622,6 +1622,22 @@
             "首轮超预算时 shadow_evaluation 为空 {}，metrics.state=UNAVAILABLE 可区分"
           ],
           "unfinished": "U09 的 200 候选来源过滤（本任务只交事实，未改 release_evidence.py）；v2 固定时点标签属 U06b(DEFERRED)"
+        },
+        {
+          "type": "review_r1_C",
+          "candidate": "ebbe1e9",
+          "verdict": "有条件GO（P1 x3 / P2 x4 / P3 x4，无 P0）",
+          "counts": "P0=0 / P1 x3 / P2 x4 / P3 x4",
+          "archived_path": "docs/dispatch/reviews/U06a/ebbe1e9/C_r1.md",
+          "gate_hard_conclusion": "**影子样本确实进得去发布门槛**：用真实 build_release_readiness_report 实测 —— 仅 A 组=200 方向候选；加入 50 条 B(bearish)+50 条 C(bullish)（不带 opportunity_id，同真实侧车写法）-> **300（Δ+100）**；30 闭合与 7 天观察 Δ=0。成因：release_evidence.py:338-346 只按 release_id/environment/signal 过滤、**不按 source 过滤**；src/core/service.py:186 + 248-252（同一 AuditDatabase）证实生产可达。**作者披露准确**（release_gate.note 逐字承认'尚未按 source 过滤、权威属 U09'），未建第二套 GO，U06a 未引入回归（只减少行数）-> **判 P1=范围外依赖且已披露，须登记为 U09 硬前置**",
+          "sidecar_conflict": "**真实**：在'适配已打、smoke 未打'树上实测 AssertionError: B/C影子组同时记录（exit 1）。改它正当且**未削弱**断言（集合相等 -> 更严的 B-only + COUNT(C)==0）",
+          "delta": "**全量 delta ∅**：同一清单 80 脚本逐条非 fail-fast，pristine 80/0、patched 80/0，失败集合差集空；测试 200/0->239/0",
+          "blocking": [
+            "P1-1 **分支 head 自身让主门禁红**：RuntimeError: 未登记冒烟脚本: scripts/smoke_u06a_shadow_isolation.py（作者只为另一个未列出的共享文件建了补丁，未给 run_offline_regression.py）—— 属 **I 的原子登记项**",
+            "P2-1 _refresh_metrics_summary 聚合失败后报 state=REFRESHED/age≈0 而缓存仍是旧值（**陈旧当新值**）",
+            "P2-2 '尚未按 source 过滤'只存 JSON 未渲染，页面却显示'研究样本可作执行候选 否'（误导）"
+          ],
+          "methodology_note": "复验者提醒：git apply 在子目录会静默 no-op，需 GIT_CEILING_DIRECTORIES；其首轮'delta ∅'是假绿，已重跑（此前 U01 的复验者也遇过同一坑）"
         }
       ],
       "blockers": [],
@@ -1659,7 +1675,18 @@
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r2",
+          "stage": "修复复验",
+          "candidate": null,
+          "sessions": [
+            "U06a author (r2)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U06a/<r2head>/"
+        }
+      ],
       "qa_runs": []
     },
     {
@@ -3453,6 +3480,14 @@
         "blocks": "check_quality / U12 RC",
         "note": "集成树实测 22 -> **19** 条命中，来源：docs/dispatch/reviews/U05/2049c1c/Q_r2.md(8) + 04a2c30/B_r1.md(6) + U00/0b85bef/C_w0r1_r2.md(1) = **15 条来自审查报告**；台账 JSON 1；src/llm/factory.py 1（KI01，U05 patches 13/14 已登记为假阳性）；tests/acceptance/test_runtime_identity.py 2（U15 故意夹具，同样由 U05 patches 登记）。**根因**：审查密钥扫描器必然引用它要匹配的模式，于是「对扫描器的审查」本身制造新命中；编排者此前在台账里写示例字面量也制造了 4 条（已把台账自己的字面量改为 <占位> 形式，22->19）。**建议**：① 对 docs/dispatch/reviews/** 与台账 JSON 施加**有文档依据的范围豁免**（它们是评审证据/状态记录，不是凭据载体），或 ② 规定文档引用模式必须用不匹配的占位形式（如 `sk-live-<占位>`），并在 CI 里对 docs 用更宽的规则。**不得静默放宽**：无论选哪种，都要在 README/CI 里写明理由与范围。",
         "convention": "I 自身后续写报告/台账时统一使用不匹配的占位形式（如 `<64位十六进制字面量>`、`sk-live-<占位夹具>`），避免自造命中。"
+      },
+      {
+        "id": "S08-SHADOW-GATE-LEAK",
+        "title": "影子样本会进发布门槛分母（release_evidence 未按 source 过滤）",
+        "status": "OPEN",
+        "owner": "**U09**（硬前置）",
+        "blocks": "U12 的 200 方向候选 / 30 闭合分母定义",
+        "note": "实测：不加 source 过滤时，50 条 B + 50 条 C 影子样本使方向候选从 200 变 300（Δ+100）。U06a 已按职责只交事实并逐字披露（release_gate.note），未越权改 release_evidence.py，也未建第二套 GO。**U09 必须在定义分母前加 source 过滤**，否则影子样本会污染发布门禁。"
       }
     ],
     "contract_candidate": "71f8109",
