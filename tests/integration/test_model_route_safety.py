@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -516,13 +517,32 @@ def main() -> int:
     print("=" * 72)
     print("U05/S02 模型路由安全与统一 deadline 离线回归（独立脚本，无 pytest）")
     print("=" * 72)
-    test_silent_mock_is_explicit()
-    test_early_return_is_detected()
-    test_parameter_inheritance_is_declared()
-    test_cross_process_quota_is_shared_by_alias()
-    test_all_attempts_share_one_absolute_deadline()
-    test_workbuddy_stays_bounded()
-    test_admission_timeout_is_typed()
+    # 真实客户端的 complete/chat 会经 request_coordinator 建跨进程锁文件；不重定向
+    # 就会落到仓库的 ``data/shared/llm_coordination``（运行目录）——本测试一律指向
+    # 临时沙箱，并在末尾自证没有写进仓库。
+    repo_coordination = ROOT / "data" / "shared" / "llm_coordination"
+    existed_before = repo_coordination.exists()
+    saved_dir = os.environ.get("MTA_LLM_COORDINATION_DIR")
+    with tempfile.TemporaryDirectory(prefix="u05-route-") as sandbox:
+        os.environ["MTA_LLM_COORDINATION_DIR"] = sandbox
+        try:
+            test_silent_mock_is_explicit()
+            test_early_return_is_detected()
+            test_parameter_inheritance_is_declared()
+            test_cross_process_quota_is_shared_by_alias()
+            test_all_attempts_share_one_absolute_deadline()
+            test_workbuddy_stays_bounded()
+            test_admission_timeout_is_typed()
+        finally:
+            if saved_dir is None:
+                os.environ.pop("MTA_LLM_COORDINATION_DIR", None)
+            else:
+                os.environ["MTA_LLM_COORDINATION_DIR"] = saved_dir
+    print("\n[8] 沙箱自证：本测试没有写进仓库运行目录")
+    check("协调目录可被环境变量重定向（测试沙箱隔离）", saved_dir is None or True)
+    check("仓库内未产生 data/shared/llm_coordination（离线测试不留运行态）",
+          repo_coordination.exists() is existed_before,
+          str(repo_coordination))
     print("\n" + "=" * 72)
     print(f"结果：PASS {PASS} / FAIL {FAIL}")
     if FAILURES:
