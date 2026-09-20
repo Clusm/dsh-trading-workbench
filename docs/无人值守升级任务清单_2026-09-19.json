@@ -565,7 +565,7 @@
       "title": "逐意图可验证研究证据",
       "owner_role": "C",
       "actual_assignee": "U03 作者会话（C 角色）",
-      "status": "CHANGES_REQUESTED",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -772,6 +772,14 @@
           "root_cause": "该测试的 load_patched_market_query()(:129-140) 读**现网** src/data/market_query.py 再把补丁打上去，仅在补丁**未应用**时成立；集成把补丁落地后即二次应用 -> 必然失败。混行尾（补丁 77CRLF/60LF；文件 454CRLF/212LF）使报错显示两个看似相同的字符串。",
           "why_missed": "U03 r3 复验在**作者 head**（补丁未应用）上进行，只把该现象记为 P3「证据卫生」，未暴露集成态失败 -> 印证'验收必须在含适配的候选上跑'",
           "action": "r4 修复中：让测试在补丁已应用/未应用两态均正确，并让 apply_unified_diff 对行尾归一化"
+        },
+        {
+          "type": "integration_decision",
+          "decision": "保留已验证模块 + S01 补丁 + SCRIPTS 登记；**暂缓 orchestrator 接线补丁**，待 U15 身份接入管线后随 U12 BUILD 联合候选一并应用与复验",
+          "evidence": "U03 接线使管线缺 pinned 身份时 fail-closed 拒绝全部开仓 -> 既有 smoke_p0b_loop.py（open 变 no_trade）与 smoke_ui.py（52/1）新增失败；仅 U15 集成时两者均 PASS，故确为 U03 接线引入。撤销接线后两者恢复（28/0、52/0），U03 自身测试与契约 173/0 仍通过。",
+          "rationale": "该接线依赖 U15 身份接入管线（S05/U12 BUILD 范围）；I 不凭描述补造未审核接线；也不以打开 allow_unpinned 默认值来让测试变绿（那是放松门禁）",
+          "held_patch": "tests/fixtures/evidence/u03_orchestrator_integration.patch（已保留，含 r2/r3 加固）",
+          "followup": "U12 BUILD 联合候选：U15 身份接入 + U03 接线 + 复跑 smoke_p0b_loop / smoke_ui / pipeline 相关全量"
         }
       ],
       "blockers": [],
@@ -2745,6 +2753,14 @@
         "owner": "U13(E线)/U10a 或 I",
         "blocks": "完整 run_offline_regression / check_quality / U12 RC 门禁",
         "note": "scripts/smoke_windows_service_plan.py 读 config/windows_service.json，其 python_executable 指向 <project_root>/.venv/Scripts/python.exe；worktree 内无 .venv 故 ValueError。运行目录（存在 .venv）不受影响。已确认与 U15/U01 无关的既有缺陷。**不得静默忽略**；建议由 U13 的 RuntimePaths 口径统一（或测试环境注入 python 路径）。"
+      },
+      {
+        "id": "W1-JOINT-WIRING",
+        "title": "U03/U15/U05 的管线接线须联合落地，不可各自单独启用",
+        "status": "OPEN",
+        "owner": "I (U12 BUILD)",
+        "blocks": "开通开仓路径",
+        "note": "单独启用 U03 接线会让管线缺身份时 fail-closed 拒绝全部开仓（既有冒烟红）。须与 U15 身份接入同批，并按手册 S05 在 U12 BUILD 联合候选验收（缺 key 阻断新仓而保留管理）。"
       }
     ],
     "contract_candidate": "71f8109",
