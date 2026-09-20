@@ -27,6 +27,14 @@ from core.contracts import (  # noqa: E402
 from core.contracts.common import sensitive_paths  # noqa: E402
 from core.runtime_identity import (  # noqa: E402
     ENVIRONMENT_OVERRIDE_WHITELIST,
+    EXECUTION_PROFILE_NOT_DECLARED,
+    EXECUTION_SCOPE_UNLOCKED,
+    IDENTITY_BINDING_UNPROVEN,
+    IDENTITY_MALFORMED,
+    READINESS_UNPROVEN,
+    RUNTIME_GENERATION_MALFORMED,
+    SCOPE_HASH_MISMATCH,
+    SCOPE_HASH_UNBOUND,
     SETTINGS_WHITELIST,
     CredentialLeakError,
     ExecutionModeError,
@@ -445,7 +453,8 @@ def check_mock_is_visible_and_blocking() -> None:
                                       env={"MTA_AI_DECISION_PROVIDER": "workbuddy"},
                                       credentials_present={}, execution_mode="demo")
         check("workbuddy-blocked-outside-live", "WORKBUDDY_OUTSIDE_LIVE" in wb_demo.blockers)
-        check("workbuddy-allowed-in-live", wb_demo.blockers == () or
+        # 严格断言（U15 r2：删除旧的 `A or not B` 恒真形式）
+        check("workbuddy-allowed-in-live",
               "WORKBUDDY_OUTSIDE_LIVE" not in model_route_blockers(
                   wb_demo.route, mock=False, execution_mode="live", provider="workbuddy"))
 
@@ -459,13 +468,15 @@ def check_mock_blocks_new_entry_via_u02_gate() -> None:
             runtime_instance_id="rt-test", scope_hash="scope-1")
         decision = authorize_new_entry(bundle, generation, expected=generation,
                                        environment="demo", account_ref=generation.account_ref,
-                                       runtime_instance_id="rt-test", scope_hash="scope-1")
+                                       runtime_instance_id="rt-test", scope_hash="scope-1",
+                                       readiness_allowed=True)
         check("mock-blocks-authorize-new-entry", not decision.allowed
               and "MODEL_ROUTE_MOCK" in decision.reason_codes and decision.http_status == 409)
         ok_bundle = build(tmp, credentials={"SENSENOVA_API_KEY": True})
         ok = authorize_new_entry(ok_bundle, generation, expected=generation,
                                  environment="demo", account_ref=generation.account_ref,
-                                 runtime_instance_id="rt-test", scope_hash="scope-1")
+                                 runtime_instance_id="rt-test", scope_hash="scope-1",
+                                 readiness_allowed=True)
         check("healthy-route-allows-entry", ok.allowed, str(ok.reason_codes))
         blocked = authorize_new_entry(ok_bundle, generation, expected=generation,
                                       environment="demo", account_ref=generation.account_ref,
@@ -479,16 +490,132 @@ def check_mock_blocks_new_entry_via_u02_gate() -> None:
             runtime_instance_id="rt-test", scope_hash="scope-1")
         mismatched = authorize_new_entry(ok_bundle, foreign, expected=generation,
                                          environment="demo", account_ref=generation.account_ref,
-                                         runtime_instance_id="rt-test", scope_hash="scope-1")
+                                         runtime_instance_id="rt-test", scope_hash="scope-1",
+                                         readiness_allowed=True)
         check("account-mismatch-blocks-entry", not mismatched.allowed
               and "ACCOUNT_REF_MISMATCH" in mismatched.reason_codes)
         # 预期提交不符必须拒绝（F13）
         git_mismatch = authorize_new_entry(ok_bundle, generation, expected=generation,
                                            environment="demo", account_ref=generation.account_ref,
                                            runtime_instance_id="rt-test", scope_hash="scope-1",
-                                           expected_git_commit="deadbeef" * 5)
+                                           expected_git_commit="deadbeef" * 5,
+                                           readiness_allowed=True)
         check("git-mismatch-blocks-entry", not git_mismatch.allowed
               and "GIT_COMMIT_MISMATCH" in git_mismatch.reason_codes)
+
+
+def check_gate_is_fail_closed() -> None:
+    """U15 r2 P0-1：省略 expected / readiness 不再等于“跳过校验”。"""
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = make_root(Path(raw))
+        bundle = build(tmp, credentials={"SENSENOVA_API_KEY": True})
+        bound = mint_runtime_generation(
+            environment="demo", account_ref=derive_account_ref("demo", declared_account_ref="acct"),
+            runtime_instance_id="rt-test", scope_hash="scope-1")
+        foreign = mint_runtime_generation(
+            environment="live", account_ref=derive_account_ref("live", declared_account_ref="other"),
+            runtime_instance_id="rt-OTHER", scope_hash="scope-other")
+
+        omitted = authorize_new_entry(bundle, foreign, readiness_allowed=True)
+        check("gate-omitted-expected-is-fail-closed",
+              not omitted.allowed and omitted.http_status == 409
+              and IDENTITY_BINDING_UNPROVEN in omitted.reason_codes,
+              str(omitted.as_dict()))
+
+        no_readiness = authorize_new_entry(bundle, bound, expected=bound)
+        check("gate-omitted-readiness-is-fail-closed",
+              not no_readiness.allowed and READINESS_UNPROVEN in no_readiness.reason_codes,
+              str(no_readiness.as_dict()))
+
+        # 异环境/异账户/异运行代：显式绑定校验必须逐项报出
+        bound_check = authorize_new_entry(bundle, foreign, expected=bound,
+                                          environment="demo",
+                                          account_ref=bound.account_ref,
+                                          runtime_instance_id="rt-test",
+                                          scope_hash="scope-1",
+                                          readiness_allowed=True)
+        check("gate-foreign-generation-rejected",
+              not bound_check.allowed
+              and {"ENVIRONMENT_MISMATCH", "ACCOUNT_REF_MISMATCH",
+                   "RUNTIME_INSTANCE_MISMATCH", "RUNTIME_GENERATION_MISMATCH"}
+              <= set(bound_check.reason_codes), str(bound_check.reason_codes))
+
+        # scope_hash：调用方要求了域绑定而运行代没有 → UNBOUND（不是静默通过）
+        unbound = mint_runtime_generation(
+            environment="demo", account_ref=derive_account_ref("demo", declared_account_ref="acct"),
+            runtime_instance_id="rt-test")
+        unbound_binding = verify_account_binding(bound, unbound, scope_hash="scope-1")
+        check("scope-hash-unbound-rejected",
+              not unbound_binding.allowed and SCOPE_HASH_UNBOUND in unbound_binding.reason_codes,
+              str(unbound_binding.reason_codes))
+        # expected 与 actual 的 scope_hash 不一致 → MISMATCH（此前从不比较）
+        other_scope = mint_runtime_generation(
+            environment="demo", account_ref=derive_account_ref("demo", declared_account_ref="acct"),
+            runtime_instance_id="rt-test", scope_hash="scope-2")
+        cross = verify_account_binding(bound, other_scope)
+        check("scope-hash-compared-both-ways",
+              not cross.allowed and SCOPE_HASH_MISMATCH in cross.reason_codes,
+              str(cross.reason_codes))
+        # 两边都未声明 scope 时不比较（不制造假阳性）
+        no_scope_a = mint_runtime_generation(
+            environment="demo", account_ref=derive_account_ref("demo", declared_account_ref="acct"),
+            runtime_instance_id="rt-test")
+        check("scope-hash-absent-on-both-sides-is-not-a-mismatch",
+              verify_account_binding(no_scope_a, no_scope_a).allowed)
+        # 畸形输入结构化拒绝（不抛 AttributeError）
+        malformed = authorize_new_entry(bundle, {"generation_id": "x"}, expected=bound,
+                                        readiness_allowed=True)
+        check("gate-malformed-generation-rejected",
+              not malformed.allowed and RUNTIME_GENERATION_MALFORMED in malformed.reason_codes)
+        malformed_bundle = authorize_new_entry("not-a-bundle", bound, expected=bound,
+                                               readiness_allowed=True)
+        check("gate-malformed-bundle-rejected",
+              not malformed_bundle.allowed and IDENTITY_MALFORMED in malformed_bundle.reason_codes)
+        malformed_expected = authorize_new_entry(bundle, bound, expected="bound",
+                                                 readiness_allowed=True)
+        check("gate-malformed-expected-rejected", not malformed_expected.allowed
+              and RUNTIME_GENERATION_MALFORMED in malformed_expected.reason_codes)
+
+
+def check_unknown_mode_is_strictest() -> None:
+    """U15 r2 P1-5：模式未知时 WorkBuddy 阻断必须触发（旧实现为空则不阻断）。"""
+    route = ModelRoute(model="deepseek-v4.1-flash", effort="max",
+                       profile_overrides={"provider": "workbuddy", "mock": False})
+    for unknown in (None, "", "   "):
+        codes = model_route_blockers(route, mock=False, provider="workbuddy",
+                                     execution_mode=unknown)
+        check(f"workbuddy-blocked-when-mode-unknown({unknown!r})",
+              "WORKBUDDY_OUTSIDE_LIVE" in codes, str(codes))
+    check("workbuddy-allowed-when-mode-live",
+          model_route_blockers(route, mock=False, provider="workbuddy",
+                               execution_mode="live") == ())
+    check("workbuddy-allowed-in-paper",
+          model_route_blockers(route, mock=False, provider="workbuddy",
+                               execution_mode="paper") == ())
+
+
+def check_scope_is_locked_or_flagged() -> None:
+    """decl-7：未选 profile 时作用域不得静默 —— 有 warning，live 下阻断。"""
+    unlocked = resolve_execution_scope(profile=None, execution_mode="live")
+    check("unlocked-scope-has-warning",
+          not unlocked.locked and EXECUTION_PROFILE_NOT_DECLARED in unlocked.warnings,
+          str(unlocked.as_dict()))
+    locked = resolve_execution_scope(profile="live", execution_mode="live")
+    check("locked-scope-has-no-warning", locked.locked and locked.warnings == ())
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = make_root(Path(raw))
+        live_unlocked = build(tmp, profile=None, execution_mode="live", env={})
+        check("live-without-profile-blocked",
+              not live_unlocked.entry_allowed
+              and EXECUTION_SCOPE_UNLOCKED in live_unlocked.blockers,
+              str(live_unlocked.blockers))
+        check("live-without-profile-advisory-visible",
+              EXECUTION_PROFILE_NOT_DECLARED in live_unlocked.advisories,
+              str(live_unlocked.advisories))
+        demo_unlocked = build(tmp, profile=None, execution_mode="demo", env={})
+        check("demo-without-profile-not-blocked",
+              EXECUTION_SCOPE_UNLOCKED not in demo_unlocked.blockers
+              and EXECUTION_PROFILE_NOT_DECLARED in demo_unlocked.advisories)
 
 
 # --------------------------------------------------------------------------
@@ -660,19 +787,24 @@ def check_dl01_fallback_illegal_params() -> None:
 def check_coverage_fail_closed() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = make_root(Path(raw))
-        # 依赖锁缺失时 build_identity 直接拒绝（覆盖缺口不可静默）
-        try:
-            collect_runtime_identity(tmp, environment="demo", runtime_instance_id="rt",
-                                     execution_mode="demo", env={},
-                                     credentials_present={"SENSENOVA_API_KEY": True},
-                                     raw_settings=SETTINGS, raw_agents=AGENTS,
-                                     require_lock_file=False)
-        except IdentityCoverageError as exc:
-            check("coverage-gap-reported-as-identity-coverage-error",
-                  "dependency.requirements_lock" in exc.groups)
-        else:
-            check("coverage-gap-reported-as-identity-coverage-error", True,
-                  "covering lock present")
+        # 锁文件在场时不得误报缺口（对照）
+        complete = build(tmp)
+        check("coverage-complete-when-lock-present",
+              len(complete.identity.dependency_hash) == 64 and complete.entry_allowed,
+              str(complete.blockers))
+        # 依赖锁缺失时 build_identity 直接拒绝（覆盖缺口不可静默）。
+        # r2 起这条断言真的会触发缺口：先删锁文件再关掉 require_lock_file。
+        (tmp / "requirements-lock.txt").unlink()
+        expect_raises("coverage-gap-reported-as-identity-coverage-error",
+                      (IdentityCoverageError,),
+                      collect_runtime_identity, tmp, environment="demo",
+                      runtime_instance_id="rt", execution_mode="demo", env={},
+                      credentials_present={"SENSENOVA_API_KEY": True},
+                      raw_settings=SETTINGS, raw_agents=AGENTS,
+                      require_lock_file=False)
+        # 缺口内容也可直接查（不依赖异常路径）
+        lock_files = collect_dependency_lock_files(tmp, require_lock=False)
+        check("coverage-gap-name-is-dependency-lock", lock_files == {})
 
 
 def check_fingerprint_disposition_registered() -> None:
@@ -698,6 +830,9 @@ def main() -> int:
     check_model_route_priority()
     check_mock_is_visible_and_blocking()
     check_mock_blocks_new_entry_via_u02_gate()
+    check_gate_is_fail_closed()
+    check_unknown_mode_is_strictest()
+    check_scope_is_locked_or_flagged()
     check_account_ref_decoupled_from_rotation()
     check_u02_binding_interface()
     check_dl01_cli_mis_selection()

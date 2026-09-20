@@ -158,6 +158,34 @@ SETTINGS_WHITELIST: tuple[str, ...] = (
 #: ``account_ref`` 允许的显式声明来源（与密钥材料**无关**）。
 ACCOUNT_REF_KEYS: tuple[str, ...] = ("MTA_ACCOUNT_REF",)
 
+# --------------------------------------------------------------------------
+# 门禁原因码（fail-closed 默认值）
+# --------------------------------------------------------------------------
+#: 调用方未提供被测运行代 / 未提供期望运行代：**无法证明绑定**，一律拒绝。
+#: 省略 `expected` 不再等价于“跳过绑定校验”，200 只可能来自真正校验过的路径。
+RUNTIME_GENERATION_UNPROVEN = "RUNTIME_GENERATION_UNPROVEN"
+IDENTITY_BINDING_UNPROVEN = "IDENTITY_BINDING_UNPROVEN"
+#: 调用方未声明 readiness（旧签名默认放行）→ 视为“未证明”，不得开新仓。
+READINESS_UNPROVEN = "READINESS_UNPROVEN"
+#: 入参形状不合法（非本模块的数据结构）→ 结构化拒绝，不抛裸 AttributeError。
+IDENTITY_MALFORMED = "IDENTITY_MALFORMED"
+RUNTIME_GENERATION_MALFORMED = "RUNTIME_GENERATION_MALFORMED"
+#: 调用方要求了作用域绑定但运行代没有 scope_hash（或反之不一致）。
+SCOPE_HASH_UNBOUND = "SCOPE_HASH_UNBOUND"
+SCOPE_HASH_MISMATCH = "SCOPE_HASH_MISMATCH"
+#: account_ref 来自 ``<env>:local`` 回退（未声明账户）：无法区分同一环境的多个账户。
+ACCOUNT_REF_UNPROVEN = "ACCOUNT_REF_UNPROVEN"
+ACCOUNT_REF_LOCAL_FALLBACK = "ACCOUNT_REF_LOCAL_FALLBACK"
+#: 未显式选择 profile：执行作用域未锁定（live 下为阻断项）。
+EXECUTION_PROFILE_NOT_DECLARED = "EXECUTION_PROFILE_NOT_DECLARED"
+EXECUTION_SCOPE_UNLOCKED = "EXECUTION_SCOPE_UNLOCKED"
+#: 模型路由 / 备用路由证据不足（不得静默当作“无备用”或“可用”）。
+PROVIDER_CAPABILITY_UNPROVEN = "PROVIDER_CAPABILITY_UNPROVEN"
+PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+FALLBACK_PROVIDER_UNRECOGNISED = "FALLBACK_PROVIDER_UNRECOGNISED"
+#: 有效配置来源文件缺失（六类来源之一无法采集）。
+CONFIG_SOURCE_MISSING = "CONFIG_SOURCE_MISSING"
+
 #: 执行模式合法取值（``paper`` 仅测试用；profile 只允许 demo/live）。
 MODE_ALLOWED: tuple[str, ...] = ("paper", "demo", "testnet", "live")
 PROFILE_ALLOWED: tuple[str, ...] = ("demo", "live")
@@ -539,7 +567,10 @@ def resolve_execution_scope(
     - 未知模式/未知 profile 直接拒绝（不再静默落回默认值，DL01 负例“CLI 误选”）；
     - profile 为空串与未提供是两种语义（空串拒绝）；
     - profile 与 EXECUTION_MODE 同时给出且不一致时，把被忽略的一方记入
-      ``ignored``（可审计，而不是无声丢失）。
+      ``ignored``（可审计，而不是无声丢失）；
+    - 未显式选择 profile（``locked is False``）时给出 ``warnings``
+      （``EXECUTION_PROFILE_NOT_DECLARED``）而不是静默：无 profile 的实盘作用域
+      无法锁定状态根（decl-7），调用方须自行判断是否阻断。
     """
     raw_profile = _normalise_mode(profile, field_name="profile")
     if raw_profile and raw_profile not in PROFILE_ALLOWED:
@@ -560,10 +591,11 @@ def resolve_execution_scope(
     if selected_profile is not None:
         ignored = ("EXECUTION_MODE",) if raw_mode else ()
         return ExecutionScope(selected_profile, selected_profile, "profile", ignored)
+    unlocked = (EXECUTION_PROFILE_NOT_DECLARED,)
     if raw_mode:
-        return ExecutionScope(None, raw_mode, "EXECUTION_MODE")
+        return ExecutionScope(None, raw_mode, "EXECUTION_MODE", (), warnings=unlocked)
     if fallback_mode:
-        return ExecutionScope(None, fallback_mode, "default_mode")
+        return ExecutionScope(None, fallback_mode, "default_mode", (), warnings=unlocked)
     raise ExecutionModeError("no execution mode could be resolved")
 
 
@@ -823,6 +855,11 @@ def model_route_blockers(
     ``WORKBUDDY_OUTSIDE_LIVE``（WorkBuddy 声明为实盘专属）、
     ``FALLBACK_DEGRADED_PRIMARY_MOCK``（主路 Mock 却声明了备用路由）。
     ``paper`` 模式不阻断（仅测试用途）。
+
+    **模式未知按最严处理**：``execution_mode``/``environment`` 均为空时
+    ``effective_mode`` 为空串，此时按“非 live”判定（而不是跳过 WorkBuddy
+    阻断）。``resolve_model_route`` 的 ``execution_mode`` 默认正是 ``None``，
+    旧实现在该默认下永不阻断，属 fail-open。
     """
     payload = route.as_payload() if isinstance(route, ModelRoute) else dict(route)
     model = _text(payload.get("model"))
@@ -841,7 +878,7 @@ def model_route_blockers(
         reasons.append("MODEL_ROUTE_UNSET")
     if forced:
         reasons.append("MODEL_ROUTE_FORCED_MOCK")
-    if resolved_provider == "workbuddy" and effective_mode and effective_mode != "live" \
+    if resolved_provider == "workbuddy" and effective_mode != "live" \
             and not allow_workbuddy_in_demo:
         reasons.append("WORKBUDDY_OUTSIDE_LIVE")
     if is_mock and tuple(payload.get("fallback_routes") or ()):
@@ -1149,10 +1186,18 @@ def verify_account_binding(
     比较项：``environment`` / ``account_ref`` / ``runtime_instance_id`` /
     ``generation_id`` / ``scope_hash``（``credential_epoch`` 与密钥指纹 **只做
     审计，不参与判定**——轮换不应否决在途管理动作）。
+
+    ``scope_hash`` 是双向补齐的 fail-closed 判定：调用方在 ``scope_hash`` 里
+    提出了域绑定要求而运行代没有该字段 → ``SCOPE_HASH_UNBOUND``（不是静默跳过）；
+    ``expected`` 与 ``actual`` 的 ``scope_hash`` 也必须逐字相等，否则
+    ``SCOPE_HASH_MISMATCH``。只有两边都为 None（未声明域）时才不比较。
     """
     reasons: list[str] = []
     if actual is None:
-        return AccountBinding(False, ("RUNTIME_GENERATION_UNPROVEN",))
+        return AccountBinding(False, (RUNTIME_GENERATION_UNPROVEN,))
+    if not isinstance(actual, RuntimeGeneration) or not isinstance(expected, RuntimeGeneration):
+        # 入参不是本模块的运行代：结构化拒绝，不抛裸 AttributeError（500）。
+        return AccountBinding(False, (RUNTIME_GENERATION_MALFORMED,))
     if _text(environment) and _text(actual.environment) != _text(environment).lower():
         reasons.append("ENVIRONMENT_MISMATCH")
     if _text(account_ref) and _text(actual.account_ref) != _text(account_ref):
@@ -1165,8 +1210,14 @@ def verify_account_binding(
         reasons.append("ACCOUNT_REF_MISMATCH")
     if actual.environment != expected.environment:
         reasons.append("ENVIRONMENT_MISMATCH")
-    if _text(scope_hash) and actual.scope_hash and actual.scope_hash != _text(scope_hash):
-        reasons.append("SCOPE_HASH_MISMATCH")
+    demanded_scope = _text(scope_hash)
+    if demanded_scope:
+        if not _text(actual.scope_hash):
+            reasons.append(SCOPE_HASH_UNBOUND)
+        elif actual.scope_hash != demanded_scope:
+            reasons.append(SCOPE_HASH_MISMATCH)
+    if _text(expected.scope_hash) != _text(actual.scope_hash):
+        reasons.append(SCOPE_HASH_MISMATCH)
     return AccountBinding(not reasons, tuple(dict.fromkeys(reasons)))
 
 
@@ -1276,8 +1327,15 @@ def collect_runtime_identity(
         model_route=route.route,
         effective_config=effective.as_payload(),
     )
-    blockers = tuple(dict.fromkeys((*route.blockers, *git_state.hard_reasons(expected_git_commit))))
-    advisories = tuple(dict.fromkeys(git_state.advisory_reasons()))
+    scope_blockers: tuple[str, ...] = ()
+    if not scope.locked and scope.mode == "live":
+        # decl-7：未显式选择 profile 却要跑实盘 —— 状态根无法唯一确定
+        # （config_loader.runtime_path 退回公共 data/），必须阻断而不是静默放行。
+        scope_blockers = (EXECUTION_SCOPE_UNLOCKED,)
+    blockers = tuple(dict.fromkeys((
+        *route.blockers, *scope_blockers, *git_state.hard_reasons(expected_git_commit),
+    )))
+    advisories = tuple(dict.fromkeys((*git_state.advisory_reasons(), *scope.warnings)))
     return IdentityBundle(
         identity=identity, model_route=route, execution_scope=scope,
         effective_config=effective, strategy_source=strategy,
@@ -1309,29 +1367,55 @@ def authorize_new_entry(
     runtime_instance_id: str | None = None,
     scope_hash: str | None = None,
     expected_git_commit: str | None = None,
-    readiness_allowed: bool = True,
+    readiness_allowed: bool | None = None,
 ) -> PermissionDecision:
     """新开仓身份门禁（F13 / DC14）：身份不符或 Mock 一律拒绝，而非降级成功。
 
-    ``readiness_allowed`` 传入既有 ``entry_readiness`` 结论（本函数不重复实现
-    那套事实判定），只叠加身份类阻断，避免建第二套判定器。
+    **fail-closed 契约（U15 r2 收紧）**：返回 200 只可能来自“身份、运行代、
+    readiness 三者都被真正校验过”的路径。
+
+    - ``generation`` 缺失 → ``RUNTIME_GENERATION_UNPROVEN``；
+    - ``expected`` 缺失 → ``IDENTITY_BINDING_UNPROVEN``：省略它**不再**等于
+      “跳过绑定校验”，而是“无法证明本次运行与期望账户/环境/运行代绑定”。
+      U02 必须显式传入它要绑定到的运行代（通常来自自己的授权记录）；
+    - ``readiness_allowed`` 默认 ``None``（未声明）→ ``READINESS_UNPROVEN``；
+      既有 ``entry_readiness`` 结论必须由调用方显式传入（``True``/``False``），
+      本函数不重复实现那套事实判定，只叠加身份类阻断；
+    - 入参形状不是本模块数据结构 → ``IDENTITY_MALFORMED`` /
+      ``RUNTIME_GENERATION_MALFORMED``（结构化 409，而不是未捕获的 AttributeError）。
+
+    ``expected`` 与 ``generation`` 分别可传 ``environment``/``account_ref``/
+    ``runtime_instance_id``/``scope_hash`` 作为额外的显式绑定要求；``scope_hash``
+    的缺失/不一致按 ``SCOPE_HASH_UNBOUND``/``SCOPE_HASH_MISMATCH`` 拒绝。
     """
     reasons: list[str] = []
     advisories: list[str] = []
     if bundle is None:
         reasons.append("IDENTITY_UNPROVEN")
+    elif not isinstance(bundle, IdentityBundle):
+        reasons.append(IDENTITY_MALFORMED)
     else:
         reasons.extend(bundle.blockers)
         reasons.extend(bundle.git_state.hard_reasons(expected_git_commit))
         advisories.extend(bundle.advisories)
+        advisories.extend(bundle.execution_scope.warnings)
     if generation is None:
-        reasons.append("RUNTIME_GENERATION_UNPROVEN")
-    elif expected is not None:
+        reasons.append(RUNTIME_GENERATION_UNPROVEN)
+    elif not isinstance(generation, RuntimeGeneration):
+        reasons.append(RUNTIME_GENERATION_MALFORMED)
+    elif expected is None:
+        # 省略 expected 即“无法证明绑定”，不再静默跳过全部账户/环境/运行代校验。
+        reasons.append(IDENTITY_BINDING_UNPROVEN)
+    elif not isinstance(expected, RuntimeGeneration):
+        reasons.append(RUNTIME_GENERATION_MALFORMED)
+    else:
         reasons.extend(verify_account_binding(
             expected, generation, environment=environment, account_ref=account_ref,
             runtime_instance_id=runtime_instance_id, scope_hash=scope_hash,
         ).reason_codes)
-    if not readiness_allowed:
+    if readiness_allowed is None:
+        reasons.append(READINESS_UNPROVEN)
+    elif not readiness_allowed:
         reasons.append("READINESS_BLOCKED")
     unique = tuple(dict.fromkeys(reasons))
     return PermissionDecision(
@@ -1514,7 +1598,16 @@ def available_environment_snapshot() -> dict[str, str]:
 __all__.extend([
     "IdentityCoverageError",
     "SensitiveInputError",
-    "CONTROL_STATE_SEVERITY",
+    # 门禁原因码（U02 / 看板按这些常量比较，不要硬编码字面量）。
+    "RUNTIME_GENERATION_UNPROVEN",
+    "IDENTITY_BINDING_UNPROVEN",
+    "READINESS_UNPROVEN",
+    "IDENTITY_MALFORMED",
+    "RUNTIME_GENERATION_MALFORMED",
+    "SCOPE_HASH_UNBOUND",
+    "SCOPE_HASH_MISMATCH",
+    "EXECUTION_PROFILE_NOT_DECLARED",
+    "EXECUTION_SCOPE_UNLOCKED",
     "fingerprint_disposition",
     "identity_mismatch_reasons",
     "available_environment_snapshot",
