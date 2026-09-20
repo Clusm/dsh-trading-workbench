@@ -1,8 +1,13 @@
-# U03 提交包 known_limits（head `0480b62`，基线 `ffdab44`，分支 `task/U03`）
+# U03 提交包 known_limits（修复轮 r3）
 
-作者会话 C 修复轮 r3（修复提交 `e381eca`，其后两个 docs 提交），回应 Q 在
-`5ffc6c0` 的 CHANGES_REQUESTED。本文件落在工作区 `mat-wt/CD`，请 I 归档进提交包
-`docs/dispatch/reviews/U03/0480b62/`（作者不得直接写 I 的目录）。
+基线 `ffdab44`，分支 `task/U03`，修复前 `5ffc6c0`。作者会话 C 修复轮 r3，
+回应 Q 在 `5ffc6c0` 的 CHANGES_REQUESTED。
+
+提交列表：`e381eca`（代码/测试/补丁）→ `e902d65`、`0480b62`、`0a6af77`、
+本提交（同一份 known_limits 的归档路径与措辞调整，无行为改动）。
+
+本文件落在工作区 `mat-wt/CD`，请 I 归档进提交包
+`docs/dispatch/reviews/U03/<head_commit>/`（作者不得直接写 I 的目录）。
 
 ## 范围与产物
 
