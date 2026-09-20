@@ -66,9 +66,12 @@ check("迁移版本9已应用", db.fetch_one("SELECT version FROM schema_migrati
 check("情报事件已落库", db.fetch_one("SELECT COUNT(*) n FROM intel_events")["n"] == 2)
 check("影子决策权重为零", db.fetch_one("SELECT MAX(execution_weight) w FROM shadow_decisions")["w"] == 0)
 sources = {row["source"] for row in db.fetch_all("SELECT DISTINCT source FROM shadow_decisions")}
-check("B/C影子组同时记录", sources == {"B_contract_market", "C_contract_plus_web3"})
-check("无Web3配置时C组未知", db.fetch_one(
-    "SELECT COUNT(*) n FROM shadow_decisions WHERE source='C_contract_plus_web3' AND signal='unknown'")["n"] == 2)
+check("B组记录方向样本", sources == {"B_contract_market"})
+# U06a：C 组未显式配置 watched_wallets/token_contracts 时**一行都不写**。
+# 旧实现把每条采集都写成 signal='unknown' 的绩效行：它占样本位、进入
+# shadow_outcomes 计数，且事后无法与"缺价/未成熟/超容差/断流"区分。
+check("C组未配置时不产生样本", db.fetch_one(
+    "SELECT COUNT(*) n FROM shadow_decisions WHERE source='C_contract_plus_web3'")["n"] == 0)
 baseline_intent = SimpleNamespace(action="open", symbol="BTCUSDT", side="LONG", confidence=0.7)
 baseline_decision = SimpleNamespace(intents=[baseline_intent])
 check("A组复制当前系统开仓方向", service.record_baseline_shadow(

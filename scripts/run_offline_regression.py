@@ -100,6 +100,8 @@ SCRIPTS = (
     "scripts/smoke_u13_supervision.py",
     # U02（B 持仓与执行）：策略仓管理/有界退出授权/并发退出预留。全程离线。
     "scripts/smoke_u02_strategy_position_manager.py",
+    # U06a（D 影子研究）：影子最小隔离与旧口径披露。全程离线。
+    "scripts/smoke_u06a_shadow_isolation.py",
 )
 EXCLUDED_SMOKE_SCRIPTS = {
     # 第[6]节直接调用 query_symbol_detail/query_symbol_cards 打公共行情接口，

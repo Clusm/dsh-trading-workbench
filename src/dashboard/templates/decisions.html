@@ -136,7 +136,7 @@
       <div class="intel-box">
         <div class="label">聪明钱代理 · {{ wi.status or 'waiting' }}</div>
         <div class="value">币安 Top Trader 账户/持仓与主动买卖比；仅影子观察，执行权重 {{ wi.execution_weight or 0 }}；
-          24h 事件 {{ (wi.shadow_evaluation or {}).events_24h or 0 }}</div>
+          24h 事件 {% if wi.shadow_evaluation and wi.shadow_evaluation.events_24h is not none %}{{ wi.shadow_evaluation.events_24h }}{% else %}—（未计算）{% endif %}</div>
       </div>
       <div class="intel-box">
         <div class="label">钱包跟踪 · {{ (wi.wallet_tracker or {}).status or 'unconfigured' }}</div>
@@ -145,6 +145,51 @@
       <div class="intel-box">
         <div class="label">Token Audit · {{ (wi.token_audit or {}).status or 'unconfigured' }}</div>
         <div class="value">{{ (wi.token_audit or {}).note or '尚未配置合约地址映射' }}</div>
+      </div>
+      {% set sd = wi.shadow_disclosure or {} %}
+      {% set sdw = sd.execution_weight or {} %}
+      <div class="intel-box">
+        <div class="label">影子口径 · {{ (sd.caliber or {}).state or '未知' }}</div>
+        <div class="value">{{ (sd.caliber or {}).label or '旧口径 v1（轮转刷新取价，仅研究参考）' }}；
+          执行权重 {{ sdw.effective|default(0, true) }}（配置声明不可抬升{{ '，已登记冲突' if sdw.conflict else '' }}）；
+          v2 固定时点标签 {{ (sd.v2_labels or {}).state or 'DEFERRED' }}；
+          研究样本可作执行候选 {{ '是' if (sd.release_gate or {}).research_eligible else '否' }}；
+          门槛口径由 {{ (sd.release_gate or {}).authority or 'release_evidence（U09 固定）' }} 固定。
+          <strong>注意</strong>：B/C 研究影子行**目前仍会计入**发布门禁的方向候选分母 —— 见下方「发布门槛口径」的残留缺口说明。
+          <details class="chain-raw" style="margin-top:6px"><summary>旧口径已知缺陷（{{ (sd.caliber or {}).limitations|length }} 条）</summary>
+            <ul style="margin:6px 0 0 18px">{% for item in (sd.caliber or {}).limitations or [] %}<li>{{ item }}</li>{% endfor %}</ul>
+          </details>
+        </div>
+      </div>
+      {% set sgr = sd.release_gate or {} %}
+      {% set sgap = sgr.residual_gap or {} %}
+      <div class="intel-box">
+        <div class="label">发布门槛口径 · 残留缺口{{ '（已登记）' if sgap.id else '' }}</div>
+        <div class="value">研究样本可作执行候选 {{ '是' if sgr.research_eligible else '否' }}{% if sgap.id %}；
+          <strong>{{ sgap.summary }}</strong>{{ ' ' + sgap.impact if sgap.impact else '' }}（归属 {{ sgap.authority or 'U09' }}，本批只披露不修）{% endif %}
+          <details class="chain-raw" style="margin-top:6px"><summary>门槛口径原文（{{ (sgr.gate_constants or {}).min_directional_candidates or 200 }} 方向候选 / {{ (sgr.gate_constants or {}).min_eligible_closed_trades or 30 }} 完整闭合，与 JSON 同源）</summary>
+            <div class="value" style="margin:6px 12px">{{ sgr.note or '（披露缺失）' }}</div>
+            <div class="value" style="margin:0 12px 6px;font-size:11.5px;color:var(--muted)">门槛常量来源：{{ sgr.gate_constants_source or '未知' }}</div>
+          </details>
+        </div>
+      </div>
+      {% set sm = wi.shadow_metrics or {} %}
+      <div class="intel-box">
+        <div class="label">汇总指标缓存 · {{ sm.state or 'UNAVAILABLE' }}</div>
+        <div class="value">
+          {%- if sm.state == 'FAILED' %}最近一次聚合<strong>失败</strong>，当前显示的是 {{ sm.age_seconds }}s 前的<strong>旧值</strong>（{{ sm.last_error or 'unknown' }}），不是本轮新值；下一轮会重试。
+          {%- elif sm.state == 'CACHED' %}未到期，显示 {{ sm.age_seconds }}s 前成功计算的缓存值。
+          {%- elif sm.state == 'REFRESHED' %}本轮刚重算成功（{{ sm.computed_at or '—' }}）。
+          {%- else %}尚未成功计算过，不得用 0 冒充「无数据」。
+          {%- endif %}
+          缺失样本计数状态 {{ sm.sample_loss_state or 'UNAVAILABLE' }}。
+        </div>
+      </div>
+      {% set na = sd.cohorts or {} %}
+      <div class="intel-box">
+        <div class="label">A/B/C 研究隔离</div>
+        <div class="value">{% for key, item in na.items() %}{{ item.group or key }}={{ item.status or '未知' }}{% if not loop.last %} · {% endif %}{% endfor %}
+          {% if not na %}状态未知{% endif %}</div>
       </div>
     </div>
     {% if wi.symbols %}
@@ -165,7 +210,8 @@
       </table>
     </div>
     {% endif %}
-    {% set evals = (wi.shadow_evaluation or {}).evaluations or [] %}
+    {# 优先用影子披露层已标注「研究参考/不计门禁」的行；缺失时回落到旧汇总，不改变既有语义。 #}
+    {% set evals = (wi.shadow_metrics or {}).evaluations or (wi.shadow_evaluation or {}).evaluations or [] %}
     {% if evals %}
     <div class="table-wrap" style="margin-top:10px">
       <table>
@@ -179,10 +225,15 @@
             <td class="num">{% if ev.avg_mfe_pct is not none %}{{ '%.3f'|format(ev.avg_mfe_pct) }}/{{ '%.3f'|format(ev.avg_mae_pct) }}%{% else %}—{% endif %}</td>
             <td class="num">{{ ev.avg_path_samples }}/{{ ev.required_path_samples }}</td>
             <td class="num">{{ ev.observation_span_days }}/7</td>
-            <td><span class="badge {{ 'ok' if ev.promotion_ready else 'muted' }}">{{ '可人工评审' if ev.promotion_ready else '继续观察' }}</span></td></tr>
+            <td><span class="badge muted">{{ ev.review_label or ('研究评审参考（不改变执行权重）' if ev.promotion_ready else '继续观察') }}</span></td></tr>
         {% endfor %}
         </tbody>
       </table>
+    </div>
+    <div class="value" style="font-size:11.5px;color:var(--muted);margin-top:6px">
+      以上为旧口径研究参考（不改变执行权重，不作为执行候选）；
+      <strong>但这些研究行目前仍会计入发布门禁的方向候选分母（残留缺口，权威属 U09）</strong>；
+      v2 固定时点标签为 {{ (wi.shadow_disclosure or {}).v2_labels.state if (wi.shadow_disclosure or {}).v2_labels else 'DEFERRED' }}。
     </div>
     {% endif %}
     <details class="chain-raw">
