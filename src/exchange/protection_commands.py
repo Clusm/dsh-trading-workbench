@@ -30,7 +30,7 @@ U04 需要的"命令种类/十进制数量"列由 :func:`ensure_execution_schema
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
@@ -69,6 +69,12 @@ REASON_BOUNDED_AGE = "UNKNOWN_AGE_EXCEEDED"
 REASON_FLAT_NOT_CONFIRMED = "FLAT_NOT_CONFIRMED"
 REASON_ALGO_NOT_STANDARD = "ALGO_NOT_COVERED_BY_STANDARD_OUTBOX"
 REASON_HEALTH_NO_FLAT_CLOSE = "HEALTH_FAULT_MUST_NOT_TRIGGER_FLAT_CLOSE"
+#: fail-closed：故障类未达到"保护确证失败"门槛时，全平一律被拒绝（含未登记的健康类）。
+REASON_FLAT_CLOSE_NOT_CONFIRMED = "FLAT_CLOSE_REQUIRES_CONFIRMED_PROTECTION_FAILURE"
+#: 终态（CANCELED/EXPIRED）回报里带有已确认成交：成交事实不得被主分类吞掉。
+REASON_PARTIAL_FILL_PRESENT = "TERMINAL_PARTIAL_FILL_PRESENT"
+#: 撤旧回调未真正执行（如缺少交易所 algoId）：不得记成"已撤销"。
+REASON_CANCEL_NOT_EXECUTED = "CANCEL_CALLBACK_NOT_EXECUTED"
 
 
 class ExecutionCommandError(RuntimeError):
@@ -197,8 +203,13 @@ def ensure_execution_schema(conn: Any) -> tuple[str, ...]:
     * 表不存在时跳过（运行期表由各自迁移创建），不在这里建表；
     * 与其它进程并发启动时，重复 ADD COLUMN 会抛 ``duplicate column name``，
       此时复查列是否已存在并视为成功，不掩盖其它错误。
+
+    返回值的语义是"**本次调用真正执行的 DDL**"：并发场景下由别的进程抢先加好的
+    列不计入，避免调用方把它当成自己新增的列去做后续动作。``commit()`` 也只在
+    本次确实发过 DDL 时执行，不会替调用方提交它自己尚未完成的事务。
     """
     added: list[str] = []
+    ddl_issued = False
     for table, columns in EXECUTION_SCHEMA_COLUMNS.items():
         existing = {
             row["name"] if not isinstance(row, Mapping) else row.get("name")
@@ -219,8 +230,12 @@ def ensure_execution_schema(conn: Any) -> tuple[str, ...]:
                 if name not in now:
                     raise ExecutionCommandError(
                         f"{table}.{name} 补齐失败: {type(exc).__name__} {exc}") from exc
+                # 并发进程已加好该列：本次没有执行 DDL，不计入返回值。
+                continue
+            ddl_issued = True
             added.append(f"{table}.{name}")
-    conn.commit()
+    if ddl_issued:
+        conn.commit()
     return tuple(added)
 
 
@@ -250,7 +265,14 @@ def parse_qty(value: Any, *, field: str = "qty", allow_negative: bool = False) -
 
 
 def qty_tolerance(target: Decimal) -> Decimal:
-    """数量比较容差：与保护镜像保持同一口径（绝对 + 相对）。"""
+    """数量比较容差：与保护镜像保持同一口径（绝对 + 相对）。
+
+    **已知放宽（U04 r2 登记）**：被替换的旧实现用步长口径
+    ``max(_min_qty(symbol), 1e-8)``，本实现是 ``1e-6`` 相对 + ``1e-9`` 绝对。
+    在 2.0 的仓位上，保护数量差 ``2e-6`` 仍会被判为 ``MATCHES_REAL_POSITION``。
+    离线无 symbol filters，无法判定该差值是否会被交易所 step-size 撞上；叠加
+    交易所 tick/step 的真实约束需要联调数据，故此处不改判据、只登记。
+    """
     return max(Decimal("1e-9"), abs(target) * Decimal("0.000001"))
 
 
@@ -313,6 +335,12 @@ def read_exchange_order(
     * 状态标签与成交数量矛盾时（如 NEW 却已有成交）以**成交事实**为准升级状态，
       并在 ``reason_codes`` 中记录来源，绝不把成交说成"只是受理"。
     * 终态（CANCELED/EXPIRED）时 working 必须为 0，未成交部分计入 terminal。
+
+    **已知口径不一致（U04 r2 登记）**：非文本 ``origQty`` 抛
+    ``QuantizationInputError``，而 ``executedQty`` 不可解析时抛
+    ``QuantityStateConflict``（U04/A_r1 P3-3）。:func:`read_submission_result`
+    两者都捕获，影响只限直接调用者；统一异常口径会改变已发布的 K04 边界语义，
+    故不改、只登记。
     """
     data = dict(payload or {})
     resolved_kind = CommandKind(kind) if kind is not None else (
@@ -517,6 +545,25 @@ def parse_timestamp_ms(value: Any) -> int | None:
     return int(parsed.timestamp() * 1000)
 
 
+def _plan_budget_count(value: Any) -> int:
+    """把查询计数列解析成非负整数；脏数据按**预算已耗尽**处理（fail-closed）。
+
+    旧实现对 ``'abc'``/``'3.0'`` 直接抛裸 ``ValueError``，会让整条 UNKNOWN 收口
+    规划中断——而"解析不了计数"最不该走的方向就是"当作 0 次、无限重试"。因此这里
+    返回 :data:`UNKNOWN_QUERY_BUDGET`，把脏行推进 ``MANUAL_RECOVERY`` 并告警。
+    """
+    if value in (None, ""):
+        return 0
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        try:
+            parsed = int(Decimal(str(value).strip()))
+        except (ArithmeticError, TypeError, ValueError):
+            return UNKNOWN_QUERY_BUDGET
+    return parsed if parsed >= 0 else UNKNOWN_QUERY_BUDGET
+
+
 def plan_unknown_reconcile(
     row: Any,
     *,
@@ -533,7 +580,7 @@ def plan_unknown_reconcile(
     command_id = str(_row_get(row, "client_order_id", _row_get(row, "command_id", "")) or "")
     kind = classify_row(row)
     status = str(_row_get(row, "status", "") or "").upper()
-    attempts = int(_row_get(row, "query_attempt_count", 0) or 0)
+    attempts = _plan_budget_count(_row_get(row, "query_attempt_count", 0))
     unknown_since = parse_timestamp_ms(_row_get(row, "unknown_since", None))
     next_retry = parse_timestamp_ms(_row_get(row, "next_retry_at", None))
     api = query_api_for(kind)
@@ -653,16 +700,24 @@ class KindCoverage:
     active: int
     terminal: int
     oldest_unknown_age_ms: int | None
+    #: 已 POST、结果未知（``SUBMITTING``）：保护"是否存在"并不确定，不构成覆盖。
+    submitting: int = 0
 
     @property
     def covered(self) -> bool:
-        """该种类下没有未决命令才算"已覆盖"；空集合不构成覆盖。"""
-        return self.total > 0 and self.unknown == 0
+        """该种类下没有未决命令才算"已覆盖"；空集合不构成覆盖。
+
+        ``SUBMITTING`` 属"已发出、结果未知"，与 ``UNKNOWN`` 同样是未决状态；
+        词表外状态在 :func:`coverage_report` 里按未决计入 ``unknown``（fail-closed），
+        因此不会出现"没见过的状态 = 已覆盖"。
+        """
+        return self.total > 0 and self.unknown == 0 and self.submitting == 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "kind": self.kind.value, "total": self.total, "unknown": self.unknown,
-            "active": self.active, "terminal": self.terminal, "covered": self.covered,
+            "active": self.active, "terminal": self.terminal, "submitting": self.submitting,
+            "covered": self.covered,
             "oldest_unknown_age_ms": self.oldest_unknown_age_ms,
         }
 
@@ -691,15 +746,20 @@ class CoverageReport:
         }
 
 
+#: 覆盖统计的封闭状态词表：词表外的状态一律按"未决"处理（fail-closed）。
+_COVERAGE_ACTIVE = frozenset({"ACKNOWLEDGED", "NEW", "PARTIALLY_FILLED"})
+_COVERAGE_TERMINAL = frozenset({"FILLED", "CANCELED", "EXPIRED", "REJECTED"})
+
+
 def coverage_report(
     rows: Iterable[Any], *, environment: str, now_ms: int | None = None,
 ) -> CoverageReport:
     """按命令种类分别汇总覆盖状态；两类命令从不合并成一个"已覆盖"结论。"""
     buckets: dict[CommandKind, dict[str, Any]] = {
         CommandKind.STANDARD: {"total": 0, "unknown": 0, "active": 0, "terminal": 0,
-                               "oldest_unknown_age_ms": None},
+                               "oldest_unknown_age_ms": None, "submitting": 0},
         CommandKind.ALGO: {"total": 0, "unknown": 0, "active": 0, "terminal": 0,
-                           "oldest_unknown_age_ms": None},
+                           "oldest_unknown_age_ms": None, "submitting": 0},
     }
     reference_ms = now_ms
     for row in rows:
@@ -707,18 +767,22 @@ def coverage_report(
         bucket = buckets[kind]
         bucket["total"] += 1
         status = str(_row_get(row, "status", "") or "").upper()
-        if status == "UNKNOWN":
+        if status in _COVERAGE_ACTIVE:
+            bucket["active"] += 1
+        elif status in _COVERAGE_TERMINAL:
+            bucket["terminal"] += 1
+        else:
+            # UNKNOWN / SUBMITTING / 词表外状态：都按"未决"计入 unknown（fail-closed），
+            # 不让"没见过的状态"或"POST 已发出但结果未知"冒充已覆盖。
             bucket["unknown"] += 1
+            if status == "SUBMITTING":
+                bucket["submitting"] += 1
             since = parse_timestamp_ms(_row_get(row, "unknown_since", None))
             if since is not None:
                 moment = reference_ms if reference_ms is not None else since
                 age = max(0, moment - since)
                 current = bucket["oldest_unknown_age_ms"]
                 bucket["oldest_unknown_age_ms"] = age if current is None else max(current, age)
-        elif status in {"SUBMITTING", "ACKNOWLEDGED", "NEW", "PARTIALLY_FILLED"}:
-            bucket["active"] += 1
-        else:
-            bucket["terminal"] += 1
     return CoverageReport(environment=str(environment), by_kind={
         kind.value: KindCoverage(kind=kind, **values)
         for kind, values in buckets.items()
@@ -756,6 +820,8 @@ class SubmissionOutcome(str, Enum):
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
     FILLED = "FILLED"
     TERMINAL_UNFILLED = "TERMINAL_UNFILLED"
+    #: 终态（CANCELED/EXPIRED）但已确认有部分成交：成交事实必须显式可见。
+    TERMINAL_PARTIAL = "TERMINAL_PARTIAL"
     REJECTED = "REJECTED"
     UNKNOWN = "UNKNOWN"
 
@@ -797,7 +863,13 @@ def read_submission_result(payload: Mapping[str, Any] | None) -> SubmissionReadi
     if quantity.status == "REJECTED":
         outcome = SubmissionOutcome.REJECTED
     elif quantity.status in {"CANCELED", "EXPIRED"}:
-        outcome = SubmissionOutcome.TERMINAL_UNFILLED
+        # 终态带成交（撤单前已有部分成交 / 过期前已有部分成交）与终态零成交是
+        # **两件事**：只读 outcome 的消费者不能把一笔真实成交看成"什么都没有"。
+        if fill_confirmed:
+            outcome = SubmissionOutcome.TERMINAL_PARTIAL
+            reasons.append(REASON_PARTIAL_FILL_PRESENT)
+        else:
+            outcome = SubmissionOutcome.TERMINAL_UNFILLED
     elif fill_confirmed and quantity.status == "FILLED":
         outcome = SubmissionOutcome.FILLED
     elif fill_confirmed and quantity.status == "PARTIALLY_FILLED":
@@ -882,18 +954,37 @@ class ProtectionView:
 
 
 def protection_view_from_algo(row: Mapping[str, Any]) -> ProtectionView:
-    """从 Algo 查询/镜像行构造视图；数量与触发价一律走 Decimal 文本。"""
+    """从 Algo 查询/镜像行构造视图；数量与触发价一律走 Decimal 文本。
+
+    读取优先级：**先文本列**（``quantity_text``/``actual_qty_text``/
+    ``trigger_price_text``，由保护镜像的 U04 补丁写入），缺失或非法才回落到
+    交易所 REAL/JSON 原值。这样镜像的"精确勾稽"列有真实消费者，而不是只写不读；
+    若上游只给了 float（如 ``2.0``），:func:`parse_qty` 会明确拒绝而不是静默舍入。
+    """
     def _decimal_or_none(value: Any, field: str) -> Decimal | None:
         if value in (None, ""):
             return None
         return parse_qty(value, field=field)
 
-    trigger = row.get("triggerPrice", row.get("trigger_price"))
+    def _prefer_text(text_key: str, fallback_keys: tuple[str, ...],
+                     field: str) -> Decimal | None:
+        for key in (text_key,) + fallback_keys:
+            value = _row_get(row, key, None)
+            if value in (None, ""):
+                continue
+            return _decimal_or_none(value, field)
+        return None
+
+    qty = _prefer_text("quantity_text", ("quantity",), "quantity")
+    trigger = _prefer_text("trigger_price_text",
+                           ("triggerPrice", "trigger_price"), "triggerPrice")
     return ProtectionView(
-        client_id=str(row.get("clientAlgoId") or row.get("client_id") or ""),
+        # 同时兼容交易所/私有流（clientAlgoId）与保护镜像（client_algo_id）两种列名。
+        client_id=str(row.get("clientAlgoId") or row.get("client_algo_id")
+                      or row.get("client_id") or ""),
         order_type=str(row.get("orderType") or row.get("order_type") or "").upper(),
-        qty=_decimal_or_none(row.get("quantity"), "quantity"),
-        trigger_price=_decimal_or_none(trigger, "triggerPrice") or ZERO,
+        qty=qty,
+        trigger_price=trigger or ZERO,
         reduce_only=bool(row.get("reduceOnly", row.get("reduce_only", True))),
         close_position=bool(row.get("closePosition", row.get("close_position", False))),
         algo_id=str(row.get("algoId") or row.get("algo_id") or "") or None,
@@ -1063,6 +1154,12 @@ def plan_protection_refresh(
                 item.qty, "NOT_IN_REFRESH_SCOPE"))
 
     surviving = [a for a in actions if a.action in {"KEEP", "PLACE"}]
+    # 已知不可达（U04 r2 登记，非缺陷隐瞒）：``cancel_candidates`` 只在
+    # ``price is not None`` 的迭代里追加，而同一迭代末尾必然追加 PLACE 或 KEEP，
+    # 因此 ``surviving`` 永不为空（穷举 513648 组合未命中，见 U04/A_r1 P2-A4）。
+    # 保留它是**未来回归护栏**：一旦有人改成"先收集 CANCEL 再决定 PLACE"，
+    # 这里会立即拦住"撤掉最后一道保护"。运行期的实际保护由
+    # 「PLACE 先于 CANCEL 执行 + can_cancel_protection 只认 flat_confirmed」提供。
     if cancel_candidates and not surviving:
         reasons.append(REASON_LAST_PROTECTION)
         return ProtectionPlan(
@@ -1089,6 +1186,10 @@ def _assert_no_cancel_before_place(plan: ProtectionPlan) -> None:
 
     校验 ``actions`` 的原始构造顺序（而非 ``ordered()`` 的排序结果），这样
     未来若有人在循环里提前追加 CANCEL，会在规划阶段就失败而不是留下裸仓。
+
+    **已知结构性不可达（U04 r2 登记）**：当前所有 CANCEL 都被追加在 PLACE 之后，
+    因此本函数不会在运行期触发（U04/A_r1 P3-8）。它同样属于未来回归护栏，
+    运行期真正的时序保证在 :func:`execute_protection_plan`。
     """
     if not plan.places or not plan.cancels:
         return
@@ -1101,7 +1202,13 @@ def _assert_no_cancel_before_place(plan: ProtectionPlan) -> None:
 
 @dataclass(frozen=True)
 class PlanExecution:
-    """保护计划执行结果；``cancel_skipped`` 表示因新保护未挂上而未撤旧。"""
+    """保护计划执行结果。
+
+    * ``cancel_skipped``：因新保护未挂上（或有 PLACE 失败）而**整体**未撤旧；
+    * ``cancel_failed``：撤旧回调明确返回**未执行/失败**的 client_id 列表。
+      这些单子**不能**记进 ``canceled``——否则账本会宣称"旧保护已撤"，而交易所
+      侧旧保护仍在（重复保护 + 过期触发器仍会触发，覆盖报告也会误判已终结）。
+    """
 
     placed: tuple[str, ...]
     kept: tuple[str, ...]
@@ -1109,6 +1216,8 @@ class PlanExecution:
     cancel_skipped: bool
     failed_place: str | None = None
     reason_codes: tuple[str, ...] = ()
+    cancel_failed: tuple[str, ...] = ()
+    cancel_unexecuted_reason: str = ""
 
 
 def execute_protection_plan(
@@ -1121,6 +1230,11 @@ def execute_protection_plan(
 
     这是"不得撤销最后一道保护"在时序上的保证：撤旧永远发生在新保护确认挂上
     之后；新保护没挂上时宁可留下重复保护，也不留下裸仓。
+
+    回调契约：``cancel`` 必须返回**真值**才算"已撤销"。返回 ``False``/``None``
+    （例如只知 ``clientAlgoId``、匹配不到交易所 ``algoId`` 而无法发出 DELETE）
+    表示未执行，会记入 ``cancel_failed`` 而不是 ``canceled``。用"真值才算成功"
+    而非"假值才算失败"，是为了让**忘记返回**的回调落在安全一侧。
     """
     if not plan.safe_to_execute:
         return PlanExecution((), (), (), True, None,
@@ -1128,6 +1242,8 @@ def execute_protection_plan(
     placed: list[str] = []
     kept: list[str] = []
     canceled: list[str] = []
+    failed_cancels: list[str] = []
+    cancel_reason = ""
     for action in plan.ordered():
         if action.action == "KEEP":
             kept.append(str(action.client_id))
@@ -1137,20 +1253,32 @@ def execute_protection_plan(
             except Exception as exc:  # noqa: BLE001 - 失败必须停止后续撤旧
                 return PlanExecution(
                     tuple(placed), tuple(kept), tuple(canceled), True,
-                    action.order_type, (f"PLACE_FAILED:{type(exc).__name__}",))
+                    action.order_type, (f"PLACE_FAILED:{type(exc).__name__}",),
+                    tuple(failed_cancels), cancel_reason)
             placed.append(str(placed_id or action.order_type))
         elif action.action == "CANCEL":
-            cancel(action)
+            outcome = cancel(action)
+            if not outcome:
+                failed_cancels.append(str(action.client_id))
+                cancel_reason = cancel_reason or REASON_CANCEL_NOT_EXECUTED
+                continue
             canceled.append(str(action.client_id))
-    return PlanExecution(tuple(placed), tuple(kept), tuple(canceled), False)
+    return PlanExecution(tuple(placed), tuple(kept), tuple(canceled), False,
+                         None, (), tuple(failed_cancels), cancel_reason)
 
 
 def can_cancel_protection(
     *, position: RealPosition, protections: Sequence[ProtectionView],
     target_client_id: str, flat_confirmed: bool = False,
 ) -> tuple[bool, str]:
-    """判定单独撤销一张保护单是否安全；返回 (是否允许, reason code)。"""
-    if flat_confirmed or position.is_flat:
+    """判定单独撤销一张保护单是否安全；返回 (是否允许, reason code)。
+
+    ``position.is_flat`` 只是"快照数量为 0"，**不等于**已确认归零（快照竞态、
+    挂单未成交、镜像滞后都会出现 ``positionAmt==0``）。因此这里只认
+    ``flat_confirmed``，与 :func:`plan_protection_refresh` 同口径：未确认归零时
+    绝不清理最后一道保护，且 reason 不谎称 ``FLAT_CONFIRMED_CLEANUP``。
+    """
+    if flat_confirmed:
         return True, "FLAT_CONFIRMED_CLEANUP"
     remaining = [
         item for item in protections
@@ -1158,6 +1286,9 @@ def can_cancel_protection(
         and (item.reduce_only or item.close_position)
     ]
     if not remaining:
+        if position.is_flat:
+            # 快照为零但未经确认：既不能撤最后一道保护，也不能报告"已确认归零"。
+            return False, REASON_FLAT_NOT_CONFIRMED
         return False, REASON_LAST_PROTECTION
     return True, ""
 
@@ -1258,18 +1389,94 @@ FLAT_CLOSE_ACTIONS = frozenset({
     "CLOSE_ALL", "FLATTEN", "CANCEL_ALL_PROTECTION", "EMERGENCY_CLOSE",
 })
 
+#: 允许驱动仓位动作的故障类**白名单**：只有"已确证的保护挂单失败"。
+#: 其余（含观测故障、提交结果未知、未归类 ``UNKNOWN``）一律 fail-closed：不得
+#: 由故障分类去触发全平。用白名单而非"枚举健康类"，是因为健康类名永远枚举不全
+#: （``PROTECTION_MIRROR_STALE``/``ALGO_ORDER_QUERY_FAILED`` 等都属观测故障却
+#: 不在登记表内）；枚举不完的一侧必须落在"拒绝"上。
+FLAT_CLOSE_AUTHORIZED: frozenset[FaultClass] = frozenset({FaultClass.PROTECTION})
+
+#: "观测故障"集合：这类故障下无法证明当前仓位无保护，因此**推迟兜底平仓**
+#: （只告警、下轮重试）。方向与 ``FLAT_CLOSE_AUTHORIZED`` 相反——这里是"别平"，
+#: 那里是"别乱平"；两者都必须避免用枚举不完的表做默认放行。
+_OBSERVATION_FAULTS: frozenset[FaultClass] = _HEALTH_LIKE
+
+
+def defers_flat_close(sync_reason: Any) -> bool:
+    """保护同步失败类别是否属于**已确证的观测故障**（据此推迟兜底平仓）。
+
+    空/`None` 一律返回 ``False``：没有可归类的观测故障证据时必须照常兜底平仓，
+    绝不允许"证据缺失"变成"保留裸仓"。
+    """
+    text = str(sync_reason or "").strip()
+    if not text:
+        return False
+    return classify_execution_fault(text).fault_class in _OBSERVATION_FAULTS
+
+
+class ProtectionSyncReasons:
+    """按标的保存"最近一轮"保护同步的失败类别。
+
+    两个必须成立的属性（V1 曾把状态做成跨标的、成功路径不复位的进程级标量）：
+
+    * **按标的隔离**：A 标的的 ``QUERY_FAILED`` 不得抑制 B 标的的兜底平仓；
+    * **每轮复位**：``begin()`` 在每个同步轮次入口清空该标的的旧值，因此
+      "上几轮查询失败、本轮查询成功"不会留下残余 ``QUERY_FAILED``。
+    """
+
+    def __init__(self) -> None:
+        self._by_symbol: dict[str, str] = {}
+
+    @staticmethod
+    def _key(symbol: Any) -> str:
+        return str(symbol or "").upper()
+
+    def begin(self, symbol: Any) -> None:
+        """同步轮次入口：先复位该标的，任何提前 return 都不会留下残余类别。"""
+        self._by_symbol.pop(self._key(symbol), None)
+
+    def mark(self, symbol: Any, reason: Any) -> None:
+        text = str(reason or "").strip()
+        if text:
+            self._by_symbol[self._key(symbol)] = text
+        else:
+            self._by_symbol.pop(self._key(symbol), None)
+
+    def get(self, symbol: Any) -> str:
+        return self._by_symbol.get(self._key(symbol), "")
+
+    def defers(self, symbol: Any) -> bool:
+        return defers_flat_close(self.get(symbol))
+
+    def as_dict(self) -> dict[str, str]:
+        return dict(self._by_symbol)
+
 
 def guard_fault_action(fault: Any, proposed_action: str) -> FaultActionPlan:
-    """阻止把健康/传输故障升级成全平；返回保守计划，非法动作直接抛错。"""
+    """阻止把健康/传输故障升级成全平；返回保守计划，非法动作直接抛错。
+
+    fail-closed：只要故障类不在 :data:`FLAT_CLOSE_AUTHORIZED`（即"保护确证失败"）
+    之内，任何 ``FLAT_CLOSE_ACTIONS`` 提议都被拒绝——**包括**未登记的健康类
+    （落入 ``UNKNOWN``）与"提交结果未知"的 ``SUBMIT_UNCERTAIN``（此时订单可能已
+    在交易所存活，全平会二次平仓甚至反手开仓）。
+    """
     plan = classify_execution_fault(fault)
     action = str(proposed_action or "").strip().upper()
-    if plan.fault_class in _HEALTH_LIKE and action in FLAT_CLOSE_ACTIONS:
+    if action in FLAT_CLOSE_ACTIONS and plan.fault_class not in FLAT_CLOSE_AUTHORIZED:
+        reason = (REASON_HEALTH_NO_FLAT_CLOSE
+                  if plan.fault_class in _HEALTH_LIKE
+                  else REASON_FLAT_CLOSE_NOT_CONFIRMED)
         raise ProtectionSafetyError(
             f"{plan.fault} 属 {plan.fault_class.value}，不得触发全平动作 {action}"
-            f"（{REASON_HEALTH_NO_FLAT_CLOSE}）")
+            f"（{reason}）")
     if plan.triggers_flat_close or plan.touches_pause_state or \
             plan.touches_emergency_state or plan.changes_risk_profile:
         raise ProtectionSafetyError("故障计划不得改变仓、风险档或 pause/emergency 语义")
+    if action in FLAT_CLOSE_ACTIONS:
+        # 唯一被授权的兜底平仓（保护确证失败）：审计计划必须**如实记录**确实发生了
+        # 仓位动作，否则计划对象不能作为"是否平仓"的证据（V1 的 triggers_flat_close
+        # 恒为 False，等于放行全平却在审计里否认）。
+        return replace(plan, action=action, triggers_flat_close=True)
     return plan
 
 
@@ -1305,10 +1512,13 @@ __all__ = [
     "FaultClass",
     "FillRevision",
     "KindCoverage",
+    "FLAT_CLOSE_ACTIONS",
+    "FLAT_CLOSE_AUTHORIZED",
     "PlanExecution",
     "ProtectionAction",
     "ProtectionPlan",
     "ProtectionSafetyError",
+    "ProtectionSyncReasons",
     "ProtectionView",
     "QuantizationInputError",
     "QuantityStateConflict",
@@ -1326,6 +1536,7 @@ __all__ = [
     "classify_execution_fault",
     "classify_row",
     "coverage_report",
+    "defers_flat_close",
     "execute_protection_plan",
     "execute_unknown_reconcile",
     "ensure_execution_schema",
