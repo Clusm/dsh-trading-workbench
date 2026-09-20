@@ -136,6 +136,61 @@ autocrlf=true 的更严口径，来源 `git config --show-origin`）。
 
 打补丁后既有 `scripts/smoke_health_watch.py`：**ok=28 fail=0**（与打补丁前相同）。
 
+### 5.1 delta 复现命令与原始输出（供 F/Q 复核）
+
+沙箱（临时，交付前已删除；`<T>` 为任意临时目录）：
+
+```bash
+PY="C:/Users/Tao/Desktop/币安/multi-agent-trader/.venv/Scripts/python.exe"
+# s0 = 官方基线 59660b2
+mkdir -p <T>/s0 && git archive 59660b2 | tar -x -C <T>/s0
+# s1 = 作者树（含 U14 独占文件）+ 仅 04
+mkdir -p <T>/s1 && git archive task/U14 | tar -x -C <T>/s1
+(cd <T>/s1 && git init -q . && git apply <patch>/04_run_offline_regression_registration.diff)
+# s2 = 作者树 + 01..04
+mkdir -p <T>/s2 && git archive task/U14 | tar -x -C <T>/s2
+(cd <T>/s2 && git init -q . && for f in <patch>/0*.diff; do    git -c core.autocrlf=false -c core.eol=lf apply "$f"; done)
+# 逐脚本收集失败集合（官方入口首错即停，无法给出集合）
+for T in s0 s1 s2; do PYTHONUTF8=1 "$PY" <runner> <T>; done
+```
+
+`<runner>` = 直接 `importlib` 加载沙箱里的 `scripts/run_offline_regression.py`，
+复制其 `main()` 的环境构造（`EXECUTION_MODE=paper`、清 `MTA_PROFILE`、
+另清 `MTA_STATE_ROOT`/`MTA_DATA_ROOT`、`MTA_NO_PROXY=1`、UTF-8），
+对 `SCRIPTS` 逐个 `subprocess.run` 并记录返回码。原始输出（节选）：
+
+```
+=== s0（官方基线 59660b2，官方入口）===
+OFFLINE REGRESSION OK scripts=79
+=== s0（逐脚本）===
+TOTAL=79 PASS=79 FAIL=0
+FAILURES=
+=== s1（作者树 + 仅登记行 04，逐脚本）===
+TOTAL=80 PASS=80 FAIL=0
+FAILURES=
+=== s2（作者树 + 01..04，官方入口）===
+OFFLINE REGRESSION OK scripts=80
+=== s2（逐脚本，首轮）===
+TOTAL=80 PASS=79 FAIL=1
+FAILURES=scripts/smoke_llm_deadline.py
+=== s2（逐脚本，复跑）===
+TOTAL=80 PASS=80 FAIL=0
+FAILURES=
+```
+
+作者树**未**应用 04 时，官方入口 fail-closed（设计如此，与 U01/U05/U13 同）：
+
+```
+RuntimeError: 未登记冒烟脚本: scripts/smoke_u14_alert_delivery.py
+```
+
+受本包直接影响的既有冒烟（均在 s2 全量 80/80 中通过）：
+`smoke_health_watch`、`smoke_db_migrations`、`smoke_account_mirror`、
+`smoke_exchange_event_inbox`、`smoke_exchange_safety_monitor`、`smoke_order_mirror`、
+`smoke_order_outbox`、`smoke_protection_mirror`、`smoke_fault_matrix`、
+`smoke_release_acceptance`、`smoke_dashboard_health`、`smoke_service_lifecycle`、
+`smoke_u13_supervision`、`smoke_contracts_v3`。
+
 ## 6. 补丁目录命名
 
 目录名 = **作者交付 head `7c430c8`**（`task/U14`）。diff 在更早的 head `5249004` 生成，
