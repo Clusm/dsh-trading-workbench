@@ -1,0 +1,21 @@
+INFO A_before=CONSUMED release_accepted=True after=RELEASED re_reserve_accepted=True
+FAIL A_release_is_idempotent_on_consumed {'release': True, 'after': 'RELEASED', 're_reserve': True}
+INFO B_limit=2000 consumed_record_pruned=True exit_key_count=2000
+PASS B_consumed_record_pruned 
+INFO B_after_prune_same_key={'action': 'SUBMIT_REDUCE', 'duplicate': False, 'qty': 1.0, 'reasons': []}
+FAIL B_consumed_not_reclaimed_when_record_pruned {'action': 'SUBMIT_REDUCE', 'reasons': []}
+PASS B_no_reclaim_audit_for_consumed 
+INFO B2_record_pruned=True exit_key_count=9
+INFO B2_after_prune_same_key={'action': 'SUBMIT_REDUCE', 'duplicate': False, 'qty': 1.0, 'reasons': ['STALE_EXIT_RESERVATION_RECLAIMED']}
+FAIL B2_consumed_not_reclaimed_via_ttl_sweep {'action': 'SUBMIT_REDUCE', 'reasons': ['STALE_EXIT_RESERVATION_RECLAIMED']}
+FAIL B2_no_reclaim_audit_for_consumed [{'exit_key': 'mta-g-aaaaaaaaaaaaaaaaaaaaaaaa', 'reason': 'STALE_EXIT_RESERVATION_RECLAIMED', 'at_ms': 1000000000000000}]
+INFO C_after_key_eviction={'action': 'NOOP', 'duplicate': False, 'accepted': False, 'qty': 0}
+FAIL C_consumed_not_resubmitted_when_key_evicted {'action': 'NOOP', 'accepted': False}
+INFO D_released=True retry={'action': 'SUBMIT_REDUCE', 'qty': 1.0}
+PASS D_released_key_can_still_resubmit 
+PASS D_released_key_never_opens_position 
+PASS E_conserved_B 
+PASS E_conserved_C 
+PASS E_conserved_D 
+
+R3_CONSUMED_PROBE tree=before FAIL=5 ['A_release_is_idempotent_on_consumed', 'B_consumed_not_reclaimed_when_record_pruned', 'B2_consumed_not_reclaimed_via_ttl_sweep', 'B2_no_reclaim_audit_for_consumed', 'C_consumed_not_resubmitted_when_key_evicted']

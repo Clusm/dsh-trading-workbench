@@ -1,0 +1,17 @@
+INFO 1_same_round first=EXECUTED second=duplicate_skipped
+PASS 1_same_round_duplicate_suppressed 
+INFO 1b_after_fill first=EXECUTED second=duplicate_skipped
+PASS 1b_same_round_after_fill_still_suppressed 
+INFO 2_next_round round1=EXECUTED round2=EXECUTED
+PASS 2_second_round_exit_executes 
+INFO 3_five_rounds=['EXECUTED', 'EXECUTED', 'EXECUTED', 'EXECUTED', 'EXECUTED']
+PASS 3_five_rounds_all_execute 
+INFO 4_same_round_partial_then_rest=EXECUTED,EXECUTED
+PASS 4_same_round_different_qty_both_execute 
+INFO 5_same_round_same_partial=EXECUTED,duplicate_skipped
+PASS 5_same_round_same_partial_suppressed 
+INFO 6_cross_symbol_round=EXECUTED,EXECUTED,EXECUTED,EXECUTED
+PASS 6_cross_symbol_and_round_independent 
+INFO 7_explicit_cid first=EXECUTED second={'order_id': 'mta-g-aaaaaaaaaaaaaaaaaaaaaaaa', 'action': 'duplicate_skipped', 'symbol': 'BTCUSDT', 'source': 'ai', 'reason_codes': ['DUPLICATE_EXIT_IGNORED']}
+
+R3_PAPER_ROUND_PROBE tree=sb_int FAIL=0 []

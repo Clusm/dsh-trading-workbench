@@ -1,0 +1,7 @@
+INFO events=[] res_skip=False submit=1.0
+FAIL 5_sweep_failure_is_alerted []
+PASS 5_sweep_failure_does_not_block_exit 
+INFO db_down_res_skip=False
+PASS 5_alert_failure_does_not_break_exit 
+
+R3_SWEEP_ALERT_PROBE tree=sb_r2 FAIL=1 ['5_sweep_failure_is_alerted']
