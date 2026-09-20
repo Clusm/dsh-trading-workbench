@@ -80,8 +80,9 @@ def main() -> int:
             ["git", "-c", "core.autocrlf=false", "diff", "--", rel],
             cwd=DIFF_REPO, check=True, capture_output=True)
         (out_dir / name).write_bytes(out.stdout)
-        print(f"OK {name} lines={out.stdout.count(b'\\n')} "
-              f"cr_lines={out.stdout.count(bytes([13]))}")
+        lines = out.stdout.count(bytes([10]))
+        cr_lines = out.stdout.count(bytes([13]))
+        print(f"OK {name} lines={lines} cr_lines={cr_lines}")
     print("\nEMIT R3 OK")
     return 0
 
