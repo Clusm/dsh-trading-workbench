@@ -717,6 +717,22 @@
           "patch_updated": "u03_orchestrator_integration.patch +8 行，apply --check EXIT=0，numstat 120/0 纯插入",
           "unfinished": "接线补丁未应用、未跑端到端（仅静态+内存副本+单测）—— 归 I 集成",
           "rollback": "git revert e381eca"
+        },
+        {
+          "type": "review_r3_verification",
+          "candidate": "c0e14c4",
+          "verdict": "PASS-with-notes",
+          "archived_path": "docs/dispatch/reviews/U03/c0e14c4/Q_r3.md",
+          "items": "1-4 CLOSED；第 5 项可应用 + 1 项 P3 证据卫生；回归抽样 10 项全成立（CRASH COUNT=0）",
+          "q_new_1": "真闭合：哨兵本体/model_copy/自造结构等价裸 dict（不引用模块常量）/改实例号副本/environment='UNPINNED'、'unpinned '、' Unpinned '、'unpinned\t' -> 全部 pinned=False/ok=False/gate.ok=False/drop=['A']/reasons=['IDENTITY_UNPINNED']；**真实身份 pinned=True/accepted=('A',)/gate.ok=True（无假阳性）**；别名路径与 allow_unpinned 降级路径均不可洗白",
+          "q_new_3": "真闭合：接线缺省确为 ('ticker',)（复验者自读补丁原文）；缺 pct_24h/quote_volume_24h -> accepted=() 且 SOURCE_FIELD_MISSING:ticker.pct_24h；ticker 齐全仍放行；default=() 对照证明差异确由非空缺省带来；残余登记如实（TradeIntent/DecisionEvidence 确无 required_sources）",
+          "q_new_2": "cycle_id 变则 binding_id/evidence_id 变；同 cycle_id 复用则碰撞（已登记）；run_id 为新增形参且在作用域内（不会 NameError）",
+          "new_findings": [
+            "P3 补丁 index 后像 890c08f 不可复现（逐 hunk 重放得 8499377，git apply 落盘 280e1ea；根因混合行尾）-> known_limits#8 的'可复现'声称不成立（仅文档卫生，git apply 本身可应用）",
+            "P3 畸形 identity 参数炸整轮（r2 起既有、当前不可达）",
+            "P3 导出的 is_unpinned_identity() 传 Mapping 抛 AttributeError"
+          ],
+          "unverifiable": "接线补丁未应用/未跑端到端（归 I）"
         }
       ],
       "blockers": [],
@@ -791,7 +807,7 @@
           "sessions": [
             "Q (reviews/U03/R3/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "PASS-with-notes",
           "reports_dir": "docs/dispatch/reviews/U03/c0e14c4/"
         }
       ],
