@@ -20,6 +20,7 @@ from audit.database import AuditDatabase
 from audit.jsonl_logger import JsonlLogger
 from core.action_space import ActionSpace
 from core.agent_recorder import AgentRecorder
+from core.decision_trace import DeadlineBudget
 from core.decision_pipeline import authorize_decision, sign_execution
 from core.position_guardian import evaluate_positions
 from core.trading_scope import TradingScope
@@ -126,7 +127,8 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
                 llm_aux_timeout_seconds: float = 60.0,
                 trading_scope: TradingScope | None = None,
                 entry_readiness_provider: Callable[[], Any] | None = None,
-                release_id: str | None = None) -> Any:
+                release_id: str | None = None,
+                cycle_budget: DeadlineBudget | None = None) -> Any:
     # 生产服务显式注入 TradingScope；离线阶段脚本仍可只传旧参数。
     # 有 risk_config 范围时也尝试构造一个只读副本，保证直接调用 build_graph 的
     # 入口不会重新退回全市场开仓。
@@ -139,10 +141,20 @@ def build_graph(*, llm: LLMClient, model: str, db: AuditDatabase, logger: JsonlL
             scope = TradingScope.from_symbols(configured_scope)
 
     aux_timeout = max(1.0, float(llm_aux_timeout_seconds))
+    # 本轮**共享的绝对期限**：主决策、工具轮与情报摘要都在它之内（U05/DL07、R22）。
+    # 旧口径的 aux_deadline() 每次都用 now + aux_timeout 重新推导，长情报调用会把
+    # 整轮拖到总预算之外；现在子预算被父期限截断，永不越过本轮总预算。
+    shared_budget = cycle_budget or DeadlineBudget.start(
+        max(1.0, float(llm_total_timeout_seconds)), clock=time.monotonic, label="cycle",
+    )
+
+    def model_deadline() -> float:
+        """主决策/工具轮使用的**同一个绝对期限**（不做二次推导）。"""
+        return shared_budget.shared().deadline
 
     def aux_deadline() -> float:
-        """每个情报摘要单独拥有有限预算，不把供应商阻塞带入无限等待。"""
-        return time.monotonic() + aux_timeout
+        """情报摘要的子预算：截断在本轮共享期限之内（不重复推导期限）。"""
+        return shared_budget.slice(aux_timeout, label="intel").deadline
 
     def market_node(state: AgentState) -> dict[str, Any]:
         pair = (agent_llms or {}).get("market_agent")

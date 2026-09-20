@@ -9,6 +9,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Iterable, Iterator, Mapping
 
 from core.contracts import income_content_hash, normalize_key_part
@@ -1691,6 +1692,58 @@ class AuditDatabase:
             (run_id, agent_name, started_at, ended_at, status, model, input_summary,
              output_summary, prompt_tokens, completion_tokens, cost_estimate, latency_ms, error,
              effective_release),
+        )
+
+    def log_decision_trace_summary(self, *, run_id: str, cycle_id: str,
+                                  summary: Mapping[str, Any],
+                                  latency: Mapping[str, Any] | None = None,
+                                  outcomes: Sequence[Mapping[str, Any]] = (),
+                                  reason: Mapping[str, Any] | None = None,
+                                  artifact_path: str | None = None,
+                                  latency_ms: int | None = None,
+                                  release_id: str | None = None) -> None:
+        """落一轮决策轨迹的**摘要**（U05/DL06）。
+
+        刻意复用既有 ``agent_runs`` 表：**不新增表、不推进 schema 版本**，因此
+        不需要任何迁移伴随修改。
+
+        **列语义**（B-r1 P1-1 修正）：``latency_ms`` 是 ``agent_runs`` 的**共享
+        耗时列**，被 ``src/agents/review.py`` 的 ``AVG(latency_ms)`` 按 agent 聚合
+        进每日复盘，因此这里只写**真实耗时**（调用方传 ``latency_ms``，通常是
+        整轮墙钟跨度 ``DecisionTrace.elapsed_ms()``）；**没测到就写 NULL**，
+        绝不填别的语义。``failed_rounds`` **不占用耗时列**：它随 ``counters`` 进
+        ``output_summary`` JSON，并在 payload 顶层以 ``failed_rounds`` 单列出现
+        （本补丁不新增列，故不复用 ``error``——``error`` 保留为 NULL，表示这一行
+        不是失败运行）。``artifact_path`` 同样在 ``output_summary.artifact`` 里，
+        **不**承诺"独立列"（旧 docstring 的该陈述已删除）。
+        """
+        import json as _json  # 局部导入：本文件其余部分不依赖 json 序列化
+
+        effective_release = str(release_id or self.release_id)
+        counters = dict(summary or {})
+        failed_rounds = int(counters.get("failed_rounds") or 0)
+        payload = {
+            "cycle_id": str(cycle_id),
+            "counters": counters,
+            "failed_rounds": failed_rounds,
+            "latency": dict(latency or {}),
+            "latency_ms": None if latency_ms is None else int(latency_ms),
+            "outcomes": [dict(item) for item in outcomes],
+            "reason": None if reason is None else dict(reason),
+            "artifact": artifact_path,
+        }
+        self._insert(
+            """INSERT INTO agent_runs(run_id, agent_name, started_at, ended_at, status, model,
+               input_summary, output_summary, prompt_tokens, completion_tokens, cost_estimate,
+               latency_ms, error, release_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (f"{run_id}:decision_trace", "decision_trace", utc_now(), utc_now(),
+             "ok" if failed_rounds == 0 else "degraded",
+             None, f"cycle={cycle_id}",
+             _json.dumps(payload, ensure_ascii=False, sort_keys=True),
+             0, 0, 0.0,
+             # 真实耗时；没测到就是 NULL（不是 failed_rounds，也不是 0）。
+             None if latency_ms is None else int(latency_ms),
+             None, effective_release),
         )
 
     def log_llm_call(self, *, call_id: str, run_id: str | None, agent_name: str, model: str,

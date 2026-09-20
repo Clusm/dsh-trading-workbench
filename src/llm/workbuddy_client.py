@@ -64,6 +64,23 @@ class WorkBuddyLLMClient(LLMClient):
         self.cli_path = Path(cli_path or _default_cli_path())
         self.node_path = Path(node_path or _default_node_path())
         self._runner = runner or subprocess.run
+        #: U05/S02：本适配器**没有**备用路由（单模型受限桥），显式声明为空集合，
+        #: 于是任何"响应模型 != 请求模型"都会被判成参数继承而不是合法降级。
+        self.declared_fallbacks: tuple[str, ...] = ()
+        #: 真正发起的 CLI 尝试次数；调用返回而本计数为 0 即"早返回"（未发出请求）。
+        self.attempts = 0
+
+    @property
+    def route_declaration(self) -> dict[str, Any]:
+        """可被外部核对的路由声明（不含凭据：本适配器不持有任何 API key）。"""
+        return {
+            "client": self.name,
+            "model": self.model,
+            "effort": self.effort,
+            "purpose": "decision",
+            "provider_scope": f"workbuddy:{self.model}#effort:{self.effort}",
+            "timeout_seconds": self.timeout_seconds,
+        }
 
     def _require_runtime(self) -> None:
         missing = [str(path) for path in (self.node_path, self.cli_path) if not path.is_file()]
@@ -155,6 +172,7 @@ class WorkBuddyLLMClient(LLMClient):
 
     def _invoke(self, *, prompt: str, schema: dict[str, Any], timeout: float) -> dict[str, Any]:
         self._require_runtime()
+        self.attempts += 1
         try:
             command = [
                 str(self.node_path), str(self.cli_path),
