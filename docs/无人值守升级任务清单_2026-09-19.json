@@ -548,7 +548,25 @@
         "F19",
         "F21"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "review_r1_A",
+          "candidate": "5b71db4",
+          "verdict": "CHANGES_REQUESTED",
+          "counts": "P0 x1 / P1 x4 / P2 x5 / P3 x9",
+          "archived_path": "docs/dispatch/reviews/U02/5b71db4/A_r1.md",
+          "blocking": [
+            "P0 预留泄漏 -> 退出永久不可用：占量后异常不 release（binance_futures.py:2018）；稳定 guardian key 使其变 duplicate_skipped。**正是 F03/R09 场景**",
+            "P1 _open:1430 引用未定义 reservation_key -> NameError（实测）",
+            "P1 纸面稳定回退键使同名标的第二次退出永久被吞（execution.py:341）",
+            "P1 只上 01 **已切换账本分区** -> README 约束 1 的理由说反了",
+            "P1 enforce=True 会关掉全部退出（filter_unbound_management 无任何调用方）"
+          ],
+          "ledger_hard_conclusion": "**未声明时与 base 逐字一致（成立）**；但'声明 MTA_ACCOUNT_REF 后旧数据不可幂等'**真实存在**（同一 trade_id 在两域各一行，唯一索引拦不住）。**README 的迁移建议不可执行**：逐字 UPDATE 在 execution_fills/position_lifecycles 上撞 UNIQUE 约束、非原子、不可重入；清单**漏 trade_reconciliation_jobs**（:2926 护栏按 account_ref 过滤，漏迁会重复生成 lifecycle）；lifecycle_fill_allocations 无该列（无效指令）。建议：**先迁移后声明**，加去重 + 单事务 + 幂等",
+          "delta": "独立复跑 75 条：pristine 与 01..06 均 FAILED=1 ['smoke_windows_service_plan.py']（既有 KI02，沙箱缺 venv），差集 {} —— 注意该基线已含独占模块，delta 只隔离 6 个共享补丁",
+          "positives": "未声明账户时行为与 base 逐字一致；6 补丁 apply --check OK；无 schema 变更"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "A",
@@ -585,7 +603,18 @@
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r2",
+          "stage": "修复复验",
+          "candidate": null,
+          "sessions": [
+            "Q (reviews/U02/R2/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U02/<r2head>/"
+        }
+      ],
       "qa_runs": []
     },
     {
@@ -3223,6 +3252,14 @@
         "owner": "U05",
         "blocks": "复盘统计正确性（U01 已集成）",
         "note": "跨任务耦合：U04/U05 的决策 trace 写入 agent_runs 的 latency_ms 列，而 U01 的 review.py:231-237 用 AVG(latency_ms) 做聚合。列语义必须统一。U05 r2 修复。"
+      },
+      {
+        "id": "U02-LEDGER-PARTITION",
+        "title": "声明 MTA_ACCOUNT_REF 会使历史账本行不可幂等（同一 trade_id 两域各一行）",
+        "status": "OPEN",
+        "owner": "U02/U13/I",
+        "blocks": "启用 MTA_ACCOUNT_REF 前的数据迁移；K03 幂等性",
+        "note": "唯一索引拦不住跨域重复。作者 README 的迁移 SQL 不可执行（撞 UNIQUE、非原子、不可重入、漏 trade_reconciliation_jobs:2926 护栏、对 lifecycle_fill_allocations 的指令无效）。**正确顺序：先迁移（去重+单事务+幂等）后声明**。在迁移脚本落地并验证前，不得在生产启用 MTA_ACCOUNT_REF。"
       }
     ],
     "contract_candidate": "71f8109",
