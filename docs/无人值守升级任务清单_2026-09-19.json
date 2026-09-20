@@ -536,6 +536,19 @@
             "无在线/宿主验收"
           ],
           "important": "SCRIPTS 登记补丁必须与两个冒烟脚本同批应用，否则 _validate_smoke_manifest() 会因未登记冒烟直接 FAIL（作者已实测）"
+        },
+        {
+          "type": "review_r1_D",
+          "candidate": "3f49e03",
+          "verdict": "CHANGES_REQUESTED",
+          "counts": "P0=0 / P1 x2 / P2 x6 / P3 x4",
+          "archived_path": "docs/dispatch/reviews/U03/3f49e03/D_r1.md",
+          "key_findings": [
+            "P1-1 research_evidence.py:1095 模型自报 claims 完全覆盖程序生成 claim -> close=744.13/trigger=900 本应 CLAIM_FALSE，自报 close>0.0001 即 VALID；不传 trigger_price 也可 VALID（违反'模型不得覆盖行情事实'）",
+            "P1-2 :968 required_sources 只到源级 -> markPrice 在而 funding_rate 全缺仍 available=True，依赖资金费的意图照过",
+            "P2-1 status 可为 VALID 而 accepted=False（字段自相矛盾）"
+          ],
+          "positives": "进行中 bar 哨兵不入事实、未来 bar 改判 live、15m 不冒充 4h、now_ms 必传、TTL 等号保守、真实 0 保留 '0' 均经独立复现；3 个补丁 APPLIES_CLEAN"
         }
       ],
       "blockers": [],
@@ -588,7 +601,7 @@
             "D (reviews/U03/D/r1)",
             "B (reviews/U03/B/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED (D 已回；B 待回)",
           "reports_dir": "docs/dispatch/reviews/U03/3f49e03/",
           "note": "Q 独立验收安排在 I 组装的 integration_candidate 上进行"
         }
