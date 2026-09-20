@@ -6,17 +6,27 @@
 
 ---
 
-更新时间：2026-09-21 01:35（北京时间）
+更新时间：2026-09-21 01:50（北京时间）
 更新者：I（claude-code 编排会话，接自 opencode 交接）
 
 ## 1. 当前状态
 
 - 波次：**W0 收尾**（U00 契约冻结前夜），W1 尚未派发
-- 当前步骤：**U00 r5 修复轮进行中**
-- 进行中的子代理：**U00 r5 作者会话（claude-opus）**，工作区 `mat-wt/I`，分支 `task/U00`
-- 基线提交：`f1579e8`（r4 审查归档 + 台账）
+- 当前步骤：**U00 r5 独立复验进行中**
+- 进行中的子代理：**U00 r5 复验会话（Q 角色，默认模型）**，工作区 `mat-wt/reviews/U00/Q/w0r1`（detached @ `71f8109`）
+- r5 作者会话（claude-opus）**已完成**，产出 4 个提交：`cca5f27`(rules 结构化拒绝) / `523db59`(finalize_costs 重算) / `2feccaa`(dropped_input_ids 守卫) / `71f8109`(README 同步)
+- 基线提交：`71f8109`（`task/U00` HEAD，工作树干净）
 
-> **判定规则：**若你在 `task/U00` 上看到 `f1579e8` 之后**没有** r5 修复提交，且没有正在运行的作者会话，说明作者会话已中断 → 走 §4 恢复流程，**不要**重新派发一整个作者会话。
+> **判定规则：**若你在 `task/U00` 上看到 HEAD 仍是 `3de51d9` 或更早（无 r5 的 4 个修复提交），说明作者会话已中断 → 走 §4 恢复流程，**不要**重新派发一整个作者会话。
+>
+> 若 HEAD 已是 `71f8109` 但 `docs/dispatch/reviews/U00/71f8109/` 下**没有** r5 复验报告，说明复验会话中断 → 重新派发**复验**（不是修复）。
+
+### r5 已完成项（待复验确认）
+- `rules` 畸形载荷 → `RulesInputError`(build) / `RULES_MISMATCH`(validate)，不再崩溃
+- `finalize_costs` 改为用入参 `coverage` 内部重算，签名未变；手工伪造 proof 不再通过
+- README 全面同步（§3/§4/§5/§10/§11），新增 T1–T5 收紧登记
+- 残余以 §12 已登记限制处理：`L16`(STRATEGY_SOURCE_FILES)、`L17`(三个 mint 侧标志)、`L18`(dropped_input_ids 不可重算)、`L20`(新增拒绝面无法用 JSON golden 表达)
+- 作者自述：golden/schema/scripts **零改动**，未改任何期望值
 
 ## 2. next_action（按顺序）
 
