@@ -13,7 +13,10 @@
   直接拒绝同卷目标。
 - **恢复后先对账再开仓（F14）**：还原完成后门禁处于 ``RECONCILE_REQUIRED``，
   必须提交**结构化对账证据**才允许新开仓——"恢复完就直接开仓"在代码层面
-  不可达。
+  不可达。门禁是安全控制，因此**fail-closed**：``recovery_gate.json`` 损坏
+  或不可解析 → ``GATE_CORRUPT`` 阻断；门禁被删除（但安装戳仍在）→
+  ``GATE_MISSING`` 阻断；只有"文件与安装戳都不存在"（确实从未 restore）才
+  回到 ``GATE_NOT_INSTALLED``。
 
 F05 相关：写盘采用"暂存目录 + 原子发布"，中断的恢复包**不会被发布**；目标已
 存在时**拒绝覆盖**（坏包不得覆盖好包）；状态 JSON 损坏时 ``STATE_CORRUPT``
@@ -42,12 +45,17 @@ from core.runtime_paths import REQUIRED_STATE_FILES, RuntimePaths
 __all__ = [
     "BUNDLE_SCHEMA",
     "EPOCH_MISMATCH",
+    "EVIDENCE_ACCOUNT_MISMATCH",
     "EVIDENCE_MISSING",
     "EVIDENCE_STALE",
     "EVIDENCE_TYPE_INVALID",
     "GATE_CLEARED",
+    "GATE_CORRUPT",
+    "GATE_MISSING",
     "GATE_NOT_INSTALLED",
     "GATE_STATE_CLEARED",
+    "GATE_STATE_CORRUPT",
+    "GATE_STATE_MISSING",
     "GATE_STATE_NOT_INSTALLED",
     "GATE_STATE_RECONCILE_REQUIRED",
     "OPTIONAL_STATE_FILES",
@@ -56,18 +64,23 @@ __all__ = [
     "RECOVERY_WRITER_RUNNING",
     "SAME_VOLUME_NOT_DISASTER_RECOVERY",
     "STATE_CORRUPT",
+    "SUPPORTED_BUNDLE_SCHEMAS",
     "RecoveryEpoch",
     "RecoveryGate",
     "RecoveryGateDecision",
     "check_writer_stopped",
     "create_epoch_bundle",
     "drill_epoch_bundle",
+    "gate_install_marker",
     "recovery_plan",
     "state_json_health",
     "verify_epoch_bundle",
 ]
 
 BUNDLE_SCHEMA = 3
+#: 可读取的恢复包 schema：本模块 3、生产脚本（create_recovery_bundle）1/2。
+#: 兼容读是为了让"演练的那一套"与"真恢复的那一套"能互相验证（P2-4）。
+SUPPORTED_BUNDLE_SCHEMAS = (1, 2, 3)
 
 #: 关键状态（缺一即 ``RECOVERY_INCOMPLETE``，与 RuntimePaths 同源）。
 OPTIONAL_STATE_FILES = (
@@ -83,15 +96,41 @@ STATE_CORRUPT = "STATE_CORRUPT"
 SAME_VOLUME_NOT_DISASTER_RECOVERY = "SAME_VOLUME_NOT_DISASTER_RECOVERY"
 RECONCILE_REQUIRED_BEFORE_ENTRY = "RECONCILE_REQUIRED_BEFORE_ENTRY"
 GATE_CLEARED = "GATE_CLEARED"
-#: 未安装门禁（从未恢复过）：新开仓不受恢复门禁约束。
+#: 未安装门禁（**从未恢复过**）：新开仓不受恢复门禁约束。
 GATE_NOT_INSTALLED = "GATE_NOT_INSTALLED"
 #: 门禁状态取值（持久化在 recovery_gate.json 的 ``state``）。
 GATE_STATE_NOT_INSTALLED = GATE_NOT_INSTALLED
 GATE_STATE_RECONCILE_REQUIRED = "RECONCILE_REQUIRED"
 GATE_STATE_CLEARED = "CLEARED"
+#: 门禁文件**存在但不可解析**（磁盘满/断电/篡改）→ fail-closed 阻断。
+GATE_CORRUPT = "GATE_CORRUPT"
+GATE_STATE_CORRUPT = "CORRUPT"
+#: 门禁**曾经安装过**（有安装戳）但文件被删除 → fail-closed 阻断。
+GATE_MISSING = "GATE_MISSING"
+GATE_STATE_MISSING = "MISSING"
 EVIDENCE_MISSING = "EVIDENCE_MISSING"
 EVIDENCE_TYPE_INVALID = "EVIDENCE_TYPE_INVALID"
 EVIDENCE_STALE = "EVIDENCE_STALE"
+#: 证据/调用方身份与门禁绑定的账户/运行代不符 → 阻断（**不**用一份对账洗白另一个账户）。
+EVIDENCE_ACCOUNT_MISMATCH = "EVIDENCE_ACCOUNT_MISMATCH"
+
+#: 已知的门禁状态；出现未知取值一律按 ``CORRUPT`` 处理（不猜、不放行）。
+KNOWN_GATE_STATES = frozenset({
+    GATE_STATE_NOT_INSTALLED, GATE_STATE_RECONCILE_REQUIRED, GATE_STATE_CLEARED,
+    GATE_STATE_CORRUPT, GATE_STATE_MISSING,
+})
+
+
+def gate_install_marker(path: Path) -> Path:
+    """门禁**安装戳**路径：证明"这个状态根恢复过、门禁装过"。
+
+    P1-2 修复的关键：单纯"文件不存在"无法区分"从未恢复过"与"门禁被删除"。
+    安装戳由 :meth:`RecoveryGate.require_reconcile`/:meth:`RecoveryGate.save`
+    写入，因此门禁被删除时安装戳仍在 → 判定为 :data:`GATE_MISSING` 并 **阻断**；
+    只有"文件与安装戳都不存在"（确实从未 restore）才回到 ``GATE_NOT_INSTALLED``。
+    """
+    resolved = Path(path)
+    return resolved.with_name(f"{resolved.name}.installed")
 
 #: 同 epoch 容差：DB 快照与全部 JSON 的 ``snapshot_at_ms`` 必须落在同一窗口。
 DEFAULT_EPOCH_TOLERANCE_MS = 5000
@@ -365,22 +404,40 @@ def create_epoch_bundle(
 def verify_epoch_bundle(
     bundle_dir: Path, *, expected_environment: str | None = None,
 ) -> dict[str, Any]:
-    """校验同 epoch 恢复包：哈希、白名单、schema、SQLite、epoch 窗口。"""
+    """校验同 epoch 恢复包：哈希、白名单、schema、SQLite、epoch 窗口。
+
+    **兼容读（P2-4）**：``scripts/create_recovery_bundle.py``（生产灾难恢复那一套）
+    产出 ``bundle_schema: 2``，本模块产出 ``3``。历史上的"演练用一套、真恢复用
+    另一套"使两者无法互相验证；这里接受 ``1/2/3`` 三种 schema，并对老包按
+    "有 epoch 才校验 epoch"处理（缺 epoch 的老包在结果里显式标 ``legacy_bundle``，
+    **不**假装校验过）。
+    """
     bundle = Path(bundle_dir).resolve()
     if not bundle.is_dir() or bundle.is_symlink():
         raise RecoveryError(RECOVERY_INCOMPLETE, "恢复包目录不存在或是符号链接")
     manifest_path = bundle / "manifest.json"
     manifest_bytes = manifest_path.read_bytes()
     manifest = json.loads(manifest_bytes.decode("utf-8"))
-    if int(manifest.get("bundle_schema") or 0) != BUNDLE_SCHEMA:
-        raise RecoveryError("BUNDLE_SCHEMA_UNSUPPORTED", "不支持的恢复包版本")
-    expected_sha = (bundle / "manifest.sha256").read_text(encoding="ascii").split()[0]
-    if expected_sha != _sha256_bytes(manifest_bytes):
-        raise RecoveryError(RECOVERY_INCOMPLETE, "manifest 哈希不匹配")
-    if manifest.get("writer_stopped") is not True:
+    schema = int(manifest.get("bundle_schema") or 0)
+    if schema not in SUPPORTED_BUNDLE_SCHEMAS:
+        raise RecoveryError("BUNDLE_SCHEMA_UNSUPPORTED",
+                            f"不支持的恢复包版本: {schema}")
+    legacy_bundle = schema < BUNDLE_SCHEMA
+    if schema >= 2:
+        expected_sha = (bundle / "manifest.sha256").read_text(encoding="ascii").split()[0]
+        if expected_sha != _sha256_bytes(manifest_bytes):
+            raise RecoveryError(RECOVERY_INCOMPLETE, "manifest 哈希不匹配")
+    # 停写一致性：本模块写 ``writer_stopped``，生产脚本历史上写
+    # ``service_was_stopped``；两者含义相同，任一为 True 即成立。
+    if not (manifest.get("writer_stopped") is True
+            or manifest.get("service_was_stopped") is True):
         raise RecoveryError(RECOVERY_INCOMPLETE, "恢复包未声明停写一致性")
 
-    epoch = RecoveryEpoch(**_epoch_kwargs(manifest.get("epoch") or {}))
+    epoch: RecoveryEpoch | None = None
+    if isinstance(manifest.get("epoch"), dict):
+        epoch = RecoveryEpoch(**_epoch_kwargs(manifest["epoch"]))
+    elif not legacy_bundle:
+        raise RecoveryError(RECOVERY_INCOMPLETE, "恢复包缺少 epoch（同 epoch 声明缺失）")
     files = manifest.get("files")
     if not isinstance(files, dict) or "database" not in files:
         raise RecoveryError(RECOVERY_INCOMPLETE, "恢复包缺少数据库清单")
@@ -404,9 +461,10 @@ def verify_epoch_bundle(
             raise RecoveryError(RECOVERY_INCOMPLETE, f"文件大小不匹配: {relative}")
         if _sha256_file(member) != str(metadata.get("sha256") or ""):
             raise RecoveryError(RECOVERY_INCOMPLETE, f"文件哈希不匹配: {relative}")
-        snapshot_at = metadata.get("snapshot_at_ms")
-        if not isinstance(snapshot_at, int) or not epoch.accepts(snapshot_at):
-            raise RecoveryError(EPOCH_MISMATCH, f"{relative} 不在同一 epoch 窗口内")
+        if epoch is not None:
+            snapshot_at = metadata.get("snapshot_at_ms")
+            if not isinstance(snapshot_at, int) or not epoch.accepts(snapshot_at):
+                raise RecoveryError(EPOCH_MISMATCH, f"{relative} 不在同一 epoch 窗口内")
         allowed.add(relative.replace("\\", "/"))
         verified[str(key)] = member
     actual = {path.relative_to(bundle).as_posix()
@@ -428,19 +486,22 @@ def verify_epoch_bundle(
     expected_schema = files["database"].get("schema_version")
     if expected_schema is not None and actual_schema != int(expected_schema):
         raise RecoveryError(RECOVERY_INCOMPLETE, "数据库迁移版本与清单不一致")
-    if expected_environment and epoch.environment != expected_environment:
-        raise RecoveryError("ENVIRONMENT_MISMATCH",
-                            f"恢复包环境不匹配: {epoch.environment}")
+    environment = (epoch.environment if epoch is not None
+                   else str(manifest.get("environment") or ""))
+    if expected_environment and environment != expected_environment:
+        raise RecoveryError("ENVIRONMENT_MISMATCH", f"恢复包环境不匹配: {environment}")
     return {
         "bundle": str(bundle),
-        "schema": BUNDLE_SCHEMA,
-        "epoch": epoch.as_dict(),
-        "environment": epoch.environment,
-        "profile": epoch.profile,
-        "account_ref": epoch.account_ref,
+        "schema": schema,
+        "legacy_bundle": legacy_bundle,
+        "epoch": epoch.as_dict() if epoch is not None else None,
+        "environment": environment,
+        "profile": epoch.profile if epoch is not None else "",
+        "account_ref": epoch.account_ref if epoch is not None else "",
         "database_schema": actual_schema,
         "files": len(verified),
-        "span_ms": epoch.snapshot_finished_ms - epoch.snapshot_started_ms,
+        "span_ms": ((epoch.snapshot_finished_ms - epoch.snapshot_started_ms)
+                    if epoch is not None else None),
     }
 
 
@@ -510,7 +571,7 @@ def drill_epoch_bundle(
         receipt = {
             "restored_at": datetime.now(timezone.utc).isoformat(),
             "source_manifest_sha256": _sha256_file(bundle / "manifest.json"),
-            "epoch_id": verified["epoch"]["epoch_id"],
+            "epoch_id": (verified["epoch"] or {}).get("epoch_id"),
             "environment": verified["environment"],
             "database_schema": verified["database_schema"],
             "same_volume": same_volume,
@@ -602,6 +663,19 @@ class RecoveryGateDecision:
 class RecoveryGate:
     """恢复门禁：恢复完成后必须提交结构化对账证据才允许新开仓。
 
+    **fail-closed**：这是安全控制，缺失/损坏/不可解析都不放行，且三种失败
+    各有明确原因码：
+
+    ==========================  ====================  ========================
+    磁盘事实                    状态                    ``before_entry`` 结果
+    ==========================  ====================  ========================
+    文件+安装戳都不存在          ``NOT_INSTALLED``     allowed（从未 restore 过）
+    文件存在但不可解析/未知状态  ``CORRUPT``           拒绝 ``GATE_CORRUPT``
+    安装戳存在但文件不存在       ``MISSING``           拒绝 ``GATE_MISSING``
+    文件 = RECONCILE_REQUIRED    ``RECONCILE_REQUIRED`` 拒绝 ``RECONCILE_REQUIRED_BEFORE_ENTRY``
+    文件 = CLEARED 且证据新鲜    ``CLEARED``            allowed
+    ==========================  ====================  ========================
+
     证据必须是显式 Mapping（与 K05 ``resolve_incident`` 同口径，fail-closed）：
 
     .. code-block:: text
@@ -611,7 +685,8 @@ class RecoveryGate:
          "runtime_instance_id": "..."}
 
     缺字段 → ``EVIDENCE_MISSING``；类型混淆/裸布尔 → ``EVIDENCE_TYPE_INVALID``；
-    时间戳过旧或来自未来 → ``EVIDENCE_STALE``。**不伪造**：证据不足即保持阻断。
+    时间戳过旧或来自未来 → ``EVIDENCE_STALE``；调用方身份与门禁绑定的
+    账户/运行代不符 → ``EVIDENCE_ACCOUNT_MISMATCH``。**不伪造**：证据不足即保持阻断。
     """
 
     path: Path
@@ -625,16 +700,34 @@ class RecoveryGate:
 
     @classmethod
     def load(cls, path: Path) -> "RecoveryGate":
-        payload = None
+        """从磁盘加载门禁；**任何异常形态都落到阻断态**（P1-2）。
+
+        - 文件缺失 + 无安装戳 → ``NOT_INSTALLED``（确实从未 restore）；
+        - 文件缺失 + 有安装戳 → ``MISSING``（门禁被删除 → fail-closed）；
+        - 读/解析失败、不是 JSON 对象、``state`` 未知 → ``CORRUPT``（fail-closed）。
+        """
+        resolved = Path(path)
+        installed = gate_install_marker(resolved).is_file()
         try:
-            payload = json.loads(Path(path).read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
-            payload = None
+            raw = resolved.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return cls(path=resolved,
+                       state=GATE_STATE_MISSING if installed else GATE_STATE_NOT_INSTALLED)
+        except (OSError, UnicodeDecodeError):
+            # 磁盘满/权限/编码损坏：读到半截文件也算损坏，绝不当成"未安装"。
+            return cls(path=resolved, state=GATE_STATE_CORRUPT)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return cls(path=resolved, state=GATE_STATE_CORRUPT)
         if not isinstance(payload, dict):
-            return cls(path=Path(path))
+            return cls(path=resolved, state=GATE_STATE_CORRUPT)
+        state = str(payload.get("state") or "")
+        if state not in KNOWN_GATE_STATES:
+            return cls(path=resolved, state=GATE_STATE_CORRUPT)
         return cls(
-            path=Path(path),
-            state=str(payload.get("state") or GATE_NOT_INSTALLED),
+            path=resolved,
+            state=state,
             epoch_id=str(payload.get("epoch_id") or ""),
             reconciled_at_ms=payload.get("reconciled_at_ms"),
             account_ref=str(payload.get("account_ref") or ""),
@@ -652,7 +745,14 @@ class RecoveryGate:
         }
 
     def save(self) -> None:
+        """落盘门禁**并**写下安装戳（安装戳只在门禁真被写过之后存在）。"""
         _atomic_write_json(self.path, self.as_dict())
+        _atomic_write_json(
+            gate_install_marker(self.path),
+            {"installed_at_ms": _now_ms(), "state": self.state,
+             "epoch_id": self.epoch_id, "account_ref": self.account_ref,
+             "runtime_instance_id": self.runtime_instance_id},
+        )
 
     def require_reconcile(self, *, epoch_id: str, account_ref: str = "",
                           runtime_instance_id: str = "") -> None:
@@ -665,11 +765,33 @@ class RecoveryGate:
         self.evidence = {}
         self.save()
 
+    def bind_runtime(self, *, account_ref: str, runtime_instance_id: str) -> bool:
+        """把门禁绑定到**当前运行代**（P2-6）：只补齐空字段，绝不放宽已有绑定。
+
+        恢复包安装门禁时还不知道运行代（restore 时服务未起），因此绑定由服务
+        启动时补齐。返回是否发生了写入（便于审计/测试）。
+        """
+        changed = False
+        if account_ref and not self.account_ref:
+            self.account_ref = str(account_ref)
+            changed = True
+        if runtime_instance_id and not self.runtime_instance_id:
+            self.runtime_instance_id = str(runtime_instance_id)
+            changed = True
+        if changed:
+            self.save()
+        return changed
+
     def before_entry(self, *, now_ms: int | None = None) -> RecoveryGateDecision:
-        """新开仓前的唯一判定入口。"""
+        """新开仓前的唯一判定入口（fail-closed）。"""
         now = now_ms if now_ms is not None else _now_ms()
+        if self.state == GATE_STATE_CORRUPT:
+            return RecoveryGateDecision(False, (GATE_CORRUPT,), self.state)
+        if self.state == GATE_STATE_MISSING:
+            return RecoveryGateDecision(False, (GATE_MISSING,), self.state)
         if self.state == GATE_NOT_INSTALLED:
-            # 从未恢复过：门禁尚未安装，不阻断（也不伪造"已对账"）。
+            # 从未恢复过（文件与安装戳都不存在）：门禁尚未安装，不阻断
+            # （也不伪造"已对账"）。
             return RecoveryGateDecision(True, (GATE_NOT_INSTALLED,), self.state)
         if self.state != GATE_STATE_CLEARED:
             return RecoveryGateDecision(
@@ -686,7 +808,12 @@ class RecoveryGate:
         account_ref: str = "", runtime_instance_id: str = "",
         untrusted_clock: bool = False,
     ) -> RecoveryGateDecision:
-        """提交对账证据；只有结构化且新鲜的证据才解除阻断。"""
+        """提交对账证据；只有结构化且新鲜的证据才解除阻断。
+
+        ``account_ref``/``runtime_instance_id`` 是**调用方（服务运行代）注入**的
+        身份，不是请求体自证：门禁若已绑定某个账户/运行代，身份不符即
+        ``EVIDENCE_ACCOUNT_MISMATCH``（P2-6：一份对账不得洗白另一个账户）。
+        """
         now = now_ms if now_ms is not None else _now_ms()
         if untrusted_clock:
             return RecoveryGateDecision(False, ("CLOCK_UNTRUSTED",), self.state)
@@ -708,6 +835,14 @@ class RecoveryGate:
                                             self.state)
         if observed > now + 1000 or now - observed > self.evidence_ttl_ms:
             return RecoveryGateDecision(False, (EVIDENCE_STALE,), self.state)
+        # 身份绑定（P2-6）：门禁已绑定的账户/运行代必须与本次提交一致。
+        # 空绑定（恢复包安装时还不知道运行代）不阻拦，由 bind_runtime 在服务
+        # 启动时补齐。
+        if self.account_ref and account_ref and str(account_ref) != self.account_ref:
+            return RecoveryGateDecision(False, (EVIDENCE_ACCOUNT_MISMATCH,), self.state)
+        if (self.runtime_instance_id and runtime_instance_id
+                and str(runtime_instance_id) != self.runtime_instance_id):
+            return RecoveryGateDecision(False, (EVIDENCE_ACCOUNT_MISMATCH,), self.state)
         self.state = GATE_STATE_CLEARED
         self.reconciled_at_ms = now
         self.account_ref = account_ref or self.account_ref

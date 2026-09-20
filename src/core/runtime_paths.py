@@ -578,6 +578,19 @@ CONSUMER_INVENTORY: tuple[ConsumerEntry, ...] = (
                   "planned", "health_watch 自实现 profile 分支，第二套解析逻辑 → 归 U14"),
     ConsumerEntry("strategy_cards", "src/signal_engine/scanner.py", "strategy_cards_file",
                   "aligned", "策略卡是代码发布物，随代码根迁移属预期（只读）"),
+    # r2（P2-9）：F 报告指出的三项遗漏消费者，按"显式登记、不静默忽略"补入。
+    ConsumerEntry("binance_public_cache", "src/data/binance_public.py:20", "cache_dir",
+                  "planned", "公共行情快照缓存 CACHE_DIR = parents[2]/data/cache，"
+                             "按代码根派生 → 跨 profile/跨代码根共用同一份缓存，"
+                             "与 kline_cache 不是同一消费者；归 U05/U04 适配"),
+    ConsumerEntry("env_file_read", "src/core/net_env.py:65", "state_base",
+                  "planned", "代理/直连配置从 <code_root>/.env 读取（代码根只读输入，"
+                             "不是状态），U13 不改其语义；仅登记以免被当成"
+                             "「已由 RuntimePaths 收口」"),
+    ConsumerEntry("legacy_phase1_entry", "scripts/run_phase1.py:41", "data_dir",
+                  "planned", "旧入口直接用 settings.project_root 拼 "
+                             "data/signal_scanner_state.json；`scripts/run_web.py` "
+                             "才是 U13 对齐的入口，旧脚本归 U05/I 决定下线或适配"),
 )
 
 #: 共享出口根的消费者：必须都落在 ``shared_egress_root`` 之下（唯一性证明）。
@@ -640,12 +653,15 @@ U13_FINGERPRINT_DISPOSITION: dict[str, dict[str, str]] = {
     },
     "fu-paths": {
         "status": "fixed",
-        "note": "RuntimePaths 落地 + 全消费者清单（CONSUMER_INVENTORY 18 项，含 "
+        "note": "RuntimePaths 落地 + 全消费者清单（CONSUMER_INVENTORY **22 项**，含 "
                 "review_lessons 漂移、binance_futures 兜底 data/、dashboard 读 "
-                "project_root、health_watch 自实现分支）；迁移为只复制不删除（可回滚），"
+                "project_root、health_watch 自实现分支，r2 补入 "
+                "binance_public.CACHE_DIR / net_env 的 .env 读取 / 旧入口 "
+                "scripts/run_phase1.py）；迁移为只复制不删除（可回滚），"
                 "状态根可由 MTA_STATE_ROOT 注入（换代码根不改状态根）。**残余**："
                 "review_lessons 写入侧、request_coordinator、binance_futures 兜底、"
-                "dashboard、health_watch 五项标 planned（文件不在 U13 可改范围），"
+                "dashboard、health_watch、binance_public 缓存、net_env、"
+                "run_phase1 共 8 项标 planned（文件不在 U13 可改范围），"
                 "已在清单中逐条登记，未静默忽略。",
         "owner": "U13/U05/U14",
     },

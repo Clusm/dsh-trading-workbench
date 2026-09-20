@@ -3,7 +3,7 @@
 三个子步骤，全部只写临时目录、不读真实 ``.env``/``data``/密钥、不联网、
 不启动服务、不下单：
 
-1. ``tests/acceptance/test_supervision.py``（U13 验收套件，112 项断言）；
+1. ``tests/acceptance/test_supervision.py``（U13 验收套件，166 项断言）；
 2. ``scripts/ops/verify_runtime_paths.py``（消费者清单 / 共享出口根唯一 / 锁不随代码根漂移）；
 3. ``scripts/ops/verify_recovery_plan.py``（建包 → 校验 → 隔离演练 → 先对账再开仓）。
 

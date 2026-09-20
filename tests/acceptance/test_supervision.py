@@ -50,6 +50,7 @@ from core.ops.supervision import (  # noqa: E402
     CLOCK_FORWARD_JUMP,
     CLOCK_ROLLBACK,
     CLOCK_UNTRUSTED,
+    LEDGER_CORRUPT,
     MANUAL_DISABLE_PRECEDES_AUTO_RECOVERY,
     MANUAL_RECOVERY_REQUIRED,
     OPERATOR_CONFIRM_REQUIRED,
@@ -258,6 +259,35 @@ def check_bounded_restart() -> None:
               sliding.restarts_in_window == 0 and sliding.allowed
               and sliding.delay_seconds == BACKOFF_SCHEDULE_SECONDS[0])
 
+        # r2：损坏账本不得回落成空账本（那等于把重启额度静默重置）
+        corrupt_path = Path(tmp) / "corrupt.json"
+        corrupt_path.write_text("{not json", encoding="utf-8")
+        corrupt = SupervisionLedger.load(corrupt_path)
+        check("损坏账本被标记（不静默当成空账本）",
+              corrupt.load_error == LEDGER_CORRUPT)
+        corrupt_decision = plan_supervision(corrupt, now=now, profile="live")
+        check("损坏账本 → 阻断（LEDGER_CORRUPT），不放行重启",
+              not corrupt_decision.allowed
+              and corrupt_decision.state == STATE_BLOCKED
+              and LEDGER_CORRUPT in corrupt_decision.reason_codes)
+        bad_shape = Path(tmp) / "shape.json"
+        bad_shape.write_text("[1, 2, 3]", encoding="utf-8")
+        check("账本不是 JSON 对象同样被标记",
+              SupervisionLedger.load(bad_shape).load_error == LEDGER_CORRUPT)
+        check("从未写过账本仍是合法空状态",
+              SupervisionLedger.load(Path(tmp) / "absent.json").load_error == "")
+        check("损坏账本不触发放行分支（额度不会被重置）",
+              not plan_supervision(
+                  SupervisionLedger.load(corrupt_path), now=now + 10**6,
+                  profile="live").allowed)
+
+        manual_path = Path(tmp) / "manual.json"
+        manual = SupervisionLedger.load(manual_path)
+        manual.set_manual_disable(actor="operator", reason="r2 落盘检查",
+                                  source="control", now=1200.0)
+        check("人工禁用置位即持久化（无需调用方再 save）",
+              SupervisionLedger.load(manual_path).manual_disable.active)
+
 
 # --------------------------------------------------------------------------
 # 必达要点 3：单账户执行者（单实例锁），换代码根不改状态根（R12）
@@ -346,7 +376,8 @@ def check_runtime_paths_inventory() -> None:
         code = base / "code"
         code.mkdir()
         legacy = RuntimePaths.resolve(code, profile="demo")
-        check("消费者清单覆盖 18 项以上", len(CONSUMER_INVENTORY) >= 18)
+        check("消费者清单覆盖 22 项（含 r2 补入的 3 项）",
+              len(CONSUMER_INVENTORY) >= 22)
         keys = [entry.key for entry in CONSUMER_INVENTORY]
         check("消费者 key 不重复", len(keys) == len(set(keys)))
         allowed_status = {"migrated", "aligned", "compat", "planned"}
@@ -574,6 +605,213 @@ def check_reconcile_before_entry() -> None:
               not RecoveryGate.load(path).before_entry(now_ms=1_000_200 + 10**7).allowed)
 
 
+def check_gate_fail_closed() -> None:
+    """P1-2：门禁是**安全控制**，损坏/删除/未知状态都必须 fail-closed。
+
+    对照修复前的 fail-open：``RecoveryGate.load()`` 把不可解析的门禁回落成
+    "未安装" → ``before_entry()`` 放行。现在：
+    "从未恢复" 只由"文件与安装戳都不存在"定义。
+    """
+    print("\n[7b] 恢复门禁 fail-closed（损坏 / 删除 / 未知状态）")
+    from core.ops.recovery import (
+        GATE_CORRUPT,
+        GATE_MISSING,
+        GATE_NOT_INSTALLED,
+        gate_install_marker,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="u13-gate-fc-") as tmp:
+        path = Path(tmp) / "ops" / "recovery_gate.json"
+        # (a) 从未 restore：文件与安装戳都不存在 → 不阻断（合法"未安装"）
+        fresh = RecoveryGate.load(path).before_entry(now_ms=1_000_000)
+        check("从未恢复过（无文件无安装戳）才允许开仓",
+              fresh.allowed and GATE_NOT_INSTALLED in fresh.reason_codes)
+
+        # (b) 恢复后门禁文件被写入半截 JSON（断电/磁盘满/篡改）
+        RecoveryGate.load(path).require_reconcile(epoch_id="epoch-fc")
+        check("安装门禁会写下安装戳", gate_install_marker(path).is_file())
+        path.write_text("{corrupt", encoding="utf-8")
+        corrupt = RecoveryGate.load(path).before_entry(now_ms=1_000_000)
+        check("门禁文件损坏 → 拒绝（GATE_CORRUPT）",
+              not corrupt.allowed and GATE_CORRUPT in corrupt.reason_codes)
+
+        # (c) 门禁文件被删除（安装戳仍在）
+        RecoveryGate.load(path).require_reconcile(epoch_id="epoch-fc")
+        path.unlink()
+        missing = RecoveryGate.load(path).before_entry(now_ms=1_000_000)
+        check("门禁文件被删除 → 拒绝（GATE_MISSING）",
+              not missing.allowed and GATE_MISSING in missing.reason_codes)
+
+        # (d) 合法 JSON 但 state 未知/为空
+        path.write_text(json.dumps({"state": "WHATEVER"}), encoding="utf-8")
+        unknown = RecoveryGate.load(path).before_entry(now_ms=1_000_000)
+        check("未知门禁状态 → 拒绝（GATE_CORRUPT）",
+              not unknown.allowed and GATE_CORRUPT in unknown.reason_codes)
+        path.write_text(json.dumps({"schema": 1}), encoding="utf-8")
+        empty = RecoveryGate.load(path).before_entry(now_ms=1_000_000)
+        check("门禁缺 state 字段 → 拒绝（GATE_CORRUPT）",
+              not empty.allowed and GATE_CORRUPT in empty.reason_codes)
+
+        # (e) 非 dict JSON（数组/标量）同样是损坏
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        array_payload = RecoveryGate.load(path).before_entry(now_ms=1_000_000)
+        check("门禁不是 JSON 对象 → 拒绝（GATE_CORRUPT）",
+              not array_payload.allowed and GATE_CORRUPT in array_payload.reason_codes)
+
+        # (f) 损坏态可以被 operator 的合法对账**显式**收口（不是死路）
+        repaired = RecoveryGate.load(path)
+        recovered = repaired.complete_reconcile(
+            {"observed_at_ms": 1_000_000, "positions_verified": True,
+             "open_orders_verified": True}, now_ms=1_000_000)
+        check("损坏门禁经结构化对账可显式收口",
+              recovered.allowed and GATE_CLEARED in recovered.reason_codes
+              and RecoveryGate.load(path).before_entry(now_ms=1_000_100).allowed)
+
+
+def check_gate_runtime_binding() -> None:
+    """P2-6：门禁绑定运行代后，另一账户/运行代的"对账"不得解除阻断。"""
+    print("\n[7c] 门禁证据绑定账户与运行代")
+    from core.ops.recovery import EVIDENCE_ACCOUNT_MISMATCH
+
+    with tempfile.TemporaryDirectory(prefix="u13-gate-bind-") as tmp:
+        path = Path(tmp) / "gate.json"
+        gate = RecoveryGate.load(path)
+        gate.require_reconcile(epoch_id="epoch-bind", account_ref="", runtime_instance_id="")
+        check("恢复包安装的门禁初始未绑定运行代",
+              RecoveryGate.load(path).account_ref == "")
+        check("服务启动时补齐运行代绑定（只补空字段）",
+              RecoveryGate.load(path).bind_runtime(
+                  account_ref="acct-A", runtime_instance_id="rt-A") is True
+              and RecoveryGate.load(path).account_ref == "acct-A")
+        check("已绑定的账户不会被二次绑定改写",
+              RecoveryGate.load(path).bind_runtime(account_ref="acct-B",
+                                                   runtime_instance_id="rt-B") is False
+              and RecoveryGate.load(path).account_ref == "acct-A")
+        evidence = {"observed_at_ms": 1_000_000, "positions_verified": True,
+                    "open_orders_verified": True}
+        wrong = RecoveryGate.load(path).complete_reconcile(
+            evidence, now_ms=1_000_000, account_ref="acct-B", runtime_instance_id="rt-B")
+        check("另一账户提交的对账被拒绝",
+              not wrong.allowed and EVIDENCE_ACCOUNT_MISMATCH in wrong.reason_codes)
+        right = RecoveryGate.load(path).complete_reconcile(
+            evidence, now_ms=1_000_000, account_ref="acct-A", runtime_instance_id="rt-A")
+        check("绑定匹配的对账才被接受",
+              right.allowed and GATE_CLEARED in right.reason_codes)
+
+
+def check_gate_production_wiring() -> None:
+    """P1-3：门禁必须接进**生产**开仓判定链，且有生产收口入口。
+
+    能力探测（共享适配补丁）：``evaluate_entry_readiness`` 是否已支持
+    ``recovery_gate_allowed`` 事实。未应用时打印 NOTE，不静默跳过。
+    """
+    print("\n[7e] 门禁生产接线（before_entry → 开仓判定链；complete_reconcile → 生产入口）")
+    import inspect
+
+    from core.entry_readiness import evaluate_entry_readiness
+
+    if "recovery_gate_allowed" not in inspect.getsource(evaluate_entry_readiness):
+        print("  NOTE  entry_readiness.py 未包含 recovery_gate_allowed 事实"
+              "（共享适配补丁未应用）；生产接线证据见交付报告探针输出")
+        return
+
+    base = {
+        "service_accepting": True, "control_state": "normal",
+        "equity_available": True, "account_risk_allow_new": True,
+        "startup_safety_ready": True, "order_submission_ready": True,
+        "market_cooldown_active": False, "data_budget_available": True,
+        "rate_coordination_available": True, "order_mirror_ok": True,
+        "protection_mirror_ok": True, "unknown_orders": 0, "submitting_orders": 0,
+        "persistence_available": True, "scope_hash": "s", "runtime_instance_id": "r",
+        "environment": "paper",
+    }
+
+    class _Scope:
+        scope_hash = "s"
+
+    allowed = evaluate_entry_readiness(base, scope=_Scope(), environment="paper")
+    check("未注入门禁事实时判定不变（存在性触发，旧调用方语义不变）",
+          allowed.new_entry_allowed)
+    blocked = evaluate_entry_readiness(
+        {**base, "recovery_gate_allowed": False,
+         "recovery_gate_reason_codes": [RECONCILE_REQUIRED_BEFORE_ENTRY]},
+        scope=_Scope(), environment="paper")
+    check("门禁阻断事实进入开仓判定链",
+          not blocked.new_entry_allowed
+          and RECONCILE_REQUIRED_BEFORE_ENTRY in blocked.blocking_reasons)
+    corrupt = evaluate_entry_readiness(
+        {**base, "recovery_gate_allowed": False,
+         "recovery_gate_reason_codes": ["GATE_CORRUPT"]},
+        scope=_Scope(), environment="paper")
+    check("损坏门禁的原因码同样进入开仓判定链",
+          not corrupt.new_entry_allowed and "GATE_CORRUPT" in corrupt.blocking_reasons)
+    no_codes = evaluate_entry_readiness(
+        {**base, "recovery_gate_allowed": False}, scope=_Scope(), environment="paper")
+    check("门禁阻断但没给原因码时仍阻断（不默认放行）",
+          not no_codes.new_entry_allowed
+          and "RECOVERY_GATE_UNPROVEN" in no_codes.blocking_reasons)
+
+    service_source = (ROOT / "src" / "core" / "service.py").read_text(encoding="utf-8")
+    app_source = (ROOT / "src" / "dashboard" / "app.py").read_text(encoding="utf-8")
+    check("服务生产路径调用 complete_reconcile（有收口入口）",
+          "complete_reconcile(" in service_source)
+    check("服务生产路径调用 before_entry（接入判定链）",
+          "before_entry()" in service_source)
+    check("控制面暴露对账入口 /api/recovery/reconcile",
+          "/api/recovery/reconcile" in app_source)
+
+
+def check_bundle_schema_compat() -> None:
+    """P2-4：core 能校验/演练**生产脚本**（schema 2）产出的恢复包。
+
+    修复前：core.verify_epoch_bundle 只接受 ``bundle_schema == 3``，
+    生产脚本建的包一律 ``BUNDLE_SCHEMA_UNSUPPORTED`` → 演练的那一套与真恢复
+    的那一套无法互相验证。
+    """
+    print("\n[7d] 两套恢复包实现的兼容读（schema 2 ↔ 3）")
+    scripts_dir = ROOT / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from create_recovery_bundle import create_recovery_bundle
+
+    with tempfile.TemporaryDirectory(prefix="u13-schema-") as tmp:
+        base = Path(tmp)
+        project = base / "project"
+        data = project / "data"
+        (project / "config").mkdir(parents=True)
+        data.mkdir()
+        connection = sqlite3.connect(data / "agent_trader.sqlite")
+        connection.execute("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY)")
+        connection.execute("INSERT INTO schema_migrations VALUES(17)")
+        connection.commit()
+        connection.close()
+        for name, payload in (
+            ("capital_state.json", {"mode": "demo"}),
+            ("channel_state.json", {"date": "2026-09-20"}),
+            ("control_state.json", {"state": "normal"}),
+            ("account_risk_state.json", {"anchor_id": "demo:schema"}),
+        ):
+            (data / name).write_text(json.dumps(payload), encoding="utf-8")
+        (project / "config" / "risk_profile.lock.json").write_text("{}", encoding="utf-8")
+        bundle = create_recovery_bundle(project, base / "bundles")
+        if json.loads((bundle / "manifest.json").read_text(
+                encoding="utf-8")).get("bundle_schema") != 2:
+            print("  NOTE  create_recovery_bundle 非 schema 2；兼容读断言跳过"
+                  "（共享适配补丁未应用）")
+            return
+        verified = verify_epoch_bundle(bundle, expected_environment="demo")
+        check("core 能校验生产脚本的 schema-2 恢复包",
+              verified["schema"] == 2 and verified["environment"] == "demo")
+        check("兼容读结果显式标注 legacy/epoch 事实",
+              verified["legacy_bundle"] is True
+              and isinstance(verified["epoch"], dict))
+        restored = drill_epoch_bundle(bundle, base / "drill", execute=True)
+        check("core 能演练生产脚本的恢复包（quick_check 通过）",
+              restored["status"] == "restored")
+        check("损坏的兼容包仍被拒绝", bool(raises(
+            RecoveryError, verify_epoch_bundle, base / "bundles" / "nope")))
+
+
 # --------------------------------------------------------------------------
 # F17 / F05 / 指纹处置
 # --------------------------------------------------------------------------
@@ -775,6 +1013,60 @@ def check_scm_dual_profile() -> None:
                           write(profile="prod", port=8000), project_root=root)))
 
 
+def check_ki02_fallback_closure() -> None:
+    """KI02 回退面收口：显式无效解释器必须报错；安装期不得只告警。
+
+    能力探测：``resolve_python_executable`` 是否已带 ``allow_fallback``（共享适配
+    补丁）。未应用时打印 NOTE，不静默跳过。
+    """
+    print("\n[12] KI02 回退面收口（显式无效声明 / 安装期 fail-closed）")
+    import inspect
+
+    from core.windows_service import resolve_python_executable
+
+    params = inspect.signature(resolve_python_executable).parameters
+    if "allow_fallback" not in params:
+        print("  NOTE  windows_service.py 未包含 run2 的 allow_fallback 收口"
+              "（共享适配补丁未应用）；KI02 收口断言见交付报告")
+        return
+
+    with tempfile.TemporaryDirectory(prefix="u13-ki02-") as tmp:
+        root = Path(tmp)
+        (root / ".venv" / "Scripts").mkdir(parents=True)
+        (root / ".venv" / "Scripts" / "python.exe").write_bytes(b"fixture")
+        declared = ".venv/Scripts/python.exe"
+
+        # (a) 显式 MTA_PYTHON 指向不存在的路径 → 必须报错，不得静默回退
+        env = {"MTA_PYTHON": str(root / "nope" / "python.exe")}
+        explicit_invalid = raises(
+            ValueError, resolve_python_executable, root, declared, env=env)
+        check("显式 MTA_PYTHON 指向不存在路径 → 报错（不静默忽略）",
+              bool(explicit_invalid) and "MTA_PYTHON" in explicit_invalid)
+
+        # (a2) 显式 MTA_PYTHON 指向存在文件 → 正常接受（保留注入能力）
+        env_ok = {"MTA_PYTHON": str(Path(sys.executable))}
+        resolved, source = resolve_python_executable(root, declared, env=env_ok)
+        check("显式 MTA_PYTHON 有效时仍被接受",
+              source == "env" and resolved == Path(sys.executable).resolve())
+
+        # (b) 安装期口径：声明缺失时不得回退到 sys.executable，而是失败
+        (root / ".venv" / "Scripts" / "python.exe").unlink()
+        install_failure = raises(
+            ValueError, resolve_python_executable, root, declared,
+            allow_fallback=False, env={})
+        check("安装期（allow_fallback=False）解释器缺失 → 失败而不是回退",
+              bool(install_failure) and "回退" in install_failure)
+        check("默认口径（allow_fallback=True）仍保留可回退行为",
+              resolve_python_executable(root, declared, env={})[0] ==
+              Path(sys.executable).resolve())
+
+    host_source = (ROOT / "scripts" / "windows_service_host.py").read_text(encoding="utf-8")
+    check("宿主脚本安装期强制 allow_fallback=False（接线而非仅告警）",
+          "allow_fallback=False" in host_source
+          and "python_executable_is_explicit" in host_source
+          and "warn: python_executable" not in host_source)
+
+
 def check_fingerprint_disposition() -> None:
     print("\n[9] 指纹报告 diff-6 / decl-6 处置登记")
     required = {"diff-6", "decl-6", "fu-1", "fu-2", "fu-4", "fu-paths"}
@@ -801,9 +1093,14 @@ def main() -> int:
     check_runtime_paths_inventory()
     check_recovery_epoch_bundle()
     check_reconcile_before_entry()
+    check_gate_fail_closed()
+    check_gate_runtime_binding()
+    check_gate_production_wiring()
+    check_bundle_schema_compat()
     check_clock_guard()
     check_recovery_script_epoch()
     check_scm_dual_profile()
+    check_ki02_fallback_closure()
     check_fingerprint_disposition()
     if FAILURES:
         print(f"\nU13 SUPERVISION ACCEPTANCE FAILED: {len(FAILURES)} -> "

@@ -41,6 +41,7 @@ __all__ = [
     "CLOCK_FORWARD_JUMP",
     "CLOCK_ROLLBACK",
     "CLOCK_UNTRUSTED",
+    "LEDGER_CORRUPT",
     "MANUAL_DISABLE_PRECEDES_AUTO_RECOVERY",
     "MANUAL_RECOVERY_REQUIRED",
     "MONOTONIC_BACKWARDS",
@@ -87,6 +88,10 @@ CLOCK_UNTRUSTED = "CLOCK_UNTRUSTED"
 CLOCK_ROLLBACK = "CLOCK_ROLLBACK"
 CLOCK_FORWARD_JUMP = "CLOCK_FORWARD_JUMP"
 MONOTONIC_BACKWARDS = "MONOTONIC_BACKWARDS"
+#: 托管账本**存在但不可解析** → 重启时间线/人工禁用/人工恢复态都不可证明。
+#: fail-closed：按"不可证明"阻断，**不**回落成空账本（否则损坏文件会静默重置
+#: 重启额度，与 P1-2 同类的 fail-open）。
+LEDGER_CORRUPT = "LEDGER_CORRUPT"
 
 #: 与 U15 控制面同名的自动执行者（任何自动路径不得放宽人工禁用）。
 AUTO_ACTOR = "auto"
@@ -396,12 +401,28 @@ class SupervisionLedger:
     manual_disable: ManualDisable = field(default_factory=ManualDisable)
     clock: ClockVerdict | None = None
     schema: int = 1
+    #: 非空表示账本**存在但不可解析**（:data:`LEDGER_CORRUPT`）：此时所有字段都
+    #: 不可证明，托管决策必须阻断而不是按空账本继续（fail-closed）。
+    load_error: str = ""
 
     @classmethod
     def load(cls, path: Path) -> "SupervisionLedger":
         ledger = cls(path=Path(path))
-        payload = _read_json(Path(path))
-        if payload is None:
+        source = Path(path)
+        try:
+            raw = source.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return ledger  # 从未写过账本：合法空状态
+        except (OSError, UnicodeDecodeError):
+            ledger.load_error = LEDGER_CORRUPT
+            return ledger
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            ledger.load_error = LEDGER_CORRUPT
+            return ledger
+        if not isinstance(payload, dict):
+            ledger.load_error = LEDGER_CORRUPT
             return ledger
         times: list[float] = []
         for value in payload.get("restart_times") or []:
@@ -431,6 +452,8 @@ class SupervisionLedger:
 
     def save(self) -> None:
         _atomic_write_json(self.path, self.as_dict())
+        # 刚写下的是一个合法账本：损坏标记随之清除。
+        self.load_error = ""
 
     def restarts_in_window(self, now: float, window_seconds: float) -> list[float]:
         cutoff = now - window_seconds
@@ -446,9 +469,14 @@ class SupervisionLedger:
                            now: float) -> ManualDisable:
         """置位人工禁用。自动执行者也可以 **置位**（按健康判定收紧），
         但任何执行者都不能把它 **放宽**（放宽只走 operator_clear_manual_recovery）。
+
+        r2（P3-3）：置位**立即落盘**——人工禁用是最不该因"调用方忘记 save()"
+        而丢失的状态；此前只有 ``plan_supervision`` 的超限分支才显式 ``save()``，
+        两处 API 强度不一致。
         """
         self.manual_disable = ManualDisable(active=True, actor=actor, reason=reason,
                                             source=source, recorded_at=now)
+        self.save()
         return self.manual_disable
 
     def record_restart(self, at: float, *, policy: RestartPolicy | None = None) -> None:
@@ -488,13 +516,15 @@ def plan_supervision(
     顺序：
 
     1. profile 未显式声明 → ``BLOCKED`` / ``PROFILE_NOT_DECLARED``；
-    2. 人工禁用生效 → ``MANUAL_RECOVERY`` /
+    2. 账本损坏（``load_error``）→ ``BLOCKED`` / ``LEDGER_CORRUPT``
+       （不可证明即阻断，**不**按空账本重置重启额度）；
+    3. 人工禁用生效 → ``MANUAL_RECOVERY`` /
        ``MANUAL_DISABLE_PRECEDES_AUTO_RECOVERY``（**不因健康恢复或重启用尽而放宽**）；
-    3. 已进入人工恢复态 → ``MANUAL_RECOVERY`` / ``MANUAL_RECOVERY_REQUIRED``；
-    4. 时钟不可信 → ``BLOCKED`` / ``CLOCK_UNTRUSTED``；
-    5. 窗口内重启次数达上限 → 置 ``manual_recovery`` 并返回
+    4. 已进入人工恢复态 → ``MANUAL_RECOVERY`` / ``MANUAL_RECOVERY_REQUIRED``；
+    5. 时钟不可信 → ``BLOCKED`` / ``CLOCK_UNTRUSTED``；
+    6. 窗口内重启次数达上限 → 置 ``manual_recovery`` 并返回
        ``MANUAL_RECOVERY`` / ``RESTART_LIMIT_EXCEEDED``；
-    6. 其余 → ``RESTART_BACKOFF`` / ``RESTART_ALLOWED``，退避 30/60/120 秒。
+    7. 其余 → ``RESTART_BACKOFF`` / ``RESTART_ALLOWED``，退避 30/60/120 秒。
     """
     policy = policy or RestartPolicy()
     declared = (profile or "").strip().lower()
@@ -504,6 +534,11 @@ def plan_supervision(
         return SupervisionDecision(False, STATE_BLOCKED, 0.0,
                                    (PROFILE_NOT_DECLARED,), in_window,
                                    ledger.manual_disable.active)
+    if ledger.load_error:
+        # 账本损坏：重启时间线/人工禁用/人工恢复态都不可证明 → 按"更严"阻断，
+        # 绝不回落成空账本（那等于把重启额度重置掉）。
+        return SupervisionDecision(False, STATE_BLOCKED, 0.0,
+                                   (ledger.load_error,), in_window, False)
     if ledger.manual_disable.active:
         # 人工禁用优先：**不** torch 任何自动恢复分支，直接人工恢复态。
         return SupervisionDecision(False, STATE_MANUAL_RECOVERY, 0.0,
