@@ -20,6 +20,12 @@
   保护，也不得把 TP 与 SL 数量相加冒充双倍覆盖。
 * **请求成功 != 成交**：只有交易所给出成交数量与可用成交价才算成交事实。
 * **健康/传输类故障不得触发全平**，也不得改动 pause/emergency 语义与风险档。
+
+U04 需要的"命令种类/十进制数量"列由 :func:`ensure_execution_schema` 以幂等
+``ALTER TABLE ... ADD COLUMN`` 补齐，**不新增迁移版本号**：``schema_version`` 参与
+``release_evidence`` 的 GO 判定（数据库迁移版本必须与发布清单一致），而这里只新增
+向后兼容的可空列，不应因此改变发布身份；旧行照常可读，未补列的库也能按端点回推
+命令种类。
 """
 from __future__ import annotations
 
