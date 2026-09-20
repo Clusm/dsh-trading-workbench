@@ -613,6 +613,27 @@
           "confirmed": "P1 _open 未定义名已真删（静态 symtable 空 + 动态 qty=0->None）；约束 1 改写准确（only01+env->demo:acct-live；only02->ImportError）；阻断级登记在 README.md:79",
           "delta": "80 条（I 已前移 + U05，非作者 76），两树 FAILED=0、差集 {}",
           "unfinished": "无实盘（路径级证明）；P0 频率与 _open 分支可达性未量化；R09 单进程；迁移未在生产库规模验证"
+        },
+        {
+          "type": "author_fix_r3",
+          "head_commit": "d6fcf51",
+          "patch_dir": "docs/dispatch/patches/U02/890bb7c/",
+          "fixed": {
+            "①CONSUMED 淘汰后重发": "management_authorization.py 新增**只增不淘汰**的成交事实 _consumed_ids + is_consumed；reserve/release/_reclaim_if_stale_locked/request_exit 全按事实判重。前后：FAIL=5（含 B2_after_prune_same_key 走 SUBMIT_REDUCE）-> **FAIL=0**（duplicate=True, qty=0）；D 反向对照证明 release 过的键仍可重发（P0-1 未回退）",
+            "②release 不幂等": "release() 对 RELEASED/CONSUMED/已淘汰但成交过的 id 一律 ALREADY_CLOSED、不改状态",
+            "③纸面同轮声明": "补丁 05 改用 confirm_exit 结算 -> 行为与声明一致。前后：FAIL=3（同轮第二次 EXECUTED）-> FAIL=0（duplicate_skipped），跨轮/5 轮/部分平+剩余仍全 EXECUTED",
+            "④⑤⑥": "迁移 README 表与正文改正；补丁 02 加 futures_exit_reservation_sweep_failed 告警、06 补中文映射；README 顶部写明强制 -c core.autocrlf=false -c core.eol=lf + git diff --stat 自检"
+          },
+          "migration_citations": "改对：:2926 查的是 position_lifecycles（本就在清单）；trade_reconciliation_jobs 无按 account_ref 的读取 -> 改为'一致性/整洁，非功能必需'；income 方向改为'不同批更新 *_norm 则仍视作同一域'",
+          "apply": "两种 git 配置下 6/6 OK",
+          "delta": "pristine_int 80 条 FAILED=0、sb_int 80 条 FAILED=0，逐条状态行 diff 为空",
+          "tests": "沙箱 test 158/0、smoke_u02 OK、contracts 173/0、ui 52/0",
+          "known_limits": [
+            "_consumed_ids 只增不淘汰（回收需先持久化）",
+            "显式 cid 在纸面路径跨轮判重（与生产 orders 表口径一致）",
+            "巡检兜底仅在收到该标的退出请求时触发"
+          ],
+          "gate_note": "作者报告沙箱 check_quality 仅失败于 **docs/dispatch/RESUME.md:36**（I 自己的文件，写 KI01 时留下了 api_key=<...> 字面量）-> I 已改写该处，**两个门禁恢复全绿**。B 工作区的 4 处 ruff 属**陈旧副本**（同名文件在集成树已干净）"
         }
       ],
       "blockers": [],
@@ -681,6 +702,16 @@
           ],
           "verdict": "PENDING",
           "reports_dir": "docs/dispatch/reviews/U02/<r3head>/"
+        },
+        {
+          "round": "r3",
+          "stage": "修复复验",
+          "candidate": "d6fcf51",
+          "sessions": [
+            "Q (reviews/U02/R3/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U02/d6fcf51/"
         }
       ],
       "qa_runs": []
