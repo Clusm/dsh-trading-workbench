@@ -1309,7 +1309,7 @@
           "counts": "P0=0 / P1 x5 / P2 x9 / P3 x6",
           "archived_path": "docs/dispatch/reviews/U05/04a2c30/B_r1.md",
           "registered_fp_safe": "机制**安全**：精确 (路径,行号,规则) 三元组；正向只剔除同规则同行；反向用 raw_hits() 做 STALE_ALLOWANCE 使登记过期即失败（复核 pristine 4 处命中与 3 条登记逐一吻合）",
-          "but_patch13_weakens": "**但 patch 13 另外引入的 .py 裸标识符放宽削弱了密钥检测**：放宽作用于逐行文本而非 AST，故 .py 的**注释/docstring/内嵌 YAML/JSON 片段**里的明文凭据（如 `# api_key = abcdefghijklmnop1234`）在 .py 视图下**静默漏报**且无留痕。**注意：这正是编排者此前建议的修法方向，其安全缺陷由独立审查抓出。**",
+          "but_patch13_weakens": "**但 patch 13 另外引入的 .py 裸标识符放宽削弱了密钥检测**：放宽作用于逐行文本而非 AST，故 .py 的**注释/docstring/内嵌 YAML/JSON 片段**里的明文凭据（如 `# api_key = <64位十六进制字面量>`）在 .py 视图下**静默漏报**且无留痕。**注意：这正是编排者此前建议的修法方向，其安全缺陷由独立审查抓出。**",
           "market_query": "撤回约束**真实存在且更强**：作者引用的 ValueError 精确复现；纯 EOF 追加虽能过反向应用，却会让集成树的身份断言 apply(前像,补丁)==现网 失败。S03 影响可接受（11/12 helper 与 reason_from_source_errors 在生产 src/ 零调用方），但应登记为显式偏差",
           "delta": "独立双树沙箱、同一 77 条清单同 env 逐条非 fail-fast -> pristine 与 patched 失败集合均为 {smoke_windows_service_plan.py}(KI02) -> **新增失败 = ∅**；15 补丁 --check 15/15、应用 15/15；作者自测 95/54/48/45 与两态可运行均属实",
           "blocking": [
@@ -1360,7 +1360,7 @@
           "registration_gaps": "market_query 撤回、生产未接线（零调用方独立 grep 证实）、P2-7 准确；**P2-3/P3-3/P3-4/P3-5 在交付 README/RESUME 找不到登记文字**（实测仍存在）",
           "new_findings": [
             "N1 补丁可应用性：评审/集成工作区（autocrlf=false）**仅 8/15 git apply --check 通过**，7 条因仓库混合行尾失败；作者'15/15'依赖未声明的 autocrlf=true（内容两种方式逐字节一致）",
-            "N5 KI01 未修尽：`api_key=fallback_key)` 仍误报（非回归）"
+            "N5 KI01 未修尽：`api_key=<已绑定变量名>)` 仍误报（非回归）"
           ],
           "unfinished": "KI02 真实失效原因未判；未联网/未接真实 LLM；租约仅假 pid；无 pytest（改用直连探针，未复跑 115/63/48/45）"
         }
@@ -3235,7 +3235,7 @@
         "status": "OPEN",
         "owner": "I（含 KI01，原派 U05）",
         "blocks": "check_quality / U12 RC",
-        "note": "4 处均为误报：① docs/dispatch/reviews/U00/0b85bef/C_w0r1_r2.md:31（审查报告正文引用 {\"note\":\"API_KEY=...\"} 文档片段）② tests/acceptance/test_runtime_identity.py:523 SECRET=\"sk-live-DEADBEEF-should-never-appear\"（故意夹具）③ 同文件:707 NESTED_SECRET=\"sk-nested-NEVER-LEAK-0002\"（故意夹具）④ src/llm/factory.py:111 api_key=fallback_key（变量引用，= KI01）。**根因**：_is_placeholder 只用于 secret-assignment 分支，**provider-token 分支无占位符过滤**；且 _is_placeholder 不识别裸小写标识符（变量名）。②③ 由本波集成 U15 引入、①由归档审查报告引入、④为既有 KI01。修复方向：给 provider-token 分支加占位符过滤 + 识别裸标识符；或把这 4 处登记为显式例外。**不得静默忽略**。"
+        "note": "4 处均为误报：① docs/dispatch/reviews/U00/0b85bef/C_w0r1_r2.md:31（审查报告正文引用 {\"note\":\"API_KEY=<值>\"} 文档片段）② tests/acceptance/test_runtime_identity.py:523 SECRET=\"sk-live-<占位夹具>\"（故意夹具）③ 同文件:707 NESTED_SECRET=\"sk-nested-<占位夹具>\"（故意夹具）④ src/llm/factory.py:111 api_key=fallback_key（变量引用，= KI01）。**根因**：_is_placeholder 只用于 secret-assignment 分支，**provider-token 分支无占位符过滤**；且 _is_placeholder 不识别裸小写标识符（变量名）。②③ 由本波集成 U15 引入、①由归档审查报告引入、④为既有 KI01。修复方向：给 provider-token 分支加占位符过滤 + 识别裸标识符；或把这 4 处登记为显式例外。**不得静默忽略**。"
       },
       {
         "id": "U04-R4-FU1",
@@ -3260,6 +3260,15 @@
         "owner": "U02/U13/I",
         "blocks": "启用 MTA_ACCOUNT_REF 前的数据迁移；K03 幂等性",
         "note": "唯一索引拦不住跨域重复。作者 README 的迁移 SQL 不可执行（撞 UNIQUE、非原子、不可重入、漏 trade_reconciliation_jobs:2926 护栏、对 lifecycle_fill_allocations 的指令无效）。**正确顺序：先迁移（去重+单事务+幂等）后声明**。在迁移脚本落地并验证前，不得在生产启用 MTA_ACCOUNT_REF。"
+      },
+      {
+        "id": "KI04",
+        "title": "scan_tracked_secrets 把**文档**（审查报告/台账 JSON）里的模式描述当作凭据命中，且随报告数量增长",
+        "status": "OPEN",
+        "owner": "I/U12",
+        "blocks": "check_quality / U12 RC",
+        "note": "集成树实测 22 -> **19** 条命中，来源：docs/dispatch/reviews/U05/2049c1c/Q_r2.md(8) + 04a2c30/B_r1.md(6) + U00/0b85bef/C_w0r1_r2.md(1) = **15 条来自审查报告**；台账 JSON 1；src/llm/factory.py 1（KI01，U05 patches 13/14 已登记为假阳性）；tests/acceptance/test_runtime_identity.py 2（U15 故意夹具，同样由 U05 patches 登记）。**根因**：审查密钥扫描器必然引用它要匹配的模式，于是「对扫描器的审查」本身制造新命中；编排者此前在台账里写示例字面量也制造了 4 条（已把台账自己的字面量改为 <占位> 形式，22->19）。**建议**：① 对 docs/dispatch/reviews/** 与台账 JSON 施加**有文档依据的范围豁免**（它们是评审证据/状态记录，不是凭据载体），或 ② 规定文档引用模式必须用不匹配的占位形式（如 `sk-live-<占位>`），并在 CI 里对 docs 用更宽的规则。**不得静默放宽**：无论选哪种，都要在 README/CI 里写明理由与范围。",
+        "convention": "I 自身后续写报告/台账时统一使用不匹配的占位形式（如 `<64位十六进制字面量>`、`sk-live-<占位夹具>`），避免自造命中。"
       }
     ],
     "contract_candidate": "71f8109",
