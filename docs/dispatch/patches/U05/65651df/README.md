@@ -160,7 +160,7 @@ U05 的运行时 API 在生产 `src/` **零调用方**（只在 U05 独占测试
 
 ### 5.4 B-r1 遗留四项：**登记为"不修"**（复验者 Q-r2 §8/N3 指出 r2 缺登记文字，r3 逐条补上）
 
-| # | 位置（集成 HEAD 实测） | 问题 | 影响 | 为何不修 |
+| # | 位置（集成 HEAD + 本包 15 补丁后实测） | 问题 | 影响 | 为何不修 |
 |---|---|---|---|---|
 | **P2-3** | `src/core/decision_trace.py:961`（`blocked: bool = False`），唯一构造处 `:1044` `blocked=False` | `blocked` 恒为 `False`，**无置真路径**，字段无语义 | 调用方若以 `CycleRunResult.blocked` 作为"是否被阻止"的判据，会恒读到"未被阻止"。**当前生产 `src/` 无任何调用方**（未接线，见 5.1），故暂无运行时后果 | 置真需要"谁有权阻止保护/对账"的**策略决定**，属 U08 决策主流程的接线内容；本轮若自行定义判定条件会与 U08 的漏斗语义冲突。**登记为 U08 待接线项** |
 | **P3-3** | `src/llm/failover_client.py:58` 回调签名 `(provider, purpose, deadline)` vs `src/llm/openai_compatible_client.py:79` `(attempt, purpose, deadline, status)` | 两个客户端 `attempt_observer` **回调元数不一致**（3 参 / 4 参） | 生产者必须按 client 类型写两套回调；跨 client 复用同一 observer 会拿到错位参数 | **`attempt_observer` 在 `src/` 里只被自身调用**（无外部注入方），改签名没有收益、却会与 U08/U12 的装配约定抢先定型。登记为**待 U08/U12 统一装配时收敛** |
