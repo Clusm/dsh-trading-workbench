@@ -23,11 +23,18 @@
 | 文件 | 目标文件 | 内容 |
 |---|---|---|
 | `src_intel_service.py.diff` | `src/intel/service.py` | 影子披露接线：零权重常量、C 未配置隔离、有界研究负载、汇总指标缓存、v2=DEFERRED 披露 |
-| `src_dashboard_templates_decisions.html.diff` | `src/dashboard/templates/decisions.html` | 旧口径明确展示（口径 ID/权重恒 0/v2 DEFERRED/不计门禁）、A/B/C 组状态、已知缺陷列表；样本表改为研究参考标注 |
+| `src_dashboard_templates_decisions.html.diff` | `src/dashboard/templates/decisions.html` | 旧口径明确展示（口径 ID/权重恒 0/v2 DEFERRED/不充当执行候选）、A/B/C 组状态、已知缺陷列表；样本表改为研究参考标注 |
+| `scripts_smoke_intel_sidecar.py.diff` | `scripts/smoke_intel_sidecar.py` | **必要**：既有共享冒烟断言的是**旧口径**（"B/C 影子组同时记录"、C 组 `signal='unknown'` 计 2 行）。U06a 明确要求"C 未配置不产生无效绩效样本"，该断言必然随口径一起改。不改则本任务在集成树上会让 `run_offline_regression` 红（实测 `AssertionError: B/C影子组同时记录`） |
 
 `src/core/service.py` **无需补丁**：侧车已由既有代码在独立线程
 `readonly-intel-sidecar` 上运行（`_intel_loop`），不接 Broker、不调用 LLM，
 必达要点③由既有实现满足，本次未改一行（见报告）。
+
+> ⚠️ **偏差声明（请审查者注意）**：`scripts/smoke_intel_sidecar.py` **不在**任务卡
+> 「集成目标（I 合入）」的三个文件之列。把它做成补丁是因为：它是**既有共享门禁
+> 的一部分**，其断言与 U06a 的必达要点②（C 未配置不产生无效绩效样本）**直接冲突**；
+> 不处理就会在集成树上引入一条新失败。除该文件的两处断言外，其 17 条断言逐字未改
+> （仍 19 通过 / 0 失败），不削弱任何既有覆盖。
 
 ## 2. 应用方式（I 在集成树上执行）
 
@@ -58,7 +65,14 @@ cfg B (default)               : exit=0
 --- src_dashboard_templates_decisions.html.diff ---
 cfg A (autocrlf=false,eol=lf) : exit=0
 cfg B (default)               : exit=0
+--- scripts_smoke_intel_sidecar.py.diff ---
+cfg A (autocrlf=false,eol=lf) : exit=0
+cfg B (default)               : exit=0
 ```
+
+另在**沙箱**（system `core.autocrlf=true` 的默认配置下工作树为 CRLF）实测：
+用 `-c core.autocrlf=false -c core.eol=lf` 应用后，`src/intel/service.py` 与
+本分支 WIP 目标内容**逐字节相同**（41628 字节、CRLF 计数 0）。
 
 行尾无损性：把补丁应用到前像后，目标文件 CRLF 计数 = 0（与前像一致），
 不产生"整文件噪声 diff"。
