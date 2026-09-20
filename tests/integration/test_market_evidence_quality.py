@@ -251,6 +251,33 @@ def test_source_quality_contract(results: dict) -> None:
           zero.source("open_interest").values)
     check("该轮整体 missing_fields 为空", zero.missing_fields == (), zero.missing_fields)
 
+    print("\n[B2b] 自报 fresh_until_ms 只能缩短不能延长（不得自证新鲜）")
+    snap_extended = evidence.snapshot_from_records(
+        symbol="ETHUSDT", interval="1h", observed_at_ms=AS_OF_MS,
+        bars=[],
+        source_payloads={"ticker": {
+            "available": True, "lastPrice": "2410.5",
+            "source_at_ms": AS_OF_MS - 500,
+            "fresh_until_ms": AS_OF_MS + 100 * 3_600_000,
+        }},
+    )
+    ticker = snap_extended.source("ticker")
+    check("未来自报有效期被夹到 min(源时点, 本地观测)+TTL",
+          ticker.fresh_until_ms == AS_OF_MS - 500 + evidence.SOURCE_TTL_MS["ticker"]
+          and ticker.fresh_at(AS_OF_MS + 60_000) is False,
+          ticker.as_dict())
+    snap_shortened = evidence.snapshot_from_records(
+        symbol="ETHUSDT", interval="1h", observed_at_ms=AS_OF_MS, bars=[],
+        source_payloads={"ticker": {
+            "available": True, "lastPrice": "2410.5",
+            "source_at_ms": AS_OF_MS - 500,
+            "fresh_until_ms": AS_OF_MS - 400,
+        }},
+    )
+    check("自报更短的有效期被尊重",
+          snap_shortened.source("ticker").fresh_until_ms == AS_OF_MS - 400,
+          snap_shortened.source("ticker").as_dict())
+
     print("\n[B3] 逐源 expires/fresh 进证据层（时点可核对）")
     check("源有效期来自逐源 TTL 或显式 fresh_until_ms",
           zero.source("mark_funding").fresh_until_ms == 1789862459000,

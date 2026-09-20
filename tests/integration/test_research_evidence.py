@@ -486,9 +486,16 @@ def test_injection_and_side_effects(results: dict, scenarios: dict) -> None:
           not any(any(token in code for token in ("忽略", "SYSTEM", "system", "skip"))
                   for code in codes), codes)
     gate = report.decision_gate()
-    check("门禁视图只含丢单与身份固定信息，不含权限/风险字段",
-          set(gate) == {"ok", "identity_pinned", "drop_intent_ids", "reasons"},
+    check("门禁视图只含丢单/身份/绑定信息，不含权限/风险字段",
+          set(gate) == {"ok", "identity_pinned", "unpinned_allowed",
+                        "drop_intent_ids", "reasons", "bindings"},
           sorted(gate))
+    check("门禁视图绑定字段是逐意图映射（放行路径可携带落审计）",
+          isinstance(gate["bindings"], dict) and all(
+              item["evidence_id"].startswith("eb-")
+              and item["binding_id"].startswith("binding-")
+              for item in gate["bindings"].values()),
+          gate["bindings"])
 
     print("\n[9b] U15 未接线时身份必须显式暴露为未固定")
     unpinned = evidence.evaluate_open_intents(
@@ -562,6 +569,277 @@ def test_snapshot_adapter(results: dict) -> None:
     check("未知周期不猜时间（fail closed）", unknown.bars == (), unknown.as_dict())
 
 
+# --------------------------------------------------------------- 12 r2 修复回归
+
+
+def test_program_claims_not_overridable(results: dict, scenarios: dict) -> None:
+    print("\n[12] 模型自报 claim 只能附加：程序比较基准不得被替换/删除")
+    snaps = build_snapshots(results, ["BNBUSDT_1h"])
+    # 对照：不给 trigger_price、不报 claims → 程序无从生成基准，直接拒。
+    base = {"intent_id": "i-base", "symbol": "BNBUSDT", "action": "OPEN", "side": "LONG",
+            "evidence": {"confirmation_interval": "1h", "data_observed_at_ms": AS_OF_MS}}
+    naked = evidence.evaluate_open_intents(
+        [dict(base, trigger_price=744.0, stop_loss=735.0, take_profit=760.0)],
+        snaps, now_ms=NOW_MS, identity=IDENTITY, cycle_id="cyc-claims",
+    )
+    check("不报 claims 时程序仍生成比较基准",
+          naked.by_intent("i-base").accepted
+          and any(c["status"] == "PASS" for c in naked.by_intent("i-base").claims),
+          naked.by_intent("i-base").claims)
+
+    # 反例（D_r1 P1-1 B）：真实 close=744.13，trigger_price=900，自报一个宽松谓词。
+    override = evidence.evaluate_open_intents(
+        [dict(base, trigger_price=900.0, stop_loss=890.0, take_profit=940.0,
+              claims=[{"claim_id": "x", "kind": "close_above_price",
+                       "expr": "1h:closed_close > 0.0001", "expected": True}])],
+        snaps, now_ms=NOW_MS, identity=IDENTITY, cycle_id="cyc-claims",
+    )
+    item = override.by_intent("i-base")
+    codes = list(item.reason_codes)
+    check("自报宽松 claim 不能把 CLAIM_FALSE 洗成 PASS",
+          not override.ok and not item.accepted
+          and has(codes, "CLAIM_FALSE") and has(codes, "CLAIM_DECLARATION_REJECTED"),
+          codes)
+    check("程序基准仍出现在 claim 结果里（未被替换）",
+          any(c["expr"] == "1h:closed_close > 900" and c["status"] == "FAIL"
+              for c in item.claims), item.claims)
+
+    # 反例（D_r1 P1-1 C）：不给 trigger_price 只报 claims。
+    bare = evidence.evaluate_open_intents(
+        [dict(base, claims=[{"kind": "close_above_price",
+                             "expr": "1h:closed_close > 0.0001", "expected": True}])],
+        snaps, now_ms=NOW_MS, identity=IDENTITY, cycle_id="cyc-claims",
+    )
+    check("开仓缺可解析入场价 → MISSING_TRIGGER_PRICE，不放行",
+          not bare.ok and has(reason_codes(bare, "i-base"), "MISSING_TRIGGER_PRICE")
+          and bare.by_intent("i-base").geometry.get("entry") is None,
+          reason_codes(bare, "i-base"))
+
+    print("\n[12b] 畸形 claim 元素结构化拒绝，不崩溃")
+    for bad in ([None], ["abc"], [123], [[]], {"kind": "x"}, "not-a-list"):
+        try:
+            rep = evidence.evaluate_open_intents(
+                [dict(base, trigger_price=744.0, stop_loss=735.0, take_profit=760.0,
+                      claims=bad)],
+                snaps, now_ms=NOW_MS, identity=IDENTITY, cycle_id="cyc-bad",
+            )
+        except Exception as exc:  # noqa: BLE001
+            check(f"畸形 claims={bad!r} 不抛异常", False, f"{type(exc).__name__}: {exc}")
+            continue
+        codes = reason_codes(rep, "i-base")
+        check(f"畸形 claims={bad!r} 结构化拒绝",
+              not rep.ok and has(codes, "CLAIM_DECLARATION_REJECTED"), codes)
+
+    check("merge_claims 保留程序基准",
+          evidence.merge_claims(
+              [{"kind": "close_above_price", "expr": "1h:closed_close > 900",
+                "expected": True}],
+              [{"kind": "close_above_price", "expr": "1h:closed_close > 1",
+                "expected": True}])[0][0]["expr"] == "1h:closed_close > 900")
+
+
+def test_field_level_source_gate(results: dict) -> None:
+    print("\n[12c] required_sources 字段级：源'部分可用'不得放行")
+    snap = evidence.snapshot_from_records(
+        symbol="BNBUSDT", interval="1h", observed_at_ms=AS_OF_MS,
+        bars=[{"input_id": "b1", "interval": "1h", "close_time_ms": AS_OF_MS - 1,
+               "values": {"close": "744.13"}, "finality": "closed"}],
+        source_payloads={"mark_funding": {"available": True, "markPrice": "744.2",
+                                          "source_at_ms": AS_OF_MS - 1000},
+                         "ticker": {"available": True, "lastPrice": "744.2",
+                                    "source_at_ms": AS_OF_MS - 500}},
+    )
+    check("只有 markPrice 时 funding_rate 记入 missing_fields",
+          "funding_rate" in snap.source("mark_funding").missing_fields)
+
+    def run(required: list) -> list:
+        rep = evidence.evaluate_open_intents(
+            [{"intent_id": "i-src", "symbol": "BNBUSDT", "action": "OPEN", "side": "LONG",
+              "trigger_price": 744.0, "stop_loss": 700.0, "take_profit": 800.0,
+              "required_sources": required,
+              "evidence": {"confirmation_interval": "1h", "data_observed_at_ms": AS_OF_MS}}],
+            [snap], now_ms=AS_OF_MS + 1000, identity=IDENTITY, cycle_id="cyc-src",
+        )
+        return reason_codes(rep, "i-src")
+
+    codes = run(["mark_funding"])
+    check("声明依赖 mark_funding 但缺 funding_rate → SOURCE_FIELD_MISSING",
+          has(codes, "SOURCE_FIELD_MISSING:mark_funding.funding_rate"), codes)
+    codes = run(["mark_funding.funding_rate"])
+    check("字段级声明同样拒绝",
+          has(codes, "SOURCE_FIELD_MISSING:mark_funding.funding_rate"), codes)
+    codes = run(["mark_funding.mark_price"])
+    check("已声明字段有值则不因该字段拒绝",
+          not has(codes, "SOURCE_FIELD_MISSING:mark_funding.mark_price"), codes)
+    codes = run(["mark_funding.lastFundingRate"])
+    check("拼错的字段名 fail-closed",
+          has(codes, "SOURCE_FIELD_UNKNOWN:mark_funding.lastFundingRate"), codes)
+    codes = run([])
+    check("未声明必需源时不追加缺失理由（策略侧可用 default_required_sources 收紧）",
+          not has(codes, "SOURCE_FIELD_MISSING"), codes)
+    rep = evidence.evaluate_open_intents(
+        [{"intent_id": "i-def", "symbol": "BNBUSDT", "action": "OPEN", "side": "LONG",
+          "trigger_price": 744.0, "stop_loss": 700.0, "take_profit": 800.0,
+          "evidence": {"confirmation_interval": "1h", "data_observed_at_ms": AS_OF_MS}}],
+        [snap], now_ms=AS_OF_MS + 1000, identity=IDENTITY, cycle_id="cyc-src",
+        default_required_sources=["mark_funding"],
+    )
+    check("策略侧缺省必需源生效",
+          has(reason_codes(rep, "i-def"), "SOURCE_FIELD_MISSING:mark_funding.funding_rate"),
+          reason_codes(rep, "i-def"))
+
+
+def test_identity_and_binding(results: dict, scenarios: dict) -> None:
+    print("\n[12d] 未固定身份 fail-closed + 逐意图证据绑定唯一可追溯")
+    scenario = scenarios["two_intents_partial_evidence"]
+    snaps = build_snapshots(results, scenario["snapshots"])
+    unpinned = evidence.evaluate_open_intents(
+        scenario["intents"], snaps, now_ms=NOW_MS, cycle_id="cyc-unpinned",
+    )
+    check("未固定身份：OPEN 一律丢单（默认 fail-closed）",
+          not unpinned.ok and unpinned.accepted_intent_ids == ()
+          and "intent-A" in unpinned.rejected_intent_ids
+          and has(reason_codes(unpinned, "intent-A"), "IDENTITY_UNPINNED"),
+          (unpinned.accepted_intent_ids, reason_codes(unpinned, "intent-A")))
+    check("未固定身份：decision_gate 不放行",
+          unpinned.decision_gate()["ok"] is False
+          and unpinned.identity_pinned is False
+          and unpinned.unpinned_allowed is False, unpinned.decision_gate())
+    allowed = evidence.evaluate_open_intents(
+        scenario["intents"], snaps, now_ms=NOW_MS, cycle_id="cyc-unpinned",
+        allow_unpinned=True,
+    )
+    check("显式 allow_unpinned 才不因身份丢单，但门禁 ok 仍为 False",
+          allowed.by_intent("intent-A").accepted and allowed.unpinned_allowed is True
+          and allowed.decision_gate()["ok"] is False,
+          (allowed.as_dict()["ok"], allowed.decision_gate()))
+    single = [{
+        "intent_id": "A", "symbol": "BNBUSDT", "action": "OPEN", "side": "LONG",
+        "trigger_price": 744.0, "stop_loss": 700.0, "take_profit": 800.0,
+        "evidence": {"confirmation_interval": "1h", "data_observed_at_ms": AS_OF_MS},
+    }]
+    pinned = evidence.evaluate_open_intents(
+        single, snaps, now_ms=NOW_MS, identity=IDENTITY, cycle_id="cyc-pinned")
+    check("显式传身份 → identity_pinned=True 且门禁 ok",
+          pinned.identity_pinned is True and pinned.decision_gate()["ok"] is True,
+          pinned.decision_gate())
+
+    two = [
+        {"intent_id": "A", "symbol": "BNBUSDT", "action": "OPEN", "side": "LONG",
+         "trigger_price": 744.0, "stop_loss": 700.0, "take_profit": 800.0,
+         "evidence": {"confirmation_interval": "1h", "data_observed_at_ms": AS_OF_MS}},
+        {"intent_id": "B", "symbol": "BNBUSDT", "action": "OPEN", "side": "LONG",
+         "trigger_price": 745.0, "stop_loss": 700.0, "take_profit": 800.0,
+         "evidence": {"confirmation_interval": "1h", "data_observed_at_ms": AS_OF_MS}},
+    ]
+    rep = evidence.evaluate_open_intents(
+        two, snaps, now_ms=NOW_MS, identity=IDENTITY, cycle_id="cyc-bind")
+    a, b = rep.by_intent("A"), rep.by_intent("B")
+    check("同轮同币同周期两单 evidence_id 不再相同",
+          a.evidence_id != b.evidence_id and a.evidence_id.startswith("eb-"),
+          (a.evidence_id, b.evidence_id))
+    check("binding_id 逐意图不同且绑定轮次/身份",
+          a.binding_id != b.binding_id
+          and rep.bindings() and {item["intent_id"] for item in rep.bindings()} == {"A", "B"},
+          [item["binding_id"] for item in rep.bindings()])
+    check("binding_id 随轮次变化（不可跨轮复用）",
+          evidence.evaluate_open_intents(
+              two, snaps, now_ms=NOW_MS, identity=IDENTITY,
+              cycle_id="cyc-bind-2").by_intent("A").binding_id != a.binding_id)
+    check("禁用身份后 binding_id 不含冒充的身份摘要",
+          evidence.evaluate_open_intents(
+              two, snaps, now_ms=NOW_MS, cycle_id="cyc-bind",
+          ).by_intent("A").binding_id != a.binding_id)
+
+    print("\n[12e] status 不自相矛盾 / 重复与畸形 intent 结构化拒绝")
+    eth = evidence.snapshot_from_tool_result(
+        results["ETHUSDT_1h_sources_missing"], interval="1h")
+    rep = evidence.evaluate_open_intents(
+        [{"intent_id": "intent-eth-funding", "symbol": "ETHUSDT", "action": "OPEN",
+          "side": "LONG", "trigger_price": 2400.0, "stop_loss": 2300.0,
+          "take_profit": 2600.0, "required_sources": ["mark_funding"],
+          "evidence": {"confirmation_interval": "1h", "data_observed_at_ms": AS_OF_MS}}],
+        [eth], now_ms=NOW_MS, identity=IDENTITY, cycle_id="cyc-status",
+    )
+    item = rep.by_intent("intent-eth-funding")
+    check("被拒意图 status=REJECTED（不再 VALID 而 accepted=False）",
+          item.status == "REJECTED" and item.accepted is False
+          and item.k02_status == "VALID" and has(list(item.reason_codes), "SOURCE_UNAVAILABLE"),
+          (item.status, item.k02_status, item.reason_codes))
+    check("门禁仍丢单", rep.decision_gate()["drop_intent_ids"] == ["intent-eth-funding"])
+
+    dup = [dict(two[0]), dict(two[0], trigger_price=745.0)]
+    rep_dup = evidence.evaluate_open_intents(
+        dup, snaps, now_ms=NOW_MS, identity=IDENTITY, cycle_id="cyc-dup")
+    check("重复 intent_id 结构化拒绝（不静默合并）",
+          not rep_dup.ok and rep_dup.rejected_intent_ids == ("A", "A")
+          and has(reason_codes(rep_dup, "A"), "DUPLICATE_INTENT_ID"),
+          rep_dup.rejected_intent_ids)
+
+    rep_bad = evidence.evaluate_open_intents(
+        [None, dict(two[0])], snaps, now_ms=NOW_MS, identity=IDENTITY, cycle_id="cyc-mal")
+    check("非 Mapping intent 元素结构化拒绝，整批不崩",
+          rep_bad.by_intent("invalid[0]") is not None
+          and rep_bad.by_intent("invalid[0]").status == "REJECTED"
+          and has(reason_codes(rep_bad, "invalid[0]"), "INTENT_MALFORMED"),
+          rep_bad.as_dict()["intents"])
+    check("同一批里合法意图仍出结论", rep_bad.by_intent("A").accepted)
+
+    print("\n[12f] 周期标签必须自证 / bar 不得异周期混入 / 显式空绑定被尊重")
+    mislabeled = evidence.snapshot_from_records(
+        symbol="BNBUSDT", interval="4h", observed_at_ms=AS_OF_MS,
+        bars=[{"input_id": "m-1", "interval": "15m", "close_time_ms": AS_OF_MS - 1,
+               "values": {"close": "7777"}},
+              {"input_id": "m-2", "interval": "4h", "close_time_ms": AS_OF_MS - 1,
+               "values": {"close": "744.13"}}],
+        source_payloads={"ticker": {"lastPrice": "744.13", "closeTime": AS_OF_MS - 500}},
+    )
+    check("异周期 bar 被剔除且快照判不可用",
+          mislabeled.ok is False and len(mislabeled.bars) == 1
+          and has(list(mislabeled.issues), "INTERVAL_MISLABELED"), mislabeled.as_dict())
+    tool_relabel = evidence.snapshot_from_tool_result(results["BNBUSDT_1h"], interval="15m")
+    check("工具出参周期与建包周期不符 → 快照不可用（1h 不得冒充 15m）",
+          tool_relabel.ok is False and has(list(tool_relabel.issues), "INTERVAL_MISLABELED"),
+          tool_relabel.as_dict())
+    explicit_empty = evidence.evaluate_open_intents(
+        [dict(two[0], bound_inputs=[])], snaps, now_ms=NOW_MS, identity=IDENTITY,
+        cycle_id="cyc-bind")
+    check("显式 bound_inputs=[] 被尊重（交 K02 判 MISSING_EVIDENCE_BINDING）",
+          not explicit_empty.ok
+          and has(reason_codes(explicit_empty, "A"), "MISSING_EVIDENCE_BINDING"),
+          reason_codes(explicit_empty, "A"))
+    conflict = evidence.evaluate_open_intents(
+        [dict(two[0], interval="4h", claims=None)], snaps, now_ms=NOW_MS,
+        identity=IDENTITY, cycle_id="cyc-bind")
+    check("interval 与 evidence.confirmation_interval 冲突被点名",
+          has(reason_codes(conflict, "A"), "INTERVAL_DECLARATION_CONFLICT"),
+          reason_codes(conflict, "A"))
+
+    print("\n[12g] 层面事实覆盖扫描进入 evidence 子字典；时效窗口有冻结上界")
+    nested = evidence.evaluate_open_intents(
+        [dict(two[0], evidence={"confirmation_interval": "1h",
+                                "data_observed_at_ms": AS_OF_MS,
+                                "last_price": "1", "close": "1",
+                                "facts": {"1h:closed_close": "1"}})],
+        snaps, now_ms=NOW_MS, identity=IDENTITY, cycle_id="cyc-nested")
+    codes = reason_codes(nested, "A")
+    check("evidence.* 内的行情事实字段同样 MODEL_FACT_OVERRIDE",
+          has(codes, "MODEL_FACT_OVERRIDE:facts") and has(codes, "MODEL_FACT_OVERRIDE:close"),
+          codes)
+    for name, kwargs in (
+        ("max_bar_age_ms", {"max_bar_age_ms": 10 ** 9}),
+        ("max_snapshot_age_ms", {"max_snapshot_age_ms": 10 ** 9}),
+        ("expires_in_ms", {"expires_in_ms": 10 ** 9}),
+    ):
+        try:
+            evidence.evaluate_open_intents([dict(two[0])], snaps, now_ms=NOW_MS,
+                                           identity=IDENTITY, cycle_id="cyc-win", **kwargs)
+        except ValueError:
+            check(f"{name} 越界被拒（冻结上界）", True)
+        else:
+            check(f"{name} 越界被拒（冻结上界）", False, "未抛 ValueError")
+
+
 def main() -> int:
     results = load("market_tool_results.json")["results"]
     scenarios = load("intent_scenarios.json")["scenarios"]
@@ -583,6 +861,9 @@ def main() -> int:
     test_injection_and_side_effects(results, scenarios)
     test_rules_and_determinism(results, scenarios)
     test_snapshot_adapter(results)
+    test_program_claims_not_overridable(results, scenarios)
+    test_field_level_source_gate(results)
+    test_identity_and_binding(results, scenarios)
 
     print("\n" + "=" * 72)
     print(f"结果：PASS {PASS} / FAIL {FAIL}")

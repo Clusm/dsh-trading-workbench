@@ -12,15 +12,33 @@
    以 ``(symbol, interval)`` 为单位为每个 intent **独立**构建 K02 证据包并独立
    出 verdict。两个意图即使同币不同周期也不共享包；缺证据的意图拿不到另一个
    意图的 VALID（verdict 绑定自己的 intent_id/symbol/evidence_id）。
-3. **程序生成有限结构化 claim + 数值矛盾确定性拒绝**
-   claim 只从 ``CLAIM_KIND_REGISTRY`` 的三种 kind 生成
+3. **程序生成有限结构化 claim + 数值矛盾确定性拒绝（程序基准不可被模型替换）**
+   比较基准**始终**由程序从 ``CLAIM_KIND_REGISTRY`` 的三种 kind 生成
    （``close_above_prior_high / close_above_price / close_below_price``），比较
    对象是**真实快照数值**；``744.13 > 744.9``、``78550 < 78443`` 这类模型叙述
    与实际数值矛盾时确定性拒绝，不因自由文本解释通过。
+
+   模型自报 ``intent["claims"]`` **只能作为附加项**：程序 claim 一律并入，
+   与程序生成结果同 kind 但 ``expr``/``expected`` 不一致的（即试图替换比较
+   基准或删掉必需真实数值的）一律 ``CLAIM_DECLARATION_REJECTED:override:<kind>``；
+   畸形声明（非序列、元素非 Mapping、``expr`` 非法）一律
+   ``CLAIM_DECLARATION_REJECTED`` 结构化拒绝，不崩溃。OPEN 动作没有可解析的
+   有限触发价（入场价）时判 ``MISSING_TRIGGER_PRICE``——程序无法生成比较基准
+   就不放行，模型不能靠自报 claim 自证。
 4. **模板化事实摘要 + 模型事实覆盖拒绝**
-   事实摘要由程序按固定模板渲染（缺失渲染为 ``MISSING``）；intent 里出现任何
-   行情事实字段（``last_price/close/high/facts/...``）一律 ``MODEL_FACT_OVERRIDE``，
-   模型解释不得覆盖行情事实。
+   事实摘要由程序按固定模板渲染（缺失渲染为 ``MISSING``）；intent 顶层或
+   ``evidence`` 子字典里出现任何行情事实字段（``last_price/close/high/facts/...``）
+   一律 ``MODEL_FACT_OVERRIDE``，模型解释不得覆盖行情事实。
+5. **身份未固定即 fail-closed**
+   ``identity`` 缺省（U15 未接线）时 ``identity_pinned=False``，且每个 OPEN
+   意图判 ``IDENTITY_UNPINNED`` 进入丢单集合；只有调用方显式声明
+   ``allow_unpinned=True``（仅供离线条测）才不因身份未固定丢单，且
+   ``decision_gate()["ok"]`` 仍为 False。缺省拒绝，不靠调用方约定。
+6. **逐意图证据绑定可追溯**
+   每个 intent 得到**自己的** ``evidence_id``（种子含 intent_id/轮次/输入摘要），
+   同轮同币同周期两单不再共享同一 id；``binding_id`` 额外绑定身份哈希与轮次。
+   ``decision_gate()["bindings"]`` 与 :meth:`ResearchEvidenceReport.bindings`
+   把 (intent_id → evidence_id/binding_id) 回传执行侧落审计。
 
 设计约束：
 
@@ -28,6 +46,13 @@
   白名单/live 开关，也不执行任何工具（注入文本无法借此改变工具权限，DC12）。
 - 非 OPEN 动作（CLOSE/REDUCE/ADJUST）不属于本模块门禁，按 K04 管理授权契约单独
   处理：本模块把它们记为 ``NOT_APPLICABLE`` 且 **不阻断**（不误伤退出）。
+  **本模块不为退出动作产出任何证据绑定**（``evidence_id``/``binding_id`` 为空），
+  K02 README §6 要求的 ``ManagementIntent.evidence_id`` 需由 K04 侧提供。
+- ``required_sources`` 支持源级（``mark_funding``）与字段级（``mark_funding.funding_rate``）
+  两种写法；源级声明等价于"该源已声明字段全必需"——源"部分可用"（例如只有
+  ``markPrice`` 没有 ``lastFundingRate``）同样拒绝，``missing_fields`` 不只是留痕。
+  未声明时可用 ``default_required_sources`` 由策略侧给缺省集合（本模块不替策略
+  猜默认值，缺省即空集合）。
 - 新增 Decimal 一律经 ``decimal_from_value`` / ``decimal_from_float`` 适配；不改变
   既有 ``TradeIntent`` 字段与 SQLite REAL 口径，不触发全仓重构（R16）。
 
@@ -55,7 +80,7 @@ from core.contracts import (
 )
 from core.contracts.k02_evidence import CLAIM_KIND_REGISTRY
 
-SCHEMA_VERSION = "u03-research-evidence-1"
+SCHEMA_VERSION = "u03-research-evidence-2"
 FACT_SUMMARY_TEMPLATE_VERSION = "u03-fact-summary-1"
 
 #: U15 尚未接线时的未固定身份：内容哈希与逐意图绑定仍成立，但
@@ -104,6 +129,12 @@ DEFAULT_MAX_SNAPSHOT_AGE_MS = 600_000
 DEFAULT_EXPIRES_IN_MS = 60_000
 DEFAULT_RR_TOLERANCE = "0.05"
 
+#: 时效窗口的**冻结上界**（离线确定性，与默认值同族）：调用方放宽窗口不得越过，
+#: 否则 10 天前的 K 线就能支撑一次新开仓。越界是调用方参数错误，直接 ValueError。
+MAX_BAR_AGE_MS_CEILING = 86_400_000
+MAX_SNAPSHOT_AGE_MS_CEILING = 3_600_000
+MAX_EXPIRES_IN_MS_CEILING = 3_600_000
+
 #: 模型不得提供的行情事实字段：出现即 ``MODEL_FACT_OVERRIDE``。
 MODEL_FACT_KEYS: tuple[str, ...] = (
     "facts",
@@ -139,6 +170,26 @@ REASON_STOP_DIRECTION = "STOP_DIRECTION_INVALID"
 REASON_TARGET_DIRECTION = "TARGET_DIRECTION_INVALID"
 REASON_RR_CONTRADICTION = "RR_CONTRADICTION"
 REASON_PRICE_NON_FINITE = "PRICE_NON_FINITE"
+#: 模型自报 claim 被拒：声明形态畸形，或试图替换/删除程序生成的比较基准。
+REASON_CLAIM_DECLARATION_REJECTED = "CLAIM_DECLARATION_REJECTED"
+#: OPEN 无可解析的有限触发价（入场价）：程序无法生成比较基准，不放行。
+REASON_MISSING_TRIGGER_PRICE = "MISSING_TRIGGER_PRICE"
+#: U15 未接线：身份未固定，OPEN 缺省一律丢单（fail-closed）。
+REASON_IDENTITY_UNPINNED = "IDENTITY_UNPINNED"
+#: 同一批意图出现重复 intent_id：报告失去逐意图分辨力，重复项结构化拒绝。
+REASON_DUPLICATE_INTENT_ID = "DUPLICATE_INTENT_ID"
+#: intent 元素不是 Mapping（或无法规范化）：结构化拒绝该条，不崩溃整批。
+REASON_INTENT_MALFORMED = "INTENT_MALFORMED"
+#: 声明的必需源缺字段（字段级门禁），而不是只记 missing_fields。
+REASON_SOURCE_FIELD_MISSING = "SOURCE_FIELD_MISSING"
+#: 声明的必需字段名不在该源的已知字段表内（拼错也 fail-closed）。
+REASON_SOURCE_FIELD_UNKNOWN = "SOURCE_FIELD_UNKNOWN"
+#: intent 顶层 interval 与 evidence.confirmation_interval 冲突。
+REASON_INTERVAL_CONFLICT = "INTERVAL_DECLARATION_CONFLICT"
+#: 快照/bar 自带的周期标签与本次建包周期不一致（15m 不得冒充 4h）。
+REASON_INTERVAL_MISLABELED = "INTERVAL_MISLABELED"
+#: 工具出参没有周期标签：不猜，fail-closed。
+REASON_INTERVAL_UNVERIFIED = "INTERVAL_UNVERIFIED"
 
 STATUS_VALID = "VALID"
 STATUS_REJECTED = "REJECTED"
@@ -181,6 +232,17 @@ def decimal_or_none(value: Any) -> Decimal | None:
 def decimal_text_or_none(value: Any) -> str | None:
     parsed = decimal_or_none(value)
     return None if parsed is None else decimal_text(parsed)
+
+
+def _bounded_window(value: Any, *, ceiling: int, name: str) -> int:
+    """时效窗口必须落在冻结上界内；越界是调用方参数错误（非模型输入）。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} 必须是整数毫秒，收到 {value!r}") from exc
+    if number < 0 or number > int(ceiling):
+        raise ValueError(f"{name}={number} 超出冻结上界 {ceiling}")
+    return number
 
 
 # ---------------------------------------------------------------- 快照结构
@@ -229,6 +291,9 @@ class MarketSnapshot:
     bars: tuple[Mapping[str, Any], ...] = ()
     sources: Mapping[str, SourceQuality] = field(default_factory=dict)
     missing_fields: tuple[str, ...] = ()
+    #: 适配器 ``data_quality.missing_fields`` 的**交易所原名**域（只做审计留痕），
+    #: 与规范名域 ``missing_fields`` 分开，避免一个缺失记两个名字。
+    declared_missing_fields: tuple[str, ...] = ()
     issues: tuple[str, ...] = ()
     ok: bool = True
 
@@ -243,6 +308,7 @@ class MarketSnapshot:
             "as_of_ms": self.as_of_ms,
             "ok": self.ok,
             "missing_fields": list(self.missing_fields),
+            "declared_missing_fields": list(self.declared_missing_fields),
             "issues": list(self.issues),
             "sources": {name: item.as_dict() for name, item in self.sources.items()},
             "bar_count": len(self.bars),
@@ -355,13 +421,16 @@ def _source_from_payload(
             values[name] = text
     if not available and not missing:
         missing = list(value_map)
+    # 源时钟不得晚于本地观测：取 max 会把未来时间洗白成"仍在有效期"。
+    cap = (min(int(source_at), int(observed_at_ms)) if source_at is not None
+           else int(observed_at_ms)) + int(ttl_ms)
     declared_until = decimal_or_none(payload.get("fresh_until_ms"))
     fresh_until: int | None = None
     if declared_until is not None:
-        fresh_until = int(declared_until)
-    elif available and source_at is not None:
-        # 源时钟不得晚于本地观测：取 max 会把未来时间洗白成"仍在有效期"。
-        fresh_until = min(int(source_at), int(observed_at_ms)) + int(ttl_ms)
+        # 自报有效期只能**缩短**不能延长：数据生产者不得自证"仍然新鲜"。
+        fresh_until = min(int(declared_until), cap)
+    elif available:
+        fresh_until = cap
     return SourceQuality(
         source=source,
         available=available,
@@ -418,7 +487,12 @@ def snapshot_from_tool_result(
     ``result`` 是工具出参（含 ``candles``/``data_quality``/``funding_rate``/``mark_price``/
     ``open_interest_usd``）。缺失的子源不会变成 0：字段缺失时对应规范字段进入
     ``missing_fields``，``values`` 里根本没有该键。
+
+    周期标签必须**自证**：出参自带的 ``interval`` 与调用方传入的 ``interval``
+    不一致（或没有标签）时快照判不可用——1h 数据不得被标成 15m，缺标签也不猜。
     """
+    max_bar_age_ms = _bounded_window(
+        max_bar_age_ms, ceiling=MAX_BAR_AGE_MS_CEILING, name="max_bar_age_ms")
     symbol = str(result.get("symbol") or "").strip().upper()
     quality = result.get("data_quality")
     quality = dict(quality) if isinstance(quality, Mapping) else {}
@@ -434,6 +508,16 @@ def snapshot_from_tool_result(
         issues.append(str(error))
     quality_issues = [str(item) for item in (quality.get("issues") or [])]
     issues.extend(quality_issues)
+
+    # 周期标签交叉核对：出参自带标签与本次建包周期必须一致，否则 fail closed。
+    declared_interval = result.get("interval")
+    interval_verified = True
+    if declared_interval is None or not str(declared_interval).strip():
+        issues.append(f"{REASON_INTERVAL_UNVERIFIED}:{symbol}")
+        interval_verified = False
+    elif str(declared_interval).strip() != str(interval):
+        issues.append(f"{REASON_INTERVAL_MISLABELED}:{declared_interval}!={interval}")
+        interval_verified = False
 
     bars: tuple[Mapping[str, Any], ...] = ()
     if include_candles_in_facts and tool_ok:
@@ -481,8 +565,9 @@ def snapshot_from_tool_result(
         sources[name] = item
         missing_fields.extend(f"{name}.{field}" for field in item.missing_fields)
     declared_missing = quality.get("missing_fields")
-    if isinstance(declared_missing, (list, tuple)):
-        missing_fields.extend(str(item) for item in declared_missing)
+    declared_missing_fields = tuple(
+        dict.fromkeys(str(item) for item in declared_missing)
+    ) if isinstance(declared_missing, (list, tuple)) else ()
 
     return MarketSnapshot(
         symbol=symbol,
@@ -492,8 +577,9 @@ def snapshot_from_tool_result(
         bars=bars,
         sources=sources,
         missing_fields=tuple(dict.fromkeys(missing_fields)),
+        declared_missing_fields=declared_missing_fields,
         issues=tuple(dict.fromkeys(issues)),
-        ok=bool(tool_ok and quality.get("ok", True)),
+        ok=bool(tool_ok and quality.get("ok", True) and interval_verified),
     )
 
 
@@ -508,9 +594,20 @@ def snapshot_from_records(
     issues: Sequence[str] = (),
     max_bar_age_ms: int = DEFAULT_MAX_BAR_AGE_MS,
 ) -> MarketSnapshot:
-    """由显式 bar 记录构造快照（夹具/离线重放入口，不经过工具出参）。"""
+    """由显式 bar 记录构造快照（夹具/离线重放入口，不经过工具出参）。
+
+    bar 自带的 ``interval`` 必须与本次建包周期一致：异周期 bar（例如 4h 快照里
+    夹一根 15m）既不入事实也不入包，整个快照判不可用（``INTERVAL_MISLABELED``）。
+    """
+    max_bar_age_ms = _bounded_window(
+        max_bar_age_ms, ceiling=MAX_BAR_AGE_MS_CEILING, name="max_bar_age_ms")
     normalized: list[dict[str, Any]] = []
+    mislabeled: list[str] = []
     for index, bar in enumerate(bars):
+        declared_bar_interval = bar.get("interval")
+        if declared_bar_interval is not None and str(declared_bar_interval) != str(interval):
+            mislabeled.append(str(declared_bar_interval))
+            continue
         values = {
             str(key): decimal_text_or_none(value)
             for key, value in (bar.get("values") or {}).items()
@@ -533,7 +630,7 @@ def snapshot_from_records(
         item = {
             "input_id": str(bar.get("input_id") or f"{symbol.lower()}-{interval}-{index}"),
             "symbol": str(bar.get("symbol") or symbol),
-            "interval": bar.get("interval", interval),
+            "interval": interval,
             "source": str(bar.get("source") or "exchange_public_kline"),
             "open_time_ms": open_time,
             "close_time_ms": close_time,
@@ -564,6 +661,10 @@ def snapshot_from_records(
         sources[name] = item
         missing_fields.extend(f"{name}.{field}" for field in item.missing_fields)
 
+    all_issues = [str(item) for item in issues]
+    if mislabeled:
+        all_issues.append(
+            f"{REASON_INTERVAL_MISLABELED}:{interval}<-{','.join(sorted(set(mislabeled)))}")
     return MarketSnapshot(
         symbol=symbol,
         interval=interval,
@@ -572,8 +673,8 @@ def snapshot_from_records(
         bars=tuple(normalized),
         sources=sources,
         missing_fields=tuple(dict.fromkeys(missing_fields)),
-        issues=tuple(dict.fromkeys(str(item) for item in issues)),
-        ok=bool(ok),
+        issues=tuple(dict.fromkeys(all_issues)),
+        ok=bool(ok and not mislabeled),
     )
 
 
@@ -645,6 +746,25 @@ def _quote_from_snapshot(
         "quote_time_ms": int(ticker.source_at_ms),
         "expires_at_ms": int(ticker.source_at_ms) + int(SOURCE_TTL_MS["ticker"]),
     }
+
+
+def _caller_quote(
+    quote_map: Mapping[str, Mapping[str, Any]],
+    intent_id: str,
+    symbol: str,
+    now_ms: int,
+) -> Mapping[str, Any] | None:
+    """调用方注入的报价只作次选，且必须带新鲜时点；过期/未来时点直接丢弃。"""
+    quote = quote_map.get(intent_id) or quote_map.get(symbol)
+    if not isinstance(quote, Mapping):
+        return None
+    quote_time = decimal_or_none(quote.get("quote_time_ms"))
+    if quote_time is None:
+        return None
+    age_ms = int(now_ms) - int(quote_time)
+    if age_ms < 0 or age_ms > int(SOURCE_TTL_MS["ticker"]):
+        return None
+    return quote
 
 
 def _interval_compatible(requested: str | None, snapshot: MarketSnapshot) -> bool:
@@ -729,6 +849,69 @@ def generate_claims(
     return claims
 
 
+def declared_claims_or_issues(
+    value: Any,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """模型自报 claim 的形态守卫：畸形一律结构化拒绝，不抛异常。
+
+    返回 ``(可用的自报 claim, 拒绝理由)``。非序列声明、非 Mapping 元素、
+    ``expr`` 不是合法比较表达式的元素都不进入"可用"列表，并留下 reason code。
+    """
+    if value is None:
+        return [], []
+    if not isinstance(value, (list, tuple)):
+        return [], [f"{REASON_CLAIM_DECLARATION_REJECTED}:not_a_sequence"]
+    out: list[dict[str, Any]] = []
+    issues: list[str] = []
+    for index, claim in enumerate(value):
+        if not isinstance(claim, Mapping):
+            issues.append(f"{REASON_CLAIM_DECLARATION_REJECTED}:element[{index}]")
+            continue
+        expr = claim.get("expr")
+        if not isinstance(expr, str) or not _CLAIM_PATTERN.match(expr):
+            issues.append(f"{REASON_CLAIM_DECLARATION_REJECTED}:expr[{index}]")
+            continue
+        out.append(dict(claim))
+    return out, issues
+
+
+def merge_claims(
+    program_claims: Sequence[Mapping[str, Any]],
+    declared: Any,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """把自报 claim 合并成"程序基准 + 附加项"，程序基准不可被替换或删除。
+
+    - 程序 claim 一律并入（模型无法用自报 claim 顶掉真实数值的比较基准）；
+    - 自报 claim 与程序生成结果同 kind 时，``expr``/``expected`` 必须逐字段一致，
+      否则 ``CLAIM_DECLARATION_REJECTED:override:<kind>``（试图替换对比基准）；
+    - 其余自报 claim 作为**附加项**进入 K02，仍按同一套程序校验（操作数越界、
+      不可解析、与事实不符一律拒绝）。
+    """
+    declared_claims, issues = declared_claims_or_issues(declared)
+    merged: list[dict[str, Any]] = [dict(claim) for claim in program_claims]
+    by_kind = {str(claim.get("kind") or ""): claim for claim in program_claims}
+    added: set[tuple[str, str, Any]] = {
+        (str(claim.get("kind") or ""), str(claim.get("expr") or ""),
+         claim.get("expected", True)) for claim in merged
+    }
+    for claim in declared_claims:
+        key = (str(claim.get("kind") or ""), str(claim.get("expr") or ""),
+               claim.get("expected", True))
+        base = by_kind.get(str(claim.get("kind") or ""))
+        if base is not None:
+            if key != (str(base.get("kind") or ""), str(base.get("expr") or ""),
+                       base.get("expected", True)):
+                issues.append(
+                    f"{REASON_CLAIM_DECLARATION_REJECTED}:override:"
+                    f"{claim.get('kind') or 'unknown'}")
+            continue
+        if key in added:
+            continue
+        added.add(key)
+        merged.append(claim)
+    return merged, issues
+
+
 def evaluate_geometry(
     *,
     side: str,
@@ -806,7 +989,15 @@ def normalise_intent(intent: Any) -> dict[str, Any]:
     item["symbol"] = str(raw.get("symbol") or "").strip().upper()
     item["action"] = str(raw.get("action") or "OPEN").upper()
     item["side"] = str(raw.get("side") or "").upper()
-    interval = raw.get("interval") or evidence.get("confirmation_interval")
+    declared_interval = raw.get("interval")
+    evidence_interval = evidence.get("confirmation_interval")
+    item["interval_conflict"] = (
+        str(declared_interval), str(evidence_interval)
+    ) if (
+        declared_interval is not None and evidence_interval is not None
+        and str(declared_interval).strip() != str(evidence_interval).strip()
+    ) else None
+    interval = declared_interval or evidence_interval
     item["interval"] = str(interval).strip() if interval else None
     trigger = raw.get("trigger_price")
     if trigger is None:
@@ -821,6 +1012,24 @@ def normalise_intent(intent: Any) -> dict[str, Any]:
     return item
 
 
+def model_fact_overrides(raw: Mapping[str, Any]) -> tuple[str, ...]:
+    """扫描模型提供的行情事实字段（顶层 + ``evidence`` 子字典），去重保序。
+
+    只深入 ``evidence`` 一层：它是 K02 意图里唯一被本模块当作"模型声明"读取的
+    嵌套结构，``evidence.facts``/``evidence.close`` 这类夹带过去不会被发现。
+    """
+    found: list[str] = []
+    for key in MODEL_FACT_KEYS:
+        if key in raw and key not in found:
+            found.append(key)
+    evidence = raw.get("evidence")
+    if isinstance(evidence, Mapping):
+        for key in MODEL_FACT_KEYS:
+            if key in evidence and key not in found:
+                found.append(key)
+    return tuple(found)
+
+
 # ---------------------------------------------------------------- 逐意图结果
 
 
@@ -833,7 +1042,11 @@ class IntentEvidence:
     interval: str | None
     action: str
     evidence_id: str
+    #: U03 层状态：有任一（本模块或 K02）拒绝理由即 ``REJECTED``；非 OPEN 为
+    #: ``NOT_APPLICABLE``。不再出现 ``status=VALID`` 而 ``accepted=False`` 的自相矛盾。
     status: str
+    #: K02 自己的 verdict 状态（原样保留，便于对照契约层结论）。
+    k02_status: str
     accepted: bool
     applies_to_open: bool
     reason_codes: tuple[str, ...]
@@ -853,6 +1066,7 @@ class IntentEvidence:
             "action": self.action,
             "evidence_id": self.evidence_id,
             "status": self.status,
+            "k02_status": self.k02_status,
             "accepted": self.accepted,
             "applies_to_open": self.applies_to_open,
             "reason_codes": list(self.reason_codes),
@@ -875,6 +1089,8 @@ class ResearchEvidenceReport:
     now_ms: int
     identity_hash: str
     identity_pinned: bool = True
+    #: 调用方显式声明"允许未固定身份"（仅离线条测）；缺省 False 即 fail-closed。
+    unpinned_allowed: bool = False
     intents: tuple[IntentEvidence, ...] = ()
     rejected_intent_ids: tuple[str, ...] = ()
     accepted_intent_ids: tuple[str, ...] = ()
@@ -885,6 +1101,25 @@ class ResearchEvidenceReport:
                 return item
         return None
 
+    def bindings(self) -> tuple[dict[str, Any], ...]:
+        """执行侧可携带/落的逐意图证据绑定（放行路径不再零审计）。"""
+        return tuple(
+            {
+                "intent_id": item.intent_id,
+                "symbol": item.symbol,
+                "interval": item.interval,
+                "evidence_id": item.evidence_id,
+                "binding_id": item.binding_id,
+                "status": item.status,
+                "k02_status": item.k02_status,
+                "accepted": item.accepted,
+                "applies_to_open": item.applies_to_open,
+                "cycle_id": self.cycle_id,
+                "identity_pinned": self.identity_pinned,
+            }
+            for item in self.intents
+        )
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -893,20 +1128,33 @@ class ResearchEvidenceReport:
             "now_ms": self.now_ms,
             "identity_hash": self.identity_hash,
             "identity_pinned": self.identity_pinned,
+            "unpinned_allowed": self.unpinned_allowed,
             "accepted_intent_ids": list(self.accepted_intent_ids),
             "rejected_intent_ids": list(self.rejected_intent_ids),
             "intents": [item.as_dict() for item in self.intents],
         }
 
     def decision_gate(self) -> dict[str, Any]:
-        """执行前门禁视图：只丢未通过证据门禁的 OPEN，不影响退出。"""
+        """执行前门禁视图：只丢未通过证据门禁的 OPEN，不影响退出。
+
+        ``ok`` 同时要求身份已固定（除非调用方显式 ``allow_unpinned=True``）：
+        消费方不能只看丢单列表就放行未固定身份下的开仓。
+        """
         return {
-            "ok": self.ok,
+            "ok": bool(self.ok and (self.identity_pinned or self.unpinned_allowed)),
             "identity_pinned": self.identity_pinned,
+            "unpinned_allowed": self.unpinned_allowed,
             "drop_intent_ids": list(self.rejected_intent_ids),
             "reasons": {
                 item.intent_id: list(item.reason_codes)
                 for item in self.intents if not item.accepted
+            },
+            "bindings": {
+                item.intent_id: {
+                    "evidence_id": item.evidence_id,
+                    "binding_id": item.binding_id,
+                }
+                for item in self.intents if item.accepted and item.applies_to_open
             },
         }
 
@@ -965,15 +1213,38 @@ def render_fact_summary(
 # ---------------------------------------------------------------- 主入口
 
 
+def _resolve_required_sources(
+    declared: Sequence[str],
+    default_required_sources: Sequence[str],
+) -> tuple[str, ...]:
+    """意图未声明必需源时用策略侧缺省集合；两者都空 = 该意图不声明源依赖。"""
+    if declared:
+        return tuple(str(item) for item in declared)
+    return tuple(str(item) for item in default_required_sources)
+
+
 def _source_gate(
     snapshot: MarketSnapshot | None,
     required_sources: Sequence[str],
     now_ms: int,
 ) -> list[str]:
+    """字段级分源门禁：``<source>`` 或 ``<source>.<field>`` 都必须真正有值。
+
+    - ``mark_funding``：源可用 + 有时点 + 新鲜 + **声明的字段一个不缺**；
+      只有 ``markPrice`` 没有 ``lastFundingRate`` 时仍然拒绝——"声明依赖资金费"
+      不能因为源对象存在就算满足。
+    - ``mark_funding.funding_rate``：精确到字段，缺该字段即拒绝。
+    """
     if snapshot is None or not required_sources:
         return []
     issues: list[str] = []
-    for name in required_sources:
+    for entry in required_sources:
+        text = str(entry).strip()
+        if not text:
+            continue
+        name, _, field = text.partition(".")
+        name = name.strip()
+        field = field.strip()
         item = snapshot.source(name)
         if item is None or not item.available:
             issues.append(f"{REASON_SOURCE_UNAVAILABLE}:{name}")
@@ -983,6 +1254,15 @@ def _source_gate(
             continue
         if not item.fresh_at(now_ms):
             issues.append(f"{REASON_SOURCE_STALE}:{name}")
+            continue
+        if field:
+            if field not in SOURCE_VALUE_FIELDS.get(name, ()):
+                issues.append(f"{REASON_SOURCE_FIELD_UNKNOWN}:{text}")
+            elif item.value(field) is None:
+                issues.append(f"{REASON_SOURCE_FIELD_MISSING}:{text}")
+            continue
+        for missing in item.missing_fields:
+            issues.append(f"{REASON_SOURCE_FIELD_MISSING}:{name}.{missing}")
     return issues
 
 
@@ -998,13 +1278,24 @@ def evaluate_open_intents(
     max_snapshot_age_ms: int = DEFAULT_MAX_SNAPSHOT_AGE_MS,
     expires_in_ms: int = DEFAULT_EXPIRES_IN_MS,
     rr_tolerance: str | Decimal = DEFAULT_RR_TOLERANCE,
+    allow_unpinned: bool = False,
+    default_required_sources: Sequence[str] = (),
 ) -> ResearchEvidenceReport:
     """逐意图校验研究证据；``now_ms`` 必传（不使用 bundle.as_of_ms 兜底）。
 
     每个 OPEN intent 得到自己的证据包与 verdict；非 OPEN 动作不进本门禁。
-    ``identity`` 缺省使用 :data:`UNPINNED_IDENTITY` 并在报告里置
-    ``identity_pinned=False``（U15 接线前不得把它当成"身份已核对"）。
+    ``identity`` 缺省（U15 未接线）时报告置 ``identity_pinned=False``，且每个
+    OPEN 判 ``IDENTITY_UNPINNED`` 进丢单集合（fail-closed）。只有调用方显式
+    传 ``allow_unpinned=True``（离线条测）才不因身份未固定丢单，且此时
+    ``decision_gate()["ok"]`` 仍为 False。
     """
+    max_bar_age_ms = _bounded_window(
+        max_bar_age_ms, ceiling=MAX_BAR_AGE_MS_CEILING, name="max_bar_age_ms")
+    max_snapshot_age_ms = _bounded_window(
+        max_snapshot_age_ms, ceiling=MAX_SNAPSHOT_AGE_MS_CEILING,
+        name="max_snapshot_age_ms")
+    expires_in_ms = _bounded_window(
+        expires_in_ms, ceiling=MAX_EXPIRES_IN_MS_CEILING, name="expires_in_ms")
     identity_pinned = identity is not None
     if identity is None:
         resolution: RuntimeIdentity = UNPINNED_IDENTITY
@@ -1012,37 +1303,77 @@ def evaluate_open_intents(
         resolution = identity
     else:
         resolution = RuntimeIdentity.model_validate(dict(identity))
+    identity_hash = resolution.identity_hash()
     snapshot_list = list(snapshots.values()) if isinstance(snapshots, Mapping) else list(snapshots)
     quote_map = dict(quotes or {})
     results: list[IntentEvidence] = []
     rejected: list[str] = []
     accepted: list[str] = []
+    raw_intents = list(intents)
+    # 先数一遍绑定键：同一 id 出现两次以上时**所有**同 id 意图一起拒绝，
+    # 否则 by_intent 只能返回第一条，报告失去逐意图分辨力。
+    id_counts: dict[str, int] = {}
+    for position, raw_intent in enumerate(raw_intents):
+        try:
+            probe = normalise_intent(raw_intent)
+            counted_id = probe["intent_id"] or f"open[{position}]"
+        except Exception:  # noqa: BLE001 - 与主循环同一口径，非 Mapping 走 invalid[position]
+            counted_id = f"invalid[{position}]"
+        id_counts[counted_id] = id_counts.get(counted_id, 0) + 1
 
-    for position, raw_intent in enumerate(intents):
-        item = normalise_intent(raw_intent)
+    for position, raw_intent in enumerate(raw_intents):
+        try:
+            item = normalise_intent(raw_intent)
+        except Exception as exc:  # noqa: BLE001 - 非 Mapping 元素结构化拒绝，不炸整批
+            intent_id = f"invalid[{position}]"
+            results.append(IntentEvidence(
+                intent_id=intent_id, symbol="", interval=None, action="",
+                evidence_id="", status=STATUS_REJECTED,
+                k02_status="NOT_EVALUATED", accepted=False, applies_to_open=False,
+                reason_codes=(f"{REASON_INTENT_MALFORMED}:{type(exc).__name__}",),
+                bundle_reasons=(),
+                summary=f"[{FACT_SUMMARY_TEMPLATE_VERSION}] intent[{position}] "
+                        f"不是 Mapping，结构化拒绝（{type(exc).__name__}）",
+            ))
+            rejected.append(intent_id)
+            continue
         intent_id = item["intent_id"]
         if not intent_id:
             # 模型可能不提供 intent_id/client_order_id：用本轮序号做确定性绑定，
             # 不让缺 id 直接抛错（门禁必须给出可审计的拒绝结论，而不是崩溃）。
             intent_id = f"open[{position}]"
             item["intent_id"] = intent_id
+        duplicate_id = id_counts.get(intent_id, 0) > 1
         symbol = item["symbol"]
         interval = item["interval"]
         action = item["action"]
-        overrides = [key for key in MODEL_FACT_KEYS if key in item]
-        issues: list[str] = [f"{REASON_MODEL_FACT_OVERRIDE}:{key}" for key in overrides]
+        issues: list[str] = [
+            f"{REASON_MODEL_FACT_OVERRIDE}:{key}"
+            for key in model_fact_overrides(item)
+        ]
+        if item.get("interval_conflict"):
+            declared_i, evidence_i = item["interval_conflict"]
+            issues.append(f"{REASON_INTERVAL_CONFLICT}:{declared_i}!={evidence_i}")
 
         if action != _OPEN_ACTION:
             reason = "NON_OPEN_ACTION_DELEGATED_TO_MANAGEMENT_CONTRACT"
             results.append(IntentEvidence(
                 intent_id=intent_id, symbol=symbol, interval=interval, action=action,
-                evidence_id="", status=STATUS_NOT_APPLICABLE, accepted=True,
+                evidence_id="", status=STATUS_NOT_APPLICABLE,
+                k02_status="NOT_EVALUATED", accepted=True,
                 applies_to_open=False, reason_codes=(reason,), bundle_reasons=(),
                 summary=f"[{FACT_SUMMARY_TEMPLATE_VERSION}] {symbol} {action} "
-                        f"非开仓动作，由 K04 管理授权契约处理（不阻断）",
+                        f"非开仓动作，由 K04 管理授权契约处理（不阻断；"
+                        f"本模块不产出退出证据绑定，evidence_id 由 K04 提供）",
             ))
             accepted.append(intent_id)
             continue
+
+        if duplicate_id:
+            issues.append(f"{REASON_DUPLICATE_INTENT_ID}:{intent_id}")
+        if not identity_pinned and not allow_unpinned:
+            # U15 未接线：未固定身份下的开仓一律丢单，不靠调用方约定。
+            issues.append(REASON_IDENTITY_UNPINNED)
 
         snapshot, locate_issues = _locate_snapshot(snapshot_list, symbol, interval)
         issues.extend(locate_issues)
@@ -1062,7 +1393,12 @@ def evaluate_open_intents(
             evidence_at = item.get("evidence_at_ms")
             if evidence_at is not None and int(evidence_at) != int(snapshot.observed_at_ms):
                 issues.append(REASON_EVIDENCE_TIME_MISMATCH)
-            issues.extend(_source_gate(snapshot, item["required_sources"], now_ms))
+            issues.extend(_source_gate(
+                snapshot,
+                _resolve_required_sources(item["required_sources"],
+                                          default_required_sources),
+                now_ms,
+            ))
 
         side = item["side"]
         if side not in _SIDES:
@@ -1079,12 +1415,24 @@ def evaluate_open_intents(
             expires_in_ms=expires_in_ms,
         )
         source_inputs = _source_inputs(snapshot) if snapshot is not None else []
+        # 逐意图 evidence_id：种子含 intent_id 与轮次，同轮同币同周期的两单不再
+        # 共享同一个 id（否则执行侧无法证明"这一单的证据是哪个"）。
+        input_digest = canonical_hash([
+            [str(entry.get("input_id")), str(entry.get("finality")),
+             dict(entry.get("values") or {})]
+            for entry in list(bars) + source_inputs
+        ])
+        evidence_id = "eb-" + canonical_hash({
+            "intent": intent_id, "symbol": symbol, "interval": interval,
+            "as_of_ms": as_of_ms, "cycle_id": str(cycle_id), "inputs": input_digest,
+        })[:16]
         bundle = build_bundle(
             {
                 "symbol": symbol,
                 "as_of_ms": as_of_ms,
                 "cycle_id": cycle_id,
                 "expires_at_ms": as_of_ms + int(expires_in_ms),
+                "evidence_id": evidence_id,
             },
             list(bars) + source_inputs,
             rules,
@@ -1092,17 +1440,21 @@ def evaluate_open_intents(
             identity=resolution,
         )
 
-        declared_claims = item.get("claims")
-        claims = [dict(claim) for claim in declared_claims] \
-            if isinstance(declared_claims, (list, tuple)) else []
-        if not claims:
-            claims = generate_claims(
-                side=side, interval=str(interval or ""),
-                trigger_price=item["trigger_price"], breakout=item["breakout"],
-            )
-        bound_inputs = item.get("bound_inputs")
-        if isinstance(bound_inputs, (list, tuple)) and bound_inputs:
-            bound = [str(x) for x in bound_inputs]
+        # 程序 claim 是权威基准：自报 claim 只能附加，不得替换/删除比较基准。
+        program_claims = generate_claims(
+            side=side, interval=str(interval or ""),
+            trigger_price=item["trigger_price"], breakout=item["breakout"],
+        )
+        if not program_claims and decimal_or_none(item["trigger_price"]) is None:
+            issues.append(REASON_MISSING_TRIGGER_PRICE)
+        claims, claim_issues = merge_claims(program_claims, item.get("claims"))
+        issues.extend(claim_issues)
+
+        declared_bound_inputs = item.get("bound_inputs")
+        if isinstance(declared_bound_inputs, (list, tuple)):
+            # 显式声明（含显式空列表）一律尊重：空绑定由 K02 的
+            # MISSING_EVIDENCE_BINDING 承担，本模块不替调用方补。
+            bound = [str(x).strip() for x in declared_bound_inputs if str(x).strip()]
         else:
             bound = list(_claim_token_bindings(claims, bundle))
 
@@ -1113,7 +1465,7 @@ def evaluate_open_intents(
             "side": side,
             "claims": claims,
         }
-        if bound:
+        if bound or isinstance(declared_bound_inputs, (list, tuple)):
             intent_payload["bound_inputs"] = bound
         declared_evidence = item.get("evidence_id")
         if declared_evidence:
@@ -1126,10 +1478,10 @@ def evaluate_open_intents(
             # F13：意图自报运行身份时交给 K02 比对，身份不符不发单。
             intent_payload["identity"] = declared_identity
 
-        quote = quote_map.get(intent_id) or quote_map.get(symbol)
+        # 执行报价优先取快照派生（权威），调用方注入的报价只作次选且必须新鲜。
+        quote = _quote_from_snapshot(snapshot, symbol) or _caller_quote(
+            quote_map, intent_id, symbol, now_ms)
         bundle_verdict = validate_bundle(bundle, rules=rules)
-        if quote is None:
-            quote = _quote_from_snapshot(snapshot, symbol)
         verdict = validate_intent(
             intent_payload, bundle, quote, now_ms=int(now_ms), rules=rules,
         )
@@ -1149,6 +1501,8 @@ def evaluate_open_intents(
             + [f"K02:{code}" for code in verdict.reason_codes]
         ))
         accepted_intent = not reason_codes and verdict.status == STATUS_VALID
+        # U03 层状态：被拒即 REJECTED，不再出现 status=VALID 而 accepted=False。
+        u03_status = verdict.status if accepted_intent else STATUS_REJECTED
         facts: dict[str, Mapping[str, Any]] = {}
         for fact in bundle.derived_facts:
             close_time = None
@@ -1173,17 +1527,20 @@ def evaluate_open_intents(
             if snapshot is not None else {}
         summary = render_fact_summary(
             symbol=symbol, interval=interval, evidence_id=bundle.evidence_id,
-            status=verdict.status, facts=facts, quote=quote,
+            status=u03_status, facts=facts, quote=quote,
             sources={k: v for k, v in sources.items() if v is not None},
             claims=claim_rows,
         )
         binding_id = "binding-" + canonical_hash({
             "intent": intent_id, "symbol": symbol, "interval": interval,
-            "evidence": bundle.evidence_id, "status": verdict.status,
+            "evidence": bundle.evidence_id, "status": u03_status,
+            "k02_status": verdict.status, "identity": identity_hash,
+            "cycle_id": str(cycle_id),
         })[:16]
         results.append(IntentEvidence(
             intent_id=intent_id, symbol=symbol, interval=interval, action=action,
-            evidence_id=bundle.evidence_id, status=verdict.status,
+            evidence_id=bundle.evidence_id, status=u03_status,
+            k02_status=verdict.status,
             accepted=accepted_intent, applies_to_open=True,
             reason_codes=reason_codes,
             bundle_reasons=tuple(bundle_verdict.reason_codes),
@@ -1201,8 +1558,9 @@ def evaluate_open_intents(
         ok=not rejected,
         cycle_id=str(cycle_id),
         now_ms=int(now_ms),
-        identity_hash=resolution.identity_hash(),
+        identity_hash=identity_hash,
         identity_pinned=identity_pinned,
+        unpinned_allowed=bool(allow_unpinned),
         intents=tuple(results),
         rejected_intent_ids=tuple(rejected),
         accepted_intent_ids=tuple(accepted),
@@ -1212,14 +1570,27 @@ def evaluate_open_intents(
 __all__ = [
     "FACT_SUMMARY_TEMPLATE_VERSION",
     "INTERVAL_MS",
+    "MAX_BAR_AGE_MS_CEILING",
+    "MAX_EXPIRES_IN_MS_CEILING",
+    "MAX_SNAPSHOT_AGE_MS_CEILING",
     "IntentEvidence",
     "MarketSnapshot",
+    "REASON_CLAIM_DECLARATION_REJECTED",
+    "REASON_DUPLICATE_INTENT_ID",
     "REASON_EVIDENCE_TIME_MISMATCH",
+    "REASON_IDENTITY_UNPINNED",
+    "REASON_INTENT_MALFORMED",
+    "REASON_INTERVAL_CONFLICT",
     "REASON_INTERVAL_MISMATCH",
+    "REASON_INTERVAL_MISLABELED",
+    "REASON_INTERVAL_UNVERIFIED",
+    "REASON_MISSING_TRIGGER_PRICE",
     "REASON_MODEL_FACT_OVERRIDE",
     "REASON_RR_CONTRADICTION",
     "REASON_SNAPSHOT_MISSING",
     "REASON_SNAPSHOT_STALE",
+    "REASON_SOURCE_FIELD_MISSING",
+    "REASON_SOURCE_FIELD_UNKNOWN",
     "REASON_SOURCE_STALE",
     "REASON_SOURCE_UNAVAILABLE",
     "ResearchEvidenceReport",
@@ -1230,9 +1601,12 @@ __all__ = [
     "bars_from_packed_candles",
     "build_rules",
     "decimal_or_none",
+    "declared_claims_or_issues",
     "evaluate_geometry",
     "evaluate_open_intents",
     "generate_claims",
+    "merge_claims",
+    "model_fact_overrides",
     "normalise_intent",
     "render_fact_summary",
     "snapshot_from_records",
