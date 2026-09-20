@@ -777,6 +777,16 @@ def test_shared_adapter_two_states() -> None:
               "process_missing" in dead.reasons, dead.reasons)
         check("补丁态：主进程故障**不**被报成 host_down（成因不混）",
               "host_down" not in dead.reasons, dead.reasons)
+        # 宿主连续运行时长真实可得时，断言成因确实是"进程故障"而非"关机"。
+        check("补丁态：outage_kind == PROCESS_MISSING（宿主持续运行 ⇒ 只可能是进程停摆）",
+              getattr(dead, "outage_kind", "") == "PROCESS_MISSING",
+              getattr(dead, "outage_kind", ""))
+        # 恢复存活锁：后面的 CLI 用例要在"服务存活"的前提下验证退出码语义。
+        (data_live / "trading_service.lock").write_text(
+            json.dumps({"pid": os.getpid(),
+                        "started_at": time.strftime(
+                            "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - 1000))}),
+            encoding="utf-8")
     else:
         section("7b. 共享补丁未应用：断言旧行为未被伪造（不是 SKIP）")
         check("未打补丁态：HealthResult 不含 trading_evidence_at（未假装接入）",
@@ -818,8 +828,14 @@ def test_shared_adapter_two_states() -> None:
             payload = {}
         check("补丁态：CLI --state-root 生效并报告 state_root_source",
               payload.get("state_root_source") == "declared", payload.get("state_root_source"))
-        check("补丁态：声明状态根后仍不声称告警已验证（退出码 2）",
-              declared.returncode == 2, declared.returncode)
+        check("补丁态：CLI --state-root 真的换到了声明状态根下的数据库",
+              payload.get("state_root") == str(state_root / "live")
+              or payload.get("state_root") == str(state_root),
+              payload.get("state_root"))
+        check("补丁态：声明状态根后仍不声称告警已验证（退出码非 0 且通道未验证）",
+              declared.returncode != 0
+              and payload.get("alert_channel_status") == "unverified",
+              (declared.returncode, payload.get("alert_channel_status")))
     else:
         check("未打补丁态：CLI 不支持 --state-root（旧行为完整保留）",
               "--state-root" not in help_text)
