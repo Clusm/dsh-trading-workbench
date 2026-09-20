@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .common import (
     canonical_hash,
+    canonical_json,
     decimal_text,
     model_content_hash,
 )
@@ -520,8 +521,34 @@ def _expected_finality(
     return "live"
 
 
+class RulesInputError(ValueError):
+    """``rules`` 载荷不可规范化时的结构化拒绝（非 Mapping / 非 JSON 值 / 混合键型）。
+
+    ``build_bundle`` 无法返回 verdict，因此以本异常做结构化拒绝；``validate_bundle``
+    则把同一情形折算成 ``RULES_MISMATCH``。
+    """
+
+
+def _rules_payload(rules: Mapping[str, Any]) -> dict[str, Any]:
+    """把 ``rules`` 规范化为可哈希字典；不可规范化一律结构化拒绝。
+
+    ``isinstance(rules, Mapping)`` 守卫只覆盖外层形态：Mapping **内容**里出现
+    ``set``/``bytes``/任意对象/``datetime`` 等非 JSON 值，或 ``{1: 'x'}`` 这类
+    混合键型，都会让 ``json.dumps(sort_keys=True)`` 抛裸 ``TypeError``。这里
+    统一转成 ``RulesInputError``，绝不把畸形 rules 当成合法哈希输入。
+    """
+    if not isinstance(rules, Mapping):
+        raise RulesInputError(f"rules must be a mapping, got {type(rules).__name__}")
+    try:
+        payload = dict(rules)
+        canonical_json(payload)
+    except (TypeError, ValueError) as error:
+        raise RulesInputError(f"rules payload is not canonical JSON: {error}") from error
+    return payload
+
+
 def _rules_hash(rules: Mapping[str, Any]) -> str:
-    return canonical_hash(dict(rules))
+    return canonical_hash(_rules_payload(rules))
 
 
 def validate_bundle(
@@ -543,8 +570,14 @@ def validate_bundle(
     从而阻止“改 rules/quality 重哈希即 VALID”的路径。
 
     ``symbol=None`` 的输入是 ``build_bundle`` 不可达形态（幽灵输入），
-    一律报 ``INPUT_SYMBOL_MISMATCH``；``dropped_input_ids`` 必须是非空字符串、
-    唯一且与保留输入 ID 不相交；``quality.dedup_removed`` 不可重算，必须为空。
+    一律报 ``INPUT_SYMBOL_MISMATCH``；``dropped_input_ids`` 必须是与保留输入
+    不相交的非空字符串序列（``tuple``/``list``，唯一）——非序列形态（如
+    ``model_copy`` 绕过类型校验写入的 ``int``/``str``）同样报 ``QUALITY_MISMATCH``；
+    ``quality.dedup_removed`` 不可重算，必须为空。
+
+    ``rules`` 除必须是 Mapping 外，其**内容**还必须可规范化为 JSON：含
+    ``set``/``bytes``/任意对象/``datetime`` 或混合键型时一律 ``RULES_MISMATCH``
+    （不抛裸 ``TypeError``，也不把畸形载荷当作合法哈希输入）。
     """
     reasons: list[str] = []
     expected_hash = model_content_hash(bundle)
@@ -650,22 +683,32 @@ def validate_bundle(
     elif not isinstance(rules, Mapping):
         reasons.append(REASON_RULES_MISMATCH)
     else:
-        if bundle.quality.get("rules_hash") != _rules_hash(rules):
+        try:
+            rules_hash = _rules_hash(rules)
+        except RulesInputError:
+            # Mapping 内容含非 JSON 值/混合键型：整体拒绝，不再逐字段比对
+            # （畸形 rules 不具备任何“合法声明”地位）。
+            rules_hash = None
             reasons.append(REASON_RULES_MISMATCH)
-        rule_intervals = [str(item) for item in (rules.get("required_intervals") or [])]
-        declared_intervals = [
-            str(item) for item in (bundle.quality.get("required_intervals") or [])
-        ]
-        if rule_intervals != declared_intervals:
-            reasons.append(REASON_RULES_MISMATCH)
-        rule_kinds = [str(item) for item in (rules.get("required_claim_kinds") or [])]
-        declared_kinds = [
-            str(item) for item in (bundle.quality.get("required_claim_kinds") or [])
-        ]
-        if rule_kinds != declared_kinds:
-            reasons.append(REASON_RULES_MISMATCH)
-        if rules.get("max_bar_age_ms") != bundle.quality.get("max_bar_age_ms"):
-            reasons.append(REASON_RULES_MISMATCH)
+        if rules_hash is not None:
+            if bundle.quality.get("rules_hash") != rules_hash:
+                reasons.append(REASON_RULES_MISMATCH)
+            rule_intervals = [
+                str(item) for item in (rules.get("required_intervals") or [])
+            ]
+            declared_intervals = [
+                str(item) for item in (bundle.quality.get("required_intervals") or [])
+            ]
+            if rule_intervals != declared_intervals:
+                reasons.append(REASON_RULES_MISMATCH)
+            rule_kinds = [str(item) for item in (rules.get("required_claim_kinds") or [])]
+            declared_kinds = [
+                str(item) for item in (bundle.quality.get("required_claim_kinds") or [])
+            ]
+            if rule_kinds != declared_kinds:
+                reasons.append(REASON_RULES_MISMATCH)
+            if rules.get("max_bar_age_ms") != bundle.quality.get("max_bar_age_ms"):
+                reasons.append(REASON_RULES_MISMATCH)
 
     if identity is not None and identity_mismatches(expected=identity, actual=bundle.identity):
         reasons.append(REASON_IDENTITY_MISMATCH)
@@ -692,10 +735,16 @@ def build_bundle(
     input_id 记入 ``dropped_input_ids``（审计记录，纳入 content_hash）；
     ``quality.dedup_removed`` 保持为空（该字段不可重算，见 README §12）。
     ``rules`` 的整体哈希写入 ``quality.rules_hash``，供验证方比对。
+
+    畸形 ``rules``（非 Mapping，或 Mapping 内容含非 JSON 值/混合键型）抛
+    ``RulesInputError``（结构化拒绝），不会退化成裸 ``TypeError``/``AttributeError``。
     """
     snap = dict(snapshot)
     if "symbol" not in snap or "as_of_ms" not in snap:
         raise ValueError("snapshot requires symbol and as_of_ms")
+    # rules 形态与内容先行校验：非 Mapping 或含非 JSON 值/混合键型 → 结构化拒绝，
+    # 不允许在后面的 rules.get(...)/哈希阶段抛裸 AttributeError/TypeError。
+    rules_payload = _rules_payload(rules)
     as_of_ms = int(snap["as_of_ms"])
     symbol = str(snap["symbol"])
     cycle = str(cycle_id or snap.get("cycle_id") or "")
@@ -846,7 +895,7 @@ def build_bundle(
         "required_claim_kinds": required_claim_kinds,
         "max_bar_age_ms": int(max_age) if max_age is not None else None,
         "as_of_ms": as_of_ms,
-        "rules_hash": _rules_hash(rules),
+        "rules_hash": canonical_hash(rules_payload),
     }
     bundle = EvidenceBundle(
         evidence_id=evidence_id,
