@@ -27,7 +27,19 @@
 | CD | U03 | `fb8ae5a` | **✅ INTEGRATED（接线暂缓）** | r3 复验 PASS → 集成时暴露"仅集成态可见"缺陷（测试读现网文件二次打补丁）→ r4 修好（两态均通过 + 行尾归一化、不削弱漂移检测），**真实集成树绿灯**。**但 U03 的 orchestrator 接线补丁使管线缺 pinned 身份时 fail-closed 拒绝全部开仓 → 既有 `smoke_p0b_loop.py` 与 `smoke_ui.py` 新增失败**（仅 U15 集成时两者均 PASS）。决策：**暂缓接线补丁**（保留模块 + S01 + 登记），撤销后两者恢复（28/0、52/0）。接线依赖 U15 身份接入管线 → 归 **U12 BUILD 联合候选**。 |
 | B | U04 | `f4e4663` | **r3 修复完成 → 聚焦复验中** | r3 已修 **N1**：`_component_status` 改 `.get(x,x)`，CANCELED+迟到成交 由 `working=0.0143/terminal=0/WRONG_TERMINAL` → `working=0/terminal=0.0143/守恒/CORRECT_TERMINAL`，终态矩阵 CANCELED/EXPIRED/REJECTED 均保留原态。N3 改 `is True`、N4 登记；N2 部分修（顺序断言仍无法区分 V1/r2，靠结构断言补）。回归断言在未修树上 4/4 FAIL（非空转）。集成态 154/0、HEAD 130/0、契约 173/0。报告 `docs/dispatch/reviews/U04/cc6de61/Q_r2.md` |
 
-**W1 出口状态**：**四条线作者全部交付**（U01/U03/U15/U04）；U01/U03/U15 已完成初审并进入 r2 修复/复验；U04 初审进行中。
+**W1 出口状态**：**四条线作者全部交付**（U01/U03/U15/U04）；**U00/U01/U03/U15 已 INTEGRATED**（U03 的 orchestrator 接线暂缓，见 `W1-JOINT-WIRING`）；U04 r3 复验进行中。
+
+### W2 进度
+
+| 线 | 任务 | 分支/base | 状态 | 备注 |
+|---|---|---|---|---|
+| CD | U05 真实耗时/模型降级/决策原因 | `task/U05` @ `0e522b1` | **作者进行中** | 依赖 U00+U03 已满足；含 S02–S04、DL01/03/04/06/07；**KI01 归属本任务**（`factory.py:111` 误报）|
+| EF | U13 托管/单实例/备份恢复 | `task/U13` @ `0e522b1` | **作者进行中** | 依赖 U00+U15 已满足；**额外承担修复 KI02**（`config/windows_service.json` 硬编码 worktree 本地 `.venv` → 全量回归在 worktree 必中止）|
+| B | U02 策略仓管理与有界退出 | — | 待派发 | 依赖 U00+U04+**U15**；U04 尚未 INTEGRATED |
+| CD | U06a / U08 | — | 待派发 | 线内串行：U05 → U06a → U08 |
+| EF | U14 / U10a | — | 待派发 | 线内串行：U13 → U14 → U10a |
+
+**W2 派发已内联 W1 的 7 条血教训**（见 §「复验范围经验」与 §「派发新任务时的强制要求」）：两态可跑的测试、迁移版本推进必须带伴随补丁并给 delta、禁止 SKIP/直接注入内部字段、共享适配必须交付 diff 文件、冒烟须登记、增量提交、自证 pristine delta。
 
 **集成时必须原子处理（否则 `run_offline_regression` 红）**：U01/U03/U04 的 `scripts/smoke_*.py` 需在集成时与 `SCRIPTS` 登记**同批落地**（`run_offline_regression.py` 由 I 独占）。U15 用 `tests/acceptance/*.py` 命名，不触发该门禁。详见 JSON `dispatch.known_issues` 的 `W1-MANIFEST-TRANSIENT*`。
 
