@@ -407,6 +407,21 @@ def test_non_open_actions(results: dict, scenarios: dict) -> None:
           report.decision_gate())
     check("非开仓动作不进开仓门禁", close_item.applies_to_open is False)
 
+    print("\n[8b] 缺 intent_id 不崩溃：用本轮序号做确定性绑定")
+    report_anon = evidence.evaluate_open_intents(
+        [{"symbol": "BNBUSDT", "action": "OPEN", "side": "LONG",
+          "trigger_price": 744.0,
+          "evidence": {"confirmation_interval": "1h", "trigger_price": 744.0,
+                       "risk_reward_ratio": 1.7778,
+                       "data_observed_at_ms": AS_OF_MS}}],
+        build_snapshots(results, ["BNBUSDT_1h"]), now_ms=NOW_MS,
+        identity=IDENTITY, cycle_id="cyc-anon",
+    )
+    anon = report_anon.by_intent("open[0]")
+    check("缺 id 的意图仍得到绑定结论",
+          anon is not None and anon.accepted and anon.status == "VALID",
+          report_anon.as_dict())
+
 
 # --------------------------------------------------------------- 9 注入文本
 

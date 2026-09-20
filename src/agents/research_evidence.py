@@ -1018,9 +1018,14 @@ def evaluate_open_intents(
     rejected: list[str] = []
     accepted: list[str] = []
 
-    for raw_intent in intents:
+    for position, raw_intent in enumerate(intents):
         item = normalise_intent(raw_intent)
         intent_id = item["intent_id"]
+        if not intent_id:
+            # 模型可能不提供 intent_id/client_order_id：用本轮序号做确定性绑定，
+            # 不让缺 id 直接抛错（门禁必须给出可审计的拒绝结论，而不是崩溃）。
+            intent_id = f"open[{position}]"
+            item["intent_id"] = intent_id
         symbol = item["symbol"]
         interval = item["interval"]
         action = item["action"]
