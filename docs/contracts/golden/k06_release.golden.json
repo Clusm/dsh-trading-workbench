@@ -148,6 +148,73 @@
         "blocking_codes": [{"group": "engineering", "code": "IDENTITY_MISMATCH"}],
         "extra_top_level_fields": []
       }
+    },
+    {
+      "case_id": "K06-P2",
+      "kind": "positive",
+      "title": "声明状态允许前后空白",
+      "operation": "k06_groups",
+      "derivation": "Q 审查 P2-3：' PASS ' 曾因未 strip 被判 DECLARED_STATUS_UNKNOWN。状态文本先 strip 再大写；证据完整时正常 PASS。",
+      "inputs": {
+        "identity_ref": "demo:rel-synth-1",
+        "focus_groups": ["engineering"],
+        "groups": {
+          "engineering": {
+            "status": " PASS ",
+            "evidence_hash": "hash-eng-synth",
+            "window_start_ms": 1789776000000,
+            "window_end_ms": 1789862400000,
+            "identity_ref": "demo:rel-synth-1"
+          }
+        }
+      },
+      "expect": {
+        "statuses": {"engineering": "PASS"},
+        "blocking_codes": [],
+        "extra_top_level_fields": []
+      }
+    },
+    {
+      "case_id": "K06-N5",
+      "kind": "negative",
+      "title": "畸形窗口字段转为阻断项而不是崩溃",
+      "operation": "k06_groups",
+      "derivation": "Q 审查 P2-3 / adv_03 J.k06_str_window：window_end='not-a-number' 曾让整份报告构建抛 ValueError。缺证据必须列出具体阻断项（规格 §4 K06）；不可解析窗口判 FAIL + WINDOW_INVALID。",
+      "inputs": {
+        "identity_ref": "demo:rel-synth-1",
+        "focus_groups": ["engineering"],
+        "groups": {
+          "engineering": {
+            "status": "PASS",
+            "evidence_hash": "hash-eng-synth",
+            "window_start_ms": 1789776000000,
+            "window_end_ms": "not-a-number",
+            "identity_ref": "demo:rel-synth-1"
+          }
+        }
+      },
+      "expect": {
+        "statuses": {"engineering": "FAIL"},
+        "blocking_codes": [{"group": "engineering", "code": "WINDOW_INVALID"}],
+        "extra_top_level_fields": []
+      }
+    },
+    {
+      "case_id": "K06-N6",
+      "kind": "negative",
+      "title": "未知声明状态降级为 NO_DATA",
+      "operation": "k06_groups",
+      "derivation": "K06 只认 PASS/FAIL/NO_DATA；未知状态不得被当作 PASS，也不能让报告崩溃，必须 NO_DATA + DECLARED_STATUS_UNKNOWN 阻断项。",
+      "inputs": {
+        "identity_ref": "demo:rel-synth-1",
+        "focus_groups": ["engineering"],
+        "groups": {"engineering": {"status": "MAYBE", "evidence_hash": "hash-eng-synth"}}
+      },
+      "expect": {
+        "statuses": {"engineering": "NO_DATA"},
+        "blocking_codes": [{"group": "engineering", "code": "DECLARED_STATUS_UNKNOWN"}],
+        "extra_top_level_fields": []
+      }
     }
   ]
 }

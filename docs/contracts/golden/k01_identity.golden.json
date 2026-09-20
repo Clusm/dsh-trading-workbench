@@ -295,6 +295,81 @@
           "effective_config.profile_overrides"
         ]
       }
+    },
+    {
+      "case_id": "K01-P6",
+      "kind": "positive",
+      "title": "显式空集合不算覆盖缺口",
+      "operation": "k01_coverage",
+      "derivation": "K01 覆盖清单要求声明字段存在；“无备用路由/无 profile 覆盖”是合法状态，必须以空集合/空字典显式声明而不是缺失字段。字段缺失（None）或空字符串才算缺口。",
+      "inputs": {
+        "coverage": {
+          "dependency": {"requirements_lock": "requirements-lock.txt", "comparison_status": "match"},
+          "strategy": {"strategy_cards": "knowledge/strategy_cards.json"},
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh", "fallback_routes": [], "profile_overrides": {}},
+          "effective_config": {"settings": "config/settings.yaml", "profile_overrides": {}, "environment_overrides": {}}
+        }
+      },
+      "expect": {"missing": []}
+    },
+    {
+      "case_id": "K01-N3",
+      "kind": "negative",
+      "title": "build_identity 强制四组覆盖，缺一即拒绝",
+      "operation": "k01_build_identity_coverage",
+      "derivation": "C 审查 CE10：model_route={}/effective_config={} 曾被静默接受并生成 hash({})。规格 §4 K01 要求覆盖实际锁文件、策略卡、模型路由与有效配置；F13 要求指纹必变且身份不符不发单。四组任一为空必须抛 IdentityCoverageError，禁止生成不完整身份。",
+      "inputs": {
+        "base": {
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "runtime_instance_id": "inst-synth-r1",
+          "artifact_files": {"src/core/service.py": "def run(): pass\n"},
+          "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
+          "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
+          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}}
+        },
+        "cases": [
+          {"name": "empty_model_route", "overrides": {"model_route": {}}},
+          {"name": "empty_effective_config", "overrides": {"effective_config": {}}},
+          {"name": "empty_dependency", "overrides": {"dependency_lock_files": {}}},
+          {"name": "empty_strategy", "overrides": {"strategy_cards": {}}},
+          {"name": "control_partial_but_present", "overrides": {}}
+        ]
+      },
+      "expect": {
+        "errors": {
+          "empty_model_route": ["model_route"],
+          "empty_effective_config": ["effective_config"],
+          "empty_dependency": ["dependency(requirements-lock.txt)"],
+          "empty_strategy": ["strategy(knowledge/strategy_cards.json)"],
+          "control_partial_but_present": []
+        }
+      }
+    },
+    {
+      "case_id": "K01-N4",
+      "kind": "negative",
+      "title": "原始文本/行列表载荷拒绝哈希",
+      "operation": "k01_secret_payload",
+      "derivation": "C 审查 CE11 / B 审查 P1-13：hash_strategy 对字符串（.env 原文）与字符串列表（行列表）曾静默哈希。规格 §4 K01 禁止对原始 .env 整文件导出哈希；所有哈希输入必须是结构化 Mapping（或 Mapping 序列），原始文本一律拒绝。控制组使用结构化策略卡，必须通过。",
+      "inputs": {
+        "cases": [
+          {"name": "strategy_env_text", "group": "strategy", "value": "MTA_API_KEY=placeholder-value\nEXECUTION_MODE=demo"},
+          {"name": "effective_config_lines", "group": "effective_config", "value": ["EXECUTION_MODE=demo", "MTA_PROFILE=live"]},
+          {"name": "artifact_raw_text", "group": "artifact", "value": "def run(): pass\n"}
+        ],
+        "control": {"group": "strategy", "value": {"cards": [{"strategy_id": "S_SYNTH_1"}]}}
+      },
+      "expect": {
+        "rejected": {
+          "strategy_env_text": true,
+          "effective_config_lines": true,
+          "artifact_raw_text": true
+        },
+        "control_rejected": false
+      }
     }
   ]
 }

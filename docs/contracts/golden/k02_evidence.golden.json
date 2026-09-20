@@ -13,7 +13,7 @@
       "inputs": {
         "now_ms": 1789862401000,
         "identity": {
-          "schema_version": "3.0",
+          "schema_version": "3.1",
           "environment": "demo",
           "account_ref": "demo:SYNTH_ACCT",
           "artifact_hash": "artifact-synth-hash",
@@ -103,7 +103,7 @@
       "inputs": {
         "now_ms": 1789862401000,
         "identity": {
-          "schema_version": "3.0",
+          "schema_version": "3.1",
           "environment": "demo",
           "account_ref": "demo:SYNTH_ACCT",
           "artifact_hash": "artifact-synth-hash",
@@ -231,7 +231,7 @@
         "now_ms": 1789862401000,
         "repeat": true,
         "identity": {
-          "schema_version": "3.0",
+          "schema_version": "3.1",
           "environment": "demo",
           "account_ref": "demo:SYNTH_ACCT",
           "artifact_hash": "artifact-synth-hash",
@@ -300,7 +300,7 @@
       "inputs": {
         "now_ms": 1789862401000,
         "identity": {
-          "schema_version": "3.0",
+          "schema_version": "3.1",
           "environment": "demo",
           "account_ref": "demo:SYNTH_ACCT",
           "artifact_hash": "artifact-synth-hash",
@@ -388,7 +388,7 @@
       "inputs": {
         "now_ms": 1789862401000,
         "identity": {
-          "schema_version": "3.0",
+          "schema_version": "3.1",
           "environment": "demo",
           "account_ref": "demo:SYNTH_ACCT",
           "artifact_hash": "artifact-synth-hash",
@@ -469,7 +469,7 @@
       "inputs": {
         "now_ms": 1789862401000,
         "identity": {
-          "schema_version": "3.0",
+          "schema_version": "3.1",
           "environment": "demo",
           "account_ref": "demo:SYNTH_ACCT",
           "artifact_hash": "artifact-synth-hash",
@@ -556,7 +556,7 @@
       "inputs": {
         "now_ms": 1789862401000,
         "identity": {
-          "schema_version": "3.0",
+          "schema_version": "3.1",
           "environment": "demo",
           "account_ref": "demo:SYNTH_ACCT",
           "artifact_hash": "artifact-synth-hash",
@@ -643,7 +643,7 @@
       "inputs": {
         "now_ms": 1789862401000,
         "identity": {
-          "schema_version": "3.0",
+          "schema_version": "3.1",
           "environment": "demo",
           "account_ref": "demo:SYNTH_ACCT",
           "artifact_hash": "artifact-synth-hash",
@@ -730,7 +730,7 @@
       "inputs": {
         "now_ms": 1789862401000,
         "identity": {
-          "schema_version": "3.0",
+          "schema_version": "3.1",
           "environment": "demo",
           "account_ref": "demo:SYNTH_ACCT",
           "artifact_hash": "artifact-synth-hash",
@@ -817,7 +817,7 @@
       "inputs": {
         "now_ms": 1789862401000,
         "identity": {
-          "schema_version": "3.0",
+          "schema_version": "3.1",
           "environment": "demo",
           "account_ref": "demo:SYNTH_ACCT",
           "artifact_hash": "artifact-synth-hash",
@@ -897,7 +897,7 @@
       "inputs": {
         "now_ms": 1789862401000,
         "identity": {
-          "schema_version": "3.0",
+          "schema_version": "3.1",
           "environment": "demo",
           "account_ref": "demo:SYNTH_ACCT",
           "artifact_hash": "artifact-synth-hash",
@@ -984,7 +984,7 @@
       "inputs": {
         "now_ms": 1789862401000,
         "identity": {
-          "schema_version": "3.0",
+          "schema_version": "3.1",
           "environment": "demo",
           "account_ref": "demo:SYNTH_ACCT",
           "artifact_hash": "artifact-synth-hash",
@@ -1042,7 +1042,7 @@
             "bound_inputs": ["in-01", "in-02"],
             "evidence_id": "eb-A",
             "identity_override": {
-              "schema_version": "3.0",
+              "schema_version": "3.1",
               "environment": "demo",
               "account_ref": "demo:SYNTH_ACCT",
               "artifact_hash": "artifact-synth-hash",
@@ -1073,6 +1073,909 @@
           }
         }
       }
+    },
+    {
+      "case_id": "K02-P4",
+      "kind": "positive",
+      "title": "必需 claim kind 已声明且程序计算为真→VALID",
+      "operation": "k02_validate",
+      "derivation": "C 审查 P0-1：契约需支持按 action 的必需 claim 策略。bundle.rules.required_claim_kinds=['close_above_prior_high'] 时，意图声明同名 kind 且表达式（744.13>743.5）由程序计算为真，全部必要检查通过。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-synth-hash",
+          "runtime_instance_id": "inst-synth-r1"
+        },
+        "bundles": {
+          "A": {
+            "evidence_id": "eb-A",
+            "symbol": "BNBUSDT",
+            "as_of_ms": 1789862400000,
+            "expires_at_ms": 1789862460000,
+            "cycle_id": "cyc-k02-p4",
+            "environment": "demo",
+            "rules": {"required_intervals": ["1h"], "max_bar_age_ms": 7200000, "required_claim_kinds": ["close_above_prior_high"]},
+            "bars": [
+              {
+                "input_id": "in-01",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789858800000,
+                "event_time_ms": 1789858800000,
+                "received_time_ms": 1789858800500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "741.0", "high": "743.5", "low": "739.0", "close": "742.8"}
+              },
+              {
+                "input_id": "in-02",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789862400000,
+                "event_time_ms": 1789862400000,
+                "received_time_ms": 1789862400500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "742.9", "high": "745.0", "low": "741.5", "close": "744.13"}
+              }
+            ]
+          }
+        },
+        "intents": {
+          "A": {
+            "intent_id": "intent-A",
+            "symbol": "BNBUSDT",
+            "action": "OPEN",
+            "side": "LONG",
+            "claims": [
+              {"claim_id": "c1", "kind": "close_above_prior_high", "expr": "1h:closed_close > 1h:prior_high", "expected": true}
+            ],
+            "bound_inputs": ["in-01", "in-02"],
+            "evidence_id": "eb-A"
+          }
+        },
+        "quotes": {
+          "A": {"symbol": "BNBUSDT", "price": "744.13", "quote_time_ms": 1789862400500, "expires_at_ms": 1789862460000}
+        }
+      },
+      "expect": {
+        "results": {
+          "A": {
+            "status": "VALID",
+            "reason_codes": [],
+            "claims": {"c1": {"status": "PASS", "actual": true}}
+          }
+        }
+      }
+    },
+    {
+      "case_id": "K02-N10",
+      "kind": "negative",
+      "title": "恒真字面量 claim 不得通过（无证据引用）",
+      "operation": "k02_validate",
+      "derivation": "C 审查 P0-1 CE1：完整 bundle 上仅写 claim '1 < 2' 曾 VALID。claim 必须引用证据（输入/事实）；两个操作数都是字面量时属于没有证据的断言，必须 CLAIM_WITHOUT_EVIDENCE + EVIDENCE_INVALID。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-synth-hash",
+          "runtime_instance_id": "inst-synth-r1"
+        },
+        "bundles": {
+          "A": {
+            "evidence_id": "eb-A",
+            "symbol": "BNBUSDT",
+            "as_of_ms": 1789862400000,
+            "expires_at_ms": 1789862460000,
+            "cycle_id": "cyc-k02-n10",
+            "environment": "demo",
+            "rules": {"required_intervals": ["1h"], "max_bar_age_ms": 7200000},
+            "bars": [
+              {
+                "input_id": "in-01",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789858800000,
+                "event_time_ms": 1789858800000,
+                "received_time_ms": 1789858800500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "741.0", "high": "743.5", "low": "739.0", "close": "742.8"}
+              },
+              {
+                "input_id": "in-02",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789862400000,
+                "event_time_ms": 1789862400000,
+                "received_time_ms": 1789862400500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "742.9", "high": "745.0", "low": "741.5", "close": "744.13"}
+              }
+            ]
+          }
+        },
+        "intents": {
+          "A": {
+            "intent_id": "intent-A",
+            "symbol": "BNBUSDT",
+            "action": "OPEN",
+            "side": "LONG",
+            "claims": [
+              {"claim_id": "c1", "expr": "1 < 2", "expected": true}
+            ],
+            "bound_inputs": ["in-01", "in-02"],
+            "evidence_id": "eb-A"
+          }
+        },
+        "quotes": {
+          "A": {"symbol": "BNBUSDT", "price": "744.13", "quote_time_ms": 1789862400500, "expires_at_ms": 1789862460000}
+        }
+      },
+      "expect": {
+        "results": {
+          "A": {
+            "status": "EVIDENCE_INVALID",
+            "reason_codes": ["CLAIM_WITHOUT_EVIDENCE"],
+            "claims": {"c1": {"status": "UNRESOLVED", "actual": null}}
+          }
+        }
+      }
+    },
+    {
+      "case_id": "K02-N11",
+      "kind": "negative",
+      "title": "未知 action 不得绕过 OPEN 门禁",
+      "operation": "k02_validate",
+      "derivation": "C 审查 P0-1 CE1b：action='OPENX' 曾因非 'OPEN' 跳过 claim/报价检查并 VALID。action 必须来自有限枚举 OPEN/CLOSE/REDUCE/ADJUST；未知值显式 UNKNOWN_ACTION + EVIDENCE_INVALID。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-synth-hash",
+          "runtime_instance_id": "inst-synth-r1"
+        },
+        "bundles": {
+          "A": {
+            "evidence_id": "eb-A",
+            "symbol": "BNBUSDT",
+            "as_of_ms": 1789862400000,
+            "expires_at_ms": 1789862460000,
+            "cycle_id": "cyc-k02-n11",
+            "environment": "demo",
+            "rules": {"required_intervals": ["1h"], "max_bar_age_ms": 7200000},
+            "bars": [
+              {
+                "input_id": "in-01",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789858800000,
+                "event_time_ms": 1789858800000,
+                "received_time_ms": 1789858800500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "741.0", "high": "743.5", "low": "739.0", "close": "742.8"}
+              },
+              {
+                "input_id": "in-02",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789862400000,
+                "event_time_ms": 1789862400000,
+                "received_time_ms": 1789862400500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "742.9", "high": "745.0", "low": "741.5", "close": "744.13"}
+              }
+            ]
+          }
+        },
+        "intents": {
+          "A": {
+            "intent_id": "intent-A",
+            "symbol": "BNBUSDT",
+            "action": "OPENX",
+            "side": "LONG",
+            "claims": [
+              {"claim_id": "c1", "expr": "1h:closed_close > 1h:prior_high", "expected": true}
+            ],
+            "bound_inputs": ["in-01", "in-02"],
+            "evidence_id": "eb-A"
+          }
+        },
+        "quotes": {"A": null}
+      },
+      "expect": {
+        "results": {
+          "A": {
+            "status": "EVIDENCE_INVALID",
+            "reason_codes": ["UNKNOWN_ACTION"],
+            "claims": {"c1": {"status": "PASS", "actual": true}}
+          }
+        }
+      }
+    },
+    {
+      "case_id": "K02-N12",
+      "kind": "negative",
+      "title": "OPEN 意图必须声明证据绑定",
+      "operation": "k02_validate",
+      "derivation": "规格 §4 K02：对每个 intent 分别核验全部必要检查并绑定 intent_id/symbol/evidence_id。OPEN 意图未声明 bound_inputs 时无法证明其检查所依赖的具体输入，必须 MISSING_EVIDENCE_BINDING。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-synth-hash",
+          "runtime_instance_id": "inst-synth-r1"
+        },
+        "bundles": {
+          "A": {
+            "evidence_id": "eb-A",
+            "symbol": "BNBUSDT",
+            "as_of_ms": 1789862400000,
+            "expires_at_ms": 1789862460000,
+            "cycle_id": "cyc-k02-n12",
+            "environment": "demo",
+            "rules": {"required_intervals": ["1h"], "max_bar_age_ms": 7200000},
+            "bars": [
+              {
+                "input_id": "in-01",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789858800000,
+                "event_time_ms": 1789858800000,
+                "received_time_ms": 1789858800500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "741.0", "high": "743.5", "low": "739.0", "close": "742.8"}
+              },
+              {
+                "input_id": "in-02",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789862400000,
+                "event_time_ms": 1789862400000,
+                "received_time_ms": 1789862400500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "742.9", "high": "745.0", "low": "741.5", "close": "744.13"}
+              }
+            ]
+          }
+        },
+        "intents": {
+          "A": {
+            "intent_id": "intent-A",
+            "symbol": "BNBUSDT",
+            "action": "OPEN",
+            "side": "LONG",
+            "claims": [
+              {"claim_id": "c1", "expr": "1h:closed_close > 1h:prior_high", "expected": true}
+            ],
+            "evidence_id": "eb-A"
+          }
+        },
+        "quotes": {
+          "A": {"symbol": "BNBUSDT", "price": "744.13", "quote_time_ms": 1789862400500, "expires_at_ms": 1789862460000}
+        }
+      },
+      "expect": {
+        "results": {
+          "A": {
+            "status": "EVIDENCE_INVALID",
+            "reason_codes": ["MISSING_EVIDENCE_BINDING"],
+            "claims": {"c1": {"status": "PASS", "actual": true}}
+          }
+        }
+      }
+    },
+    {
+      "case_id": "K02-N13",
+      "kind": "negative",
+      "title": "输入级跨 symbol 引用被拒绝",
+      "operation": "k02_validate",
+      "derivation": "C 审查 P0/P1 CE3：BNBUSDT 包内引用 BTCUSDT 输入曾 VALID（DC07 禁止借用另一个 symbol 的检查结果）。build_bundle 把跨 symbol 输入隔离出事实与最终性计算，引用它得到 INPUT_SYMBOL_MISMATCH，且缺 1h 已收盘K线。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-synth-hash",
+          "runtime_instance_id": "inst-synth-r1"
+        },
+        "bundles": {
+          "A": {
+            "evidence_id": "eb-A",
+            "symbol": "BNBUSDT",
+            "as_of_ms": 1789862400000,
+            "expires_at_ms": 1789862460000,
+            "cycle_id": "cyc-k02-n13",
+            "environment": "demo",
+            "rules": {"required_intervals": ["1h"], "max_bar_age_ms": 7200000},
+            "bars": [
+              {
+                "input_id": "in-99",
+                "symbol": "BTCUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789862400000,
+                "event_time_ms": 1789862400000,
+                "received_time_ms": 1789862400500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "78400.0", "high": "78550.0", "low": "78300.0", "close": "78443.0"}
+              }
+            ]
+          }
+        },
+        "intents": {
+          "A": {
+            "intent_id": "intent-A",
+            "symbol": "BNBUSDT",
+            "action": "OPEN",
+            "side": "LONG",
+            "claims": [
+              {"claim_id": "c1", "expr": "in-99.close > in-99.high", "expected": true}
+            ],
+            "bound_inputs": ["in-99"],
+            "evidence_id": "eb-A"
+          }
+        },
+        "quotes": {
+          "A": {"symbol": "BNBUSDT", "price": "744.13", "quote_time_ms": 1789862400500, "expires_at_ms": 1789862460000}
+        }
+      },
+      "expect": {
+        "results": {
+          "A": {
+            "status": "EVIDENCE_INVALID",
+            "reason_codes": [
+              "MISSING_REQUIRED_INTERVAL",
+              "BUNDLE_NOT_CLOSED",
+              "INPUT_SYMBOL_MISMATCH"
+            ],
+            "claims": {"c1": {"status": "UNRESOLVED", "actual": null}}
+          }
+        }
+      }
+    },
+    {
+      "case_id": "K02-N14",
+      "kind": "negative",
+      "title": "无收盘时间的 bar 不得判为已收盘",
+      "operation": "k02_validate",
+      "derivation": "C 审查 P1-5 CE4：close_time_ms 缺省曾变 0 → closed，且 bar_times={1h:0}。无收盘时间的 bar 不可能被证明已收盘；必须降级为 unknown 并产生 UNDATED_BAR，缺必需周期使 bundle 非 closed。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-synth-hash",
+          "runtime_instance_id": "inst-synth-r1"
+        },
+        "bundles": {
+          "A": {
+            "evidence_id": "eb-A",
+            "symbol": "BNBUSDT",
+            "as_of_ms": 1789862400000,
+            "expires_at_ms": 1789862460000,
+            "cycle_id": "cyc-k02-n14",
+            "environment": "demo",
+            "rules": {"required_intervals": ["1h"], "max_bar_age_ms": 7200000},
+            "bars": [
+              {
+                "input_id": "in-01",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "finality": "closed",
+                "source": "exchange_public",
+                "event_time_ms": 1789862400000,
+                "received_time_ms": 1789862400500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "742.9", "high": "745.0", "low": "741.5", "close": "744.13"}
+              }
+            ]
+          }
+        },
+        "intents": {
+          "A": {
+            "intent_id": "intent-A",
+            "symbol": "BNBUSDT",
+            "action": "OPEN",
+            "side": "LONG",
+            "claims": [
+              {"claim_id": "c1", "expr": "in-01.close > 1", "expected": true}
+            ],
+            "bound_inputs": ["in-01"],
+            "evidence_id": "eb-A"
+          }
+        },
+        "quotes": {
+          "A": {"symbol": "BNBUSDT", "price": "744.13", "quote_time_ms": 1789862400500, "expires_at_ms": 1789862460000}
+        }
+      },
+      "expect": {
+        "results": {
+          "A": {
+            "status": "EVIDENCE_INVALID",
+            "reason_codes": [
+              "MISSING_REQUIRED_INTERVAL",
+              "BUNDLE_NOT_CLOSED",
+              "UNDATED_BAR"
+            ],
+            "claims": {"c1": {"status": "UNRESOLVED", "actual": null}}
+          }
+        }
+      }
+    },
+    {
+      "case_id": "K02-N15",
+      "kind": "negative",
+      "title": "空 symbol 的执行报价被拒绝",
+      "operation": "k02_validate",
+      "derivation": "C 审查 P2-2 CE5：quote.symbol='' 时曾跳过币种比对。执行报价必须显式携带币种；空/缺失一律 QUOTE_SYMBOL_MISMATCH，不得按“未提供即不比较”放行。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-synth-hash",
+          "runtime_instance_id": "inst-synth-r1"
+        },
+        "bundles": {
+          "A": {
+            "evidence_id": "eb-A",
+            "symbol": "BNBUSDT",
+            "as_of_ms": 1789862400000,
+            "expires_at_ms": 1789862460000,
+            "cycle_id": "cyc-k02-n15",
+            "environment": "demo",
+            "rules": {"required_intervals": ["1h"], "max_bar_age_ms": 7200000},
+            "bars": [
+              {
+                "input_id": "in-01",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789858800000,
+                "event_time_ms": 1789858800000,
+                "received_time_ms": 1789858800500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "741.0", "high": "743.5", "low": "739.0", "close": "742.8"}
+              },
+              {
+                "input_id": "in-02",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789862400000,
+                "event_time_ms": 1789862400000,
+                "received_time_ms": 1789862400500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "742.9", "high": "745.0", "low": "741.5", "close": "744.13"}
+              }
+            ]
+          }
+        },
+        "intents": {
+          "A": {
+            "intent_id": "intent-A",
+            "symbol": "BNBUSDT",
+            "action": "OPEN",
+            "side": "LONG",
+            "claims": [
+              {"claim_id": "c1", "expr": "1h:closed_close > 1h:prior_high", "expected": true}
+            ],
+            "bound_inputs": ["in-01", "in-02"],
+            "evidence_id": "eb-A"
+          }
+        },
+        "quotes": {
+          "A": {"symbol": "", "price": "744.13", "quote_time_ms": 1789862400500, "expires_at_ms": 1789862460000}
+        }
+      },
+      "expect": {
+        "results": {
+          "A": {
+            "status": "EVIDENCE_INVALID",
+            "reason_codes": ["QUOTE_SYMBOL_MISMATCH"]
+          }
+        }
+      }
+    },
+    {
+      "case_id": "K02-N16",
+      "kind": "negative",
+      "title": "缺少必需 claim kind 时拒绝",
+      "operation": "k02_validate",
+      "derivation": "C 审查 P0-1：契约需强制必需 claim 集合。rules 要求 close_above_prior_high，意图只声明 other_kind（即使表达式为真），必要检查集合不完整 → MISSING_REQUIRED_CLAIM。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-synth-hash",
+          "runtime_instance_id": "inst-synth-r1"
+        },
+        "bundles": {
+          "A": {
+            "evidence_id": "eb-A",
+            "symbol": "BNBUSDT",
+            "as_of_ms": 1789862400000,
+            "expires_at_ms": 1789862460000,
+            "cycle_id": "cyc-k02-n16",
+            "environment": "demo",
+            "rules": {"required_intervals": ["1h"], "max_bar_age_ms": 7200000, "required_claim_kinds": ["close_above_prior_high"]},
+            "bars": [
+              {
+                "input_id": "in-01",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789858800000,
+                "event_time_ms": 1789858800000,
+                "received_time_ms": 1789858800500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "741.0", "high": "743.5", "low": "739.0", "close": "742.8"}
+              },
+              {
+                "input_id": "in-02",
+                "symbol": "BNBUSDT",
+                "interval": "1h",
+                "source": "exchange_public",
+                "close_time_ms": 1789862400000,
+                "event_time_ms": 1789862400000,
+                "received_time_ms": 1789862400500,
+                "valid_until_ms": 1789866000000,
+                "values": {"open": "742.9", "high": "745.0", "low": "741.5", "close": "744.13"}
+              }
+            ]
+          }
+        },
+        "intents": {
+          "A": {
+            "intent_id": "intent-A",
+            "symbol": "BNBUSDT",
+            "action": "OPEN",
+            "side": "LONG",
+            "claims": [
+              {"claim_id": "c1", "kind": "other_kind", "expr": "1h:closed_close > 1h:prior_high", "expected": true}
+            ],
+            "bound_inputs": ["in-01", "in-02"],
+            "evidence_id": "eb-A"
+          }
+        },
+        "quotes": {
+          "A": {"symbol": "BNBUSDT", "price": "744.13", "quote_time_ms": 1789862400500, "expires_at_ms": 1789862460000}
+        }
+      },
+      "expect": {
+        "results": {
+          "A": {
+            "status": "EVIDENCE_INVALID",
+            "reason_codes": ["MISSING_REQUIRED_CLAIM"],
+            "claims": {"c1": {"status": "PASS", "actual": true}}
+          }
+        }
+      }
+    },
+    {
+      "case_id": "K02-N17",
+      "kind": "negative",
+      "title": "篡改输入值后 content_hash 失效",
+      "operation": "k02_bundle_tamper",
+      "derivation": "C 审查 P0-2 CE2：model_copy 把 in-02.close 742.8→999 后 verdict 可翻 VALID 而 content_hash 仍旧值。篡改输入会同时造成 content_hash 失配与派生事实不可重算（closed_close 必须等于输入 close）；validate_bundle 两个方向都检出，validate_intent 随之 EVIDENCE_INVALID。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-synth-hash",
+          "runtime_instance_id": "inst-synth-r1"
+        },
+        "bundle": {
+          "evidence_id": "eb-A",
+          "symbol": "BNBUSDT",
+          "as_of_ms": 1789862400000,
+          "expires_at_ms": 1789862460000,
+          "cycle_id": "cyc-k02-n17",
+          "environment": "demo",
+          "rules": {"required_intervals": ["1h"], "max_bar_age_ms": 7200000},
+          "bars": [
+            {
+              "input_id": "in-01",
+              "symbol": "BNBUSDT",
+              "interval": "1h",
+              "source": "exchange_public",
+              "close_time_ms": 1789858800000,
+              "event_time_ms": 1789858800000,
+              "received_time_ms": 1789858800500,
+              "valid_until_ms": 1789866000000,
+              "values": {"open": "741.0", "high": "743.5", "low": "739.0", "close": "742.8"}
+            },
+            {
+              "input_id": "in-02",
+              "symbol": "BNBUSDT",
+              "interval": "1h",
+              "source": "exchange_public",
+              "close_time_ms": 1789862400000,
+              "event_time_ms": 1789862400000,
+              "received_time_ms": 1789862400500,
+              "valid_until_ms": 1789866000000,
+              "values": {"open": "742.9", "high": "745.0", "low": "741.5", "close": "744.13"}
+            }
+          ]
+        },
+        "intent": {
+          "intent_id": "intent-A",
+          "symbol": "BNBUSDT",
+          "action": "OPEN",
+          "side": "LONG",
+          "claims": [
+            {"claim_id": "c1", "expr": "1h:closed_close > 1h:prior_high", "expected": true}
+          ],
+          "bound_inputs": ["in-01", "in-02"],
+          "evidence_id": "eb-A"
+        },
+        "quote": {"symbol": "BNBUSDT", "price": "744.13", "quote_time_ms": 1789862400500, "expires_at_ms": 1789862460000},
+        "tamper": {"kind": "input_value", "input_id": "in-02", "key": "close", "value": "999.0"}
+      },
+      "expect": {
+        "bundle_valid": false,
+        "bundle_reasons": ["CONTENT_HASH_MISMATCH", "DERIVED_FACT_MISMATCH"],
+        "status": "EVIDENCE_INVALID",
+        "reason_codes": ["CONTENT_HASH_MISMATCH", "DERIVED_FACT_MISMATCH"]
+      }
+    },
+    {
+      "case_id": "K02-N18",
+      "kind": "negative",
+      "title": "伪造事实值并刷新哈希仍被溯源校验拒绝",
+      "operation": "k02_bundle_tamper",
+      "derivation": "C 审查 P0-2 CE12：把 DerivedFact(1h:closed_close).value 改为 999 后 claim 变 VALID。事实必须能按 kind 从引用输入重算；即使攻击者重算 content_hash 掩盖篡改，DERIVED_FACT_MISMATCH 仍必须拒绝。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-synth-hash",
+          "runtime_instance_id": "inst-synth-r1"
+        },
+        "bundle": {
+          "evidence_id": "eb-A",
+          "symbol": "BNBUSDT",
+          "as_of_ms": 1789862400000,
+          "expires_at_ms": 1789862460000,
+          "cycle_id": "cyc-k02-n18",
+          "environment": "demo",
+          "rules": {"required_intervals": ["1h"], "max_bar_age_ms": 7200000},
+          "bars": [
+            {
+              "input_id": "in-01",
+              "symbol": "BNBUSDT",
+              "interval": "1h",
+              "source": "exchange_public",
+              "close_time_ms": 1789858800000,
+              "event_time_ms": 1789858800000,
+              "received_time_ms": 1789858800500,
+              "valid_until_ms": 1789866000000,
+              "values": {"open": "741.0", "high": "743.5", "low": "739.0", "close": "742.8"}
+            },
+            {
+              "input_id": "in-02",
+              "symbol": "BNBUSDT",
+              "interval": "1h",
+              "source": "exchange_public",
+              "close_time_ms": 1789862400000,
+              "event_time_ms": 1789862400000,
+              "received_time_ms": 1789862400500,
+              "valid_until_ms": 1789866000000,
+              "values": {"open": "742.9", "high": "745.0", "low": "741.5", "close": "744.13"}
+            }
+          ]
+        },
+        "intent": {
+          "intent_id": "intent-A",
+          "symbol": "BNBUSDT",
+          "action": "OPEN",
+          "side": "LONG",
+          "claims": [
+            {"claim_id": "c1", "expr": "1h:closed_close > 1h:prior_high", "expected": true}
+          ],
+          "bound_inputs": ["in-01", "in-02"],
+          "evidence_id": "eb-A"
+        },
+        "quote": {"symbol": "BNBUSDT", "price": "744.13", "quote_time_ms": 1789862400500, "expires_at_ms": 1789862460000},
+        "tamper": {"kind": "fact_value_rehash", "fact_id": "1h:closed_close", "value": "999"}
+      },
+      "expect": {
+        "bundle_valid": false,
+        "bundle_reasons": ["DERIVED_FACT_MISMATCH"],
+        "status": "EVIDENCE_INVALID",
+        "reason_codes": ["DERIVED_FACT_MISMATCH"]
+      }
+    },
+    {
+      "case_id": "K02-N19",
+      "kind": "negative",
+      "title": "预期身份不符时 bundle 校验失败",
+      "operation": "k02_bundle_tamper",
+      "derivation": "C 审查 P1-3：U15 需要用契约 API 证明持久化证据属于当前身份。validate_bundle 接受期望身份并逐字段比较（忽略进程级 runtime_instance_id）；model_route_hash 不同的身份必须 IDENTITY_MISMATCH。",
+      "inputs": {
+        "identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-synth-hash",
+          "runtime_instance_id": "inst-synth-r1"
+        },
+        "expected_identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-OTHER-hash",
+          "runtime_instance_id": "inst-synth-r9"
+        },
+        "bundle": {
+          "evidence_id": "eb-A",
+          "symbol": "BNBUSDT",
+          "as_of_ms": 1789862400000,
+          "expires_at_ms": 1789862460000,
+          "cycle_id": "cyc-k02-n19",
+          "environment": "demo",
+          "rules": {"required_intervals": ["1h"], "max_bar_age_ms": 7200000},
+          "bars": [
+            {
+              "input_id": "in-01",
+              "symbol": "BNBUSDT",
+              "interval": "1h",
+              "source": "exchange_public",
+              "close_time_ms": 1789862400000,
+              "event_time_ms": 1789862400000,
+              "received_time_ms": 1789862400500,
+              "valid_until_ms": 1789866000000,
+              "values": {"open": "742.9", "high": "745.0", "low": "741.5", "close": "744.13"}
+            }
+          ]
+        },
+        "tamper": {"kind": "none"}
+      },
+      "expect": {
+        "bundle_valid": false,
+        "bundle_reasons": ["IDENTITY_MISMATCH"]
+      }
+    },
+    {
+      "case_id": "K02-P5",
+      "kind": "positive",
+      "title": "完整证据包通过 validate_bundle",
+      "operation": "k02_bundle_tamper",
+      "derivation": "validate_bundle 是 content_hash/事实溯源/质量字段的可校验入口；由 build_bundle 构建的包必须 valid=true 且无 reason，否则该入口会误伤正常证据。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "identity": {
+          "schema_version": "3.1",
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "artifact_hash": "artifact-synth-hash",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "dependency_hash": "dependency-synth-hash",
+          "effective_config_hash": "effective-config-synth-hash",
+          "strategy_hash": "strategy-synth-hash",
+          "model_route_hash": "model-route-synth-hash",
+          "runtime_instance_id": "inst-synth-r1"
+        },
+        "bundle": {
+          "evidence_id": "eb-A",
+          "symbol": "BNBUSDT",
+          "as_of_ms": 1789862400000,
+          "expires_at_ms": 1789862460000,
+          "cycle_id": "cyc-k02-p5",
+          "environment": "demo",
+          "rules": {"required_intervals": ["1h"], "max_bar_age_ms": 7200000},
+          "bars": [
+            {
+              "input_id": "in-01",
+              "symbol": "BNBUSDT",
+              "interval": "1h",
+              "source": "exchange_public",
+              "close_time_ms": 1789858800000,
+              "event_time_ms": 1789858800000,
+              "received_time_ms": 1789858800500,
+              "valid_until_ms": 1789866000000,
+              "values": {"open": "741.0", "high": "743.5", "low": "739.0", "close": "742.8"}
+            },
+            {
+              "input_id": "in-02",
+              "symbol": "BNBUSDT",
+              "interval": "1h",
+              "source": "exchange_public",
+              "close_time_ms": 1789862400000,
+              "event_time_ms": 1789862400000,
+              "received_time_ms": 1789862400500,
+              "valid_until_ms": 1789866000000,
+              "values": {"open": "742.9", "high": "745.0", "low": "741.5", "close": "744.13"}
+            }
+          ]
+        },
+        "tamper": {"kind": "none"}
+      },
+      "expect": {"bundle_valid": true, "bundle_reasons": []}
     }
   ]
 }

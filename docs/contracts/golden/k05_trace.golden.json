@@ -9,7 +9,7 @@
       "kind": "positive",
       "title": "恢复证据新鲜满足谓词→RESOLVED 且记录证据哈希",
       "operation": "k05_incident_recovery",
-      "derivation": "规格 §4 K05：ACK 只是确认看到，RESOLVED 必须满足恢复证据。证据时间 1789862400000 距 now=1789862401000 仅 1 秒，不超过 max_age_ms=90000，且 value=true；恢复成立后状态 RESOLVED 并写入 resolution_evidence_hash（规范化 JSON 的 sha256）。",
+      "derivation": "规格 §4 K05：ACK 只是确认看到，RESOLVED 必须满足恢复证据；§10.3 要求恢复谓词依赖新鲜证据。证据是 ACK 之后重新观察的（observed_at=1789862401000 等于 ack 时刻且不早于它），距 now 仅 0ms，远小于 max_age_ms=90000，且 value 为显式布尔 true；恢复成立后状态 RESOLVED 并写入 resolution_evidence_hash（规范化 JSON 的 sha256）。",
       "inputs": {
         "now_ms": 1789862401000,
         "ack": true,
@@ -24,7 +24,7 @@
           "object_ref": "account_snapshot"
         },
         "evidence": {
-          "fresh_account_snapshot": {"observed_at_ms": 1789862400000, "value": true}
+          "fresh_account_snapshot": {"observed_at_ms": 1789862401000, "value": true}
         }
       },
       "expect": {
@@ -197,7 +197,7 @@
       "kind": "negative",
       "title": "陈旧恢复证据不得用于 RESOLVED",
       "operation": "k05_incident_recovery",
-      "derivation": "规格 §10.3：恢复谓词依赖的是新鲜证据，不是原来缓存的绿色状态。证据时间 1789862000000 距 now=1789862401000 已 401 秒，超过 max_age_ms=90000，判 EVIDENCE_STALE 并拒绝恢复。",
+      "derivation": "规格 §10.3：恢复谓词依赖的是新鲜证据，不是原来缓存的绿色状态；C 审查 P1-1 要求 ACK 后必须重新观察。证据时间 1789862000000 距 now=1789862401000 已 401 秒，超过 max_age_ms=90000（EVIDENCE_STALE），且早于 ack 时刻 1789862401000（EVIDENCE_PREDATES_ACK），双重不合格并拒绝恢复。",
       "inputs": {
         "now_ms": 1789862401000,
         "ack": true,
@@ -217,10 +217,209 @@
       },
       "expect": {
         "recovered": false,
-        "reason_codes": ["EVIDENCE_STALE"],
+        "reason_codes": ["EVIDENCE_STALE", "EVIDENCE_PREDATES_ACK"],
         "resolve_error": "ResolutionNotAllowedError",
         "status": "ACK",
         "evidence_hash_present": false
+      }
+    },
+    {
+      "case_id": "K05-P6",
+      "kind": "positive",
+      "title": "同 cycle 重复 span 只计一轮",
+      "operation": "k05_counters",
+      "derivation": "C 审查 P1-2 / DL07：同一周期两枚 purpose=cycle span 曾计出 cycles_total=2。轮次按 cycle_id 去重；API 尝试与决策按 span 计（重试是真实尝试）。",
+      "inputs": {
+        "spans": [
+          {"cycle_id": "cyc-1", "stage": "cycle_start", "request_id": "req-c1", "attempt": 1, "purpose": "cycle", "started_ms": 1789862400000, "ended_ms": 1789862400100},
+          {"cycle_id": "cyc-1", "stage": "cycle_retry", "request_id": "req-c2", "attempt": 1, "purpose": "cycle", "started_ms": 1789862400100, "ended_ms": 1789862400200},
+          {"cycle_id": "cyc-1", "stage": "research", "request_id": "req-a1", "attempt": 1, "purpose": "api_attempt", "started_ms": 1789862400200, "ended_ms": 1789862400300},
+          {"cycle_id": "cyc-1", "stage": "submit", "request_id": "req-d1", "attempt": 1, "purpose": "decision", "started_ms": 1789862400300, "ended_ms": 1789862400400}
+        ]
+      },
+      "expect": {
+        "cycles_total": 1,
+        "api_attempts_total": 1,
+        "decisions_total": 1
+      }
+    },
+    {
+      "case_id": "K05-P7",
+      "kind": "positive",
+      "title": "具备供应商回执与设备回执才可 DELIVERED",
+      "operation": "k05_delivery",
+      "derivation": "规格 §11.2：供应商接收与设备送达分开记录。submitted_at + provider_receipt + delivered_at 齐备时，transition 到 DELIVERED 成功；声明状态与事实推导一致。",
+      "inputs": {
+        "delivery": {
+          "incident_key": "demo|account_snapshot|EVIDENCE_STALE",
+          "attempt": 1,
+          "receiver_ref": "ops-fake-sink",
+          "provider_receipt": "receipt-synth-2",
+          "submitted_at_ms": 1789860300000,
+          "delivered_at_ms": 1789860320000,
+          "ack_at_ms": null,
+          "state": "SUBMITTED"
+        },
+        "transition": "DELIVERED"
+      },
+      "expect": {
+        "derived_state": "DELIVERED",
+        "transition_error": null,
+        "state": "DELIVERED"
+      }
+    },
+    {
+      "case_id": "K05-N5",
+      "kind": "negative",
+      "title": "时间倒序 span 拒绝计数",
+      "operation": "k05_counters",
+      "derivation": "C 审查 P1-2 / CE8：ended<started 的 span 曾被 tally 静默计数。span 时间自相矛盾时无法定义真实耗时，必须抛 SpanValidationError 而不是污染分母。",
+      "inputs": {
+        "spans": [
+          {"cycle_id": "cyc-1", "stage": "cycle_start", "request_id": "req-c1", "attempt": 1, "purpose": "cycle", "started_ms": 2000, "ended_ms": 1000}
+        ]
+      },
+      "expect": {"error": "SpanValidationError"}
+    },
+    {
+      "case_id": "K05-N6",
+      "kind": "negative",
+      "title": "恢复证据缺时间戳不得 RESOLVED",
+      "operation": "k05_incident_recovery",
+      "derivation": "Q 审查 adv_03 K.dict_no_value / C 审查 CE7：{'value': true} 无 observed_at_ms 时新鲜度检查被跳过。§10.3 要求新鲜证据；缺时间戳即 EVIDENCE_TIMESTAMP_MISSING 并拒绝恢复。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "ack": true,
+        "incident": {
+          "incident_key": "demo|account_snapshot|EVIDENCE_STALE",
+          "first_seen_ms": 1789860000000,
+          "last_seen_ms": 1789860300000,
+          "severity": "WARNING",
+          "status": "OPEN",
+          "recovery_predicate": {"required_evidence": ["fresh_account_snapshot"], "max_age_ms": 90000},
+          "profile": "demo",
+          "object_ref": "account_snapshot"
+        },
+        "evidence": {
+          "fresh_account_snapshot": {"value": true}
+        }
+      },
+      "expect": {
+        "recovered": false,
+        "reason_codes": ["EVIDENCE_TIMESTAMP_MISSING"],
+        "resolve_error": "ResolutionNotAllowedError",
+        "status": "ACK",
+        "evidence_hash_present": false
+      }
+    },
+    {
+      "case_id": "K05-N7",
+      "kind": "negative",
+      "title": "字符串假值不得真值化",
+      "operation": "k05_incident_recovery",
+      "derivation": "Q 审查 adv_03 K.string_false：{'value': 'false'} 曾被 bool() 转为真。恢复证据的值必须是显式布尔；字符串/数值一律 EVIDENCE_TYPE_INVALID，禁止 truthiness 真值化。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "ack": true,
+        "incident": {
+          "incident_key": "demo|account_snapshot|EVIDENCE_STALE",
+          "first_seen_ms": 1789860000000,
+          "last_seen_ms": 1789860300000,
+          "severity": "WARNING",
+          "status": "OPEN",
+          "recovery_predicate": {"required_evidence": ["fresh_account_snapshot"], "max_age_ms": 90000},
+          "profile": "demo",
+          "object_ref": "account_snapshot"
+        },
+        "evidence": {
+          "fresh_account_snapshot": {"observed_at_ms": 1789862401000, "value": "false"}
+        }
+      },
+      "expect": {
+        "recovered": false,
+        "reason_codes": ["EVIDENCE_TYPE_INVALID"],
+        "resolve_error": "ResolutionNotAllowedError",
+        "status": "ACK",
+        "evidence_hash_present": false
+      }
+    },
+    {
+      "case_id": "K05-N8",
+      "kind": "negative",
+      "title": "裸布尔恢复证据不得 RESOLVED",
+      "operation": "k05_incident_recovery",
+      "derivation": "Q 审查 adv_03 K.no_timestamp_true / C 审查 CE7：{'fresh_account_snapshot': true} 曾被接受。证据必须是带 observed_at_ms 与显式布尔的结构体；裸值无法证明新鲜度。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "ack": true,
+        "incident": {
+          "incident_key": "demo|account_snapshot|EVIDENCE_STALE",
+          "first_seen_ms": 1789860000000,
+          "last_seen_ms": 1789860300000,
+          "severity": "WARNING",
+          "status": "OPEN",
+          "recovery_predicate": {"required_evidence": ["fresh_account_snapshot"], "max_age_ms": 90000},
+          "profile": "demo",
+          "object_ref": "account_snapshot"
+        },
+        "evidence": {
+          "fresh_account_snapshot": true
+        }
+      },
+      "expect": {
+        "recovered": false,
+        "reason_codes": ["EVIDENCE_TYPE_INVALID"],
+        "resolve_error": "ResolutionNotAllowedError",
+        "status": "ACK",
+        "evidence_hash_present": false
+      }
+    },
+    {
+      "case_id": "K05-N9",
+      "kind": "negative",
+      "title": "无提交事实不得跃迁到 ACKNOWLEDGED",
+      "operation": "k05_delivery",
+      "derivation": "Q 审查 P2-4：UNKNOWN→ACKNOWLEDGED 曾放行。人确认的前提是消息已提交（否则“确认”不存在对象）；无 submitted_at 时 transition 必须 TransitionError。",
+      "inputs": {
+        "delivery": {
+          "incident_key": "demo|account_snapshot|EVIDENCE_STALE",
+          "attempt": 1,
+          "receiver_ref": "ops-oncall",
+          "provider_receipt": null,
+          "submitted_at_ms": null,
+          "delivered_at_ms": null,
+          "ack_at_ms": null,
+          "state": "UNKNOWN"
+        },
+        "transition": "ACKNOWLEDGED"
+      },
+      "expect": {
+        "transition_error": "TransitionError",
+        "state": "UNKNOWN"
+      }
+    },
+    {
+      "case_id": "K05-N10",
+      "kind": "negative",
+      "title": "缺供应商回执不得跃迁到 DELIVERED",
+      "operation": "k05_delivery",
+      "derivation": "C 审查 CE9：submitted+delivered 时间戳齐但无 provider_receipt 时 transition DELIVERED 曾成功。设备送达必然经过供应商接收；缺回执时只能 ACKNOWLEDGED（人确认）或保持 SUBMITTED，不得伪造 DELIVERED。",
+      "inputs": {
+        "delivery": {
+          "incident_key": "demo|account_snapshot|EVIDENCE_STALE",
+          "attempt": 1,
+          "receiver_ref": "ops-fake-sink",
+          "provider_receipt": null,
+          "submitted_at_ms": 1789860300000,
+          "delivered_at_ms": 1789860320000,
+          "ack_at_ms": null,
+          "state": "SUBMITTED"
+        },
+        "transition": "DELIVERED"
+      },
+      "expect": {
+        "transition_error": "TransitionError",
+        "state": "SUBMITTED"
       }
     }
   ]

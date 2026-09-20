@@ -20,6 +20,7 @@ from core.contracts import (  # noqa: E402
     ConservationViolation,
     CostAttribution,
     DecisionTraceSpan,
+    IdentityCoverageError,
     Incident,
     K01SchemaEnvelope,
     K02SchemaEnvelope,
@@ -28,10 +29,15 @@ from core.contracts import (  # noqa: E402
     K05SchemaEnvelope,
     K06SchemaEnvelope,
     ManagementAuthorization,
+    ManagementIntent,
     OrderQuantity,
+    QuantityError,
     RELEASE_GROUPS,
     ResolutionNotAllowedError,
+    RuntimeIdentity,
     SensitiveInputError,
+    SpanValidationError,
+    TransitionError,
     UnclassifiedPurposeError,
     acknowledge,
     allocate_weighted,
@@ -43,6 +49,8 @@ from core.contracts import (  # noqa: E402
     build_release_report,
     check_conservation,
     check_recovery,
+    confirm_cancel,
+    coverage_problems,
     decimal_text,
     delivery_violations,
     derive_management_id,
@@ -54,14 +62,19 @@ from core.contracts import (  # noqa: E402
     hash_model_route,
     hash_strategy,
     identity_mismatches,
+    income_content_hash,
     ingest_income,
     management_idempotency_key,
+    model_content_hash,
     plan_next_page,
     purpose_kind,
+    request_cancel,
     resolve_incident,
     stable_incident_key,
     tally,
+    transition_state,
     validate_authorization,
+    validate_bundle,
     validate_coverage,
     validate_intent,
     zero_fee_proof,
@@ -108,23 +121,27 @@ def op_k01_hash_scope(inputs: dict[str, Any]) -> dict[str, Any]:
     return {"changed": {key: base[key] != variant[key] for key in base}}
 
 
-def op_k01_secret_rejected(inputs: dict[str, Any]) -> dict[str, Any]:
-    functions = {
+def _hash_functions() -> dict[str, Any]:
+    return {
         "artifact": hash_artifact,
         "dependency": hash_dependencies,
         "strategy": hash_strategy,
         "model_route": hash_model_route,
         "effective_config": hash_effective_config,
     }
+
+
+def _secret_rejection(values: dict[str, Any]) -> dict[str, bool]:
+    functions = _hash_functions()
     rejected: dict[str, bool] = {}
-    for case in inputs["cases"]:
+    for case in values["cases"]:
         try:
             functions[case["group"]](case["value"])
         except SensitiveInputError:
             rejected[case["name"]] = True
         else:
             rejected[case["name"]] = False
-    control = inputs["control"]
+    control = values["control"]
     try:
         functions[control["group"]](control["value"])
     except SensitiveInputError:
@@ -132,6 +149,28 @@ def op_k01_secret_rejected(inputs: dict[str, Any]) -> dict[str, Any]:
     else:
         control_rejected = False
     return {"rejected": rejected, "control_rejected": control_rejected}
+
+
+def op_k01_secret_rejected(inputs: dict[str, Any]) -> dict[str, Any]:
+    return _secret_rejection(inputs)
+
+
+def op_k01_secret_payload(inputs: dict[str, Any]) -> dict[str, Any]:
+    return _secret_rejection(inputs)
+
+
+def op_k01_build_identity_coverage(inputs: dict[str, Any]) -> dict[str, Any]:
+    base = dict(inputs["base"])
+    errors: dict[str, list[str]] = {}
+    for case in inputs["cases"]:
+        spec = {**base, **case.get("overrides", {})}
+        try:
+            build_identity(**spec)
+        except IdentityCoverageError as error:
+            errors[case["name"]] = list(error.groups)
+        else:
+            errors[case["name"]] = []
+    return {"errors": errors}
 
 
 def op_k01_identity_diff(inputs: dict[str, Any]) -> dict[str, Any]:
@@ -210,8 +249,65 @@ def op_k02_validate(inputs: dict[str, Any]) -> dict[str, Any]:
     return output
 
 
+def op_k02_bundle_tamper(inputs: dict[str, Any]) -> dict[str, Any]:
+    bundle = _bundle_from(inputs, inputs["bundle"])
+    tamper = dict(inputs.get("tamper") or {"kind": "none"})
+    kind = tamper.get("kind", "none")
+    if kind == "input_value":
+        new_inputs = tuple(
+            item.model_copy(update={
+                "values": {**item.values, tamper["key"]: tamper["value"]},
+            }) if item.input_id == tamper["input_id"] else item
+            for item in bundle.inputs
+        )
+        bundle = bundle.model_copy(update={"inputs": new_inputs})
+    elif kind in ("fact_value", "fact_value_rehash"):
+        new_facts = tuple(
+            fact.model_copy(update={"value": tamper["value"]})
+            if fact.fact_id == tamper["fact_id"] else fact
+            for fact in bundle.derived_facts
+        )
+        bundle = bundle.model_copy(update={"derived_facts": new_facts})
+        if kind == "fact_value_rehash":
+            bundle = bundle.model_copy(
+                update={"content_hash": model_content_hash(bundle)}
+            )
+    elif kind == "hash_only":
+        bundle = bundle.model_copy(update={"content_hash": tamper["value"]})
+    expected_identity = inputs.get("expected_identity")
+    identity_model = (
+        RuntimeIdentity.model_validate(expected_identity) if expected_identity else None
+    )
+    check = validate_bundle(bundle, identity=identity_model)
+    output: dict[str, Any] = {
+        "bundle_valid": check.valid,
+        "bundle_reasons": list(check.reason_codes),
+    }
+    if inputs.get("intent") is not None:
+        verdict = validate_intent(
+            _intent_from(inputs["intent"]),
+            bundle,
+            inputs.get("quote"),
+            now_ms=inputs["now_ms"],
+        )
+        output["status"] = verdict.status
+        output["reason_codes"] = list(verdict.reason_codes)
+        output["claims"] = {
+            item.claim_id: {"status": item.status, "actual": item.actual}
+            for item in verdict.claim_results
+        }
+    return output
+
+
 def op_k03_ingest(inputs: dict[str, Any]) -> dict[str, Any]:
-    result = ingest_income(inputs["page"], existing=inputs.get("existing") or None)
+    source: Any = inputs.get("existing")
+    if inputs.get("existing_pairs"):
+        existing: dict[Any, str] = {}
+        for pair in inputs["existing_pairs"]:
+            key: Any = tuple(pair["key"]) if "key" in pair else pair["text_key"]
+            existing[key] = income_content_hash(pair["event"])
+        source = existing
+    result = ingest_income(inputs["page"], existing=source)
     return {
         "inserted": list(result.inserted),
         "duplicates": list(result.duplicates),
@@ -246,6 +342,10 @@ def op_k03_zero_fee(inputs: dict[str, Any]) -> dict[str, Any]:
         late_recheck_done=inputs["late_recheck_done"],
     )
     return {"provable": proof.provable, "reason_codes": list(proof.reason_codes)}
+
+
+def op_k03_coverage_problems(inputs: dict[str, Any]) -> dict[str, Any]:
+    return {"problems": coverage_problems(inputs.get("coverage"))}
 
 
 def op_k03_attribution(inputs: dict[str, Any]) -> dict[str, Any]:
@@ -283,14 +383,17 @@ def op_k03_conservation(inputs: dict[str, Any]) -> dict[str, Any]:
 
 
 def op_k03_allocate(inputs: dict[str, Any]) -> dict[str, Any]:
-    allocations = allocate_weighted(
-        inputs["source_amount"],
-        inputs["weights"],
-        method=inputs["method"],
-        version=inputs["version"],
-        evidence=inputs["evidence"],
-        event_id=inputs["event_id"],
-    )
+    try:
+        allocations = allocate_weighted(
+            inputs["source_amount"],
+            inputs["weights"],
+            method=inputs["method"],
+            version=inputs["version"],
+            evidence=inputs["evidence"],
+            event_id=inputs["event_id"],
+        )
+    except ValueError as error:
+        return {"error": type(error).__name__}
     total = sum((item.allocated_amount for item in allocations), Decimal(0))
     return {
         "allocations": [
@@ -308,9 +411,12 @@ def op_k03_allocate(inputs: dict[str, Any]) -> dict[str, Any]:
 
 
 def op_k03_late_income(inputs: dict[str, Any]) -> dict[str, Any]:
-    revision = apply_late_income(
-        inputs["event"], inputs["closed_outcomes"], lifecycle_id=inputs["lifecycle_id"],
-    )
+    try:
+        revision = apply_late_income(
+            inputs["event"], inputs["closed_outcomes"], lifecycle_id=inputs["lifecycle_id"],
+        )
+    except LookupError as error:
+        return {"error": type(error).__name__}
     return {
         "outcome_id": revision.outcome_id,
         "source_event_id": revision.source_event_id,
@@ -350,10 +456,24 @@ def op_k04_quantity(inputs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _components(quantity: OrderQuantity) -> dict[str, Any]:
+    output = quantity.to_components()
+    for key in (
+        "accepted_qty",
+        "cumulative_filled_qty",
+        "working_leaves_qty",
+        "terminal_unfilled_qty",
+        "requested_qty",
+    ):
+        value = output.get(key)
+        output[key] = decimal_text(Decimal(value)) if value is not None else None
+    return output
+
+
 def op_k04_late_fill(inputs: dict[str, Any]) -> dict[str, Any]:
     quantity = OrderQuantity.model_validate(inputs["quantity"])
     updated = apply_fill(quantity, inputs["fill_qty"])
-    output = updated.to_components()
+    output = _components(updated)
     output["violations"] = list(updated.violations())
     return output
 
@@ -365,11 +485,84 @@ def op_k04_authorization(inputs: dict[str, Any]) -> dict[str, Any]:
         request=inputs["request"],
         now_ms=inputs["now_ms"],
         current_revision=inputs["current_revision"],
+        consumed_nonces=inputs.get("consumed_nonces") or (),
     )
     return {
         "authorization_id": verdict.authorization_id,
         "allowed": verdict.allowed,
+        "submit_allowed": verdict.submit_allowed,
+        "reconcile_allowed": verdict.reconcile_allowed,
         "reason_codes": list(verdict.reason_codes),
+    }
+
+
+def op_k04_apply_fills(inputs: dict[str, Any]) -> dict[str, Any]:
+    quantity = OrderQuantity.model_validate(inputs["quantity"])
+    applied: list[str] = []
+    statuses: list[str] = []
+    try:
+        for fill in inputs["fills"]:
+            quantity = apply_fill(
+                quantity,
+                fill["qty"],
+                fill_id=fill.get("fill_id"),
+                applied_fill_ids=applied,
+            )
+            statuses.append(quantity.status)
+            if fill.get("fill_id"):
+                applied.append(fill["fill_id"])
+    except QuantityError as error:
+        return {"error": type(error).__name__}
+    output = _components(quantity)
+    output["statuses"] = statuses
+    output["violations"] = list(quantity.violations())
+    return output
+
+
+def op_k04_quantity_roundtrip(inputs: dict[str, Any]) -> dict[str, Any]:
+    quantity = OrderQuantity.model_validate(inputs["quantity"])
+    restored = OrderQuantity.model_validate(quantity.to_components())
+    return {
+        "roundtrip_violations": list(restored.violations()),
+        "cancel_requested": restored.cancel_requested,
+        "cancel_confirmed": restored.cancel_confirmed,
+    }
+
+
+def op_k04_cancel(inputs: dict[str, Any]) -> dict[str, Any]:
+    quantity = OrderQuantity.model_validate(inputs["quantity"])
+    try:
+        if inputs["action"] == "request":
+            updated = request_cancel(quantity)
+        else:
+            updated = confirm_cancel(quantity)
+    except QuantityError as error:
+        return {"error": type(error).__name__}
+    return {
+        "status": updated.status,
+        "cancel_requested": updated.cancel_requested,
+        "cancel_confirmed": updated.cancel_confirmed,
+    }
+
+
+def op_k04_intent(inputs: dict[str, Any]) -> dict[str, Any]:
+    spec = dict(inputs["intent"])
+    derived = derive_management_id(
+        lifecycle_id=spec["lifecycle_id"],
+        trigger_type=spec["trigger_type"],
+        policy_version=spec["policy_version"],
+        trigger_event_id=spec["trigger_event_id"],
+    )
+    if inputs.get("rebind"):
+        spec["management_id"] = derived
+    try:
+        intent = ManagementIntent.model_validate(spec)
+    except ValueError as error:
+        return {"error": type(error).__name__}
+    return {
+        "error": None,
+        "rebound_ok": intent.management_id == derived,
+        "management_id": intent.management_id,
     }
 
 
@@ -423,12 +616,30 @@ def op_k05_delivery(inputs: dict[str, Any]) -> dict[str, Any]:
         delivered_at_ms=delivery.delivered_at_ms,
         ack_at_ms=delivery.ack_at_ms,
     )
-    return {"derived_state": derived, "violations": list(delivery_violations(delivery))}
+    output: dict[str, Any] = {
+        "derived_state": derived,
+        "violations": list(delivery_violations(delivery)),
+    }
+    if inputs.get("transition"):
+        try:
+            updated = transition_state(
+                delivery, inputs["transition"], now_ms=inputs.get("now_ms", 0),
+            )
+        except TransitionError as error:
+            output["transition_error"] = type(error).__name__
+            output["state"] = delivery.state
+        else:
+            output["transition_error"] = None
+            output["state"] = updated.state
+    return output
 
 
 def op_k05_counters(inputs: dict[str, Any]) -> dict[str, Any]:
     spans = [DecisionTraceSpan.model_validate(item) for item in inputs["spans"]]
-    counters = tally(spans)
+    try:
+        counters = tally(spans)
+    except SpanValidationError:
+        return {"error": "SpanValidationError"}
     unknown_error = None
     if inputs.get("unknown_purpose"):
         try:
@@ -476,12 +687,16 @@ def op_k06_groups(inputs: dict[str, Any]) -> dict[str, Any]:
 OPERATIONS = {
     "k01_hash_scope": op_k01_hash_scope,
     "k01_secret_rejected": op_k01_secret_rejected,
+    "k01_secret_payload": op_k01_secret_payload,
     "k01_identity_diff": op_k01_identity_diff,
     "k01_coverage": op_k01_coverage,
+    "k01_build_identity_coverage": op_k01_build_identity_coverage,
     "k02_validate": op_k02_validate,
+    "k02_bundle_tamper": op_k02_bundle_tamper,
     "k03_ingest": op_k03_ingest,
     "k03_pagination": op_k03_pagination,
     "k03_zero_fee": op_k03_zero_fee,
+    "k03_coverage_problems": op_k03_coverage_problems,
     "k03_attribution": op_k03_attribution,
     "k03_conservation": op_k03_conservation,
     "k03_allocate": op_k03_allocate,
@@ -491,6 +706,10 @@ OPERATIONS = {
     "k04_late_fill": op_k04_late_fill,
     "k04_authorization": op_k04_authorization,
     "k04_idempotency": op_k04_idempotency,
+    "k04_apply_fills": op_k04_apply_fills,
+    "k04_quantity_roundtrip": op_k04_quantity_roundtrip,
+    "k04_cancel": op_k04_cancel,
+    "k04_intent": op_k04_intent,
     "k05_incident_recovery": op_k05_incident_recovery,
     "k05_delivery": op_k05_delivery,
     "k05_counters": op_k05_counters,
