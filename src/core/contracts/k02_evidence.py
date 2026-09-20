@@ -605,16 +605,22 @@ def validate_bundle(
             reasons.append(REASON_UNDATED_BAR)
 
     seen_dropped: set[str] = set()
-    for dropped_id in bundle.dropped_input_ids:
-        if (
-            not isinstance(dropped_id, str)
-            or not dropped_id.strip()
-            or dropped_id in seen_dropped
-            or dropped_id in seen
-        ):
-            reasons.append(REASON_QUALITY_MISMATCH)
-            break
-        seen_dropped.add(dropped_id)
+    dropped_ids = bundle.dropped_input_ids
+    if not isinstance(dropped_ids, (tuple, list)):
+        # model_copy(update=...) 不重跑类型校验：非序列形态（int/None）会抛
+        # TypeError，裸字符串会被逐字符迭代成 3 个"被丢弃 id"。
+        reasons.append(REASON_QUALITY_MISMATCH)
+    else:
+        for dropped_id in dropped_ids:
+            if (
+                not isinstance(dropped_id, str)
+                or not dropped_id.strip()
+                or dropped_id in seen_dropped
+                or dropped_id in seen
+            ):
+                reasons.append(REASON_QUALITY_MISMATCH)
+                break
+            seen_dropped.add(dropped_id)
 
     missing_quality = [
         key for key in QUALITY_REQUIRED_KEYS if key not in bundle.quality
