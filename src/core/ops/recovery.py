@@ -47,6 +47,9 @@ __all__ = [
     "EVIDENCE_TYPE_INVALID",
     "GATE_CLEARED",
     "GATE_NOT_INSTALLED",
+    "GATE_STATE_CLEARED",
+    "GATE_STATE_NOT_INSTALLED",
+    "GATE_STATE_RECONCILE_REQUIRED",
     "OPTIONAL_STATE_FILES",
     "RECONCILE_REQUIRED_BEFORE_ENTRY",
     "RECOVERY_INCOMPLETE",
@@ -82,6 +85,10 @@ RECONCILE_REQUIRED_BEFORE_ENTRY = "RECONCILE_REQUIRED_BEFORE_ENTRY"
 GATE_CLEARED = "GATE_CLEARED"
 #: 未安装门禁（从未恢复过）：新开仓不受恢复门禁约束。
 GATE_NOT_INSTALLED = "GATE_NOT_INSTALLED"
+#: 门禁状态取值（持久化在 recovery_gate.json 的 ``state``）。
+GATE_STATE_NOT_INSTALLED = GATE_NOT_INSTALLED
+GATE_STATE_RECONCILE_REQUIRED = "RECONCILE_REQUIRED"
+GATE_STATE_CLEARED = "CLEARED"
 EVIDENCE_MISSING = "EVIDENCE_MISSING"
 EVIDENCE_TYPE_INVALID = "EVIDENCE_TYPE_INVALID"
 EVIDENCE_STALE = "EVIDENCE_STALE"
@@ -650,7 +657,7 @@ class RecoveryGate:
     def require_reconcile(self, *, epoch_id: str, account_ref: str = "",
                           runtime_instance_id: str = "") -> None:
         """恢复/接管后进入"必须先对账"状态（清空旧证据）。"""
-        self.state = "RECONCILE_REQUIRED"
+        self.state = GATE_STATE_RECONCILE_REQUIRED
         self.epoch_id = epoch_id
         self.reconciled_at_ms = None
         self.account_ref = account_ref
@@ -664,7 +671,7 @@ class RecoveryGate:
         if self.state == GATE_NOT_INSTALLED:
             # 从未恢复过：门禁尚未安装，不阻断（也不伪造"已对账"）。
             return RecoveryGateDecision(True, (GATE_NOT_INSTALLED,), self.state)
-        if self.state != "CLEARED":
+        if self.state != GATE_STATE_CLEARED:
             return RecoveryGateDecision(
                 False, (RECONCILE_REQUIRED_BEFORE_ENTRY,), self.state)
         if self.reconciled_at_ms is None:
@@ -701,7 +708,7 @@ class RecoveryGate:
                                             self.state)
         if observed > now + 1000 or now - observed > self.evidence_ttl_ms:
             return RecoveryGateDecision(False, (EVIDENCE_STALE,), self.state)
-        self.state = "CLEARED"
+        self.state = GATE_STATE_CLEARED
         self.reconciled_at_ms = now
         self.account_ref = account_ref or self.account_ref
         self.runtime_instance_id = runtime_instance_id or self.runtime_instance_id
