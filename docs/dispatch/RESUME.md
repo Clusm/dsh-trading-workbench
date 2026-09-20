@@ -33,8 +33,8 @@
 
 | 线 | 任务 | 分支/base | 状态 | 备注 |
 |---|---|---|---|---|
-| CD | U05 真实耗时/模型降级/决策原因 | `task/U05` @ `0e522b1` | **r2 修复完成 → 复验中** | 初审 B P0=0/P1×5 → r2 全修：**P1-5** 改用 `tokenize`（无法词法分析即**整体放弃放宽**、留痕 `skipped=20/unparsable=0`；注释类凭据重新报出且 **KI01 保持关闭**）；**P1-1** `latency_ms` 只写真实耗时（不再污染 U01 `AVG(latency_ms)`）；**P1-2** 分类以 `report.ok` 为准；**P1-3** `mock_allowed` 仅来自显式开关 `MTA_ALLOW_MOCK_LLM`（缺省 False）；**P1-4** span 违规不再击穿保护链路。补丁包 `8a8e31e/`（15 条）；全量 delta 新增失败 ∅。**登记为显式偏差**：market_query 撤回（S03）、生产接线归 U08/U12 |
-| EF | U13 托管/单实例/备份恢复 | `task/U13` @ `0e522b1` | **r2 修复完成 → 复验中** | r2 已修 **P1-2**（安装戳 `recovery_gate.json.installed`：损坏→`GATE_CORRUPT`、删除→`GATE_MISSING` 均 `allowed=False`；**从未恢复**才 `allowed=True`）与 **P1-3**（`submit_recovery_reconcile()` 成为 `complete_reconcile` 唯一生产调用点 + `before_entry` 接入开仓链 + `POST /api/recovery/reconcile`，端到端含重启第二实例）；KI02 收口（无效 `MTA_PYTHON` 报错、安装期失败）。验收 **166 PASS/0**（原 131），打补丁树全量回归 **0 失败**。**r2 已只交补丁**（12 个 @ `b55c4fb/`；**注意旧目录 `a27fc17/` 仍在，二选一**）|
+| CD | U05 真实耗时/模型降级/决策原因 | `task/U05` | **r2 复验 CHANGES_REQUESTED → r3 修复中** | r2 已闭合 P1-1（`AVG(latency_ms)=1234` 不再被污染）/P1-2/P1-3/P1-4 与全量 delta ∅。**P1-5 未真闭合**：注释/字符串面已合上，但**代码位置的裸明文凭据仍漏报**（`api_key=<64位key>`、.env 内容贴进 .py、顶层 YAML 行）—— 作者"裸值过不了语法解析"的理由不成立。另：**7/15 补丁在集成工作区（`autocrlf=false`）无法应用**（作者口径依赖未声明的 `autocrlf=true`）→ 会阻塞集成；P2-3/P3-3/P3-4/P3-5 **登记文字缺失**。r3 要求：把放宽收紧为"名字在模块符号表中确实被绑定"，并在**两种 git 配置**下补齐可应用性 + 补登记 |
+| EF | U13 托管/单实例/备份恢复 | `task/U13` | **✅ INTEGRATED** | 初审 P1×3 → r2 修（安装戳 fail-closed、`submit_recovery_reconcile()` 接线、KI02 收口）→ Q r2 **PASS-with-notes** → r3 按集成 HEAD **重生成 7 个补丁**（其余 5 文件零差异，因合并已带入 r1 共享改动）→ 7/7 干净应用 → **跨任务验收全绿**（U15/U01/U04 的套件均 exit 0）→ **KI02 消除：`smoke_windows_service_plan` 24/0**，**官方单命令入口首次端到端成功 `OFFLINE REGRESSION OK scripts=75`** |
 | B | U02 策略仓管理与有界退出 | `task/U02` @ `45ebdff` | **作者进行中** | 依赖 U00+U04+U15 **均已满足**；新建 `strategy_position_manager.py`/`management_authorization.py`；消费 U15 的绑定接口与 U04 的保护链路。**额外承担 U15 的跨任务阻塞项**：账本侧 `trade_reconciliation.py:66-69` 的 `account_ref=sha256(api_key)[:16]` 随轮换漂移且与 U15 派生值不一致 |
 | CD | U06a / U08 | — | 待派发 | 线内串行：U05 → U06a → U08 |
 | EF | U14 / U10a | — | 待派发 | 线内串行：U13 → U14 → U10a |
