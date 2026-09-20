@@ -2411,6 +2411,24 @@
           ],
           "housekeeping": "EF 工作区有他人遗留的未跟踪沙箱目录（_sb_*/_scratch_*），未跟踪 .py 达 1429 个 -> Windows 命令行长度上限使 EF 本地 check_quality/scan_tracked_secrets 无法运行（WinError 206）。I 已删 _sb_*（1429->1177），_scratch_r2(49M)/_scratch_r3/_scratch_F 仍在。**集成树不受影响**（无这些目录，门禁全绿）。",
           "unfinished": "真实通道/宿主验收归 U12 OPS（D02）"
+        },
+        {
+          "type": "review_r1_F",
+          "candidate": "68903f8",
+          "verdict": "CHANGES_REQUESTED（修完 3 处 P1 即可转 GO；无需改契约、无需新增迁移）",
+          "counts": "P0=0 / P1 x3 / P2 x3 / P3 x5",
+          "archived_path": "docs/dispatch/reviews/U14/68903f8/F_r1.md",
+          "confirmed": {
+            "未写既有表列": "成立：s0/s2 全库 schema 差集只有新增表 alert_deliveries；既有表列/索引/行数零变化；current_schema_version 仍 17；写语句只打自己的队列文件；交易库以 mode=ro+query_only 打开",
+            "9 处断言不触发": "成立：实为 8 处 range(1,18) + smoke_fault_matrix 手工 VALUES(18) = 9 条，清单与全仓一致；s2 上 8 个脚本逐条 rc=0",
+            "抖动不可复现": "**未升级**：10 次顺序 + 12 路并发 + 8 路 CPU 负载下 15 次 + 全量 1 轮全绿；并用 runpy 证明该脚本运行期 AuditDatabase **构造 0 次** -> 补丁代码路径未执行",
+            "delta": "s0 79/79、s1 80/80、s2 80/80，失败集合差集 **∅**，新增失败 0；补丁 04 缺失时官方入口 fail-closed 复现成功"
+          },
+          "blocking": [
+            "P1-1 dispatch_due 未捕获 AlertLadderViolation：供应商回执时间略早于本地提交（真实网关常态）-> 整批投递被异常中断，触发告警**永卡 ACCEPTED 且每轮复发**（alert_delivery.py:1444-1448）",
+            "P1-2 ops_status **fail-open**：空队列 + 仅配置 verified=true 即报 OPS_OK（与自身 docstring 矛盾）；且历史上任一 DELIVERED 会让 NO_CONFIRMED_DELIVERY 永不触发，卡住的告警 300 秒内报 OPS_OK（:1565-1575）",
+            "P1-3 回执不绑定消息身份/无上界：他消息回执、非字符串（12345）、未来 10^12ms 时间戳均可标 DELIVERED（:1319-1341）-> 违反 R14（供应商接受!=送达）"
+          ]
         }
       ],
       "blockers": [],
@@ -2448,7 +2466,18 @@
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r2",
+          "stage": "修复复验",
+          "candidate": null,
+          "sessions": [
+            "U14 author (r2)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U14/<r2head>/"
+        }
+      ],
       "qa_runs": []
     },
     {
