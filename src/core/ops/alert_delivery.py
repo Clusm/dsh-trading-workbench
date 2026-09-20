@@ -190,6 +190,15 @@ ALERT_RECOVERED = "ALERT_RECOVERED"
 TRANSITION_REJECTED = "TRANSITION_REJECTED"
 TRANSPORT_NOT_CONFIGURED = "TRANSPORT_NOT_CONFIGURED"
 TRANSPORT_FAILED = "TRANSPORT_FAILED"
+#: 通道（``transport.submit``）**自身抛异常**：任何异常（超时/连接重置/DNS/TLS/SDK
+#: 自定义异常）都收敛为该结构化原因码（``TRANSPORT_EXCEPTION:<异常类名>``），
+#: 绝不穿出 :meth:`AlertQueue.dispatch_due`（P1-4）。
+TRANSPORT_EXCEPTION = "TRANSPORT_EXCEPTION"
+#: 单条隔离单元的**兜底**原因码：既不是通道异常、也不是阶梯/回执拒绝的其它异常
+#: （如队列行数据损坏）。只影响该条，并计入返回结构的 ``errors``（P1-4）。
+INTERNAL_ERROR = "INTERNAL_ERROR"
+#: 连"记录失败 + 退避"都写不进去（持久化故障）：如实暴露，但同样不得中断整批（P1-4）。
+PERSIST_FAILED = "PERSIST_FAILED"
 DELIVERED_WITHOUT_DEVICE_RECEIPT = "DELIVERED_WITHOUT_DEVICE_RECEIPT"
 MANUAL_ACK_WITHOUT_SUBMISSION = "MANUAL_ACK_WITHOUT_SUBMISSION"
 MANUAL_ACK_ACTOR_INVALID = "MANUAL_ACK_ACTOR_INVALID"
@@ -204,6 +213,9 @@ RECEIPT_UNBOUND = "RECEIPT_UNBOUND"
 RECEIPT_BINDING_MISMATCH = "RECEIPT_BINDING_MISMATCH"
 #: 回执类型不符（非字符串，如 ``12345``）⇒ 结构化拒绝，**不**做 ``str()`` 强转。
 RECEIPT_TYPE_INVALID = "RECEIPT_TYPE_INVALID"
+#: 回执为**空/全空白**⇒ 与"类型不符"分开的结构化拒绝码（P1-4：既有的空回执负例
+#: 仍拿到含字段名的 ``ValueError``，但它必须能被单条隔离捕获）。
+RECEIPT_EMPTY = "RECEIPT_EMPTY"
 #: 回执时间戳落在未来（超出容差）⇒ 拒绝，避免用未来时间伪造"已送达"。
 RECEIPT_TIMESTAMP_FUTURE = "RECEIPT_TIMESTAMP_FUTURE"
 #: 供应商回执时间略早于本地提交时刻，已按有界容差归一（如实标注，不静默）。
@@ -249,15 +261,20 @@ class AlertLadderViolation(RuntimeError):
 class AlertReceiptRejected(ValueError):
     """送达回执被**结构化**拒绝（P1-3）。
 
-    三类：类型不符（:data:`RECEIPT_TYPE_INVALID`）、未绑定/绑定他消息
-    （:data:`RECEIPT_UNBOUND` / :data:`RECEIPT_BINDING_MISMATCH`）、时间戳越界
-    （:data:`RECEIPT_TIMESTAMP_FUTURE`）。带 :attr:`reason_codes` 供调用方
-    按码分支，而不是靠解析字符串。
+    四类：类型不符（:data:`RECEIPT_TYPE_INVALID`）、空/全空白
+    （:data:`RECEIPT_EMPTY`）、未绑定/绑定他消息（:data:`RECEIPT_UNBOUND` /
+    :data:`RECEIPT_BINDING_MISMATCH`）、时间戳越界（:data:`RECEIPT_TIMESTAMP_FUTURE`）。
+    带 :attr:`reason_codes` 供调用方按码分支，而不是靠解析字符串。
+
+    它**仍**是 :class:`ValueError` 的子类（既有"空回执拿到 ValueError"的负例不受影响）；
+    ``field`` 只用于让错误串保留字段名，便于人读。
     """
 
-    def __init__(self, reason_codes: Iterable[str]) -> None:
+    def __init__(self, reason_codes: Iterable[str], *, field: str | None = None) -> None:
         self.reason_codes = tuple(reason_codes)
-        super().__init__("alert receipt rejected: " + ", ".join(self.reason_codes))
+        self.field = field
+        detail = f" ({field} required: 回执不得为空)" if field else ""
+        super().__init__("alert receipt rejected: " + ", ".join(self.reason_codes) + detail)
 
 
 # --------------------------------------------------------------------------
@@ -1388,16 +1405,18 @@ class AlertQueue:
     @staticmethod
     def _bind_receipt(alert_id: str, receipt: object, *, field: str,
                       bound_alert_id: object) -> str:
-        """回执的**身份绑定 + 类型**校验（P1-3）：不绑定本消息一律结构化拒绝。
+        """回执的**身份绑定 + 类型 + 非空**校验（P1-3 / P1-4）：不绑定本消息一律结构化拒绝。
 
-        顺序刻意如此：类型 → 非空 → 绑定存在 → 绑定一致。既有负例（空回执）仍拿到
-        含 ``field`` 名字的 ``ValueError``，其余情形拿到带原因码的
-        :class:`AlertReceiptRejected`。
+        顺序刻意如此：类型 → 非空 → 绑定存在 → 绑定一致。**全部**拒绝都抛
+        :class:`AlertReceiptRejected`（它本身是 :class:`ValueError`，且错误串里保留
+        ``field`` 名），不再混用裸 :class:`ValueError`——裸 ``ValueError`` 不是
+        ``AlertReceiptRejected``，会让 :meth:`AlertQueue.dispatch_due` 的单条隔离漏网
+        （P1-4：异常穿出 ⇒ 整批中断 + 该行无退避 + 每轮复发）。
         """
         if not isinstance(receipt, str):
             raise AlertReceiptRejected((RECEIPT_TYPE_INVALID,))
         if not receipt.strip():
-            raise ValueError(f"{field} required: 回执不得为空")
+            raise AlertReceiptRejected((RECEIPT_EMPTY,), field=field)
         if not isinstance(bound_alert_id, str) or not bound_alert_id.strip():
             raise AlertReceiptRejected((RECEIPT_UNBOUND,))
         if bound_alert_id != alert_id:
@@ -1552,16 +1571,23 @@ class AlertQueue:
            按有界容差归一到 ``submitted_at_ms`` 并记
            :data:`PROVIDER_CLOCK_SKEW_TOLERATED` 审计行（如实标注，不静默掩盖）；
            超出容差则交由阶梯自检拒绝。
-        2. **单条告警的阶梯/回执异常不得中断整批**：每条 due 行的
-           :class:`AlertLadderViolation` / :class:`AlertReceiptRejected` 都被收敛成
-           该条的失败记录（：data:`TRANSITION_REJECTED` + ``last_error``）并按退避
-           重排，然后 ``continue`` 处理其余行——不会再出现"一条坏回执让整批停摆、
-           且每轮复发"的卡死状态。
+        2. **单条告警的异常不得中断整批**（P1-1 / P1-4）：每条 due 行是一个
+           **隔离单元**，该单元内**任何** :class:`Exception` 都不得穿出本函数——
+           一律收敛成该条的结构化失败记录（审计标签 + ``last_error``）并按退避重排，
+           然后 ``continue`` 处理其余行。三类原因分别可辨：
+
+           - 通道异常 ⇒ :data:`TRANSPORT_EXCEPTION` + ``TRANSPORT_EXCEPTION:<异常类名>``
+             （计入 ``failed``）。真实网关的超时/连接重置/DNS/TLS 抖动只会让**该条**
+             退避重试，不会让整条告警通路停摆。
+           - 阶梯违规 / 回执拒绝 ⇒ :data:`TRANSITION_REJECTED` + 原因码（计入 ``rejected``）。
+           - 其余内部异常 ⇒ :data:`INTERNAL_ERROR`（计入 ``errors``）。
+
+           只有 :class:`BaseException`（``KeyboardInterrupt``/``SystemExit``）**不**被吞。
         """
         now = _now_ms(now_ms)
         result: dict[str, Any] = {
             "submitted": 0, "confirmed": 0, "failed": 0, "rejected": 0, "skipped": 0,
-            "blocked": False, "slo_breached": False, "reason_codes": [],
+            "errors": 0, "blocked": False, "slo_breached": False, "reason_codes": [],
         }
         if not channel.verified and not drill:
             pending = self.due(now_ms=now, limit=limit)
@@ -1575,17 +1601,28 @@ class AlertQueue:
 
         for row in self.due(now_ms=now, limit=limit):
             alert_id = str(row["alert_id"])
-            attempt = int(row["attempts"]) + 1
-            alert = _alert_from_row(row)
+            attempt = 0
             try:
-                outcome = transport.submit(
-                    alert=alert,
-                    receiver_ref=str(row["receiver_ref"] or channel.receiver_ref),
-                    attempt=attempt, now_ms=now)
+                attempt = int(row["attempts"]) + 1
+                alert = _alert_from_row(row)
+                try:
+                    # 通道是唯一的外部依赖，也是"一次网络抖动即可让告警通路永久停摆"
+                    # 的那条路径：它抛出的**任何**异常都在这里收敛成结构化的传输失败，
+                    # 绝不穿出 dispatch_due（P1-4）。
+                    outcome = transport.submit(
+                        alert=alert,
+                        receiver_ref=str(row["receiver_ref"] or channel.receiver_ref),
+                        attempt=attempt, now_ms=now)
+                except Exception as exc:  # noqa: BLE001 - 见上：通道侧兜底
+                    outcome = TransportOutcome(
+                        False, error=f"{TRANSPORT_EXCEPTION}:{type(exc).__name__}")
                 if not outcome.ok:
-                    self._record_failure(alert_id, now_ms=now, attempt=attempt,
-                                         error=outcome.error or TRANSPORT_FAILED)
+                    error = outcome.error or TRANSPORT_FAILED
+                    self._isolate_failure(alert_id, now_ms=now, attempt=attempt,
+                                          error=error, transition=TRANSPORT_FAILED,
+                                          result=result)
                     result["failed"] += 1
+                    result["reason_codes"].append(error)
                     continue
                 self._record_attempt(alert_id, now_ms=now, attempt=attempt)
                 state = self.record_submitted(alert_id, now_ms=now,
@@ -1600,8 +1637,13 @@ class AlertQueue:
                         self._schedule_recheck(alert_id, now_ms=now,
                                                delay_seconds=accepted_poll_seconds)
                 if outcome.delivered_at_ms is not None and outcome.device_receipt:
+                    # 类型校验而非裸 int()（P1-4）：非数值的 delivered_at_ms 必须是
+                    # **结构化的回执拒绝**，而不是把 ValueError/TypeError 抛到隔离单元外。
+                    if not isinstance(outcome.delivered_at_ms, int) or isinstance(
+                            outcome.delivered_at_ms, bool):
+                        raise AlertReceiptRejected((RECEIPT_TYPE_INVALID,))
                     delivered_at = self._normalize_receipt_time(
-                        alert_id, delivered_at_ms=int(outcome.delivered_at_ms),
+                        alert_id, delivered_at_ms=outcome.delivered_at_ms,
                         submitted_at_ms=(int(row["submitted_at_ms"])
                                          if row["submitted_at_ms"] is not None else now),
                         now_ms=now, result=result)
@@ -1625,11 +1667,19 @@ class AlertQueue:
                     result["reason_codes"].append(BREACH_DELIVERY_SLO)
             except (AlertLadderViolation, AlertReceiptRejected) as exc:
                 codes = getattr(exc, "reason_codes", ())
-                self._record_failure(
+                self._isolate_failure(
                     alert_id, now_ms=now, attempt=attempt,
-                    error=":".join((TRANSITION_REJECTED, *codes)) or TRANSITION_REJECTED)
+                    error=":".join((TRANSITION_REJECTED, *codes)) or TRANSITION_REJECTED,
+                    transition=TRANSITION_REJECTED, result=result)
                 result["rejected"] += 1
                 result["reason_codes"].extend(codes or (TRANSITION_REJECTED,))
+                continue
+            except Exception as exc:  # noqa: BLE001 - P1-4：兜底，任意异常都不得中断整批
+                error = f"{INTERNAL_ERROR}:{type(exc).__name__}"
+                self._isolate_failure(alert_id, now_ms=now, attempt=attempt, error=error,
+                                      transition=INTERNAL_ERROR, result=result)
+                result["errors"] += 1
+                result["reason_codes"].append(error)
                 continue
         result["reason_codes"] = list(dict.fromkeys(result["reason_codes"]))
         return result
@@ -1663,7 +1713,28 @@ class AlertQueue:
                               "last_error='' WHERE alert_id=?", (int(attempt), alert_id))
             self.conn.commit()
 
-    def _record_failure(self, alert_id: str, *, now_ms: int, attempt: int, error: str) -> None:
+    def _isolate_failure(self, alert_id: str, *, now_ms: int, attempt: int, error: str,
+                         transition: str, result: dict[str, Any]) -> None:
+        """隔离单元的最后一环：记失败 + 退避，**连记录失败也不抛出**（P1-4）。
+
+        "记录失败"本身是严重的持久化故障（磁盘满/库被锁），用
+        ``PERSIST_FAILED:<异常类名>`` 如实暴露到返回结构里；但不得因此把整批投递带走。
+        """
+        try:
+            self._record_failure(alert_id, now_ms=now_ms, attempt=attempt, error=error,
+                                 transition=transition)
+        except Exception as exc:  # noqa: BLE001 - 兜底：绝不再抛
+            result["reason_codes"].append(f"{PERSIST_FAILED}:{type(exc).__name__}")
+
+    def _record_failure(self, alert_id: str, *, now_ms: int, attempt: int, error: str,
+                        transition: str = TRANSPORT_FAILED) -> None:
+        """记一次失败并按 ``min(base * 2**(attempt-1), max)`` 退避（该条不再每轮复发）。
+
+        ``transition`` 是审计表里的**原因类型**标签（P3-6），必须与 ``error`` 的语义一致：
+        传输失败用 :data:`TRANSPORT_FAILED`（默认）、阶梯/回执拒绝用
+        :data:`TRANSITION_REJECTED`、内部兜底用 :data:`INTERNAL_ERROR`。
+        否则按 ``transition`` 过滤日志的消费者会把"阶梯拒绝"误读成"传输失败"。
+        """
         delay = min(self.base_backoff_seconds * (2 ** max(0, attempt - 1)),
                     self.max_backoff_seconds)
         with self.conn:
@@ -1671,8 +1742,10 @@ class AlertQueue:
                 "UPDATE alert_queue SET attempts=?, next_attempt_ms=?, last_error=? "
                 "WHERE alert_id=?",
                 (int(attempt), int(now_ms) + int(delay * 1000), str(error)[:200], alert_id))
-            self._audit(alert_id, TRANSPORT_FAILED, int(now_ms),
-                        note=f"attempt={attempt} backoff={delay}s error={str(error)[:120]}")
+            self._audit(alert_id, transition, int(now_ms),
+                        note=f"attempt={attempt} backoff={delay}s error={str(error)[:120]}",
+                        detail={"reason": str(transition), "error": str(error)[:200],
+                                "attempt": int(attempt), "backoff_seconds": float(delay)})
             self.conn.commit()
 
 

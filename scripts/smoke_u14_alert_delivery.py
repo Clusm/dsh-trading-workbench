@@ -10,7 +10,9 @@
 2. 本机主进程故障与主机关机**分别**可检测（判别式 = 宿主 uptime vs 证据年龄）；
 3. 真实渠道未确认时保留 ``OPS_BLOCKED``（不伪造 DELIVERED）；
 4. 心跳包含交易证据时间以防假健康，投递队列独立于交易 DB；
-5. 无设备回执用可审计人类确认演练但不伪造 DELIVERED。
+5. 无设备回执用可审计人类确认演练但不伪造 DELIVERED；
+6. 单条隔离单元对**任意**异常 fail-closed（P1-4：通道异常 / 空白回执 /
+   非数值 `delivered_at_ms` 都只让**该条**退避重试，绝不中断整批、不每轮复发）。
 
 两态可跑：共享适配补丁（``src/core/health_watch.py`` / ``scripts/health_watch.py`` /
 ``src/audit/database.py``）**在**与**不在**都通过——补丁在则断言接入后的新事实，
@@ -40,15 +42,20 @@ from core.ops.alert_delivery import (  # noqa: E402
     PROCESS_MISSING,
     PROVIDER_CLOCK_SKEW_TOLERATED,
     RECEIPT_BINDING_MISMATCH,
+    RECEIPT_EMPTY,
     RECEIPT_TIMESTAMP_FUTURE,
     RECEIPT_TYPE_INVALID,
     TRADING_STALLED,
+    TRANSITION_REJECTED,
+    TRANSPORT_EXCEPTION,
+    TRANSPORT_FAILED,
     AlertQueue,
     AlertReceiptRejected,
     ChannelPolicy,
     Heartbeat,
     HeartbeatState,
     RecordingSink,
+    TransportOutcome,
     UnconfiguredTransport,
     advance_heartbeat,
     classify_outage,
@@ -251,6 +258,97 @@ def main() -> None:  # noqa: C901 - 冒烟脚本按段落线性展开
     finally:
         queue.close()
 
+    # ---- 4c. 修复轮 r3：单条隔离对任意异常 fail-closed（P1-4）-------------
+    print("\n[4c] 单条隔离：通道异常 / 畸形回执不得中断整批（P1-4）")
+
+    def _isolation_case(name: str, behaviour, expect_transition: str) -> dict | None:
+        queue = AlertQueue(TMP / f"isolation-{name}" / "q.sqlite", capacity=8,
+                           cooldown_seconds=0)
+        try:
+            bad = _enqueue(queue, now, f"bad-{name}")
+            others = [_enqueue(queue, now, f"ok{i}-{name}") for i in (1, 2)]
+            try:
+                res = queue.dispatch_due(_RawSink(behaviour), _verified(), now_ms=now)
+            except Exception as exc:  # noqa: BLE001 - 穿出即 P1-4 未闭合
+                check(f"P1-4[{name}]: 异常不得穿出 dispatch_due", False,
+                      f"{type(exc).__name__}: {exc}")
+                return None
+            row = queue.get(bad)
+            check(f"P1-4[{name}]: 该条被退避隔离，其余两条照常送达",
+                  all(queue.get(a)["state"] == "DELIVERED" for a in others)
+                  and row["next_attempt_ms"] is not None
+                  and int(row["next_attempt_ms"]) > now
+                  and row["delivered_at_ms"] is None,
+                  (res, dict(row), [queue.get(a)["state"] for a in others]))
+            check(f"P3-6[{name}]: 审计标签与原因一致（{expect_transition}）",
+                  expect_transition in [e["transition"] for e in queue.audit_trail(bad)],
+                  [e["transition"] for e in queue.audit_trail(bad)])
+            again = queue.dispatch_due(_RawSink(behaviour), _verified(), now_ms=now + 1)
+            check(f"P1-4[{name}]: 退避窗口内不复发（不每轮重试）",
+                  again["submitted"] == 0 and again["rejected"] == 0
+                  and again["failed"] == 0 and again["errors"] == 0, again)
+            return res
+        finally:
+            queue.close()
+
+    def _normal_outcome(alert, now_ms):
+        return TransportOutcome(True, http_status=200, provider_receipt="rcpt-ok",
+                                delivered_at_ms=now_ms, device_receipt="dev-ok",
+                                receipt_alert_id=alert.alert_id())
+
+    def _raises(exc_type):
+        def _b(alert, now_ms):
+            if alert.incident_key.split("|")[1].startswith("bad"):
+                raise exc_type("synthetic gateway fault")
+            return _normal_outcome(alert, now_ms)
+        return _b
+
+    for exc_type in (TimeoutError, RuntimeError):
+        tag = exc_type.__name__
+        res = _isolation_case(f"raise-{tag}", _raises(exc_type), TRANSPORT_FAILED)
+        check(f"P1-4[通道抛 {tag}]: 隔离为 TRANSPORT_EXCEPTION:{tag} 且计入 failed",
+              bool(res) and res["failed"] == 1
+              and f"{TRANSPORT_EXCEPTION}:{tag}" in res["reason_codes"], res)
+
+    def _blank_receipt(alert, now_ms):
+        if alert.incident_key.split("|")[1].startswith("bad"):
+            return TransportOutcome(True, http_status=200, provider_receipt="   ",
+                                    receipt_alert_id=alert.alert_id())
+        return _normal_outcome(alert, now_ms)
+
+    res = _isolation_case("blank-receipt", _blank_receipt, TRANSITION_REJECTED)
+    check("P1-4[空白回执]: 隔离为 RECEIPT_EMPTY 且计入 rejected（不是裸 ValueError）",
+          bool(res) and res["rejected"] == 1 and RECEIPT_EMPTY in res["reason_codes"], res)
+
+    def _bad_delivered_at(alert, now_ms):
+        if alert.incident_key.split("|")[1].startswith("bad"):
+            return TransportOutcome(True, http_status=200, provider_receipt="rcpt-bad",
+                                    delivered_at_ms="not-a-number",
+                                    device_receipt="dev-bad",
+                                    receipt_alert_id=alert.alert_id())
+        return _normal_outcome(alert, now_ms)
+
+    res = _isolation_case("bad-delivered-at", _bad_delivered_at, TRANSITION_REJECTED)
+    check("P1-4[delivered_at_ms 非数值]: 隔离为 RECEIPT_TYPE_INVALID",
+          bool(res) and res["rejected"] == 1
+          and RECEIPT_TYPE_INVALID in res["reason_codes"], res)
+
+    # 不得过度捕获：BaseException 必须穿出隔离层。
+    queue = AlertQueue(TMP / "isolation-baseexc" / "q.sqlite", capacity=4)
+    try:
+        _enqueue(queue, now, "bad-ki")
+        try:
+            queue.dispatch_due(_RawSink(lambda alert, now_ms: _raise_ki()),
+                               _verified(), now_ms=now)
+            ki = "SWALLOWED"
+        except KeyboardInterrupt:
+            ki = "KeyboardInterrupt"
+        except Exception as exc:  # noqa: BLE001
+            ki = f"WRONG:{type(exc).__name__}"
+        check("P1-4: KeyboardInterrupt（BaseException）不得被吞", ki == "KeyboardInterrupt", ki)
+    finally:
+        queue.close()
+
     # ---- 5. 无设备回执 → 可审计人工确认（不伪造 DELIVERED） ---------------
     print("\n[5] 无设备回执用可审计人工确认（不伪造送达）")
     queue = AlertQueue(TMP / "manual" / "q.sqlite", capacity=4)
@@ -373,6 +471,27 @@ def main() -> None:  # noqa: C901 - 冒烟脚本按段落线性展开
     print(f"\nSMOKE_U14_ALERT_DELIVERY ok={ok} fail={fail}")
     if fail:
         raise SystemExit(1)
+
+
+class _RawSink:
+    """按 incident_key 直接返回/抛出任意东西的通道（``RecordingSink`` 只返回合法回执）。
+
+    P1-4 的逃逸向量（通道抛异常、通道返回"空白回执"/非数值时间戳）需要这种注入能力。
+    """
+
+    name = "raw-sink"
+
+    def __init__(self, behaviour) -> None:
+        self.behaviour = behaviour
+        self.calls: list[str] = []
+
+    def submit(self, *, alert, receiver_ref: str, attempt: int, now_ms: int) -> object:
+        self.calls.append(alert.incident_key)
+        return self.behaviour(alert, now_ms)
+
+
+def _raise_ki() -> object:
+    raise KeyboardInterrupt("synthetic operator interrupt")
 
 
 def _receipt_rejections(queue, alert_id: str, now_ms: int) -> list[str]:

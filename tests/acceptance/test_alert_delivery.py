@@ -36,6 +36,7 @@ from core.ops.alert_delivery import (  # noqa: E402
     CHANNEL_UNVERIFIED,
     DELIVERED_WITHOUT_DEVICE_RECEIPT,
     HOST_CONTINUITY_UNKNOWN,
+    INTERNAL_ERROR,
     HOST_DOWN,
     HOST_JUST_BOOTED,
     HOST_REBOOT_OBSERVED,
@@ -52,12 +53,15 @@ from core.ops.alert_delivery import (  # noqa: E402
     PROCESS_UNVERIFIED,
     PROVIDER_CLOCK_SKEW_TOLERATED,
     RECEIPT_BINDING_MISMATCH,
+    RECEIPT_EMPTY,
     RECEIPT_TIMESTAMP_FUTURE,
     RECEIPT_TYPE_INVALID,
     RECEIPT_UNBOUND,
     TRADING_EVIDENCE_FROM_FUTURE,
     TRADING_STALLED,
     TRANSITION_REJECTED,
+    TRANSPORT_EXCEPTION,
+    TRANSPORT_FAILED,
     Alert,
     AlertLadderViolation,
     AlertQueue,
@@ -1198,6 +1202,206 @@ def test_r2_regressions() -> None:
 
 
 # --------------------------------------------------------------------------
+# 10. 修复轮 r3：单条隔离单元必须对**任意** Exception fail-closed（P1-4 / P3-6）
+# --------------------------------------------------------------------------
+
+
+class _RawSink:
+    """按 incident_key 直接返回/抛出任意东西的 sink（绕过 ``RecordingSink`` 的收敛）。
+
+    P1-4 的三个逃逸向量都需要"通道返回畸形回执"或"通道自己抛异常"这两种
+    ``RecordingSink`` 无法表达的行为（它只会返回合法的 ``TransportOutcome``）。
+    """
+
+    name = "raw-sink"
+
+    def __init__(self, behaviour) -> None:
+        self.behaviour = behaviour
+        self.calls: list[str] = []
+
+    def submit(self, *, alert: Alert, receiver_ref: str, attempt: int,
+               now_ms: int) -> object:
+        self.calls.append(alert.incident_key)
+        return self.behaviour(alert, now_ms)
+
+
+def test_r3_isolation() -> None:
+    section("10. 修复轮 r3：单条隔离单元对任意异常 fail-closed（P1-4 / P3-6）")
+    now = int(time.time() * 1000)
+
+    def _run(name: str, behaviour) -> tuple[dict, dict, list[str], list[str]]:
+        """3 条同批（第 1 条坏、后 2 条正常），返回 (dispatch 结果, 坏行, 坏行审计, 状态)。"""
+        queue = AlertQueue(TMP / f"r3-{name}" / "q.sqlite", capacity=8, cooldown_seconds=0)
+        try:
+            bad = queue.enqueue(make_alert(now, incident=f"live|bad-{name}|R3"),
+                                now_ms=now).alert_id
+            others = [queue.enqueue(make_alert(now, incident=f"live|ok{i}-{name}|R3"),
+                                    now_ms=now).alert_id for i in (1, 2)]
+            sink = _RawSink(behaviour)
+            try:
+                res = queue.dispatch_due(sink, verified_channel(), now_ms=now)
+            except Exception as exc:  # noqa: BLE001 - 穿出即 P1-4 未闭合
+                check(f"P1-4[{name}]: 异常不得穿出 dispatch_due",
+                      False, f"{type(exc).__name__}: {exc}")
+                return {}, {}, [], []
+            row = dict(queue.get(bad))
+            trail = [entry["transition"] for entry in queue.audit_trail(bad)]
+            states = [queue.get(a)["state"] for a in others]
+            # 退避窗口内不得复发（否则"隔离"退化成"每轮重试"）。
+            again = queue.dispatch_due(_RawSink(behaviour), verified_channel(),
+                                       now_ms=now + 1)
+            check(f"P1-4[{name}]: 坏条不再每轮复发（+1s 内不重派）",
+                  again["submitted"] == 0 and again["rejected"] == 0
+                  and again["failed"] == 0 and again["errors"] == 0, again)
+            return res, row, trail, states
+        finally:
+            queue.close()
+
+    def _normal(alert: Alert, now_ms: int) -> TransportOutcome:
+        return TransportOutcome(True, http_status=200, provider_receipt="rcpt-ok",
+                                delivered_at_ms=now_ms, device_receipt="dev-ok",
+                                receipt_alert_id=alert.alert_id())
+
+    # ---- 向量 1：通道自身抛异常（超时/连接重置/DNS…）----
+    for exc_type in (TimeoutError, RuntimeError, OSError):
+        tag = exc_type.__name__
+        res, bad_row, trail, states = _run(
+            f"raise-{tag}",
+            lambda alert, now_ms, _t=exc_type: (
+                _raise_synthetic(_t) if alert.incident_key.startswith("live|bad")
+                else _normal(alert, now_ms)))
+        check(f"P1-4[通道抛 {tag}]: 该条被隔离（failed=1）且整批不中断",
+              res.get("failed") == 1 and res.get("submitted") == 2
+              and res.get("confirmed") == 2 and res.get("errors") == 0, res)
+        check(f"P1-4[通道抛 {tag}]: 其余两条照常送达",
+              states == ["DELIVERED", "DELIVERED"], states)
+        check(f"P1-4[通道抛 {tag}]: 原因码区分传输失败（TRANSPORT_EXCEPTION:{tag}）",
+              f"{TRANSPORT_EXCEPTION}:{tag}" in res.get("reason_codes", []),
+              res.get("reason_codes"))
+        check(f"P1-4[通道抛 {tag}]: 该条留下结构化 last_error",
+              bad_row.get("last_error") == f"{TRANSPORT_EXCEPTION}:{tag}", bad_row)
+        check(f"P1-4[通道抛 {tag}]: 该条被退避重排（不再每轮复发）",
+              bad_row.get("next_attempt_ms") is not None
+              and int(bad_row["next_attempt_ms"]) > now, bad_row)
+        check(f"P3-6[通道抛 {tag}]: 审计标签是 TRANSPORT_FAILED（传输失败）",
+              TRANSPORT_FAILED in trail, trail)
+
+    # ---- 向量 2：空白回执（本模块自己抛的"畸形回执"）----
+    def _blank_provider(alert: Alert, now_ms: int) -> TransportOutcome:
+        if alert.incident_key.startswith("live|bad"):
+            return TransportOutcome(True, http_status=200, provider_receipt="   ",
+                                    receipt_alert_id=alert.alert_id())
+        return _normal(alert, now_ms)
+
+    def _blank_device(alert: Alert, now_ms: int) -> TransportOutcome:
+        if alert.incident_key.startswith("live|bad"):
+            return TransportOutcome(True, http_status=200, provider_receipt="rcpt-bad",
+                                    delivered_at_ms=now_ms, device_receipt="   ",
+                                    receipt_alert_id=alert.alert_id())
+        return _normal(alert, now_ms)
+
+    for label, behaviour in (("空 provider_receipt", _blank_provider),
+                             ("空 device_receipt", _blank_device)):
+        res, bad_row, trail, states = _run(f"blank-{label}", behaviour)
+        check(f"P1-4[{label}]: 被隔离为该条结构化拒绝（rejected=1）且整批不中断",
+              res.get("rejected") == 1 and res.get("confirmed") == 2
+              and res.get("errors") == 0, res)
+        check(f"P1-4[{label}]: 其余两条照常送达", states == ["DELIVERED", "DELIVERED"],
+              states)
+        check(f"P1-4[{label}]: 原因码 RECEIPT_EMPTY（不再漏成裸 ValueError）",
+              RECEIPT_EMPTY in res.get("reason_codes", []), res.get("reason_codes"))
+        check(f"P1-4[{label}]: 该条有退避且不伪造送达（delivered_at_ms 为空）",
+              bad_row.get("delivered_at_ms") is None
+              and bad_row.get("next_attempt_ms") is not None
+              and int(bad_row["next_attempt_ms"]) > now, bad_row)
+        check(f"P3-6[{label}]: 审计标签是 TRANSITION_REJECTED（不是 TRANSPORT_FAILED）",
+              TRANSITION_REJECTED in trail and TRANSPORT_FAILED not in trail, trail)
+
+    # ---- 向量 3：delivered_at_ms 非数值 ----
+    for label, bad_value in (("str", "not-a-number"), ("list", [1, 2])):
+        def _behaviour(alert: Alert, now_ms: int, _v=bad_value) -> TransportOutcome:
+            if alert.incident_key.startswith("live|bad"):
+                return TransportOutcome(True, http_status=200, provider_receipt="rcpt-bad",
+                                        delivered_at_ms=_v, device_receipt="dev-bad",
+                                        receipt_alert_id=alert.alert_id())
+            return _normal(alert, now_ms)
+
+        res, bad_row, trail, states = _run(f"delivered-{label}", _behaviour)
+        check(f"P1-4[delivered_at_ms={label}]: 类型不符被结构化拒绝（rejected=1）",
+              res.get("rejected") == 1 and res.get("confirmed") == 2
+              and res.get("errors") == 0, res)
+        check(f"P1-4[delivered_at_ms={label}]: 原因码 RECEIPT_TYPE_INVALID",
+              RECEIPT_TYPE_INVALID in res.get("reason_codes", []), res.get("reason_codes"))
+        check(f"P1-4[delivered_at_ms={label}]: 其余两条照常送达",
+              states == ["DELIVERED", "DELIVERED"], states)
+        check(f"P1-4[delivered_at_ms={label}]: 该条有退避、未伪造送达",
+              bad_row.get("delivered_at_ms") is None
+              and bad_row.get("next_attempt_ms") is not None
+              and int(bad_row["next_attempt_ms"]) > now, bad_row)
+
+    # ---- 兜底桶：既不是通道异常也不是回执拒绝的其它异常 ----
+    res, bad_row, trail, states = _run(
+        "garbage-outcome",
+        lambda alert, now_ms: (None if alert.incident_key.startswith("live|bad")
+                               else _normal(alert, now_ms)))
+    check("P1-4[通道返回垃圾]: 兜底桶收敛（errors=1, INTERNAL_ERROR:AttributeError）",
+          res.get("errors") == 1 and res.get("confirmed") == 2
+          and any(str(c).startswith(INTERNAL_ERROR) for c in res.get("reason_codes", [])),
+          res)
+    check("P1-4[通道返回垃圾]: 其余两条照常送达且该条被退避",
+          states == ["DELIVERED", "DELIVERED"]
+          and bad_row.get("next_attempt_ms") is not None
+          and int(bad_row["next_attempt_ms"]) > now, (states, bad_row))
+    check("P3-6[通道返回垃圾]: 审计标签是 INTERNAL_ERROR",
+          INTERNAL_ERROR in trail, trail)
+
+    # ---- 不得过度捕获：BaseException（KeyboardInterrupt）必须穿出 ----
+    queue = AlertQueue(TMP / "r3-baseexc" / "q.sqlite", capacity=4, cooldown_seconds=0)
+    try:
+        queue.enqueue(make_alert(now, incident="live|bad-ki|R3"), now_ms=now)
+
+        def _interrupt(alert: Alert, now_ms: int) -> TransportOutcome:
+            raise KeyboardInterrupt("synthetic operator interrupt")
+
+        surfacing = ""
+        try:
+            queue.dispatch_due(_RawSink(_interrupt), verified_channel(), now_ms=now)
+            surfacing = "SWALLOWED"
+        except KeyboardInterrupt:
+            surfacing = "KeyboardInterrupt"
+        except Exception as exc:  # noqa: BLE001 - 兜底桶也不该收下它
+            surfacing = f"WRONG:{type(exc).__name__}"
+        check("P1-4: KeyboardInterrupt（BaseException）不得被隔离层吞掉",
+              surfacing == "KeyboardInterrupt", surfacing)
+    finally:
+        queue.close()
+
+    # ---- 既有负例的错误串契约未被破坏（空回执仍拿到带字段名的 ValueError）----
+    queue = AlertQueue(TMP / "r3-empty-msg" / "q.sqlite", capacity=4, cooldown_seconds=0)
+    try:
+        aid = queue.enqueue(make_alert(now, incident="live|empty-msg|R3"), now_ms=now).alert_id
+        queue.record_submitted(aid, now_ms=now)
+        message = ""
+        try:
+            queue.record_accepted(aid, now_ms=now, provider_receipt="   ", bound_alert_id=aid)
+        except ValueError as exc:  # AlertReceiptRejected 仍是 ValueError
+            message = str(exc)
+            codes = getattr(exc, "reason_codes", ())
+            check("P1-4: 空回执仍是 ValueError 且带字段名（既有负例契约不变）",
+                  "provider_receipt" in message, message)
+            check("P1-4: 空回执同时带结构化原因码 RECEIPT_EMPTY",
+                  codes == (RECEIPT_EMPTY,), codes)
+        if not message:
+            check("P1-4: 空回执必须被拒（不得放行）", False, "ACCEPTED")
+    finally:
+        queue.close()
+
+
+def _raise_synthetic(exc_type) -> TransportOutcome:
+    raise exc_type("synthetic gateway fault")
+
+
+# --------------------------------------------------------------------------
 
 
 def main() -> int:
@@ -1211,6 +1415,7 @@ def main() -> int:
         test_queue_independence()
         test_message_redaction()
         test_r2_regressions()
+        test_r3_isolation()
         test_shared_adapter_two_states()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
