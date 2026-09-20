@@ -1461,6 +1461,12 @@ def background_refresh(
     3. 逐源抓取，每一步前检查 ``http_remaining_ms()``；预算耗尽即停止并在
        ``reason`` 回带 ``DATA_UNAVAILABLE``（诚实标注"没取到"，不假装成功）；
     4. 摘要只在 ``summary_remaining_ms()`` 足够时执行，否则 ``summary_done=False``。
+
+    **口径边界（如实声明）**：预算约束的是"**是否发起**下一次调用"，不是"中断
+    已发起的调用"（本层无法打断正在进行的 HTTP/subprocess）。因此一轮刷新的
+    ``elapsed_ms`` 可能略越 ``total_ms``（最多一次调用的耗时），``failed`` 与
+    ``summary_done`` 才是"有没有按预算做事"的权威结论。要精确截断必须在
+    ``fetch`` 内部接入本层期限（由共享适配补丁负责）。
     """
     active_cache = cache if cache is not None else SourceCache()
     requested = tuple(str(name) for name in sources)

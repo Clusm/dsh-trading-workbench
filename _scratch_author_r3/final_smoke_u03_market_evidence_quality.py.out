@@ -1,0 +1,72 @@
+========================================================================
+U03 / S01 分源证据质量 离线回归（独立脚本，无 pytest）
+========================================================================
+
+[A] S01 共享适配补丁：可应用、口径正确
+  PASS  补丁确实改变了目标文件
+  PASS  补丁未触碰开仓白名单/交易范围代码
+  PASS  funding 缺失不再回落到 0.0
+  PASS  OI 缺失不再回落到 0.0
+  PASS  出参仍保留 funding_rate/mark_price/open_interest_usd 键（兼容既有消费端）
+  PASS  缺失键 → None
+  PASS  显式 None → None
+  PASS  真实 0 保留为 0（缺失 != 零）
+  PASS  非数值文本 → None
+  PASS  NaN/Infinity → None
+  PASS  空载荷/非映射 → None
+  PASS  真实 0 的源仍算可用
+  PASS  源时点/有效期/观测时点齐备
+  PASS  缺失源：available=False 且字段全列 missing
+  PASS  源时钟晚于本地观测：以本地观测为准（不延长有效期）
+
+[A2] 补丁对基线漂移敏感（不能静默打歪）
+  PASS  夹具基线确实被改动
+  PASS  上下文不符时拒绝应用并报错
+
+[B] 分源证据质量：patched 与 legacy 出参结论一致
+  PASS  legacy：mark_funding 不可用且不产出 0
+  PASS  legacy：missing_fields 覆盖 funding/OI
+  PASS  legacy：ticker 仍可用且有源时点
+  PASS  patched：mark_funding 不可用且不产出 0
+  PASS  patched：missing_fields 覆盖 funding/OI
+  PASS  patched：ticker 仍可用且有源时点
+
+[B2] 真实 0 是数据，不是缺失（关键判别）
+  PASS  真实 funding_rate=0 保留为 "0" 且不列为缺失
+  PASS  真实 mark 价保留
+  PASS  真实 OI 保留为十进制文本
+  PASS  该轮整体 missing_fields 为空
+
+[B2b] 自报 fresh_until_ms 只能缩短不能延长（不得自证新鲜）
+  PASS  未来自报有效期被夹到 min(源时点, 本地观测)+TTL
+  PASS  自报更短的有效期被尊重
+
+[B3] 逐源 expires/fresh 进证据层（时点可核对）
+  PASS  源有效期来自逐源 TTL 或显式 fresh_until_ms
+  PASS  源时点早于本地观测且被保留
+
+[B4] DC12：注入文本不改变分源可用性/时点
+  PASS  注入文本不把缺失源变成可用
+  PASS  注入文本不进入 missing_fields 之外的口径
+  PASS  依赖缺失源的注入意图仍被拒
+  PASS  注入文本未出现在任何原因码
+
+[B5] 逐源元数据是权威口径：出参回带 0 也不得当成真实值
+  PASS  夹具确实回带了 0.0（模拟旧口径）
+  PASS  适配层不信任回带的 0
+  PASS  缺失字段仍被完整记录
+
+[C] U03 接线补丁：分源门禁缺省生效 + 轮次分量非空
+  PASS  补丁确实改变了 orchestrator
+  PASS  补丁仍是纯插入（无删除行）
+  PASS  身份开关缺省 False（未固定身份下开仓仍 fail-closed）
+  PASS  策略侧缺省必需源**非空**（默认路径下字段级分源门禁真实生效）：('ticker',)
+  PASS  缺省源 'ticker' 是模块认识的源名（源级或字段级）
+  PASS  门禁处 identity=None（未固定身份，待 U15 接线）
+  PASS  门禁传 allow_unpinned=ALLOW_UNPINNED_RESEARCH_EVIDENCE（不写死 True）
+  PASS  轮次分量不再恒为空串（pipeline_decision_id 之后才写入）
+
+========================================================================
+结果：PASS 46 / FAIL 0
+========================================================================
+[smoke_u03_market_evidence_quality] -> tests/integration/test_market_evidence_quality.py

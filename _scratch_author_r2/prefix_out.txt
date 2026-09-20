@@ -1,0 +1,30 @@
+== 事实基准：BNBUSDT 1h 最新已收盘 close = 744.13，trigger_price=900 应 CLAIM_FALSE ==
+
+[1] D-P1-1 模型自报 claims 覆盖程序 claim
+  A 对照(不报 claims): status=EVIDENCE_INVALID accepted=False reasons=['K02:CLAIM_FALSE'] k02=[] claims=[('close_above_price', '1h:closed_close > 900', 'FAIL')]
+  B 反例(自报 close_above_price 1h:closed_close > 0.0001): status=VALID accepted=True reasons=[] k02=[] claims=[('x', '1h:closed_close > 0.0001', 'PASS')]
+  C 反例(不给 trigger_price，只报 claims)：
+    status=VALID accepted=True geometry.entry=None
+
+[2] B-P1-1 identity=None fail-open
+  identity_pinned=False ok=True accepted=('intent-bnb',) gate={'ok': True, 'identity_pinned': False, 'drop_intent_ids': [], 'reasons': {}}
+
+[3] B-P1-2 畸形 claim 元素使门禁崩溃
+  claims=[None] -> RAISED TypeError: 'NoneType' object is not iterable
+  claims=['abc'] -> RAISED ValueError: dictionary update sequence element #0 has length 1; 2 is required
+  claims=[123] -> RAISED TypeError: 'int' object is not iterable
+  claims=[[]] -> RAISED ValueError: argument must be a sequence of length 3
+  claims={'a': 1} -> NO RAISE
+
+[4] D-P1-2 required_sources 源级粒度：mark_funding 只有 markPrice
+  mark_funding available=True values={'mark_price': '744.2'} missing=('funding_rate',)
+  声明依赖 mark_funding -> status=VALID accepted=True reasons=[]
+
+[5] B-P1-3 同周期两单 evidence_id 相同 / 放行路径无落地绑定
+  A evid=eb-ba12eec9f8dcf764 binding=binding-9023dcf445b0110d accepted=True
+  B evid=eb-ba12eec9f8dcf764 binding=binding-3c7239e969fc0913 accepted=False
+  SAME evidence_id ? True
+
+[6] D-P2-1 status=VALID 而 accepted=False（作者自备夹具）
+  status=VALID accepted=False reasons=['SOURCE_UNAVAILABLE:mark_funding']
+  decision_gate.drop=['intent-eth-funding']

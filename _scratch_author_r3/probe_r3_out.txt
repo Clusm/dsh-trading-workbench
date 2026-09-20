@@ -1,0 +1,46 @@
+HEAD=c0e14c4
+
+========================================================================
+S1  Q-NEW-1 未固定身份哨兵逃逸：修复前(5ffc6c0) vs 修复后
+========================================================================
+  修复前 UNPINNED_IDENTITY（模块常量）        ok=False identity_pinned=False accepted=() gate.ok=False drop=['A'] reasons=['IDENTITY_UNPINNED']
+  修复后 UNPINNED_IDENTITY（模块常量）        ok=False identity_pinned=False accepted=() gate.ok=False drop=['A'] reasons=['IDENTITY_UNPINNED']
+  修复前 UNPINNED_IDENTITY.model_copy() ok=False identity_pinned=False accepted=() gate.ok=False drop=['A'] reasons=['IDENTITY_UNPINNED']
+  修复后 UNPINNED_IDENTITY.model_copy() ok=False identity_pinned=False accepted=() gate.ok=False drop=['A'] reasons=['IDENTITY_UNPINNED']
+  修复前 等值裸 dict                       ok=False identity_pinned=False accepted=() gate.ok=False drop=['A'] reasons=['IDENTITY_UNPINNED']
+  修复后 等值裸 dict                       ok=False identity_pinned=False accepted=() gate.ok=False drop=['A'] reasons=['IDENTITY_UNPINNED']
+  对照 修复后 identity=None          ok=False identity_pinned=False gate.ok=False reasons=['IDENTITY_UNPINNED']
+  对照 修复后 真实身份                identity_pinned=True  gate.ok=True  is_unpinned(真实身份)=False
+
+========================================================================
+S2  Q-NEW-3 字段级分源门禁在生产路径是否默认生效
+========================================================================
+  接线常量 RESEARCH_EVIDENCE_REQUIRED_SOURCES = ('ticker',)   ALLOW_UNPINNED_RESEARCH_EVIDENCE = False
+  _resolve_required_sources((), ('ticker',)) = ('ticker',)
+  夹具：ticker 源可用但只有 lastPrice，missing_fields=('pct_24h', 'quote_volume_24h')
+  修复前 default=()               issues=[] 剩下 intents=0 decision=no_trade
+      blocked 理由 = cid-1:IDENTITY_UNPINNED,SNAPSHOT_STALE,RR_CONTRADICTION,K02:BUNDLE_EXPIRED,K02:INPUT_STALE,K02:QUOTE_EXPIRED
+  修复后 default=('ticker',)      issues=[] 剩下 intents=0 decision=no_trade
+      blocked 理由 = cid-1:IDENTITY_UNPINNED,SNAPSHOT_STALE,SOURCE_STALE:ticker,RR_CONTRADICTION,K02:BUNDLE_EXPIRED,K02:INPUT_STALE,K02:QUOTE_EXPIRED
+  固定身份 + 接线缺省 ticker 字段不齐        accepted=() reasons=['SOURCE_FIELD_MISSING:ticker.pct_24h', 'SOURCE_FIELD_MISSING:ticker.quote_volume_24h']
+  固定身份 + 接线缺省 ticker 字段齐全        accepted=('A',) reasons=[]
+  固定身份 + 修复前缺省 ()           accepted=('A',)  ← 缺 ticker 字段仍放行（原始缺口）
+
+========================================================================
+S3  Q-NEW-2 binding_id 的轮次分量
+========================================================================
+  修复前（cycle_id 恒 ''）第1轮          cycle=''          evid=eb-7367fa72231d6fcf bind=binding-8565b85ce332fec1
+  修复前（cycle_id 恒 ''）第2轮          cycle=''          evid=eb-7367fa72231d6fcf bind=binding-8565b85ce332fec1
+  修复后 run_id=run-aaaa 第1轮        cycle='run-aaaa'  evid=eb-3ae657ccb5020304 bind=binding-4e2ad28ffbcc0e0f
+  修复后 run_id=run-bbbb 第2轮        cycle='run-bbbb'  evid=eb-2ccd6eb4d563d0de bind=binding-d3b5364e15b1e7c0
+  接线补丁实际写入：True
+
+========================================================================
+S4  Q-NEW-4/5 并集语义 + 畸形声明 fail-closed
+========================================================================
+  declared=[] default=()（控制组）                                    reasons=[]
+  declared=[] default=('ticker',)                                reasons=['SOURCE_FIELD_MISSING:ticker.pct_24h', 'SOURCE_FIELD_MISSING:ticker.quote_volume_24h']
+  declared=('ticker.last_price',) default=('mark_funding.funding_rate',) reasons=['SOURCE_UNAVAILABLE:mark_funding']
+  declared='mark_funding'（裸字符串）                                  reasons=['SOURCE_DECLARATION_REJECTED:not_a_sequence']
+  declared=('mark_funding.',)（尾点）                                reasons=['SOURCE_DECLARATION_REJECTED:mark_funding.']
+  declared=('',)（空条目）                                            reasons=['SOURCE_DECLARATION_REJECTED:empty']
