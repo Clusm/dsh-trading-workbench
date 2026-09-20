@@ -1493,13 +1493,48 @@
         {
           "type": "author_claim_audit",
           "note": "作者自述'指纹报告修复 12 项'，但 E/B 两名独立审查者各自证明其中至少 2 项为虚报（diff-7 状态根接口不存在 / diff-7 account_ref 未闭合）。作者对自己工作的'已修复'声明不得作为证据。"
+        },
+        {
+          "type": "review_r1_C",
+          "candidate": "a136cb5",
+          "verdict": "CHANGES_REQUESTED",
+          "counts": "P0=0 / P1 x6 / P2 x5 / P3 x11",
+          "archived_path": "docs/dispatch/reviews/U15/a136cb5/C_r1.md",
+          "key_findings": [
+            "P1-1 凭据经嵌套键泄漏进身份: profile_effective(~781-786) 只过滤顶层键 -> 原始 secret 落入 ModelRoute.profile_overrides -> 进 model_route_hash 并经 as_dict() 外露",
+            "P1-5 model_route_blockers(~844) 默认 fail-open: execution_mode=None/'' 时 WorkBuddy 非 live 阻断不触发，而默认正是 None",
+            "P1-4/P1-6 有效路由不诚实: 未识别 fallback provider 被静默丢弃无原因码；备用路由对非 ai_trader agent 也生成",
+            "P1-2 artifact_relatives 无 root 边界 -> 绝对路径可把 .env 内容读进 artifact_hash",
+            "P1-3 非 Mapping 的 raw_settings 被静默当空配置，身份照常生成",
+            "P2-3 src//scripts/ 对 collect_runtime_identity/authorize_new_entry 零引用（F13/DC14 部署态未实现）",
+            "P2-4 处置表 diff-7 称'状态根一致性校验接口已提供'实际不存在 -> 登记不实"
+          ],
+          "positives": "空/未设置/空白不产生虚假覆盖；非白名单秘密不进身份；mock 在 demo/live 阻断而 paper 不阻断；覆盖优先级与 factory 一致；策略卡文件级来源校验真实生效"
+        },
+        {
+          "type": "shared_patch_artifact",
+          "status": "DONE",
+          "commit": "6dd0d1a",
+          "path": "docs/dispatch/patches/U15/a136cb5/",
+          "files": [
+            "01_release_manifest.diff(237行)",
+            "02_config_loader.diff(70行)",
+            "03_dashboard_app.diff(72行)",
+            "04_entry_readiness.diff(60行)",
+            "README.md"
+          ],
+          "verified": "4 补丁对 a136cb5 git apply --check -p1 全部通过；共享源文件未被修改（git diff --name-only HEAD -- src/ 为空）"
+        },
+        {
+          "type": "review_workspace_boundary_incident",
+          "note": "U15 的 C 审查者曾把 scratch 文件写入 mat-wt/EF 工作区（违反只读边界），随后自行清理；已核实 EF 工作树恢复干净。后续派发已再次强调边界。"
         }
       ],
       "blockers": [
         {
-          "id": "U15-B1",
-          "text": "共享适配补丁文件缺失（作者仅文字描述），补交会话进行中",
-          "owner": "I",
+          "id": "U15-B2",
+          "text": "r1 三名审查者一致 CHANGES_REQUESTED：P0 x2（authorize_new_entry fail-open；配置漂移失明）+ P1 x17。r2 修复轮进行中",
+          "owner": "I/U15作者",
           "status": "IN_PROGRESS"
         }
       ],
@@ -1553,9 +1588,14 @@
             "B (reviews/U15/B/r1)",
             "C (reviews/U15/C/r1)"
           ],
-          "verdict": "CHANGES_REQUESTED (B 已回；E/C 待回)",
+          "verdict": "CHANGES_REQUESTED（E/B/C 三名一致；P0 x2、P1 合计 17）",
           "reports_dir": "docs/dispatch/reviews/U15/a136cb5/",
-          "note": "Q 的独立验收安排在 I 组装的 integration_candidate 上进行（非作者 head），以避免重复且覆盖共享适配"
+          "note": "Q 的独立验收安排在 I 组装的 integration_candidate 上进行（非作者 head），以避免重复且覆盖共享适配",
+          "reports": [
+            "E_r1",
+            "B_r1",
+            "C_r1"
+          ]
         }
       ],
       "qa_runs": []
