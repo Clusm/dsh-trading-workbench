@@ -234,12 +234,10 @@ def issue_management_authorization(
         account_ref = ""
         environment = None
         instance = None
-        stable = False
     else:
         account_ref = str(generation.account_ref or "")
         environment = str(generation.environment or "") or None
         instance = str(generation.runtime_instance_id or "") or None
-        stable = bool(getattr(generation, "account_ref_stable", False))
         if instance is None:
             reasons.append("RUNTIME_INSTANCE_UNBOUND")
         if environment is None:
