@@ -9,6 +9,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from core.instance_lock import InstanceLock  # noqa: E402
+from core.ops.recovery import state_json_health  # noqa: E402
 
 REQUIRED_STATE_FILES = (
     "capital_state.json",
@@ -47,7 +50,11 @@ def _git_commit(project_root: Path) -> str | None:
 
 
 def _copy_verified_json(source: Path, destination: Path) -> dict[str, Any]:
-    """读取原子JSON并在写入恢复包前完成语法与哈希校验。"""
+    """读取原子JSON并在写入恢复包前完成语法与哈希校验。
+
+    U13：清单条目额外记录 ``snapshot_at_ms``（本文件被复制的时刻），供
+    ``restore_recovery_bundle`` 判定"DB 与 JSON 是否落在同一 epoch 窗口"。
+    """
     data = source.read_bytes()
     # Windows PowerShell 历史脚本可能写入 UTF-8 BOM；它仍是合法 JSON 编码。
     # 校验时兼容 BOM，但复制和哈希始终保留原始字节。
@@ -58,7 +65,8 @@ def _copy_verified_json(source: Path, destination: Path) -> dict[str, Any]:
     copied = destination.read_bytes()
     if _sha256(copied) != _sha256(data):
         raise RuntimeError(f"状态文件复制校验失败: {source.name}")
-    return {"path": f"state/{source.name}", "size": len(data), "sha256": _sha256(data)}
+    return {"path": f"state/{source.name}", "size": len(data), "sha256": _sha256(data),
+            "snapshot_at_ms": int(time.time() * 1000)}
 
 
 def create_recovery_bundle(project_root: Path, output_dir: Path) -> Path:
@@ -91,6 +99,13 @@ def _create_locked_bundle(root: Path, output_dir: Path) -> Path:
     missing = [name for name in REQUIRED_STATE_FILES if not (data_dir / name).is_file()]
     if missing:
         raise FileNotFoundError(f"缺少关键状态文件: {', '.join(missing)}")
+    # U13/F05：状态 JSON 损坏时 **不得** 建包——否则会把一份"看起来完整"的
+    # 坏快照发布出去，之后再用它覆盖好备份。
+    health = state_json_health(data_dir)
+    if health["corrupt"]:
+        raise ValueError("状态 JSON 损坏，拒绝创建恢复包: " + ", ".join(health["corrupt"]))
+    epoch_id = uuid.uuid4().hex
+    epoch_started_ms = int(time.time() * 1000)
 
     target_root = Path(output_dir).resolve()
     target_root.mkdir(parents=True, exist_ok=True)
@@ -123,6 +138,7 @@ def _create_locked_bundle(root: Path, output_dir: Path) -> Path:
             "size": len(db_bytes),
             "sha256": _sha256(db_bytes),
             "schema_version": schema_version,
+            "snapshot_at_ms": int(time.time() * 1000),
         }
         for name in REQUIRED_STATE_FILES + OPTIONAL_STATE_FILES:
             source = data_dir / name
@@ -136,8 +152,14 @@ def _create_locked_bundle(root: Path, output_dir: Path) -> Path:
             files["risk_profile_lock"] = {
                 "path": "risk_profile.lock.json", "size": len(lock_data),
                 "sha256": _sha256(lock_data),
+                "snapshot_at_ms": int(time.time() * 1000),
             }
         capital = json.loads((data_dir / "capital_state.json").read_text(encoding="utf-8"))
+        snapshot_finished_ms = int(time.time() * 1000)
+        # U13：epoch 块声明"DB 与 JSON 属于同一快照窗口"。bundle_schema 保持 2
+        # （向后兼容既有恢复工具与回归），epoch 为**追加**字段：旧消费者忽略它，
+        # 新消费者（restore 脚本 / core.ops.recovery）据此判定同 epoch。
+        # 本脚本在持有单实例锁期间运行，窗口跨度天然极小。
         manifest = {
             "bundle_schema": 2,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -145,6 +167,19 @@ def _create_locked_bundle(root: Path, output_dir: Path) -> Path:
             "environment": capital.get("mode"),
             "capital_anchor": capital.get("anchored_at"),
             "service_was_stopped": True,
+            "writer_stopped": True,
+            "epoch": {
+                "epoch_id": epoch_id,
+                "snapshot_started_ms": epoch_started_ms,
+                "snapshot_finished_ms": snapshot_finished_ms,
+                "environment": capital.get("mode"),
+                "profile": "",
+                "account_ref": "",
+                "runtime_instance_id": "",
+                "generation_id": "",
+                "db_schema_version": schema_version,
+                "tolerance_ms": 5000,
+            },
             "files": files,
         }
         manifest_path = stage / "manifest.json"

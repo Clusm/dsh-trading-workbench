@@ -29,8 +29,18 @@ from core.windows_service import (  # noqa: E402
 
 
 def _load_config(path: Path) -> WindowsServiceConfig:
-    """加载正式配置并要求本机解释器、入口和工作目录存在。"""
-    return load_windows_service_config(path, project_root=PROJECT_ROOT, require_files=True)
+    """加载正式配置并要求本机解释器、入口和工作目录存在。
+
+    KI02：解释器按"可注入 + 可回退 + 记录来源"解析（``MTA_PYTHON`` 优先），
+    与 ``validate_windows_service_plan.py`` 使用同一 ``resolve_python_executable``
+    口径——安装期与运行期不会解析出两个不同的解释器。
+    """
+    config = load_windows_service_config(path, project_root=PROJECT_ROOT, require_files=True)
+    if config.python_executable_from_fallback:
+        # 不静默：回退解释器会影响"到底是哪份运行时在跑"的复盘判断。
+        print(f"warn: python_executable 回退到 {config.python_executable} "
+              f"(source={config.python_executable_source})", flush=True)
+    return config
 
 
 def _configure_log(config: WindowsServiceConfig) -> Any:
@@ -67,6 +77,9 @@ def _run_application(config: WindowsServiceConfig, stop_event: threading.Event) 
         interval_minutes=config.interval_minutes,
         no_autostart=config.no_autostart,
         stop_event=stop_event,
+        # decl-6：把托管配置里显式声明的 profile 传给统一入口，让 SCM 托管的
+        # 进程状态根/端口与配置解析结果一致（dual-profile 托管的关键一环）。
+        profile=config.profile,
     )
 
 

@@ -128,15 +128,50 @@ try:
         wrong_entry_blocked = True
     check("非统一Web入口被拒绝", wrong_entry_blocked)
 
-    print("\n[3] 配置文件不完整时安装前失败")
+    print("\n[3] 解释器解析（KI02：可注入/可回退）与配置不完整时安装前失败")
+    # KI02 回归：配置里的 `.venv/...` 是**相对代码根**的路径。把同一份配置放到
+    # 没有 `.venv` 的目录（worktree / 只读发布目录 / CI 检出）时，旧实现直接
+    # ValueError 并中止整条离线回归。现在改为"可注入 + 可回退 + 记录来源"：
+    # 回退成功但必须能被审查看到（source != "config"）。
     missing = write_config(tmp / "missing")
-    (missing.parents[1] / ".venv" / "Scripts" / "python.exe").unlink()
+    interpreter = missing.parents[1] / ".venv" / "Scripts" / "python.exe"
+    interpreter.unlink()
+    fallback = load_windows_service_config(
+        missing, project_root=missing.parents[1], require_files=True)
+    check("解释器缺失时回退而不是硬失败（KI02）", fallback.python_executable.is_file())
+    check("回退来源被记录（非 config）", fallback.python_executable_from_fallback
+          and fallback.python_executable_source != "config")
+    injected = load_windows_service_config(
+        missing, project_root=missing.parents[1], require_files=True,
+        python_executable=sys.executable)
+    check("解释器可显式注入", injected.python_executable == Path(sys.executable).resolve()
+          and injected.python_executable_source == "argument")
     try:
-        load_windows_service_config(missing, project_root=missing.parents[1], require_files=True)
-        missing_blocked = False
+        load_windows_service_config(missing, project_root=missing.parents[1],
+                                    require_files=True, strict_python=True)
+        strict_blocked = False
     except ValueError:
-        missing_blocked = True
-    check("解释器缺失时require-files失败", missing_blocked)
+        strict_blocked = True
+    check("strict 模式下解释器缺失仍然失败（fail-closed 未被削弱）", strict_blocked)
+    interpreter.write_bytes(b"fixture")
+    declared = load_windows_service_config(
+        missing, project_root=missing.parents[1], require_files=True)
+    check("声明路径存在时来源为 config", declared.python_executable_source == "config"
+          and declared.python_executable == interpreter.resolve())
+    broken = load_windows_service_config(
+        missing, project_root=missing.parents[1], require_files=False,
+        python_executable="/nonexistent/python.exe")
+    check("require-files=False 不做存在性解析（发布包语义不变）",
+          broken.python_executable == interpreter.resolve())
+    (missing.parents[1] / "scripts" / "run_web.py").unlink()
+    try:
+        load_windows_service_config(missing, project_root=missing.parents[1],
+                                    require_files=True)
+        entry_blocked = False
+    except ValueError:
+        entry_blocked = True
+    check("入口缺失时require-files失败", entry_blocked)
+    (missing.parents[1] / "scripts" / "run_web.py").write_text("# fixture", encoding="utf-8")
 
     print("\n[4] 日志达到上限时有限轮转")
     rotate_path = write_config(tmp / "rotate", log_max_bytes=1024 * 1024)

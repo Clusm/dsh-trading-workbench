@@ -1,0 +1,120 @@
+diff --git a/src/core/config_loader.py b/src/core/config_loader.py
+index 9a06322..53f0f1e 100644
+--- a/src/core/config_loader.py
++++ b/src/core/config_loader.py
+@@ -12,8 +12,8 @@ from dotenv import load_dotenv
+ from core.runtime_identity import (
+     collect_effective_config,
+     collect_source_config_files,
+-    verify_environment_state_root,
+ )
++from core.runtime_paths import RuntimePaths, resolve_state_base
+ 
+ 
+ #: 原因码 / 异常标识：未显式选择 profile 却要跑实盘。
+@@ -56,26 +56,51 @@ class Settings:
+                     **self.raw_settings.get("channels", {}), **override,
+                 }
+ 
++    @property
++    def state_base(self) -> Path:
++        """状态基座（data 根的父级）：``MTA_STATE_ROOT`` / ``paths.state_root`` 优先。
++
++        U13：把状态根从代码根解耦是"换代码根不改状态根"（R12/F18）的唯一开关。
++        **未声明时**退回 ``<project_root>/data``，与升级前逐字节一致。
++        """
++        declared = (self.raw_settings.get("paths") or {}).get("state_root")
++        base, _declared, _origin = resolve_state_base(
++            self.project_root, declared=declared, env=os.environ,
++        )
++        return base
++
++    @property
++    def runtime_paths(self) -> RuntimePaths:
++        """RuntimePaths 视图（U13 的路径单一事实源）。"""
++        return RuntimePaths.from_settings(self)
++
+     def runtime_path(self, relative: str) -> Path:
+-        """实盘状态固定写入 data/live；Demo 保留原账本，禁止路径逃逸。
++        """profile 感知的状态路径；实盘写入 ``<state_base>/live``，禁止路径逃逸。
+ 
+         未指定 profile 的旧调用方保持原语义。显式 profile 在启动时冻结，
+         不随后续环境变量或控制台修改而切换，避免同一账本绑定另一账户。
++
++        U13：基座由 :attr:`state_base` 决定，因此声明 ``MTA_STATE_ROOT`` 后
++        换个代码目录启动仍指向同一份状态；未声明时行为与升级前一致。
+         """
+-        path = self.project_root / relative
+-        if self.profile_name is None:
+-            return path
+-        base = (self.project_root / "data").resolve()
+-        resolved = path.resolve()
+-        if not resolved.is_relative_to(base):
+-            raise ValueError(f"运行状态路径必须位于 data 内: {relative}")
+-        suffix = resolved.relative_to(base)
+-        if suffix.parts and suffix.parts[0] == "live":
++        rel = str(relative).replace("\\", "/").lstrip("/")
++        data_rel = str(self.raw_settings.get("paths", {}).get("data_dir", "data")) \
++            .replace("\\", "/").strip("/")
++        if data_rel and rel == data_rel:
++            suffix = ""
++        elif data_rel and rel.startswith(data_rel + "/"):
++            suffix = rel[len(data_rel) + 1:]
++        else:
++            suffix = rel
++        parts = Path(suffix).parts if suffix else ()
++        if ".." in parts:
++            raise ValueError(f"运行状态路径不得逃出状态根: {relative}")
++        if parts and parts[0] == "live" and self.profile_name is not None:
+             raise ValueError("配置使用公共相对路径，由 profile 自动分配 live 子目录")
+-        target = base / "live" / suffix if self.profile_name == "live" else resolved
+-        if self.profile_name == "live" and not target.resolve().is_relative_to(base / "live"):
+-            raise ValueError("实盘目录不能通过链接指向其他账本")
+-        return target
++        base = self.state_base
++        if self.profile_name == "live":
++            return (base / "live" / suffix) if suffix else (base / "live")
++        return (base / suffix) if suffix else base
+ 
+     def assert_environment_matches_state_root(self, environment: str | None) -> None:
+         """校验 ``environment`` 与状态根是否一致（fail-closed）。
+@@ -96,10 +121,11 @@ class Settings:
+         text = str(environment or "").strip().lower()[:32]
+         if text != "live":
+             return
+-        data_rel = str(self.raw_settings.get("paths", {}).get("data_dir", "data"))
+-        reasons = verify_environment_state_root(
+-            text, data_rel, profile=self.profile_name, project_root=self.project_root,
+-        )
++        # 判定仍只由 U15 的 verify_environment_state_root 产出；这里改走
++        # RuntimePaths 以便把**显式声明的状态根**（MTA_STATE_ROOT /
++        # paths.state_root）一并交给判定源，否则"声明了独立状态根"的实盘
++        # 会被误判成 LIVE_SHARED_STATE_ROOT。
++        reasons = self.runtime_paths.validate(text)
+         if reasons:
+             raise LiveWithoutProfileStateRootError(
+                 f"{LIVE_WITHOUT_PROFILE_STATE_ROOT}: environment={text} "
+@@ -140,8 +166,21 @@ class Settings:
+ 
+     @property
+     def rate_limit_state(self) -> Path:
+-        """沿用原公共文件，保留升级前已登记的冷却及跨进程额度。"""
+-        return self.project_root / "data" / "public_rate_limit_state.json"
++        """限流冷却状态：跨 profile 共享，且**不随代码根漂移**（F08）。
++
++        U13：规范位置是 ``state_base/shared/public_rate_limit_state.json``
++        （``RuntimePaths.shared_egress_root``，demo 与 live 必须解析到同一个
++        目录）。既有安装的旧文件 ``<project_root>/data/public_rate_limit_state.json``
++        仍被**优先读取**——否则升级瞬间就会丢掉已登记的 418/429 冷却。
++        """
++        paths = self.runtime_paths
++        legacy = paths.legacy_rate_limit_state
++        canonical = paths.rate_limit_state
++        if canonical.exists():
++            return canonical
++        if legacy.exists():
++            return legacy
++        return canonical
+ 
+     @property
+     def stage(self) -> str:

@@ -377,6 +377,9 @@ def _event_type_cn(value: Any) -> str:
         "mode_switch_saved": "执行模式已保存",
         "release_manifest_write_error": "发布清单写入失败",
         "release_observation_error": "发布观察证据写入失败",
+        # U13：恢复门禁与运行代事件（操作员必须能看到"为什么停止开新仓"）。
+        "recovery_reconcile_required": "恢复后待对账（已停新仓）",
+        "run_generation_error": "运行代持久化失败",
     }.get(str(value), str(value))
 
 def _agent_cn(value: Any) -> str:
