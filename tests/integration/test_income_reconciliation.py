@@ -18,7 +18,6 @@ sys.path.insert(0, str(ROOT))
 from core.contracts import IncomeEvent, idempotency_key_text  # noqa: E402
 from exchange.income_reconciliation import (  # noqa: E402
     DEFAULT_PAGE_LIMIT,
-    INCOME_TYPE_COMMISSION,
     REASON_PAGE_NOT_SORTED,
     REASON_PAGINATION_STALLED,
     InvalidIncomeRow,
@@ -165,7 +164,6 @@ def test_idempotency_and_pagination(fx: dict) -> dict:
     print("\n[2] 分页完整性 + 幂等键 (environment, account_ref, income_type, tran_id)")
     window = fx["inputs"]["windows"][0]
     sync = _sync_window(window)
-    golden = fx["derived_golden"]
 
     check("页数 = 3（短页终止）", sync.pages_fetched == 3, sync.pages_fetched)
     check("W1 coverage COMPLETE", sync.coverage.coverage_status == "COMPLETE",

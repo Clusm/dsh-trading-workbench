@@ -235,7 +235,6 @@ def test_query_review_library_read_only() -> None:
 
     before = LESSONS_FILE.exists()
     writes: list[str] = []
-    real_write_text = Path.write_text
 
     def _forbid(self, *args, **kwargs):
         writes.append(str(self))
