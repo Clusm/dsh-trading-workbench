@@ -345,7 +345,9 @@
         "src/agents/review.py",
         "src/agents/calibration.py",
         "src/agents/lessons.py",
-        "tests/integration/test_review_statistics.py"
+        "tests/integration/test_review_statistics.py",
+        "scripts/smoke_u01_income.py",
+        "scripts/smoke_u01_review_statistics.py"
       ],
       "contracts": [
         "K01",
@@ -488,7 +490,9 @@
         "src/agents/research_evidence.py",
         "tests/integration/test_research_evidence.py",
         "tests/fixtures/evidence/",
-        "tests/integration/test_market_evidence_quality.py"
+        "tests/integration/test_market_evidence_quality.py",
+        "scripts/smoke_u03_research_evidence.py",
+        "scripts/smoke_u03_market_evidence_quality.py"
       ],
       "contracts": [
         "K01",
@@ -549,6 +553,20 @@
             "P2-1 status 可为 VALID 而 accepted=False（字段自相矛盾）"
           ],
           "positives": "进行中 bar 哨兵不入事实、未来 bar 改判 live、15m 不冒充 4h、now_ms 必传、TTL 等号保守、真实 0 保留 '0' 均经独立复现；3 个补丁 APPLIES_CLEAN"
+        },
+        {
+          "type": "review_r1_B",
+          "candidate": "3f49e03",
+          "verdict": "CHANGES_REQUESTED",
+          "counts": "P0 x1 / P1 x3 / P2 x5 / P3 x4",
+          "archived_path": "docs/dispatch/reviews/U03/3f49e03/B_r1.md",
+          "key_findings": [
+            "P0 新增 scripts/smoke_u03_*.py 未登记 -> run_offline_regression.py 清单门禁直接红（编排者已复现 RuntimeError）",
+            "P1 未固定身份 fail-open: identity=None 时 ok=True/accepted_ids 非空/drop_intent_ids=[]，与固定身份同形只差 identity_pinned 布尔；接线补丁正写死 identity=None 且不阻断",
+            "P1 畸形 claim 元素使门禁崩溃（claims=[None]/['abc']/[123] -> TypeError/ValueError, :1095-1097）",
+            "P1 binding_id/evidence_id 全不落地、放行路径零审计；同周期同币两单 evidence_id 完全相同"
+          ],
+          "positives": "跨周期隔离、数值矛盾拒绝、rules 必传、时效过期均成立；S01 补丁可应用且无破坏消费者"
         }
       ],
       "blockers": [],
@@ -2186,6 +2204,14 @@
         "owner": "I",
         "blocks": "无（P3，构造性极强，方向仍 fail-closed）",
         "note": "建议补 README §12 L21 登记或加 RecursionError 守卫；不得静默忽略"
+      },
+      {
+        "id": "W1-MANIFEST-TRANSIENT",
+        "title": "U01/U03 作者 head 上 smoke 清单门禁为红（scripts/smoke_*.py 未登记）",
+        "status": "OWNED_BY_I",
+        "owner": "I",
+        "blocks": "无（集成时原子解决）",
+        "note": "U01/U03 作者按项目约定把入口命名为 scripts/smoke_*.py，触发 _validate_smoke_manifest() 强制登记；而 run_offline_regression.py 属 I 独占。登记必须与冒烟脚本同批落地，否则会从'未登记'翻转为'清单引用不存在'。已据此把 4 个脚本路径补入 U01/U03 owned_paths。**这是 I 的集成动作，不是作者缺陷；不得因此要求作者返工。** U15 用 tests/acceptance/*.py 命名，未触发该门禁。"
       }
     ],
     "contract_candidate": "71f8109",
