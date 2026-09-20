@@ -32,9 +32,13 @@ from core.runtime_identity import (  # noqa: E402
     ENVIRONMENT_OVERRIDE_WHITELIST,
     EXECUTION_PROFILE_NOT_DECLARED,
     EXECUTION_SCOPE_UNLOCKED,
+    FALLBACK_PROVIDER_UNRECOGNISED,
     IDENTITY_BINDING_UNPROVEN,
     IDENTITY_MALFORMED,
+    PROVIDER_CAPABILITY_UNPROVEN,
+    PROVIDER_UNAVAILABLE,
     READINESS_UNPROVEN,
+    RUNTIME_GENERATION_UNPROVEN,
     RUNTIME_GENERATION_MALFORMED,
     SCOPE_HASH_MISMATCH,
     SCOPE_HASH_UNBOUND,
@@ -606,6 +610,101 @@ def check_mock_is_visible_and_blocking() -> None:
                   wb_demo.route, mock=False, execution_mode="live", provider="workbuddy"))
 
 
+NESTED_SECRET = "sk-nested-NEVER-LEAK-0002"
+
+
+def check_provider_evidence_and_fallback() -> None:
+    """r2 P1-1/P1-4/P1-6：递归敏感过滤、provider 能力证据、备用路由不静默。"""
+    # ① 嵌套敏感键不得进入 profile_overrides / 身份哈希 / as_dict（C P1-1）
+    leaked = resolve_model_route(
+        raw_settings=SETTINGS, raw_agents=AGENTS, env={},
+        credentials_present={"SENSENOVA_API_KEY": True}, execution_mode="demo",
+        profile_overrides={"llm": {"api_key": NESTED_SECRET, "model": "m"}})
+    blob = json.dumps(leaked.as_dict(), ensure_ascii=False, sort_keys=True)
+    check("nested-secret-not-in-model-route",
+          NESTED_SECRET not in blob
+          and sensitive_paths(leaked.route.as_payload()) == []
+          and leaked.route.profile_overrides["profile"] == {"llm": {"model": "m"}},
+          str(leaked.route.profile_overrides))
+    check("nested-secret-drop-is-counted",
+          any(path.endswith("llm.api_key") for path in leaked.dropped_overrides),
+          str(leaked.dropped_overrides))
+
+    # ② WorkBuddy：能力未声明即阻断，且不得写伪证据
+    wb_unknown = resolve_model_route(
+        raw_settings=SETTINGS, raw_agents=AGENTS,
+        env={"MTA_AI_DECISION_PROVIDER": "workbuddy"}, credentials_present={},
+        execution_mode="live")
+    check("workbuddy-capability-unproven-blocks",
+          PROVIDER_CAPABILITY_UNPROVEN in wb_unknown.blockers)
+    check("workbuddy-no-fake-credential-evidence",
+          wb_unknown.route.profile_overrides.get("mock_source") != "credential_present"
+          and wb_unknown.provider_evidence == "unproven",
+          str(wb_unknown.as_dict()))
+    wb_absent = resolve_model_route(
+        raw_settings=SETTINGS, raw_agents=AGENTS,
+        env={"MTA_AI_DECISION_PROVIDER": "workbuddy"}, credentials_present={},
+        execution_mode="live", provider_available={"workbuddy": False})
+    check("workbuddy-declared-unavailable-blocks",
+          PROVIDER_UNAVAILABLE in wb_absent.blockers
+          and wb_absent.provider_evidence == "declared_unavailable")
+    wb_ok = resolve_model_route(
+        raw_settings=SETTINGS, raw_agents=AGENTS,
+        env={"MTA_AI_DECISION_PROVIDER": "workbuddy"}, credentials_present={},
+        execution_mode="live", provider_available={"workbuddy": True})
+    check("workbuddy-declared-available-allows",
+          wb_ok.blockers == () and wb_ok.provider_evidence == "declared_available"
+          and not wb_ok.mock, str(wb_ok.as_dict()))
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = make_source_root(Path(raw))
+        live_env = {"EXECUTION_MODE": "live", "MTA_AI_DECISION_PROVIDER": "workbuddy"}
+        unproven_bundle = collect_runtime_identity(
+            tmp, environment="live", runtime_instance_id="rt-test", profile="live",
+            execution_mode="live", env=live_env, credentials_present={},
+            raw_settings=SETTINGS, raw_agents=AGENTS)
+        proven_bundle = collect_runtime_identity(
+            tmp, environment="live", runtime_instance_id="rt-test", profile="live",
+            execution_mode="live", env=live_env, credentials_present={},
+            provider_available={"workbuddy": True},
+            raw_settings=SETTINGS, raw_agents=AGENTS)
+        check("workbuddy-live-blocks-entry-without-evidence",
+              not unproven_bundle.entry_allowed
+              and PROVIDER_CAPABILITY_UNPROVEN in unproven_bundle.blockers,
+              str(unproven_bundle.blockers))
+        check("workbuddy-live-allows-entry-with-evidence",
+              proven_bundle.entry_allowed, str(proven_bundle.blockers))
+
+    # ③ 备用 provider 不认识 → 原因码；非 ai_trader 不构造备用（C P1-4/P1-6）
+    dash = {"EXECUTION_MODE": "live", "MTA_AI_DECISION_FALLBACK_PROVIDER": "anthropic",
+            "ANTHROPIC_API_KEY": "present"}
+    unknown_fb = resolve_model_route(raw_settings=SETTINGS, raw_agents=AGENTS, env=dash,
+                                     credentials_present={"SENSENOVA_API_KEY": True},
+                                     execution_mode="live")
+    check("unrecognised-fallback-provider-is-not-silent",
+          FALLBACK_PROVIDER_UNRECOGNISED in unknown_fb.blockers
+          and tuple(unknown_fb.route.fallback_routes) == ()
+          and unknown_fb.sources["fallback"].startswith("unrecognised-provider"),
+          str(unknown_fb.sources))
+    analyst = {"EXECUTION_MODE": "live", "MTA_AI_DECISION_FALLBACK_PROVIDER": "opencode",
+               "OPENCODE_MODEL": "union-alpha", "OPENCODE_BASE_URL": "https://opencode.ai/zen/v1",
+               "OPENCODE_API_KEY": "present"}
+    analyst_route = resolve_model_route(raw_settings=SETTINGS, raw_agents=AGENTS, env=analyst,
+                                        credentials_present={"SENSENOVA_API_KEY": True},
+                                        agent_name="market_analyst", execution_mode="live")
+    check("no-fallback-for-non-ai-trader",
+          tuple(analyst_route.route.fallback_routes) == ()
+          and analyst_route.sources["fallback"] == "skipped:agent-not-ai-trader"
+          and analyst_route.blockers == (), str(analyst_route.sources))
+    # 调用方显式声明备用凭据缺失 → 结构化拒绝（不再只有 env 一条判定路径）
+    expect_raises("fallback-declared-unavailable-rejected", (FallbackRouteError,),
+                  resolve_model_route, raw_settings=SETTINGS, raw_agents=AGENTS,
+                  env=analyst,
+                  credentials_present={"SENSENOVA_API_KEY": True, "OPENCODE_API_KEY": False},
+                  execution_mode="live")
+    check("fallback-opencode-explicitly-declared-path", True,
+          "credentials_present 优先于 env 缺省")
+
+
 def check_mock_blocks_new_entry_via_u02_gate() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = make_root(Path(raw))
@@ -977,6 +1076,7 @@ def main() -> int:
     check_defaults_are_not_effective_values()
     check_model_route_priority()
     check_mock_is_visible_and_blocking()
+    check_provider_evidence_and_fallback()
     check_mock_blocks_new_entry_via_u02_gate()
     check_gate_is_fail_closed()
     check_unknown_mode_is_strictest()

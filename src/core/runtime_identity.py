@@ -614,6 +614,11 @@ class ResolvedModelRoute:
     execution_mode: str | None
     sources: Mapping[str, str]
     blockers: tuple[str, ...] = ()
+    #: 被递归丢弃的 profile 覆盖键路径（命中敏感标记）；只记路径不记值。
+    dropped_overrides: tuple[str, ...] = ()
+    #: provider 可用性证据：``unproven`` / ``declared_available`` /
+    #: ``declared_unavailable``（WorkBuddy 依赖本机 CLI runtime，不是 API key）。
+    provider_evidence: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -623,6 +628,8 @@ class ResolvedModelRoute:
             "execution_mode": self.execution_mode,
             "sources": dict(self.sources),
             "blockers": list(self.blockers),
+            "dropped_overrides": list(self.dropped_overrides),
+            "provider_evidence": self.provider_evidence,
         }
 
     def identity_hash(self) -> str:
@@ -696,25 +703,55 @@ def spec_env(env: Mapping[str, str], cfg: Mapping[str, Any], name_key: str) -> s
     return _text(env.get(var))
 
 
+#: 备用路由状态（进 ``ResolvedModelRoute.sources["fallback"]``，禁止静默）。
+FALLBACK_STATUS_ABSENT = "absent"
+FALLBACK_STATUS_SKIPPED_AGENT = "skipped:agent-not-ai-trader"
+FALLBACK_STATUS_UNRECOGNISED = "unrecognised-provider"
+
+
 def _fallback_route(
     fallback_cfg: Mapping[str, Any],
     env: Mapping[str, str],
+    creds: Mapping[str, bool],
     *,
     provider: str,
-) -> tuple[Mapping[str, Any], ...]:
-    """按环境声明的 provider 构造备用路由；非法参数抛 ``FallbackRouteError``。"""
-    if provider != "opencode":
-        return ()
+    agent_name: str = "ai_trader",
+) -> tuple[tuple[Mapping[str, Any], ...], tuple[str, ...], str]:
+    """构造备用路由，返回 ``(routes, reason_codes, status)``。
+
+    - 未声明 provider → ``("", "absent")``；
+    - 声明的 provider 不认识（如 ``anthropic``）→ **不再静默当作“无备用”**：
+      返回 ``FALLBACK_PROVIDER_UNRECOGNISED`` 与状态码，让身份里如实记下
+      “运维声明了备用但运行时不支持”（DL01 故障降级承诺）；
+    - agent 不是 ``ai_trader`` → 不构造备用（与 ``src/llm/factory.py:61``
+      ``agent_name == "ai_trader" and fallback_provider == "opencode"`` 同语义），
+      状态记 ``skipped:agent-not-ai-trader``，避免身份多报不存在的备用；
+    - provider=opencode 但参数非法 → ``FallbackRouteError``（DL01 负例）。
+    """
+    text = _text(provider).lower()
+    if not text:
+        return (), (), FALLBACK_STATUS_ABSENT
+    if _text(agent_name) != "ai_trader":
+        return (), (), FALLBACK_STATUS_SKIPPED_AGENT
+    if text != "opencode":
+        return (), (FALLBACK_PROVIDER_UNRECOGNISED,), f"{FALLBACK_STATUS_UNRECOGNISED}:{text}"
+    key_env = _text(fallback_cfg.get("api_key_env")) or "OPENCODE_API_KEY"
+    declared = creds.get(key_env)
+    key_present = (bool(_text(spec_env(env, fallback_cfg, "api_key_env")))
+                   if declared is None else bool(declared))
     primary = {
         "provider": "opencode",
         "model": _text(spec_env(env, fallback_cfg, "model_env")) or _text(fallback_cfg.get("default_model")),
         "base_url": _text(spec_env(env, fallback_cfg, "base_url_env")) or _text(fallback_cfg.get("default_base_url")),
-        "credential_present": bool(_text(spec_env(env, fallback_cfg, "api_key_env"))),
+        "credential_present": key_present,
         "min_remaining_seconds": fallback_cfg.get("min_remaining_seconds"),
         "max_retries": fallback_cfg.get("max_retries"),
     }
     normalised = validate_fallback_route(primary)
-    return ({k: v for k, v in normalised.items() if k != "scheme"},)
+    return (
+        ({k: v for k, v in normalised.items() if k != "scheme"},), (),
+        f"declared:opencode:{normalised['model']}",
+    )
 
 
 def resolve_model_route(
@@ -727,6 +764,7 @@ def resolve_model_route(
     execution_mode: str | None = None,
     profile_overrides: Mapping[str, Any] | None = None,
     allow_workbuddy_in_demo: bool = False,
+    provider_available: Mapping[str, bool] | None = None,
 ) -> ResolvedModelRoute:
     """解析有效模型路由并给出 Mock 判定与阻断原因。
 
@@ -738,12 +776,34 @@ def resolve_model_route(
     3. effort：``agents.yaml[agent].reasoning_effort`` > ``settings.llm.reasoning_effort``
        > ``"default"``；
     4. fallback_routes：仅 ``MTA_AI_DECISION_FALLBACK_PROVIDER=opencode`` 且
-       agent 为 ai_trader 时构造；否则显式空元组（声明“无备用”）。
+       agent 为 ai_trader 时构造；未声明 → 显式空元组（声明“无备用”）；
+       声明了不认识的 provider → ``FALLBACK_PROVIDER_UNRECOGNISED``（不静默）；
     5. profile_overrides：由调用方传入的 profile 生效值 + provider/mock 判定证据。
+       **递归**丢弃命中敏感标记的键（嵌套 ``{"llm": {"api_key": ...}}`` 同样拒绝），
+       丢掉的键路径记入 ``dropped_overrides``。
 
     ``credentials_present`` 只接受 **布尔**（由调用方用 ``bool(os.getenv(name))``
     拍平），本函数不接受、也不会记录任何凭据值或凭据变量名。
+
+    ``provider_available`` 是调用方对 provider **能力**的显式声明（布尔映射），
+    用于 WorkBuddy：WorkBuddy 依赖本机 CLI runtime（``MTA_WORKBUDDY_CLI`` /
+    node），不是 API key，本模块在 ``project_root`` 之外不做文件系统探测，
+    因此**不猜**：未声明 → ``PROVIDER_CAPABILITY_UNPROVEN``（live/demo 阻断），
+    声明 False → ``PROVIDER_UNAVAILABLE``，声明 True → 记录 ``declared_available``。
+    绝不再把未验证的事实写进 ``mock_source="credential_present"``。
     """
+    if raw_settings is not None and not isinstance(raw_settings, Mapping):
+        raise MalformedInputError(["raw_settings must be a mapping"])
+    if raw_agents is not None and not isinstance(raw_agents, Mapping):
+        raise MalformedInputError(["raw_agents must be a mapping"])
+    if env is not None and not isinstance(env, Mapping):
+        raise MalformedInputError(["env must be a mapping"])
+    if credentials_present is not None and not isinstance(credentials_present, Mapping):
+        raise MalformedInputError(["credentials_present must be a mapping"])
+    if profile_overrides is not None and not isinstance(profile_overrides, Mapping):
+        raise MalformedInputError(["profile_overrides must be a mapping"])
+    if provider_available is not None and not isinstance(provider_available, Mapping):
+        raise MalformedInputError(["provider_available must be a mapping"])
     settings = raw_settings or {}
     agents = raw_agents or {}
     env_map = {str(k): str(v) for k, v in (env if env is not None else {}).items()}
@@ -761,6 +821,8 @@ def resolve_model_route(
     provider = "workbuddy" if (agent_name == "ai_trader" and decision_provider == "workbuddy") else "sensenova"
 
     sources: dict[str, str] = {}
+    provider_reasons: tuple[str, ...] = ()
+    provider_evidence = ""
     if provider == "workbuddy":
         wb = llm.get("workbuddy") or {}
         wb = wb if isinstance(wb, Mapping) else {}
@@ -768,6 +830,16 @@ def resolve_model_route(
         effort = _text(wb.get("effort")) or "max"
         sources.update(model="settings.llm.workbuddy.model", effort="settings.llm.workbuddy.effort")
         mock = False
+        # 能力证据必须由调用方声明：本模块不猜“本机 CLI 是否可用”。
+        available = None if provider_available is None else provider_available.get("workbuddy")
+        if available is None:
+            provider_evidence = "unproven"
+            provider_reasons = (PROVIDER_CAPABILITY_UNPROVEN,)
+        elif available:
+            provider_evidence = "declared_available"
+        else:
+            provider_evidence = "declared_unavailable"
+            provider_reasons = (PROVIDER_UNAVAILABLE,)
     else:
         model_env = _text(llm.get("model_env")) or "SENSENOVA_MODEL"
         agent_model = _text(agent_cfg.get("model"))
@@ -798,22 +870,41 @@ def resolve_model_route(
         elif not model or model.lower() == "none":
             sources["mock"] = "model_unset"
 
+    fallback_cfg = llm.get("decision_fallback") or {}
+    fallback_cfg = fallback_cfg if isinstance(fallback_cfg, Mapping) else {}
     fallback_provider = env_map.get("MTA_AI_DECISION_FALLBACK_PROVIDER", "").strip().lower()
-    fallback_routes = _fallback_route(llm.get("decision_fallback") or {}, env_map, provider=fallback_provider)
+    fallback_routes, fallback_reasons, fallback_status = _fallback_route(
+        fallback_cfg, env_map, creds, provider=fallback_provider, agent_name=agent_name)
+    sources["fallback"] = fallback_status
 
+    # mock_source 必须只陈述**真正发生过**的判定；WorkBuddy 全程不检查 API key，
+    # 因此不再复用 "credential_present" 这个标签（U15 r2 P1-6 伪证据）。
+    if sources.get("mock"):
+        mock_source = sources["mock"]
+    elif mock:
+        mock_source = "unknown"
+    elif provider == "workbuddy":
+        mock_source = "provider_local_cli"
+    else:
+        mock_source = "credential_present"
     overrides: dict[str, Any] = {
         "provider": provider,
         "mock": mock,
         "model_source": sources.get("model", ""),
         "effort_source": sources.get("effort", ""),
-        "mock_source": sources.get("mock", "credential_present" if not mock else "unknown"),
+        "mock_source": mock_source,
+        "fallback_status": fallback_status,
     }
+    if provider_evidence:
+        overrides["provider_evidence"] = provider_evidence
     if _text(execution_mode):
         overrides["execution_mode"] = _text(execution_mode).lower()
-    profile_effective = {
-        str(key): value for key, value in dict(profile_overrides or {}).items()
-        if not is_sensitive_name(key)
-    }
+    override_dropped: list[str] = []
+    override_payloads: list[str] = []
+    profile_effective = _sanitise_source_payload(
+        dict(profile_overrides or {}), prefix="profile_overrides",
+        dropped=override_dropped, dropped_payloads=override_payloads,
+    )
     if profile_effective:
         overrides["profile"] = profile_effective
 
@@ -831,9 +922,15 @@ def resolve_model_route(
         mock_source=sources.get("mock"),
         allow_workbuddy_in_demo=allow_workbuddy_in_demo,
     )
+    # 备用路由不可用 / provider 能力未证明：与其它模型路由阻断同口径（paper 豁免）。
+    extra = (*provider_reasons, *fallback_reasons)
+    if extra and _text(execution_mode).lower() != "paper":
+        blockers = tuple(dict.fromkeys((*blockers, *extra)))
     return ResolvedModelRoute(
         route=route, provider=provider, mock=mock,
         execution_mode=execution_mode, sources=sources, blockers=blockers,
+        dropped_overrides=tuple(sorted(set(override_dropped))),
+        provider_evidence=provider_evidence,
     )
 
 
@@ -1463,6 +1560,7 @@ def collect_runtime_identity(
     execution_mode: str | None = None,
     env: Mapping[str, str] | None = None,
     credentials_present: Mapping[str, bool] | None = None,
+    provider_available: Mapping[str, bool] | None = None,
     raw_settings: Mapping[str, Any] | None = None,
     raw_agents: Mapping[str, Any] | None = None,
     agent_name: str = "ai_trader",
@@ -1526,6 +1624,7 @@ def collect_runtime_identity(
     route = resolve_model_route(
         raw_settings=raw_settings, raw_agents=raw_agents, env=env_map,
         agent_name=agent_name, credentials_present=credentials_present,
+        provider_available=provider_available,
         execution_mode=scope.mode, profile_overrides=effective.profile_overrides,
     )
     artifacts = collect_artifact_files(root, relatives=artifact_relatives)
