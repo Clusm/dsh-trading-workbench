@@ -17,6 +17,8 @@
       {
         "clientAlgoId": "SYNTH_SL_03",
         "algoId": "8001",
+        "symbol": "YYYUSDT",
+        "side": "SELL",
         "orderType": "STOP_MARKET",
         "positionSide": "LONG",
         "closePosition": true,
@@ -28,6 +30,8 @@
       {
         "clientAlgoId": "SYNTH_TP_03",
         "algoId": "8002",
+        "symbol": "YYYUSDT",
+        "side": "SELL",
         "orderType": "TAKE_PROFIT_MARKET",
         "positionSide": "LONG",
         "closePosition": false,
@@ -38,7 +42,7 @@
     ],
     "desired_after_partial_reduce": {"desired_sl": "190.00", "desired_tp": "220.00"},
     "removal_request": {"action": "MAINTAIN_PROTECTION", "remove_protection": true, "target_client_id": "SYNTH_SL_03"},
-    "place_failure_injection": {"fail_order_type": "STOP_MARKET", "effect": "新保护挂单失败时不得继续撤销旧保护"}
+    "place_failure_injection": {"fail_order_type": "TAKE_PROFIT_MARKET", "effect": "新保护挂单失败时不得继续撤销旧保护"}
   },
   "derived_golden": {
     "after_partial_reduce_to_2_0": {

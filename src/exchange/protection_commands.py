@@ -973,10 +973,13 @@ def plan_protection_refresh(
         same_type = [item for item in existing if item.order_type == order_type]
         kept = False
         for item in same_type:
+            # closePosition 型保护在触发时按 positionSide 全平，数量天然跟随
+            # 真实仓位；数量型保护必须 reduceOnly 且数量与仓位一致才算有效。
             qty_ok = item.close_position or (
                 item.qty is not None and quantities_equal(item.qty, target))
             price_ok = quantities_equal(item.trigger_price, price)
-            if item.reduce_only and qty_ok and price_ok and not kept:
+            has_reduce_semantics = item.reduce_only or item.close_position
+            if has_reduce_semantics and qty_ok and price_ok and not kept:
                 actions.append(ProtectionAction(
                     "KEEP", order_type, item.client_id, item.trigger_price,
                     item.qty, "MATCHES_REAL_POSITION"))
@@ -1089,7 +1092,8 @@ def can_cancel_protection(
         return True, "FLAT_CONFIRMED_CLEANUP"
     remaining = [
         item for item in protections
-        if item.client_id != target_client_id and item.reduce_only
+        if item.client_id != target_client_id
+        and (item.reduce_only or item.close_position)
     ]
     if not remaining:
         return False, REASON_LAST_PROTECTION
