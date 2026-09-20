@@ -885,6 +885,41 @@
           ],
           "patch_opinions": "order_outbox fill 幂等接线正确（同事务 applied_fill_ids），但 apply_fill_revision 状态兜底使第一笔成交必抛 STATUS_FILL_MISMATCH，且两个新方法无调用者；binance_futures'先挂新后撤旧'经独立验证确实无窗口期裸奔（唯一完全达成项），但丢掉逐条容错、_cancel_action 静默 skip 却被记为已撤；不抬 schema_version 理由成立（release_evidence:448 的 GO 门），建议写入契约文档；protection_mirror 三个 *_text 列只写不读",
           "positives": "模块本体质量高；三分量守恒与 Decimal 全程成立；未发现 P0"
+        },
+        {
+          "type": "author_fix_r2",
+          "head_commit": "cc6de61",
+          "commits": [
+            "083c16d",
+            "da3327f",
+            "cc6de61"
+          ],
+          "fixed": {
+            "P1-1 can_cancel_protection": "只认 flat_confirmed；未确认归零 -> FLAT_NOT_CONFIRMED（前 (True,'FLAT_CONFIRMED_CLEANUP') -> 后 (False,'FLAT_NOT_CONFIRMED')），与 plan_protection_refresh 同口径",
+            "P1-2 健康故障放行全平": "改白名单 FLAT_CLOSE_AUTHORIZED={PROTECTION}；前 PROTECTION_MIRROR_STALE/ALGO_ORDER_QUERY_FAILED/SOMETHING_NEW/HTTP_503/TIMEOUT/INSUFFICIENT_MARGIN 全 ALLOWED -> 后全 BLOCKED，仅 PROTECTION_FAILED 放行且 triggers_flat_close=True",
+            "P1-3 ProtectionSyncReasons": "按标的 + begin() 每轮复位；前 closes=0（裸仓）-> 后 closes=1",
+            "P1-4 apply_fill_revision": "状态由分量推导 + 接线；前第一笔成交 RAISED STATUS_FILL_MISMATCH -> 后 OK cumulative=0.0047 applied=['55501']",
+            "P1-5/_cancel_action": "逐条容错 + _exchange_decimal；未执行 -> cancel_failed/CANCEL_CALLBACK_NOT_EXECUTED",
+            "P2-6": "新增 mirrored_protection_views() 真实读取方"
+          },
+          "partial_misjudgement": "作者主张 A 的 N->N+1->N+2 顺序场景不可复现（AST 枚举全部 return 路径 + probe），真正可达的是同一实例跨标的/跨线程窗口；已修该窗口并把测试改为只替换交易所 I/O 边界、不注入字段。**待 Q r2 独立裁定**",
+          "登记项": "P2-A4/P3-3/P3-4/P3-6/P3-8 已登记（模块内注释含理由）",
+          "orchestrator_verified": {
+            "test_execution_faults": "exit 0（作者称 122/0）",
+            "smoke_u04_execution_faults": "exit 0",
+            "smoke_contracts_v3": "PASS 173/0",
+            "patch_apply_check": "4/4 OK",
+            "shared_contract_runner_untouched": true,
+            "patched_tree": "作者在实打补丁的集成树上跑出 133/0，MUST FIX 3/4 严格断言在真实集成路径通过"
+          },
+          "known_limits": [
+            "quantities_equal 1e-6 相对容差是否撞 step-size 离线不可判",
+            "status_counts_by_kind/unknown_orders_by_kind 仍无消费者（P3-6），方向保守",
+            "P2-A4/P3-8 为结构性不可达的回归护栏",
+            "补丁取消路径错误码与真实报文类型无回放数据"
+          ],
+          "rollback": "git revert cc6de61 da3327f 083c16d",
+          "suggestion_to_i": "把'可空向后兼容列不抬 schema_version'写进 docs/contracts/README.md §10.2 —— 与 U01 同类请求，I 决定不写冻结契约（见 CONTRACT-FREEZE-BOUNDARY）"
         }
       ],
       "blockers": [],
@@ -934,6 +969,16 @@
           ],
           "verdict": "CHANGES_REQUESTED",
           "reports_dir": "docs/dispatch/reviews/U04/8eb0480/"
+        },
+        {
+          "round": "r2",
+          "stage": "修复复验",
+          "candidate": "cc6de61",
+          "sessions": [
+            "Q (reviews/U04/R2/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U04/cc6de61/"
         }
       ],
       "qa_runs": []
