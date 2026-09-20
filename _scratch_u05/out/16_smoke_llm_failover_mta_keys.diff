@@ -1,0 +1,19 @@
+diff --git a/scripts/smoke_llm_failover.py b/scripts/smoke_llm_failover.py
+index 5870507..b8ead34 100644
+--- a/scripts/smoke_llm_failover.py
++++ b/scripts/smoke_llm_failover.py
+@@ -61,7 +61,13 @@ def main():
+         assert len(primary.calls) == len(fallback.calls) == 1
+         assert primary.calls == fallback.calls
+         assert fallback.calls[0][3]["deadline"] == deadline
+-        assert result["_mta"] == {"provider": "fallback", "fallback_used": True}
++        # U05/S02 之后 _mta 追加期限可观测字段（deadline_monotonic /
++        # deadline_remaining_ms）。此处不再做整字典相等断言（否则任何新增
++        # 可观测字段都会打断本冒烟），改为"关键事实 + 新增字段都存在"。
++        assert result["_mta"]["provider"] == "fallback"
++        assert result["_mta"]["fallback_used"] is True
++        assert "deadline_monotonic" in result["_mta"]
++        assert "deadline_remaining_ms" in result["_mta"]
+     for error in [*(status_error(code) for code in [400, 401, 403, 404, 409, 422]),
+                   ValueError("invalid"), LLMTimeBudgetExceeded("expired")]:
+         client, primary, fallback = pair(error)

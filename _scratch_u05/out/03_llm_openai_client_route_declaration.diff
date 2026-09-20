@@ -1,0 +1,70 @@
+diff --git a/src/llm/openai_compatible_client.py b/src/llm/openai_compatible_client.py
+index 04b80b2..5d5355d 100644
+--- a/src/llm/openai_compatible_client.py
++++ b/src/llm/openai_compatible_client.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ 
+ import os
+ import time
++from collections.abc import Callable
+ from typing import Any
+ 
+ import httpx
+@@ -72,6 +73,38 @@ class OpenAICompatibleLLMClient(LLMClient):
+         self._trust_env = os.getenv("MTA_NO_PROXY", "").strip().lower() not in {
+             "1", "true", "yes", "on",
+         }
++        #: 可选尝试观察器 ``observer(attempt, purpose, deadline, status) -> None``：
++        #: 每次真正发起 HTTP 尝试时调用一次，供执行侧落 K05 span、判"早返回"
++        #: 与跨进程额度（U05/S02、DL06）。观测器故障不得影响调用。
++        self.attempt_observer: Callable[[int, str, float | None, str | None], None] | None = None
++
++    @property
++    def route_declaration(self) -> dict[str, Any]:
++        """可被外部核对的**路由声明**（不含凭据原文，作用域是脱敏别名）。
++
++        执行侧用它与响应比对：``model`` 不一致且未声明为备用路由即
++        ``PARAMETER_INHERITANCE``；``provider_scope`` 缺失即
++        ``CROSS_PROCESS_QUOTA``（U05/S02 §3.3）。
++        """
++        return {
++            "client": self.name,
++            "model": self.model,
++            "base_url": self.base_url,
++            "purpose": self.purpose,
++            "provider_scope": self.provider_scope,
++            "max_retries": self.max_retries,
++            "timeout_seconds": self.timeout_seconds,
++        }
++
++    def _notify_attempt(self, attempt: int, purpose: str, deadline: float | None,
++                        status: str | None) -> None:
++        observer = self.attempt_observer
++        if observer is None:
++            return
++        try:
++            observer(attempt, purpose, deadline, status)
++        except Exception:  # noqa: BLE001 - 观测器故障不得影响模型调用
++            return
+ 
+     def _post(self, payload: dict[str, Any], *, deadline: float | None = None,
+               timeout_seconds: float | None = None,
+@@ -85,7 +118,9 @@ class OpenAICompatibleLLMClient(LLMClient):
+         for attempt in range(self.max_retries + 1):
+             remaining = None if deadline is None else deadline - time.monotonic()
+             if remaining is not None and remaining <= 0:
++                self._notify_attempt(attempt + 1, request_purpose, deadline, "deadline")
+                 raise LLMTimeBudgetExceeded("LLM total time budget exceeded")
++            self._notify_attempt(attempt + 1, request_purpose, deadline, None)
+             try:
+                 request_timeout = float(timeout_seconds or self.timeout_seconds)
+                 if remaining is not None:
+@@ -109,6 +144,8 @@ class OpenAICompatibleLLMClient(LLMClient):
+                             json=payload,
+                         )
+                     r.raise_for_status()
++                    self._notify_attempt(attempt + 1, request_purpose, deadline,
++                                         "http_%d" % r.status_code)
+                     if deadline is not None and time.monotonic() >= deadline:
+                         raise LLMTimeBudgetExceeded(
+                             "LLM total time budget exceeded during HTTP request"

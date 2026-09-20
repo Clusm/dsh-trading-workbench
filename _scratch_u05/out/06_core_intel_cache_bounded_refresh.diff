@@ -1,0 +1,69 @@
+diff --git a/src/core/intel_cache.py b/src/core/intel_cache.py
+index fc1a852..bcce8dc 100644
+--- a/src/core/intel_cache.py
++++ b/src/core/intel_cache.py
+@@ -1,10 +1,22 @@
+-"""市场/宏观/链上情报缓存：默认 1 小时刷新一次，避免每个 5 分钟决策循环重复抓取公开数据。"""
++"""市场/宏观/链上情报缓存：默认 1 小时刷新一次，避免每个 5 分钟决策循环重复抓取公开数据。
++
++U05/S03 增补（**不改动既有 TTL 语义**）：在单条 TTL 缓存之外提供
++:meth:`IntelCache.refresh_bounded`，把"HTTP 与摘要总预算 / 分源缓存 / 不阻塞
++管理"落到本进程缓存层。既有 ``get_or_refresh`` 行为保持原样，调用方按需选用。
++"""
+ from __future__ import annotations
+ 
+ import threading
+ import time
+ from typing import Any, Callable
+ 
++from core.decision_trace import (
++    BackgroundRefreshOutcome,
++    RefreshBudget,
++    SourceCache,
++    background_refresh,
++)
++
+ 
+ class IntelCache:
+     """进程内 TTL 缓存。
+@@ -17,6 +29,8 @@ class IntelCache:
+         self.default_ttl_seconds = float(ttl_seconds)
+         self._items: dict[str, dict[str, Any]] = {}
+         self._lock = threading.RLock()
++        #: 分源 TTL 缓存（U05/S03）：与整包 ``_items`` 分离，单源过期不牵连其它源。
++        self._source_cache = SourceCache()
+ 
+     def get_or_refresh(self, key: str, refresher: Callable[[], Any],
+                        ttl_seconds: float | None = None) -> Any:
+@@ -40,6 +54,31 @@ class IntelCache:
+     def clear(self) -> None:
+         with self._lock:
+             self._items.clear()
++            self._source_cache = SourceCache()
++
++    def refresh_bounded(self, sources: "list[str] | tuple[str, ...]",
++                        *, fetch: Callable[[str], Any], budget: RefreshBudget,
++                        summarize: Callable[[dict[str, Any]], Any] | None = None,
++                        source_cache: SourceCache | None = None,
++                        ) -> BackgroundRefreshOutcome:
++        """有界后台刷新（U05/S03）：总预算 / 分源缓存 / 给管理路径让路。
++
++        - 剩余预算不足以覆盖 ``budget.reserve_for_management_ms`` 时**立即让路**，
++          一次 ``fetch`` 都不发（长刷新不得拖住快循环，R22）；
++        - 分源 TTL 命中即复用（单源过期只重抓该源，不整包重抓）；
++        - HTTP 段耗尽后不再发起新的抓取，摘要段只在仍有预算时执行。
++
++        ``source_cache`` 缺省用本实例自带的 :class:`SourceCache`（跨 cycle 复用，
++        与 ``self._items`` 的单条 TTL 缓存互不影响）。
++        """
++        cache = source_cache or self._source_cache
++        return background_refresh(sources=sources, fetch=fetch, cache=cache,
++                                  budget=budget, summarize=summarize)
++
++    @property
++    def source_cache(self) -> SourceCache:
++        """分源缓存视图（ticker / mark_funding / open_interest 各自 TTL）。"""
++        return self._source_cache
+ 
+     def stats(self) -> dict[str, dict[str, Any]]:
+         with self._lock:
