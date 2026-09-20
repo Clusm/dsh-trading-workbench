@@ -68,13 +68,13 @@ def main() -> int:
     print(f"INFO round2 token={second} guard={g2}", flush=True)
     check("同名标的的第二轮退出不被永久吞掉", g2 is None, g2)
 
-    third = _new_round(broker)
+    _new_round(broker)
     g3 = broker._exit_idempotency_guard(
         manager, _Intent(qty=0.3), existing, "ai")
     print(f"INFO round3 partial guard={g3}", flush=True)
     check("部分平仓后的剩余退出仍可执行", g3 is None, g3)
 
-    same_round = _new_round(broker)
+    _new_round(broker)
     a = broker._exit_idempotency_guard(manager, _Intent(qty=0.5), existing, "ai")
     b = broker._exit_idempotency_guard(manager, _Intent(qty=0.5), existing, "ai")
     print(f"INFO same round: first={a} second={b}", flush=True)
