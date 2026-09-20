@@ -25,7 +25,7 @@
 | EF | U15 | `abf2eda` | **✅ INTEGRATED** | r1 E/B/C → r2 闭两 P0 → r2 复验剩 NEW-A → r3 修（`IDENTITY_GENERATION_MISMATCH`/409，无假阳性）→ **Q r3 = PASS-with-notes** → 合并 `5ffa54d` + 补丁 `2954dce`。**代码与已验证 head 逐字节一致（git diff 为空）**；69/69 非基线脚本 PASS。**U02 阻塞项**：账本 `account_ref=sha256(api_key)[:16]` 仍漂移 |
 | A | U01 | `fb12a38` | **✅ INTEGRATED** | r3 复验 PASS-with-notes：**05 补丁必需且正确**（168 行/9 文件逐条核对）；**全量 delta = ∅**（独立确认 `NEW=0 GONE=0`，两态唯一失败均 KI02）。I 应用 5 个补丁 + 原子登记两个 `smoke_u01_*` → 全量 **TOTAL=73 FAILED=1（仅 KI02）**。修复轮各关键项（`[9]` 真跑、content_hash 对 K03、重放不抹账）回归保持。**遗留 P3**：4 处文档内嵌断言仍写死 `current_schema_version()==16`（不参与 smoke 执行，故 delta 为空）→ `U01-R3-FU1` |
 | CD | U03 | `fb8ae5a` | **✅ INTEGRATED（接线暂缓）** | r3 复验 PASS → 集成时暴露"仅集成态可见"缺陷（测试读现网文件二次打补丁）→ r4 修好（两态均通过 + 行尾归一化、不削弱漂移检测），**真实集成树绿灯**。**但 U03 的 orchestrator 接线补丁使管线缺 pinned 身份时 fail-closed 拒绝全部开仓 → 既有 `smoke_p0b_loop.py` 与 `smoke_ui.py` 新增失败**（仅 U15 集成时两者均 PASS）。决策：**暂缓接线补丁**（保留模块 + S01 + 登记），撤销后两者恢复（28/0、52/0）。接线依赖 U15 身份接入管线 → 归 **U12 BUILD 联合候选**。 |
-| B | U04 | `f4e4663` | **r3 复验 CHANGES_REQUESTED → r4 修复中** | N1 **真闭合**（6 类绕过全挡）、断言非空转、**全量 delta=∅**。**但 N1 的修复引入新 P1（N6）**：`_component_status` 把"`_update` 先写 `status=FILLED`、成交未入账"的中间态当成 FILLED → `working,terminal=0,0` → 守恒违规 → **`X=FILLED` 帧的成交被静默丢弃**（"部分成交→全成" filled 停在 0.0105、"一笔全成" filled=0）。根因是**套件里没有 `X=FILLED` 帧用例**，故 154/0 未覆盖。另有 **N7（P2 未登记）**：`EXPIRED_IN_MATCH` 保留交易所别名致行无法重水化、无成交时留下 `working=0.02` 终态行。r4 要求：修 N6 + **补 `X=FILLED` 覆盖** + 处置 N7 + 如实登记 N2 残余 |
+| B | U04 | `8660c55` | **r4 修复完成 → 聚焦复验中** | r4 已修 **N6**（`FILLED` 必须由分量背书，否则退回推导）→ 两条路径 `filled=0.02/working=0/terminal=0.00/viol=()`；**补齐 `X=FILLED` 覆盖**（154→**167 通过/0 失败**，未修树 155/12 失败=非空转）；**N7 选择修**（`EXPIRED_IN_MATCH` 归一为词表内终态、可重水化、历史遗留行自愈）；**N2 残余如实写入测试注释**（结构断言挡不住"对象正确、读路径退化"，并发实测 6~20/20000 裸仓）。全量 delta = ∅ |
 
 **W1 出口状态**：**四条线作者全部交付**（U01/U03/U15/U04）；**U00/U01/U03/U15 已 INTEGRATED**（U03 的 orchestrator 接线暂缓，见 `W1-JOINT-WIRING`）；U04 r3 复验进行中。
 
@@ -34,7 +34,7 @@
 | 线 | 任务 | 分支/base | 状态 | 备注 |
 |---|---|---|---|---|
 | CD | U05 真实耗时/模型降级/决策原因 | `task/U05` @ `0e522b1` | **作者进行中** | 依赖 U00+U03 已满足；含 S02–S04、DL01/03/04/06/07；**KI01 归属本任务**（`factory.py:111` 误报）|
-| EF | U13 托管/单实例/备份恢复 | `task/U13` @ `0e522b1` | **作者进行中** | 依赖 U00+U15 已满足；**额外承担修复 KI02**（`config/windows_service.json` 硬编码 worktree 本地 `.venv` → 全量回归在 worktree 必中止）|
+| EF | U13 托管/单实例/备份恢复 | `task/U13` @ `0e522b1` | **作者已交付 → 初审 F 中** | head `bf4c0cc`（6 提交）；`test_supervision` 131 PASS/0；11 个补丁 `apply --check` 11/11。**KI02 已修**：`resolve_python_executable` 回退链 → worktree 内 `smoke_windows_service_plan` 19/0，全量回归不再中止（补丁应用态 **0 失败**）；**配置无需改动**（缺陷在解析层）。**偏差记录**：作者把 11 个共享文件改动提交进了自己分支（应只交补丁）|
 | B | U02 策略仓管理与有界退出 | — | 待派发 | 依赖 U00+U04+**U15**；U04 尚未 INTEGRATED |
 | CD | U06a / U08 | — | 待派发 | 线内串行：U05 → U06a → U08 |
 | EF | U14 / U10a | — | 待派发 | 线内串行：U13 → U14 → U10a |
