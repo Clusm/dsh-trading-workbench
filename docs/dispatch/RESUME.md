@@ -16,7 +16,18 @@
 - 已验收候选：`71f8109`（Q r5 复验 PASS-with-notes；与 tag 的差异仅为 dispatch 文档，`src/core/contracts` 与 `docs/contracts` 逐字节相同）
 - 集成区分支：`integration/unattended-v3` @ `ffdab44`（契约冻结后又有 1 个台账提交 `4fdc6bf`）
 - 四个实现线 worktree **已创建**（均从 `ffdab44`）：`mat-wt/A`(task/U01)、`mat-wt/B`(task/U04)、`mat-wt/CD`(task/U03)、`mat-wt/EF`(task/U15)
-- 当前步骤：**W1 四条线作者会话进行中**（U01 / U04 / U03 / U15，均为 claude-opus 作者会话）
+- 当前步骤：**W1 进行中**（U15 已交付并进入初审；U01/U04/U03 作者会话仍在运行）
+
+### W1 进度（每轮更新）
+
+| 线 | 任务 | 作者 head | 状态 | 备注 |
+|---|---|---|---|---|
+| EF | U15 | `a136cb5` | **READY_FOR_REVIEW** | 初审 E/B/C 已派发（`reviews/U15/{E,B,C}/r1`）；共享适配补丁文件补交中；`service.py` 接线未做 |
+| A | U01 | — | 作者进行中 | 已有 2 提交 + 未提交改动；含 `docs/dispatch/patches/U01/...`、`scripts/smoke_u01_*.py` |
+| B | U04 | — | 作者进行中 | 已有 4 提交 |
+| CD | U03 | — | 作者进行中 | 已有 1 提交；含 `s01_market_query_adaptation.patch` |
+
+**派发新任务时的强制要求（吸取 U15 首轮中断教训）**：提示词内联约束，只让它读契约实现与目标源文件；**必须**要求作者交付"完整 unified diff 文件"到 `docs/dispatch/patches/<ID>/<head>/`，而不是只在报告里文字描述。
 
 ### 事故记录
 - **2026-09-21 01:48 U15（EF 线）作者会话异常中断**：仅运行 2.6 分钟 / 34 次工具调用，返回的是半句话（"Now I have a full picture. Let me write the core module."），**未产出任何文件**（`mat-wt/EF` 工作树干净、无提交）。
