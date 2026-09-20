@@ -332,8 +332,8 @@
       "id": "U01",
       "title": "资金费流水与成本闭环",
       "owner_role": "A",
-      "actual_assignee": null,
-      "status": "PLANNED",
+      "actual_assignee": "U01 作者会话（A 角色）；经 r2(接续)/r3 修复",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -864,8 +864,8 @@
       "id": "U04",
       "title": "部分成交、保护和重放验收",
       "owner_role": "B",
-      "actual_assignee": "U04 作者会话（B 角色）",
-      "status": "READY_FOR_REVIEW",
+      "actual_assignee": "U04 作者会话（B 角色）；经 r2/r3 修复",
+      "status": "CHANGES_REQUESTED",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
