@@ -1,0 +1,164 @@
+U04 执行故障验收（离线；临时目录、假 Broker、无网络）
+临时数据目录: C:\Users\Tao\AppData\Local\Temp\mta-u04-exec-4r7x42n9
+
+[1] DC04 三分量守恒与终态迟到成交（F02/F21）
+  PASS  首笔部分成交后分数与状态与夹具一致
+  PASS  首笔后三分量守恒精确成立
+  PASS  首笔后无守恒/状态违规
+  PASS  撤单确认前 working 未提前计入 terminal
+  PASS  撤单确认后余量转入 terminal 且状态为 CANCELED
+  PASS  CANCELED 后迟到成交仍修订累计成交（终态可修正）
+  PASS  迟到成交被标记为 revision_only（只改事实不改状态）
+  PASS  迟到成交后三分量仍守恒
+  PASS  迟到成交推高 revision 序号
+  PASS  重复 fill_id 被幂等拒绝（不重复累计成交）
+
+[2] 0.01 -> 0.0047 的 Decimal 精度（禁止浮点近似）
+  PASS  浮点累减得不到精确余量（夹具陷阱成立）
+  PASS  Decimal 勾稽终态余量精确得到 0.0006
+  PASS  Decimal 勾稽精确得到 0.0053
+  PASS  成交数量用 Decimal 表示且无指数/尾零漂移
+  PASS  浮点数量入参被拒绝（fail-closed 到十进制文本）
+  PASS  四舍五入不会把 0.0047 归零
+
+[3] DC13 UNKNOWN 只查单、不重发、有界升级（F01）
+  PASS  503/响应丢失后进入 UNKNOWN
+  PASS  SUBMITTING 与 UNKNOWN 都不是成交状态
+  PASS  只按原 clientOrderId 查询（查询集合等于原 ID）
+  PASS  整个恢复过程没有任何提交调用
+  PASS  恢复后记录被采纳交易所回报
+  PASS  采纳回报的三分量与夹具一致
+  PASS  采纳回报的成交被确认为真实成交
+  PASS  查询预算耗尽转 MANUAL_RECOVERY 并告警
+  PASS  MANUAL_RECOVERY 仍阻断新开仓且禁止重发/换 ID
+  PASS  预算耗尽后记录仍保留且状态未被猜成终态
+  PASS  退避期内判定 BACKOFF 且仍禁止重发
+  PASS  到期后的查询入口是普通订单查询
+  PASS  人工收口不允许猜成 FILLED
+  PASS  假 Broker 的全平入口从未被调用
+  PASS  脏计数 'abc' 不抛异常且 fail-closed 到 MANUAL_RECOVERY
+  PASS  脏计数 '-1' 不抛异常且 fail-closed 到 MANUAL_RECOVERY
+  PASS  脏计数 '1e3' 不抛异常且 fail-closed 到 MANUAL_RECOVERY
+  PASS  十进制计数 '3.0' 被解析为 3 而不是抛 ValueError
+
+[4] F04 重启断点：SUBMITTING -> UNKNOWN，不重发（F04）
+  PASS  重启把悬空 SUBMITTING 转成 UNKNOWN 且仅一条
+  PASS  重启后只规划按原 ID 查单，不重发
+  PASS  同一 clientOrderId 被数据库幂等约束阻断再次提交
+
+[5] F03 保护随真实仓位更新、不撤最后一道保护（F03/F02）
+  PASS  真实仓位解析为 2.0 且方向为 LONG
+  PASS  保护目标数量随真实仓位变为 2.0
+  PASS  closePosition 型 SL 被保留（自动覆盖当前数量）
+  PASS  数量过期的 TP 被替换为新保护
+  PASS  旧 TP 被撤销
+  PASS  PLACE 严格排在 CANCEL 之前（先建新后撤旧）
+  PASS  计划无阻塞原因且可执行
+  PASS  拒绝撤销最后一道保护
+  PASS  未确认归零（position_flat_unconfirmed）不得撤掉最后一道保护、不得谎报已确认
+  PASS  未确认归零（position_flat_unconfirmed）与 plan_protection_refresh 同口径拒绝
+  PASS  确认归零（position_flat_unconfirmed）才允许清理且 reason 如实标注
+  PASS  未确认归零（position_flat_unconfirmed_zero_text）不得撤掉最后一道保护、不得谎报已确认
+  PASS  未确认归零（position_flat_unconfirmed_zero_text）与 plan_protection_refresh 同口径拒绝
+  PASS  确认归零（position_flat_unconfirmed_zero_text）才允许清理且 reason 如实标注
+  PASS  非布尔 flat_confirmed='false' 不得授权清理（fail-closed）
+  PASS  非布尔 flat_confirmed='true' 不得授权清理（fail-closed）
+  PASS  非布尔 flat_confirmed='0' 不得授权清理（fail-closed）
+  PASS  非布尔 flat_confirmed=1 不得授权清理（fail-closed）
+  PASS  非布尔 flat_confirmed=1.0 不得授权清理（fail-closed）
+  PASS  非布尔 flat_confirmed=[0] 不得授权清理（fail-closed）
+  PASS  非布尔 flat_confirmed=(0,) 不得授权清理（fail-closed）
+  PASS  非布尔 flat_confirmed={'a': 0} 不得授权清理（fail-closed）
+  PASS  镜像文本列优先于浮点原列被读取（精确路径成立）
+  PASS  文本列缺失时不静默接受浮点原值（仍拒绝浮点直传）
+  PASS  仓位归零未确认时不得清理保护
+  PASS  归零确认后允许清理遗留保护
+  PASS  成功路径先挂新后撤旧（调用顺序可复核）
+  PASS  成功路径确实挂新且撤旧各一次
+  PASS  撤旧回调未执行时记入 cancel_failed 而不是 canceled
+  PASS  新保护挂单失败时停止后续撤旧（cancel_skipped）
+
+[5b] 保护镜像与真实仓位口径一致（组合验证）
+  PASS  镜像识别出数量错配的 TP（5.0 != 2.0）
+  PASS  镜像判定该仓位保护覆盖不一致（需要刷新）
+
+[6] F21 普通命令与 Algo 命令分别持久化与查单（R07）
+  PASS  端点判定命令种类：普通
+  PASS  端点判定命令种类：Algo
+  PASS  端点缺失时按 clientAlgoId 兜底识别为 Algo
+  PASS  command_kind 与端点矛盾时拒绝该记录
+  PASS  未知端点不被默认当成普通订单
+  PASS  普通命令规划走 query_order
+  PASS  Algo 命令规划走 query_algo_order
+  PASS  分派查单只使用对应端点（无交叉调用）
+  PASS  普通命令按 symbol+clientOrderId 查询
+  PASS  Algo 命令只按 clientAlgoId 查询
+  PASS  查单过程零提交、零全平
+  PASS  两类命令都被各自端点收口为 NEW
+  PASS  覆盖报告按种类分开统计
+  PASS  Algo 未知命令保留可观测年龄
+  PASS  SUBMITTING 的保护命令不被声明为已覆盖
+  PASS  词表外状态按未决计入（fail-closed），不冒充已覆盖
+  PASS  已确认存在的保护命令（NEW）仍算覆盖
+  PASS  用普通订单记录声明 Algo 已覆盖被拒绝
+  PASS  普通订单记录可以支撑普通订单覆盖声明
+
+[6b] Algo 提交结果丢失后按 clientAlgoId 恢复且只 POST 一次
+  PASS  响应丢失后按 clientAlgoId 采纳交易所事实
+  PASS  Algo 恢复过程只 POST 一次
+  PASS  Algo 记录以 algoId 收口为 NEW
+
+[7] 请求成功 != 成交
+  PASS  仅有 orderId/状态 NEW 时判为已受理而非成交
+  PASS  终态 + 成交数量 + 可用成交价才算成交
+  PASS  成交价不可用时不得当成交（退回已受理并标注未确认）
+  PASS  部分成交被确认为真实成交且工作余量精确
+  PASS  CANCELED 带已确认成交时主分类可见且带 reason
+  PASS  CANCELED 零成交仍为 TERMINAL_UNFILLED 且无成交 reason
+  PASS  EXPIRED 带已确认成交时主分类可见且带 reason
+  PASS  EXPIRED 零成交仍为 TERMINAL_UNFILLED 且无成交 reason
+  PASS  拒绝回报携带成交时判为自相矛盾而不是静默丢弃成交
+  PASS  成交超过受理量时结构化拒绝
+
+[8] 健康故障不得触发全平、不改 pause/emergency
+  PASS  WS_DISCONNECT 不触发全平且不动控制位
+  PASS  QUERY_FAILED 不触发全平且不动控制位
+  PASS  HEALTH_DEGRADED 不触发全平且不动控制位
+  PASS  健康故障提议全平被拒绝
+  PASS  未登记的健康类/提交未知/未归类故障提议全平全部被拒（白名单 fail-closed）
+  PASS  白名单里只有已确证的保护失败
+  PASS  保护确证失败的全平被授权且审计计划如实记录 triggers_flat_close
+  PASS  推迟兜底平仓只认已确证的观测故障，空值/保护失败/提交未知一律照常平仓
+  PASS  超时映射为按原 ID 查单而不是全平
+  PASS  未识别故障 fail-closed 到人工复核且不被当成健康故障
+  PASS  已确证的保护失败属保护类而非健康类（不触发推迟平仓分支）
+  PASS  控制位在执行故障前后保持一致
+  PASS  控制位被改动时守护函数抛错
+  PASS  UNKNOWN 收口失败路径不改动控制位
+  PASS  查询失败时保持 UNKNOWN 且无提交
+
+[9] 执行命令分账列的幂等补齐（不抬升 schema 版本号）
+  PASS  补列前迁移链良构（自 1 起连续前缀、非空；上限不写死）
+  PASS  首次补齐同时覆盖两张表的列
+  PASS  第二次调用为空操作（幂等）
+  PASS  补列不新增迁移且不改变迁移版本集合（前后两次取数相等）
+  PASS  补列不抬升 schema 版本号（current_schema_version 前后相等）
+  PASS  旧行仍可读且新列为空（不重写历史数据）
+  PASS  旧行按端点回推命令种类（无需新列也能收口）
+  PASS  历史未知端点的命令种类判定 fail-closed（不默认成普通订单）
+  PASS  并发方已加好的列不计入本次返回值
+  PASS  本次无 DDL 时不替调用方提交未完成事务（rollback 仍能撤销）
+
+[10] 保护核验失败时的平仓路由：健康故障不平仓，保护缺口仍兜底平仓
+  PENDING  binance_futures 健康故障守护未安装（待 I 应用适配补丁）
+  PASS  修复前基线：查询失败无守护时仍兜底全平（对照用）
+  PASS  修复前基线：保护挂单失败仍兜底全平（对照用）
+  PASS  同步失败类别跨轮次不复位 -> 会抑制平仓（修复前语义，对照）
+  PASS  同步失败类别在轮次入口复位 -> 不再抑制平仓（修复后语义）
+  PASS  失败类别按标的隔离，不跨标的传染
+
+[11] 私有流成交落库与重启重放（补丁接线后启用）
+  PENDING  order_outbox 成交落库接线未安装（待 I 应用补丁）
+
+结果: 131 通过 / 0 失败
+U04 EXECUTION FAULTS OK
