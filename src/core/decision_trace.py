@@ -113,7 +113,12 @@ class UnknownReasonCode(ValueError):
 
 
 def normalise_reason_codes(codes: Iterable[str]) -> tuple[str, ...]:
-    """去重保序 + 逐码 fail-closed；空码与未登记码都拒绝。"""
+    """去重保序 + 逐码 fail-closed。
+
+    未登记码一律拒绝（:class:`UnknownReasonCode`）。**空白码按"未提供"丢弃**，
+    不抛异常——这是调用方的"这个槽位我没填"与 :class:`DecisionReason` 缺省语义
+    共用的表示；旧 docstring 声称"空码也拒绝"，与实现不符（B-r1 P3-2）。
+    """
     out: list[str] = []
     unknown: list[str] = []
     for raw in codes:
@@ -245,20 +250,63 @@ def classify_exception(exc: BaseException) -> DecisionReason:
     return DecisionReason(primary=REASON_VALIDATION_REJECTED, details=(detail,))
 
 
+def _evidence_gate_state(report: Any) -> tuple[bool | None, tuple[str, ...]]:
+    """读 U03 门禁结论：优先 ``decision_gate()``，退回 ``report.ok``。
+
+    返回 ``(ok, details)``。``ok is None`` 表示报告**没有**给出门禁结论 —— 此时
+    本层不猜（既不冒充"门禁通过"，也不擅自判失败）。门禁失败时的结构化线索
+    （身份未固定 / 被丢意图 / 逐意图拒绝码）一并回带，供审计区分"门禁没过"
+    与"某个源取不到"。
+    """
+    details: list[str] = []
+    ok: bool | None = None
+    gate = getattr(report, "decision_gate", None)
+    if callable(gate):
+        payload = gate()
+        if isinstance(payload, Mapping):
+            if "ok" in payload:
+                ok = bool(payload.get("ok"))
+            if payload.get("identity_pinned") is False and not payload.get("unpinned_allowed"):
+                details.append("gate:identity_unpinned")
+            dropped = payload.get("drop_intent_ids")
+            if isinstance(dropped, (list, tuple, set, frozenset)):
+                details.extend(f"gate:drop_intent:{item}" for item in sorted(map(str, dropped)))
+            reasons = payload.get("reasons")
+            if isinstance(reasons, Mapping):
+                for intent_id, codes in reasons.items():
+                    for code in sorted(map(str, codes or ())):
+                        details.append(f"gate:rejected:{intent_id}:{code}")
+        elif isinstance(payload, bool):
+            ok = payload
+    if ok is None:
+        raw = getattr(report, "ok", None)
+        if isinstance(raw, bool):
+            ok = raw
+    return ok, tuple(dict.fromkeys(details))
+
+
 def classify_evidence_report(report: Any) -> DecisionReason:
     """把 U03 逐意图证据报告映射成原因码（**不重复实现**证据判定）。
 
-    只消费 U03 已产出的结构化字段：``decision_gate()``、``rejected_intent_ids``、
-    每个 ``IntentEvidence.reason_codes``。判定语义：
+    只消费 U03 已产出的结构化字段：``decision_gate()``/``report.ok``、
+    ``rejected_intent_ids``、每个 ``IntentEvidence.reason_codes``。判定语义：
 
     - 非 OPEN 动作被委托给 K04 → 不产生原因（返回空 DecisionReason）；
     - 源不可用/快照缺失/身份未固定/程序基准缺触发价 → ``RESEARCH_INCOMPLETE``
       为主因，**同时**回带 ``DATA_UNAVAILABLE`` 辅因（"证据没备齐"与"数据取不到"
       是两件事，可能同时成立）；
     - 数值矛盾/几何/方向类拒绝 → ``VALIDATION_REJECTED``；
-    - 全部通过 → ``NO_EDGE``（有证据但没有可下单的边际）。
+    - **门禁整体失败（``decision_gate()["ok"] is False``）即原因码为门禁服务**：
+      即使逐意图原因码一个都没落进上面的分类，也**绝不**归因为 ``NO_EDGE``
+      （``NO_EDGE`` 的前提是"证据齐了但没有可下单的边际"，与 ``ok=False`` 直接
+      矛盾）；此时主因取 ``RESEARCH_INCOMPLETE``（证据门禁未放行），
+      细节带 ``evidence_gate_failed`` 与门禁给的线索。
+    - 门禁通过且逐意图无拒绝 → ``NO_EDGE`` + ``evidence_gate_ok``；
+    - 报告**没给**门禁结论（缺 ``ok`` 也没有 ``decision_gate()``）→ ``NO_EDGE`` +
+      ``evidence_gate_unknown``（不冒充"门禁通过"）。
     """
     intents = list(getattr(report, "intents", ()) or ())
+    gate_ok, gate_details = _evidence_gate_state(report)
     codes: list[str] = []
     details: list[str] = []
     data_missing = False
@@ -298,13 +346,27 @@ def classify_evidence_report(report: Any) -> DecisionReason:
         codes.append(REASON_DATA_UNAVAILABLE)
     if validation:
         codes.append(REASON_VALIDATION_REJECTED)
+    if not codes and gate_ok is False:
+        # 门禁整体失败：不得读成 NO_EDGE（"证据齐了却没有边际"）。
+        codes.append(REASON_RESEARCH_INCOMPLETE)
     if not codes:
-        return DecisionReason(primary=REASON_NO_EDGE, details=("evidence_gate_ok",))
+        if gate_ok is True:
+            return DecisionReason(primary=REASON_NO_EDGE,
+                                  details=("evidence_gate_ok",))
+        # 报告没给门禁结论：不冒充"门禁通过"（旧口径会在此写 evidence_gate_ok）。
+        return DecisionReason(primary=REASON_NO_EDGE,
+                              details=("evidence_gate_unknown",))
+    extra: list[str] = []
+    if gate_ok is False:
+        extra.append("evidence_gate_failed")
+        extra.extend(gate_details)
+    elif gate_ok is None:
+        extra.append("evidence_gate_unknown")
     # 证据门禁场景下"证据没备齐"是决策层原因（主因），"某个源取不到"是其中一种
     # 成因（辅因）；两者必须共存，而不是让更靠前的数据码吞掉研究结论。
     return DecisionReason.from_codes(
-        codes, details=tuple(dict.fromkeys(details)),
-        prefer=REASON_RESEARCH_INCOMPLETE if research else None,
+        codes, details=tuple(dict.fromkeys((*details, *extra))),
+        prefer=REASON_RESEARCH_INCOMPLETE if (research or gate_ok is False) else None,
     )
 
 
@@ -445,13 +507,18 @@ class DeadlineBudget:
 
         ``attempts_left <= 0`` 或期限已耗尽是调用方时序错误，直接抛
         :class:`DeadlineExceeded`（不返回 0 让调用方"再试一次"）。
+
+        ``minimum`` 是"别把一次尝试切到必然失败的 0"的下限，但它**不能**让返回
+        值越过 ``remaining_seconds()``：期限是绝对的，下限只在不越过它时生效
+        （B-r1 P2-8 旧口径会在余 0.1s 时返回 0.25s）。返回值是**建议值**，
+        真正的强制点是调用方把同一个 ``deadline`` 透传给 ``_call(deadline=)``。
         """
         remaining = self.remaining_seconds()
         if attempts_left <= 0:
             raise DeadlineExceeded("attempts_left must be positive")
         if remaining <= 0:
             raise DeadlineExceeded(f"{self.label} deadline exhausted")
-        return max(minimum, remaining / float(attempts_left))
+        return min(remaining, max(float(minimum), remaining / float(attempts_left)))
 
     def check(self) -> None:
         """调用方在发起尝试前调用；耗尽即抛，避免无谓的供应商往返。"""
@@ -600,26 +667,32 @@ def stage_latency_stats(spans: Sequence[DecisionTraceSpan]) -> dict[str, StageLa
 class TraceSummary:
     """**四类分开**的计数视图；刻意不提供"总计数"字段。
 
-    ``requests_total`` 与 ``failed_rounds`` 语义正交：一轮可以发 5 次请求全部成功
-    （``cycles_total=1, api_attempts_total=5, failed_rounds=0``），也可以一轮发 1 次
-    请求就失败（``cycles_total=1, api_attempts_total=1, failed_rounds=1``）。
+    ``api_attempts_total`` 与 ``failed_rounds`` 语义正交：一轮可以发 5 次请求全部
+    成功（``cycles_total=1, api_attempts_total=5, failed_rounds=0``），也可以一轮发
+    1 次请求就失败（``cycles_total=1, api_attempts_total=1, failed_rounds=1``）。
     旧的单一"总次数"计数器无法区分这两种情形——A/Q 审查据此判定"失败轮次被轮次
     计数吞掉"。
+
+    旧实现另有一个 ``requests_total``，其值恒等于 ``counters.api_attempts_total``
+    （同一来源、同一取值），两个名字一个数——已在 B-r1 P2-1 复核后**删除**，
+    统一用 K05 的规范名 ``api_attempts_total``。
     """
 
     counters: DecisionCounters
-    requests_total: int
     requests_failed: int
     requests_retried: int
     failed_rounds: int
-    rounds_total: int
+    #: **已登记结局**的轮次数；没有任何轮次结局时为 ``None``（不是 0）。
+    #: 与 ``counters.cycles_total``（已开始/已登记的轮次 span 数）是两件事：
+    #: "4 轮已开始、0 轮有结局"不能读成"4 轮全部成功"——旧实现用
+    #: ``len(outcomes) or cycles_total`` 把两个来源混成一个数，正是这个误读。
+    rounds_total: int | None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "cycles_total": self.counters.cycles_total,
             "api_attempts_total": self.counters.api_attempts_total,
             "decisions_total": self.counters.decisions_total,
-            "requests_total": self.requests_total,
             "requests_failed": self.requests_failed,
             "requests_retried": self.requests_retried,
             "rounds_total": self.rounds_total,
@@ -665,6 +738,7 @@ class DecisionTrace:
         self._failed_requests = 0
         self._retried_requests = 0
         self._sequence = 0
+        self._span_errors: list[str] = []
 
     # -- span ---------------------------------------------------------
 
@@ -702,6 +776,11 @@ class DecisionTrace:
             reason = handle.reason_code
             if reason == "" and handle.failed:
                 reason = REASON_MODEL_DEADLINE
+            # **登记绝不击穿调用方**：span 违规（如期限已耗尽的
+            # NEGATIVE_DEADLINE_REMAINING）在这里只降级为"拒绝登记 + 留痕"，
+            # 否则异常会从 with 的 finally 抛出，把**已经执行完**的保护/对账步骤
+            # 的结果连同返回值一起吞掉（U05/B-r1 P1-4）。被拒绝的 span 不进入
+            # 计数与分位，因此口径是 fail-closed（宁可少记，不可记错）。
             self._append(DecisionTraceSpan(
                 cycle_id=cycle, stage=handle.stage, request_id=handle.request_id,
                 attempt=handle.attempt, purpose=handle.purpose,
@@ -709,22 +788,37 @@ class DecisionTrace:
                 ended_ms=handle.ended_ms if handle.ended_ms is not None else ended_ms,
                 deadline_remaining_ms=handle.deadline_remaining_ms,
                 reason_code=reason,
-            ))
+            ), strict=False)
             if handle.purpose in ("api_attempt", "tool_call"):
                 if handle.failed:
                     self._failed_requests += 1
                 if handle.attempt > 1:
                     self._retried_requests += 1
 
-    def _append(self, span: DecisionTraceSpan) -> None:
+    def _append(self, span: DecisionTraceSpan, *, strict: bool = True) -> bool:
+        """登记 span；违规时**拒绝登记**并按 ``strict`` 决定是否抛出。"""
         violations = span_violations(span)
         if violations:
-            raise SpanValidationError(violations)
+            self._span_errors.extend(f"{item}:{span.stage}" for item in violations)
+            if strict:
+                raise SpanValidationError(violations)
+            return False
         self._spans.append(span)
         self._sequence += 1
+        return True
+
+    @property
+    def span_errors(self) -> tuple[str, ...]:
+        """被拒绝登记的 span 违规留痕（``with trace.span(...)`` 路径不抛异常）。"""
+        return tuple(self._span_errors)
 
     def record_span(self, span: DecisionTraceSpan) -> None:
-        """直接登记外部构造的 span（执行侧适配层回填用）；违规 span 一律拒绝。"""
+        """直接登记外部构造的 span（执行侧适配层回填用）；违规 span 一律拒绝。
+
+        与 ``with trace.span(...)`` 的区别：这里是**调用方显式**提交一个 span，
+        违规必须原样抛给提交者（``strict=True``），而不是像上下文管理器路径那样
+        降级留痕——后者的调用栈里已经发生了副作用，抛异常会吞掉结果。
+        """
         self._append(span)
 
     # -- 轮次结局 -----------------------------------------------------
@@ -762,15 +856,27 @@ class DecisionTrace:
         counters = self.counters()
         return TraceSummary(
             counters=counters,
-            requests_total=counters.api_attempts_total,
             requests_failed=self._failed_requests,
             requests_retried=self._retried_requests,
             failed_rounds=sum(1 for item in self._outcomes.values() if item.failed),
-            rounds_total=len(self._outcomes) or counters.cycles_total,
+            rounds_total=len(self._outcomes) if self._outcomes else None,
         )
 
     def latency(self) -> dict[str, StageLatency]:
         return stage_latency_stats(self._spans)
+
+    def elapsed_ms(self) -> int | None:
+        """整轮**真实墙钟跨度** = ``max(ended_ms) - min(started_ms)``。
+
+        用于落 ``agent_runs.latency_ms``（共享耗时列必须放真实耗时，见 U05/B-r1
+        P1-1）。没有任何**已结束** span 时返回 ``None``（不是 0：没测到 ≠ 0ms）。
+        """
+        started = [int(item.started_ms) for item in self._spans]
+        ended = [int(item.ended_ms) for item in self._spans if item.ended_ms is not None]
+        if not started or not ended:
+            return None
+        span = max(ended) - min(started)
+        return span if span >= 0 else None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -853,6 +959,10 @@ class CycleRunResult:
     reconciliation: StepOutcome
     reason: DecisionReason
     blocked: bool = False
+    #: 本轮被**拒绝登记**的 span 违规留痕（如期限耗尽后的
+    #: ``NEGATIVE_DEADLINE_REMAINING``）。非空表示"有步骤跑了但轨迹没记全"——
+    #: 这是可审计的降级，不是静默丢失（U05/B-r1 P1-4）。
+    span_errors: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -861,6 +971,7 @@ class CycleRunResult:
             "reconciliation": self.reconciliation.as_dict(),
             "reason": self.reason.as_dict(),
             "blocked": self.blocked,
+            "span_errors": list(self.span_errors),
         }
 
 
@@ -883,6 +994,11 @@ def run_protection_first(
     三个 purpose 缺省与 K05 计数口径对齐：模型步 = ``api_attempt``（进请求次数），
     保护步 = ``decision``（保护本身就是一个决策），对账步 = ``validation``
     （K05 显式不计数：对账是校验，不是请求也不是决策）。三者都进**分阶段耗时**。
+
+    **span 登记失败不影响本函数的结果**：违规 span 只被拒绝登记并记进
+    :attr:`CycleRunResult.span_errors`，不会从 ``with trace.span(...)`` 的
+    ``finally`` 抛出来击穿三步链路（B-r1 P1-4：旧口径下期限耗尽的保护步
+    "已经执行、有副作用，却拿不到结果，且对账/模型根本没跑"）。
     """
     def _run(name: str, step: Callable[[], Any], stage: str,
              purpose: str) -> tuple[StepOutcome, Any]:
@@ -893,16 +1009,23 @@ def run_protection_first(
                 code = classify_exception(exc)
                 return StepOutcome(name=name, ran=True, ok=False, reason=code,
                                    error=f"{type(exc).__name__}: {exc}"[:200]), None
+        # 先把**步骤结果**收进局部变量，再退出 with —— 这样即使 span 登记路径
+        # 出任何问题，返回值/"这一步真的跑了"这两件事都不会丢。
+        value: Any = None
+        step_error: BaseException | None = None
         with trace.span(stage, purpose=purpose) as handle:
             try:
                 value = step()
             except BaseException as exc:  # noqa: BLE001 - 同上
-                code = classify_exception(exc)
+                step_error = exc
                 handle.fail(exc)
-                return StepOutcome(name=name, ran=True, ok=False, reason=code,
-                                   error=f"{type(exc).__name__}: {exc}"[:200]), None
-            handle.finish()
+            else:
+                handle.finish()
+        if step_error is None:
             return StepOutcome(name=name, ran=True, ok=True), value
+        code = classify_exception(step_error)
+        return StepOutcome(name=name, ran=True, ok=False, reason=code,
+                           error=f"{type(step_error).__name__}: {step_error}"[:200]), None
 
     protection, _ = _run("protection", protection_step, Stage.MANAGEMENT.value,
                          protection_purpose)
@@ -919,6 +1042,7 @@ def run_protection_first(
     return CycleRunResult(
         model=model, protection=protection, reconciliation=reconciliation,
         reason=reason, blocked=False,
+        span_errors=() if trace is None else trace.span_errors,
     )
 
 
@@ -969,7 +1093,9 @@ class ModelRouteGuard:
 
     - ``SILENT_MOCK``：期望真实模型（``mock_allowed=False``）却拿到 mock 客户端/
       mock 模型/mock 响应体 → 违规。反向也成立：调用方**显式** ``mock_allowed=True``
-      时才允许 mock。
+      时才允许 mock。此外，**运行时降级**（``observe_attempt(degraded_reason=...)``
+      非空，如"缺 key 于是返回 Mock"）**无条件**上报，不看 ``mock_allowed``——
+      判定必须独立于被守卫的降级条件本身，否则守卫会自证清白。
     - ``EARLY_RETURN``：调用方 ``expect_attempt()`` 之后调用返回，但**没有任何**对该
       ``request_id`` 的尝试 span → "函数早返回了、请求从未发出"。这是静默降级最常见的
       形态（无 key/无工具/早 return 都长这样）。
@@ -1008,13 +1134,32 @@ class ModelRouteGuard:
         self._cross_process_seen.add(str(request_id))
 
     def observe_attempt(self, *, request_id: str, client_name: str = "",
-                        span: DecisionTraceSpan | None = None) -> None:
-        """记录一次**真实发出**的尝试（有 span/有客户端名即算发出）。"""
+                        span: DecisionTraceSpan | None = None,
+                        provider_scope: str | None = None,
+                        degraded_reason: str | None = None) -> None:
+        """记录一次**真实发出**的尝试（有 span/有客户端名即算发出）。
+
+        ``provider_scope`` 必须由调用方**显式**给出（来自适配器的脱敏作用域）。
+        旧口径在只给 ``span`` 时拿 ``request_id`` 充当 ``provider_scope``——那是
+        **自证清白**：``CROSS_PROCESS_QUOTA`` 在该路径上永不触发（B-r1 P3-1）。
+        现在"带了 span 却没有作用域"就是一次**缺作用域**的尝试，照实上报。
+
+        ``degraded_reason`` 非空（客户端**在运行时**降级到 Mock，如缺 key）时
+        **无条件**上报 ``SILENT_MOCK``，**不看** ``mock_allowed``——否则判定又会
+        与被守卫的对象同源（B-r1 P1-3）。真正被显式允许的 Mock 形态由工厂置
+        ``degraded_reason=None``，两者不冲突。
+        """
         key = str(request_id)
         self._attempts.add(key)
-        if span is not None:
-            self.observe_admission(request_id=key, provider_scope=key)
-        if not self.expectation.mock_allowed and str(client_name) == "mock":
+        if provider_scope is not None or span is not None:
+            self.observe_admission(request_id=key, provider_scope=provider_scope)
+        if str(degraded_reason or "").strip():
+            self._violations.append(RouteViolation(
+                risk=RouteRisk.SILENT_MOCK,
+                detail=f"client degraded to mock at runtime: {degraded_reason}",
+                request_id=key,
+            ))
+        elif not self.expectation.mock_allowed and str(client_name) == "mock":
             self._violations.append(RouteViolation(
                 risk=RouteRisk.SILENT_MOCK,
                 detail=f"mock client used without explicit allowance: {client_name}",

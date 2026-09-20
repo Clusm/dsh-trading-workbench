@@ -94,11 +94,18 @@ def test_counters_are_separated() -> None:
     summary = dt.summary()
     check("轮次按 cycle_id 去重计数", summary.counters.cycles_total == 1,
           summary.as_dict())
-    check("请求次数逐 span 计数（含重试）", summary.requests_total == 3, summary.as_dict())
+    check("请求次数逐 span 计数（含重试）",
+          summary.counters.api_attempts_total == 3, summary.as_dict())
     check("失败轮次独立于请求次数", summary.failed_rounds == 1, summary.as_dict())
     check("失败请求数单列", summary.requests_failed == 1, summary.as_dict())
     check("重试请求数单列（attempt>1 的 2 次）", summary.requests_retried == 2,
           summary.as_dict())
+
+    check("不再有与 api_attempts_total 同值的装饰性别名 requests_total",
+          not hasattr(summary, "requests_total")
+          and "requests_total" not in summary.as_dict(), sorted(summary.as_dict()))
+    check("未登记任何轮次结局时 rounds_total 为 None（不读成 0）",
+          trace.DecisionTrace(cycle_id="c-none", clock=clock).summary().rounds_total is None)
 
     # 关键反例：失败轮次 == 1 而请求次数 == 3 —— 两者不可能由同一计数器互相推导。
     follow = dt.finish_cycle(cycle_id="cycle-3", failed=True,
@@ -117,7 +124,9 @@ def test_counters_are_separated() -> None:
     merged.finish_cycle(failed=False)
     ms = merged.summary()
     check("5 次请求 / 0 失败轮次 可表达（旧单计数器无法区分）",
-          (ms.requests_total, ms.failed_rounds) == (5, 0), ms.as_dict())
+          (ms.counters.api_attempts_total, ms.failed_rounds) == (5, 0), ms.as_dict())
+    check("有一个轮次结局时 rounds_total 为已登记结局数",
+          ms.rounds_total == 1, ms.as_dict())
 
     fields = set(ms.as_dict())
     check("summary 不含任何'总计数'字段（无 total-of-total）",
@@ -230,9 +239,18 @@ def test_attempt_timeout_splits_budget() -> None:
     check("4 次剩余尝试各自 2s", abs(budget.attempt_timeout(4) - 2.0) < 1e-6,
           budget.attempt_timeout(4))
     clock.advance(7.9)
-    check("最后一次尝试只拿到剩余 0.1s（并被下限抬到 MIN_ATTEMPT_SECONDS）",
-          abs(budget.attempt_timeout(1) - trace.MIN_ATTEMPT_SECONDS) < 1e-9,
-          budget.attempt_timeout(1))
+    # B-r1 P2-8 修正：下限 MIN_ATTEMPT_SECONDS 不得把建议值抬过**本轮剩余**。
+    check("最后一次尝试只拿到剩余 0.1s（下限不再抬高到 MIN_ATTEMPT_SECONDS）",
+          abs(budget.attempt_timeout(1) - 0.1) < 1e-6, budget.attempt_timeout(1))
+    check("建议值永不越过 remaining_seconds()（任意剩余/尝试数）",
+          all(budget.attempt_timeout(n) <= budget.remaining_seconds() + 1e-12
+              for n in (1, 2, 3, 5)))
+    clock = FakeClock()
+    floor = trace.DeadlineBudget.start(60.0, clock=clock)
+    clock.advance(59.0)
+    check("剩余充足时下限仍然生效（剩余 1s / 4 次尝试 → MIN_ATTEMPT_SECONDS）",
+          abs(floor.attempt_timeout(4) - trace.MIN_ATTEMPT_SECONDS) < 1e-9,
+          floor.attempt_timeout(4))
     check("attempts_left 非正即抛（时序错误不静默）",
           _raises(trace.DeadlineExceeded, lambda: budget.attempt_timeout(0)))
 
@@ -334,6 +352,56 @@ def test_llm_failure_does_not_block_protection() -> None:
     check("保护失败回带 VALIDATION_REJECTED",
           result2.reason.primary == "VALIDATION_REJECTED", result2.reason.as_dict())
     check("保护失败同样不置 blocked", result2.blocked is False)
+
+    # B-r1 P1-4 反例：**期限已耗尽**时，span 的 deadline_remaining_ms 为负，
+    # K05 的 span_violations 会判 NEGATIVE_DEADLINE_REMAINING。旧口径下该异常从
+    # with 的 finally 抛出，击穿整个 run_protection_first：保护步已产生副作用却
+    # 拿不到结果，对账与模型根本没跑。修复后必须"照跑、照返回、只留痕"。
+    order.clear()
+    expired_clock = FakeClock()
+    expired_trace = trace.DecisionTrace(
+        cycle_id="c-expired", clock=expired_clock,
+        budget=trace.DeadlineBudget.start(1.0, clock=expired_clock))
+    expired_clock.advance(5.0)          # 期限早已耗尽 → 剩余为负
+    check("前置：期限已耗尽", expired_trace.budget.expired())
+
+    def side_effect_protection() -> str:
+        order.append("protection")
+        return "protect-side-effect-done"
+
+    raised: BaseException | None = None
+    try:
+        expired_result = trace.run_protection_first(
+            model_step=lambda: (order.append("model"), "model-ok")[1],
+            protection_step=side_effect_protection,
+            reconciliation_step=lambda: (order.append("reconciliation"), "recon-ok")[1],
+            trace=expired_trace,
+        )
+    except BaseException as exc:  # noqa: BLE001 - 这里就是断言"不得抛出"
+        raised = exc
+    check("期限耗尽时 span 违规不得击穿 run_protection_first",
+          raised is None, repr(raised))
+    check("保护步仍然真的执行了（副作用发生）",
+          raised is None and order == ["protection", "reconciliation", "model"], order)
+    check("已执行动作的结果仍可返回（保护 ok=True 且拿得到值）",
+          raised is None and expired_result.protection.ran
+          and expired_result.protection.ok,
+          None if raised else expired_result.as_dict())
+    check("对账与模型不再被短路（三步事实齐全）",
+          raised is None and expired_result.reconciliation.ok
+          and expired_result.model.ok, None if raised else expired_result.as_dict())
+    check("违规 span fail-closed：被拒绝登记并留痕（不静默）",
+          raised is None and any(
+              item.startswith("NEGATIVE_DEADLINE_REMAINING")
+              for item in expired_result.span_errors),
+          None if raised else expired_result.span_errors)
+    check("被拒绝的 span 不进入计数（宁可少记，不可记错）",
+          raised is None and expired_trace.counters().api_attempts_total == 0,
+          None if raised else expired_trace.counters())
+    check("留痕随结果可序列化（可落审计）",
+          raised is None and json.loads(json.dumps(expired_result.as_dict()))
+          ["span_errors"] == list(expired_result.span_errors),
+          None if raised else expired_result.as_dict())
 
     # span 计数语义：模型步进请求计数，对账步（validation）不进计数
     counters = dt.counters()
@@ -529,6 +597,53 @@ def test_links_to_u03_evidence_report() -> None:
     check("非 OPEN 动作不产生原因码（交给 K04 管理契约）",
           trace.classify_evidence_report(close_report).primary == "NO_EDGE",
           trace.classify_evidence_report(close_report).as_dict())
+
+    # ---- B-r1 P1-2：分类必须以 U03 门禁结果为准，不得把"门禁失败"读成 NO_EDGE
+    blank = evidence.evaluate_open_intents(
+        [_intent(required=[])], [snapshot], now_ms=OBSERVED_MS + 1, cycle_id="c-ok",
+    )
+    check("报告自带的 ok 与门禁字段存在",
+          hasattr(blank, "ok") and isinstance(blank.decision_gate(), dict),
+          blank.decision_gate())
+
+    class _GateReport:
+        """只暴露 U03 门禁字段的最小替身（不复用 U03 内部构造）。"""
+
+        def __init__(self, *, ok: bool, pinned: bool = True, dropped: tuple = ()) -> None:
+            self.ok, self.identity_pinned = ok, pinned
+            self.rejected_intent_ids = dropped
+            self.intents: tuple = ()
+
+        def decision_gate(self) -> dict:
+            return {
+                "ok": bool(self.ok and self.identity_pinned),
+                "identity_pinned": self.identity_pinned,
+                "unpinned_allowed": False,
+                "drop_intent_ids": list(self.rejected_intent_ids),
+                "reasons": {},
+            }
+
+    failed = trace.classify_evidence_report(_GateReport(ok=False))
+    check("门禁整体失败绝不归因为 NO_EDGE", failed.primary != "NO_EDGE", failed.as_dict())
+    check("门禁失败时 details 不得声称 evidence_gate_ok",
+          "evidence_gate_ok" not in failed.details, failed.as_dict())
+    check("门禁失败留痕可审计（evidence_gate_failed）",
+          "evidence_gate_failed" in failed.details, failed.as_dict())
+
+    unpinned = trace.classify_evidence_report(_GateReport(ok=True, pinned=False))
+    check("身份未固定（门禁 ok=False）同样不得读成 NO_EDGE",
+          unpinned.primary != "NO_EDGE" and "gate:identity_unpinned" in unpinned.details,
+          unpinned.as_dict())
+
+    ghost = trace.classify_evidence_report(
+        _GateReport(ok=False, dropped=("ghost-1",)))
+    check("被丢意图（intents 里看不到）也随门禁失败上报",
+          ghost.primary != "NO_EDGE"
+          and "gate:drop_intent:ghost-1" in ghost.details, ghost.as_dict())
+
+    check("没有门禁结论的报告不冒充'门禁通过'",
+          trace.classify_evidence_report(object()).details == ("evidence_gate_unknown",),
+          trace.classify_evidence_report(object()).as_dict())
 
 
 # ---------------------------------------------------------------- [6] p95/p99

@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 import llm.openai_compatible_client as client_module  # noqa: E402
+from core.contracts import DecisionTraceSpan  # noqa: E402
 from core.decision_trace import (  # noqa: E402
     ModelRouteGuard,
     RouteExpectation,
@@ -199,6 +200,56 @@ def test_silent_mock_is_explicit() -> None:
           type(client).__name__)
     check("工厂同时回传显式 mock 标签（调用方可判定，非静默）", model == "mock", model)
     check("Mock 客户端自带 name=mock 供路由判定", client.name == "mock", client.name)
+
+    # ---- B-r1 P1-3：守卫的判定必须**独立于**被守卫的降级条件（不得自证清白）
+    import llm.factory as factory_module  # noqa: PLC0415 - 延迟导入便于缺依赖时定位
+    route_expectation = getattr(factory_module, "route_expectation", None)
+    allowance_env = getattr(factory_module, "MOCK_ALLOWANCE_ENV", None)
+    if route_expectation is None or allowance_env is None:
+        # 共享适配 01 未应用（作者 worktree 形态）：不依赖补丁存在，保持双态可运行。
+        print("  SKIP  共享适配 01 未应用：route_expectation 不在本树，跳过守卫独立性命中")
+    else:
+        saved_switch = os.environ.pop(allowance_env, None)
+        try:
+            expectation = route_expectation(settings, "market_agent")
+            check("缺 key **不再**自动推出 mock_allowed（判定独立于降级条件）",
+                  expectation.mock_allowed is False, expectation)
+            degraded_reason = getattr(client, "degraded_reason", None)
+            check("缺 key 返回的 Mock 带显式降级原因", degraded_reason == "missing_api_key",
+                  degraded_reason)
+            guard = ModelRouteGuard(expectation)
+            guard.expect_attempt("rid-degraded")
+            guard.observe_attempt(request_id="rid-degraded", client_name=client.name,
+                                  degraded_reason=degraded_reason)
+            guard.finish_call(request_id="rid-degraded", returned=True)
+            check("缺 key 的运行时降级被判为 SILENT_MOCK（不再是'干净'）",
+                  not guard.clean()
+                  and "SILENT_MOCK" in guard.violation_risks(), guard.as_dict())
+
+            # 显式开关（独立开关，非"取不到 key"）才允许 Mock。
+            os.environ[allowance_env] = "1"
+            explicit = route_expectation(settings, "market_agent")
+            check("显式进程开关打开后 mock_allowed=True（独立开关，非反推）",
+                  explicit.mock_allowed is True, explicit)
+            explicit_client, _ = build_llm_for_agent(settings, "market_agent")
+            check("显式允许时不再标降级原因（预期形态 ≠ 降级）",
+                  getattr(explicit_client, "degraded_reason", "missing") is None,
+                  getattr(explicit_client, "degraded_reason", "missing"))
+            allowed_guard = ModelRouteGuard(explicit)
+            allowed_guard.expect_attempt("rid-allowed")
+            allowed_guard.observe_attempt(
+                request_id="rid-allowed", client_name=explicit_client.name,
+                degraded_reason=getattr(explicit_client, "degraded_reason", None))
+            check("显式声明的 Mock 形态不判违规（开关与降级条件解耦）",
+                  allowed_guard.clean(), allowed_guard.as_dict())
+            # 调用方显式传入的参数优先于进程开关（更细粒度的上级 profile）。
+            check("调用方显式 mock_allowed=False 覆盖进程开关",
+                  route_expectation(settings, "market_agent",
+                                    mock_allowed=False).mock_allowed is False)
+        finally:
+            os.environ.pop(allowance_env, None)
+            if saved_switch is not None:
+                os.environ[allowance_env] = saved_switch
 
 
 # ---------------------------------------------------------------- [2] 早返回
@@ -375,6 +426,21 @@ def test_cross_process_quota_is_shared_by_alias() -> None:
           provider_scope("https://provider.invalid/v1", FAKE_KEY + "2") != scope)
     check("本模块与 request_coordinator 的作用域口径一致",
           shared_admission_scope("https://provider.invalid/v1", FAKE_KEY) == scope)
+
+    # B-r1 P3-1：旧口径在只给 span 时拿 request_id 充当 provider_scope（自证清白），
+    # 该路径下 CROSS_PROCESS_QUOTA 永不触发。现在"带 span 却不给作用域"照实上报。
+    guard3 = ModelRouteGuard(RouteExpectation(model="ctor-model", require_cross_process=True))
+    span = DecisionTraceSpan(cycle_id="c", stage="model_decision", request_id="rid-span",
+                            attempt=1, purpose="api_attempt", started_ms=0, ended_ms=1,
+                            deadline_remaining_ms=1000)
+    guard3.observe_attempt(request_id="rid-span", client_name="openai_compatible",
+                           span=span)
+    check("带 span 却不给显式作用域 → CROSS_PROCESS_QUOTA（不再自证清白）",
+          "CROSS_PROCESS_QUOTA" in guard3.violation_risks(), guard3.as_dict())
+    guard4 = ModelRouteGuard(RouteExpectation(model="ctor-model", require_cross_process=True))
+    guard4.observe_attempt(request_id="rid-span2", client_name="openai_compatible",
+                           span=span, provider_scope=scope)
+    check("显式给出脱敏作用域才不判违规", guard4.clean(), guard4.as_dict())
 
 
 # ---------------------------------------------------------------- [5] 统一 deadline
