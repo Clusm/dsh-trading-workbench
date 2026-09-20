@@ -162,6 +162,62 @@ def query_api_for(kind: CommandKind) -> str:
     return QUERY_API[CommandKind(kind)]
 
 
+#: 执行命令分账需要的向前兼容列：全部可空/带默认值，旧行读取不受影响。
+#: 这些列由 ``ensure_execution_schema`` 幂等补齐，而不是抬升 schema 版本号 ——
+#: ``schema_version`` 参与 release_evidence 的 GO 判定（数据库迁移版本必须与发布
+#: 清单一致），U04 只新增向后兼容的列，不应因此改变发布身份。
+EXECUTION_SCHEMA_COLUMNS: dict[str, dict[str, str]] = {
+    "order_outbox": {
+        "command_kind": "TEXT",
+        "accepted_qty_text": "TEXT",
+        "cumulative_filled_qty_text": "TEXT",
+        "working_leaves_qty_text": "TEXT",
+        "terminal_unfilled_qty_text": "TEXT",
+        "applied_fill_ids_json": "TEXT DEFAULT '[]'",
+        "quantity_revision": "INTEGER DEFAULT 0",
+    },
+    "protection_order_mirror": {
+        "quantity_text": "TEXT",
+        "actual_qty_text": "TEXT",
+        "trigger_price_text": "TEXT",
+    },
+}
+
+
+def ensure_execution_schema(conn: Any) -> tuple[str, ...]:
+    """幂等补齐执行命令分账所需的列，返回本次新增的 ``表.列``。
+
+    * 只做 ``ALTER TABLE ... ADD COLUMN``，不动任何既有列/行，旧库可直接读；
+    * 表不存在时跳过（运行期表由各自迁移创建），不在这里建表；
+    * 与其它进程并发启动时，重复 ADD COLUMN 会抛 ``duplicate column name``，
+      此时复查列是否已存在并视为成功，不掩盖其它错误。
+    """
+    added: list[str] = []
+    for table, columns in EXECUTION_SCHEMA_COLUMNS.items():
+        existing = {
+            row["name"] if not isinstance(row, Mapping) else row.get("name")
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if not existing:
+            continue
+        for name, declaration in columns.items():
+            if name in existing:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+            except Exception as exc:  # noqa: BLE001 - 并发添加需复查而不是直接失败
+                now = {
+                    row["name"] if not isinstance(row, Mapping) else row.get("name")
+                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if name not in now:
+                    raise ExecutionCommandError(
+                        f"{table}.{name} 补齐失败: {type(exc).__name__} {exc}") from exc
+            added.append(f"{table}.{name}")
+    conn.commit()
+    return tuple(added)
+
+
 # --------------------------------------------------------------------------- #
 # 2. Decimal 数量：拒绝浮点近似
 # --------------------------------------------------------------------------- #
@@ -1110,6 +1166,11 @@ class FaultClass(str, Enum):
     RATE_LIMIT = "RATE_LIMIT"
     HEALTH = "HEALTH"
     REJECTION = "REJECTION"
+    #: 已确证的保护挂单失败：不是观测故障，必须按 P0 兜底处理（不得静默留守裸仓）。
+    PROTECTION = "PROTECTION"
+    #: 无法归类的故障：既不能当健康故障（会放过保护缺口），也不能当已确证故障，
+    #: 只做保守告警与人工复核，风险动作由调用方按 P0 策略决定。
+    UNKNOWN = "UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -1145,6 +1206,9 @@ _FAULT_TABLE: dict[str, tuple[FaultClass, str]] = {
     "HEARTBEAT_STALE": (FaultClass.HEALTH, "ALERT_ONLY"),
     "REJECTED": (FaultClass.REJECTION, "NO_RETRY"),
     "INSUFFICIENT_MARGIN": (FaultClass.REJECTION, "NO_RETRY"),
+    "PROTECTION_FAILED": (FaultClass.PROTECTION, "ALERT_AND_RETRY_PROTECTION"),
+    "PLACE_FAILED": (FaultClass.PROTECTION, "ALERT_AND_RETRY_PROTECTION"),
+    "UNKNOWN_FAULT": (FaultClass.UNKNOWN, "ALERT_AND_MANUAL_REVIEW"),
 }
 
 
@@ -1168,7 +1232,10 @@ def classify_execution_fault(fault: Any) -> FaultActionPlan:
         fault_class, action = _FAULT_TABLE[text]
         known = True
     else:
-        fault_class, action, known = FaultClass.HEALTH, "ALERT_AND_MANUAL_REVIEW", False
+        # 未归类故障不得默认成健康故障：否则"保护确实失败"这类确定性故障会被
+        # 当成观测故障而放过裸仓风险（P0）。默认只告警 + 人工复核，由调用方
+        # 按 P0 策略决定风险动作。
+        fault_class, action, known = FaultClass.UNKNOWN, "ALERT_AND_MANUAL_REVIEW", False
     reasons = [REASON_HEALTH_NO_FLAT_CLOSE] if fault_class in _HEALTH_LIKE else []
     if not known:
         reasons.append("FAULT_UNRECOGNIZED_FAIL_CLOSED")
@@ -1255,6 +1322,7 @@ __all__ = [
     "coverage_report",
     "execute_protection_plan",
     "execute_unknown_reconcile",
+    "ensure_execution_schema",
     "execution_state_flags",
     "guard_fault_action",
     "guard_state_flags_unchanged",

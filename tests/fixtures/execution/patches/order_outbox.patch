@@ -1,0 +1,204 @@
+--- a/src/exchange/order_outbox.py
++++ b/src/exchange/order_outbox.py
+@@ -8,7 +8,16 @@
+ from typing import Any
+ 
+ from audit.database import AuditDatabase, utc_now
++from core.contracts import OrderQuantity, decimal_text
+ from exchange.event_models import ExchangeEvent
++from exchange.protection_commands import (
++    CommandKind,
++    ExecutionCommandError,
++    apply_late_fill,
++    classify_endpoint,
++    classify_row,
++    ensure_execution_schema,
++)
+ 
+ 
+ _ACTIVE = {"SUBMITTING", "UNKNOWN", "ACKNOWLEDGED", "NEW", "PARTIALLY_FILLED"}
+@@ -40,6 +49,9 @@
+                  max_reconcile_per_cycle: int = 5) -> None:
+         self.db = db
+         self.environment = str(environment)
++        # U04：幂等补齐命令种类与十进制数量列（向后兼容列，不抬升 schema 版本号，
++        # 因为 schema_version 参与 release_evidence 的 GO 判定）。
++        ensure_execution_schema(self.db.conn)
+         self.last_event_at: float | None = None
+         self.last_reconcile_at: float | None = None
+         self.last_error: str | None = None
+@@ -55,9 +67,18 @@
+     def prepare(self, *, client_order_id: str, symbol: str, side: str,
+                 position_side: str | None, order_type: str, purpose: str,
+                 qty: float, price: float | None, reduce_only: bool,
+-                endpoint: str, request: dict[str, Any]) -> None:
+-        """在交易所 POST 前记录 SUBMITTING；重复 ID 或未决开仓会直接拒绝。"""
++                endpoint: str, request: dict[str, Any],
++                command_kind: str | None = None,
++                qty_text: str | None = None) -> None:
++        """在交易所 POST 前记录 SUBMITTING；重复 ID 或未决开仓会直接拒绝。
++
++        ``command_kind`` 显式声明普通订单或 Algo 保护命令（R07）：缺省时按端点判定，
++        端点未知直接拒绝，不默认成普通订单。``qty_text`` 用十进制文本保存受理量，
++        避免 ``float`` 在 0.0047 这类数量上的尾差（U04/DC04）。
++        """
+         now = utc_now()
++        kind = CommandKind(command_kind) if command_kind else classify_endpoint(endpoint)
++        accepted_qty_text = str(qty_text) if qty_text is not None else str(qty)
+         key = self.business_key(symbol=symbol, side=side,
+                                 position_side=position_side, purpose=purpose)
+         with self.db.lock:
+@@ -82,14 +103,17 @@
+                     """INSERT INTO order_outbox(
+                         client_order_id,release_id,environment,business_key,symbol,side,position_side,
+                         order_type,purpose,qty,price,reduce_only,endpoint,status,request_json,
+-                        attempt_count,created_at,updated_at
+-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
++                        attempt_count,created_at,updated_at,command_kind,accepted_qty_text,
++                        cumulative_filled_qty_text,working_leaves_qty_text,
++                        terminal_unfilled_qty_text,applied_fill_ids_json,quantity_revision
++                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     (client_order_id, getattr(self.db, "release_id", "legacy"), self.environment,
+                      key, symbol.upper(), side.upper(),
+                      (position_side or "BOTH").upper(), order_type.upper(), purpose.upper(),
+                      float(qty), price, int(reduce_only), endpoint, "SUBMITTING",
+                      json.dumps(request, ensure_ascii=False, separators=(",", ":")),
+-                     1, now, now),
++                     1, now, now, kind.value, accepted_qty_text,
++                     "0", accepted_qty_text, "0", "[]", 0),
+                 )
+                 self.db.conn.commit()
+             except sqlite3.IntegrityError as exc:
+@@ -138,6 +162,79 @@
+         """记录可确定未被交易所接受的订单失败。"""
+         self._update(client_order_id, status="REJECTED",
+                      error_type=type(exc).__name__, resolved_at=utc_now())
++
++    def apply_exchange_quantities(
++        self, client_order_id: str, *, accepted_qty: str, filled_qty: str,
++        working_leaves_qty: str, terminal_unfilled_qty: str, revision: int,
++    ) -> None:
++        """按交易所回报落库三分量（十进制文本），不改变命令种类与端点。"""
++        with self.db.lock:
++            self.db.conn.execute(
++                "UPDATE order_outbox SET accepted_qty_text=?,cumulative_filled_qty_text=?,"
++                "working_leaves_qty_text=?,terminal_unfilled_qty_text=?,quantity_revision=?,"
++                "updated_at=? WHERE client_order_id=?",
++                (str(accepted_qty), str(filled_qty), str(working_leaves_qty),
++                 str(terminal_unfilled_qty), int(revision), utc_now(), client_order_id),
++            )
++            self.db.conn.commit()
++
++    def apply_fill_revision(
++        self, client_order_id: str, *, fill_qty: str, fill_id: str,
++    ) -> dict[str, Any] | None:
++        """应用一笔成交事实并持久化修订（含 CANCELED 后的迟到成交）。
++
++        fill 级幂等由 ``applied_fill_ids_json`` 保证：同一 ``fill_id`` 重复投递抛
++        ``DuplicateFillError``；终态订单只修订累计成交与终态余量，状态不变。缺少
++        三分量记录的旧行返回 ``None``，由调用方先落一次交易所回报。
++        """
++        with self.db.lock:
++            row = self.db.conn.execute(
++                "SELECT * FROM order_outbox WHERE client_order_id=?",
++                (client_order_id,),
++            ).fetchone()
++            if not row:
++                return None
++            keys = set(row.keys())
++            if "accepted_qty_text" not in keys or not row["accepted_qty_text"]:
++                return None
++            applied = json.loads(str(row["applied_fill_ids_json"] or "[]"))
++            stored_status = str(row["status"])
++            quantity = OrderQuantity.checked(
++                order_id=str(row["exchange_order_id"] or client_order_id),
++                accepted_qty=row["accepted_qty_text"],
++                cumulative_filled_qty=row["cumulative_filled_qty_text"] or "0",
++                working_leaves_qty=row["working_leaves_qty_text"] or "0",
++                terminal_unfilled_qty=row["terminal_unfilled_qty_text"] or "0",
++                status=stored_status if stored_status in {
++                    "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "EXPIRED",
++                    "REJECTED"} else "PARTIALLY_FILLED",
++                revision=int(row["quantity_revision"] or 0),
++            )
++            revision = apply_late_fill(
++                quantity, fill_qty=fill_qty, fill_id=fill_id,
++                applied_fill_ids=tuple(applied),
++            )
++            updated = revision.quantity
++            self.db.conn.execute(
++                "UPDATE order_outbox SET cumulative_filled_qty_text=?,"
++                "working_leaves_qty_text=?,terminal_unfilled_qty_text=?,quantity_revision=?,"
++                "applied_fill_ids_json=?,updated_at=? WHERE client_order_id=?",
++                (decimal_text(updated.cumulative_filled_qty),
++                 decimal_text(updated.working_leaves_qty),
++                 decimal_text(updated.terminal_unfilled_qty), int(updated.revision),
++                 json.dumps(list(applied) + [fill_id]), utc_now(), client_order_id),
++            )
++            self.db.conn.commit()
++        if updated.status != quantity.status:
++            self._update(client_order_id, status=updated.status)
++        return {
++            "client_order_id": client_order_id,
++            "status": updated.status,
++            "fill_id": fill_id,
++            "revision_only": revision.revision_only,
++            "cumulative_filled_qty": decimal_text(updated.cumulative_filled_qty),
++            "terminal_unfilled_qty": decimal_text(updated.terminal_unfilled_qty),
++        }
+ 
+     def _update(self, client_order_id: str, *, status: str,
+                 exchange_order_id: str | None = None,
+@@ -201,7 +298,8 @@
+         """限量查询到期 UNKNOWN；只查询、不重发，失败按指数退避。"""
+         now = utc_now()
+         rows = self.db.fetch_all(
+-            "SELECT client_order_id,symbol,endpoint,query_attempt_count FROM order_outbox "
++            "SELECT client_order_id,symbol,endpoint,command_kind,query_attempt_count "
++            "FROM order_outbox "
+             "WHERE environment=? AND status='UNKNOWN' "
+             "AND (next_retry_at IS NULL OR next_retry_at<=?) "
+             "ORDER BY COALESCE(unknown_since,updated_at) LIMIT ?",
+@@ -211,7 +309,9 @@
+         for row in rows:
+             try:
+                 client_id = str(row["client_order_id"])
+-                if str(row["endpoint"]).endswith("/algoOrder"):
++                # R07：按显式种类分派查单入口，绝不用普通订单查询去收口 Algo 命令。
++                kind = classify_row(row)
++                if kind is CommandKind.ALGO:
+                     response = broker.query_algo_order(client_id)
+                     found = isinstance(response, dict) and response.get("algoId")
+                 else:
+@@ -285,6 +385,18 @@
+             "SELECT COUNT(*) AS count FROM order_outbox WHERE environment=? "
+             "AND status='UNKNOWN' AND (next_retry_at IS NULL OR next_retry_at<=?)",
+             (self.environment, utc_now()))
++        # 按命令种类分开计数：普通订单的「未知已清零」不代表 Algo 保护命令已覆盖（R07）。
++        status_counts_by_kind: dict[str, dict[str, int]] = {}
++        for row in self.db.fetch_all(
++                "SELECT command_kind,endpoint,status,COUNT(*) AS count FROM order_outbox "
++                "WHERE environment=? GROUP BY command_kind,endpoint,status",
++                (self.environment,)):
++            try:
++                kind = classify_row(row).value
++            except ExecutionCommandError:
++                kind = "UNCLASSIFIED"
++            bucket = status_counts_by_kind.setdefault(kind, {})
++            bucket[str(row["status"])] = bucket.get(str(row["status"]), 0) + int(row["count"])
+         return {
+             "enabled": True,
+             "environment": self.environment,
+@@ -297,4 +409,12 @@
+             "submitting_orders": int(counts.get("SUBMITTING", 0)),
+             "reconciled_unknown": self.reconciled_unknown,
+             "status_counts": counts,
++            "status_counts_by_kind": status_counts_by_kind,
++            "unknown_orders_by_kind": {
++                kind: int(bucket.get("UNKNOWN", 0))
++                for kind, bucket in status_counts_by_kind.items()
++            },
++            # 普通 Outbox 的覆盖结论只适用于 STANDARD 命令；Algo 保护命令必须由
++            # Algo 记录与 algoOrder 查询单独证明，不能被本状态冒充（R07）。
++            "algo_covered_by_standard_outbox": False,
+         }

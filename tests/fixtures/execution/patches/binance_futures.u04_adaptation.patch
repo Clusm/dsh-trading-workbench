@@ -1,0 +1,176 @@
+--- a/src/exchange/binance_futures.py
++++ b/src/exchange/binance_futures.py
+@@ -18,6 +18,7 @@
+ 
+ from agents.models import RiskVerdict, TradeDecision, TradeIntent
+ from audit.database import AuditDatabase, utc_now
++from core.contracts import decimal_from_float
+ from data.binance_transport import endpoint_group
+ from data.binance_request_policy import parse_retry_after, policy_for
+ from data.rate_limit import (
+@@ -30,6 +31,14 @@
+     reserve_request,
+ )
+ from exchange.order_outbox import OrderOutbox
++from exchange.protection_commands import (
++    FaultClass,
++    classify_execution_fault,
++    execute_protection_plan,
++    plan_protection_refresh,
++    protection_view_from_algo,
++    real_position_from_snapshot,
++)
+ from exchange.protection_mirror import ProtectionOrderMirror
+ from exchange.protocol import normalize_algo_orders_payload, parse_iso as _parse_iso, parse_iso_ms
+ from exchange.trade_reconciliation import (
+@@ -190,6 +199,9 @@
+         self.order_outbox = OrderOutbox(db, environment=environment) if db is not None else None
+         if self.order_outbox is not None:
+             self.order_outbox.recover_stale_submitting()
++        # U04：最近一次保护同步的失败类别。QUERY_FAILED 属健康/传输类故障，无法证明
++        # “当前无保护”，因此不得据此触发全平（只能告警并在下轮重试）。
++        self.last_protection_sync_reason: str = ""
+         self.mode = environment
+         self.environment = environment
+         self.trade_reconciliation = (
+@@ -599,6 +611,9 @@
+                     request.get("reduceOnly", request.get("reduceonly", False)))
+                 or _exchange_bool(request.get("closePosition")),
+                 endpoint="/fapi/v1/algoOrder", request=request,
++                command_kind="ALGO",
++                qty_text=(str(request["quantity"])
++                          if request.get("quantity") is not None else None),
+             )
+         try:
+             data = self._signed("POST", "/fapi/v1/algoOrder", request)
+@@ -647,6 +662,9 @@
+                 price=float(request["price"]) if request.get("price") is not None else None,
+                 reduce_only=str(request.get("reduceOnly", "false")).lower() == "true",
+                 endpoint="/fapi/v1/order", request=request,
++                command_kind="STANDARD",
++                qty_text=(str(request["quantity"])
++                          if request.get("quantity") is not None else None),
+             )
+         try:
+             data = self._signed("POST", "/fapi/v1/order", request)
+@@ -1111,6 +1129,25 @@
+             take_profit=order.get("take_profit"),
+         )
+         if ok:
++            return
++        symbol = str(order.get("symbol") or "")
++        sync_reason = str(getattr(self, "last_protection_sync_reason", "") or "")
++        sync_fault = classify_execution_fault(sync_reason) if sync_reason else None
++        # 只有"已确证是健康/传输类故障"才推迟平仓；未归类/未知失败仍按 P0 兜底
++        # 立即平仓（绝不允许裸仓），避免把保护缺口误判成观测故障而放任风险。
++        if sync_fault is not None and sync_fault.fault_class in {
++                FaultClass.TRANSPORT, FaultClass.HEALTH,
++                FaultClass.QUERY_UNCERTAIN, FaultClass.RATE_LIMIT}:
++            # 健康/传输类故障下无法证明“当前无保护”：按 U04 硬约束只告警，不得触发
++            # 全平（全平是仓位动作，不能由观测故障驱动），也不改 pause/emergency。
++            if self.db:
++                # 复用已登记的事件类型（dashboard 事件映射表无需新增键）；
++                # 语义由 action_taken 明确表达：只告警，不因观测故障平仓。
++                self.db.log_risk_event(
++                    event_type="futures_sync_error", severity="critical",
++                    details=(f"{symbol}: 保护状态无法核验（{sync_fault.fault}），"
++                             f"本轮不平仓，等待下轮重试"),
++                    action_taken="alert_only_no_flat_close")
+             return
+         try:
+             close_intent = TradeIntent(
+@@ -1672,6 +1709,7 @@
+             # 带明确 intent 的主动挂单路径除外（调用方明确要求挂新保护，即使
+             # 查询失败也应尝试撤旧挂新，由 -2011 等错误码兜底）。
+             if intent is None and stop_loss is None and take_profit is None:
++                self.last_protection_sync_reason = "QUERY_FAILED"
+                 if self.db:
+                     self.db.log_risk_event(
+                         event_type="futures_sync_error", severity="warn",
+@@ -1759,27 +1797,68 @@
+         if stop_ok and take_ok:
+             return True
+ 
+-        # 有变化/重复单：全部取消后按当前仓位重挂
+-        self._cancel_symbol_algos(symbol)
+-        failed = False
+-        if sl:
++        # 有变化/重复单：交由 U04 保护规划按“先挂新、后撤旧”执行；任一 PLACE 失败即
++        # 停止，绝不先把旧保护撤掉留下裸仓，也不撤销最后一道保护。
++        plan = plan_protection_refresh(
++            position=real_position_from_snapshot({
++                "symbol": symbol,
++                "positionAmt": pos.get("positionAmt"),
++                "positionSide": pos.get("positionSide"),
++            }),
++            protections=[protection_view_from_algo(dict(item)) for item in existing],
++            desired_sl=(decimal_from_float(sl) if sl is not None else None),
++            desired_tp=(decimal_from_float(tp) if tp is not None else None),
++            flat_confirmed=False,
++        )
++
++        def _place_action(action: Any) -> str:
++            is_stop = action.order_type == "STOP_MARKET"
++            self._place_algo_protection(
++                symbol, close_side, qty, action.order_type,
++                float(action.trigger_price), "sl" if is_stop else "tp",
++                "STOP" if is_stop else "TAKE")
++            return action.order_type
++
++        def _cancel_action(action: Any) -> None:
++            target = None
++            for item in existing:
++                if str(item.get("clientAlgoId") or "") == str(action.client_id):
++                    target = item
++                    break
++            algo_id = str((target or {}).get("algoId") or "") or None
++            if algo_id is None:
++                return
+             try:
+-                self._place_algo_protection(symbol, close_side, qty, "STOP_MARKET", sl, "sl", "STOP")
++                self._signed("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
+             except Exception as e:
+-                failed = True
++                # 撤旧失败不致命：新保护已挂上，旧保护留在交易所不构成裸仓。
+                 if self.db:
+-                    self.db.log_risk_event(event_type="futures_sl_failed", severity="critical",
+-                                           details=f"{symbol}: {type(e).__name__} {e}",
+-                                           action_taken="protection_failed")
+-        if tp:
+-            try:
+-                self._place_algo_protection(symbol, close_side, qty, "TAKE_PROFIT_MARKET", tp, "tp", "TAKE")
+-            except Exception as e:
+-                failed = True
+-                if self.db:
+-                    self.db.log_risk_event(event_type="futures_tp_failed", severity="critical",
+-                                           details=f"{symbol}: {type(e).__name__} {e}",
+-                                           action_taken="protection_failed")
++                    self.db.log_risk_event(
++                        event_type="futures_adjust_error", severity="warn",
++                        details=f"{symbol}: 撤销被替换保护 {algo_id} 失败: "
++                                f"{type(e).__name__} {e}",
++                        action_taken="保留旧保护")
++                return
++            if self.db:
++                self.db.cancel_order_by_exchange_id(exchange_order_id=algo_id)
++            if action.client_id and getattr(self, "order_outbox", None) is not None:
++                self.order_outbox.acknowledge(str(action.client_id), {
++                    "algoId": algo_id, "algoStatus": "CANCELED",
++                })
++
++        execution = execute_protection_plan(plan, place=_place_action,
++                                            cancel=_cancel_action)
++        failed = bool(execution.failed_place)
++        if failed and self.db:
++            self.db.log_risk_event(
++                event_type=("futures_sl_failed"
++                            if execution.failed_place == "STOP_MARKET"
++                            else "futures_tp_failed"),
++                severity="critical",
++                details=(f"{symbol}: {execution.failed_place} 挂新保护失败，"
++                         f"已按计划保留旧保护（cancel_skipped={execution.cancel_skipped}）"),
++                action_taken="protection_failed")
++        self.last_protection_sync_reason = "PROTECTION_FAILED" if failed else ""
+         return not failed
+ 
+     def _place_protection(self, symbol: str, intent: Any) -> bool:

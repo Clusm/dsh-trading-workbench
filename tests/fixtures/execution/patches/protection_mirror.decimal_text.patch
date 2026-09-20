@@ -1,0 +1,80 @@
+--- a/src/exchange/protection_mirror.py
++++ b/src/exchange/protection_mirror.py
+@@ -3,9 +3,11 @@
+ 
+ import json
+ import time
++from decimal import Decimal
+ from typing import Any, Iterable
+ 
+ from audit.database import AuditDatabase, utc_now
++from exchange.protection_commands import ensure_execution_schema
+ 
+ 
+ def _float(value: Any) -> float:
+@@ -13,6 +15,19 @@
+         return float(value or 0.0)
+     except (TypeError, ValueError):
+         return 0.0
++
++
++def _text_decimal(value: Any) -> str | None:
++    """数量的十进制文本形式；缺失/非法返回 None，绝不补 0 冒充数量。"""
++    if value is None or value == "":
++        return None
++    try:
++        result = Decimal(str(value))
++    except (ArithmeticError, TypeError, ValueError):
++        return None
++    if not result.is_finite():
++        return None
++    return "0" if result == 0 else format(result.normalize(), "f")
+ 
+ 
+ def _bool(value: Any) -> bool:
+@@ -34,6 +49,8 @@
+         self.db = db
+         self.environment = str(environment)
+         self.allowed_symbols = {str(s).upper() for s in allowed_symbols if s}
++        # U04：幂等补齐数量十进制文本列（与 order_outbox 同一套列清单）。
++        ensure_execution_schema(self.db.conn)
+         self.last_reconcile_at: float | None = None
+         self.last_error: str | None = None
+         self.out_of_scope = 0
+@@ -142,8 +159,9 @@
+                     """INSERT INTO protection_order_mirror(
+                         environment,algo_id,client_algo_id,symbol,side,position_side,
+                         order_type,purpose,status,quantity,actual_qty,trigger_price,
+-                        reduce_only,close_position,event_time_ms,updated_at,source
+-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
++                        reduce_only,close_position,event_time_ms,updated_at,source,
++                        quantity_text,actual_qty_text,trigger_price_text
++                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     ON CONFLICT(environment,algo_id) DO UPDATE SET
+                         client_algo_id=excluded.client_algo_id,symbol=excluded.symbol,
+                         side=excluded.side,position_side=excluded.position_side,
+@@ -152,7 +170,10 @@
+                         actual_qty=excluded.actual_qty,trigger_price=excluded.trigger_price,
+                         reduce_only=excluded.reduce_only,close_position=excluded.close_position,
+                         event_time_ms=excluded.event_time_ms,updated_at=excluded.updated_at,
+-                        source=excluded.source""",
++                        source=excluded.source,
++                        quantity_text=excluded.quantity_text,
++                        actual_qty_text=excluded.actual_qty_text,
++                        trigger_price_text=excluded.trigger_price_text""",
+                     (self.environment, algo_id,
+                      str(row.get("clientAlgoId") or "") or None,
+                      str(row.get("symbol")), str(row.get("side") or "").upper(),
+@@ -160,7 +181,11 @@
+                      str(row.get("algoStatus") or "NEW").upper(),
+                      _float(row.get("quantity")), _float(row.get("actualQty")),
+                      _float(row.get("triggerPrice")), int(_bool(row.get("reduceOnly"))),
+-                     int(_bool(row.get("closePosition"))), event_ms, now, "rest_reconcile"),
++                     int(_bool(row.get("closePosition"))), event_ms, now, "rest_reconcile",
++                     # REAL 列只用于展示；精确数量以十进制文本列勾稽（U04/DC04）。
++                     _text_decimal(row.get("quantity")),
++                     _text_decimal(row.get("actualQty")),
++                     _text_decimal(row.get("triggerPrice"))),
+                 )
+             self.db.conn.execute(
+                 """INSERT INTO protection_reconciliations(
