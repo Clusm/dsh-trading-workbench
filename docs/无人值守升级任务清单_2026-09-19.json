@@ -1027,6 +1027,32 @@
           "author_pushback_upheld": "第 3 项**作者抗辩成立**：复验者自行 AST 枚举确认 V1 唯一 return False 在返回前即写入字段，两条不写路径均返回 True 且读者在 ok=True 时提前 return => 单线程读不到残余，A 的 N->N+1->N+2 不可复现。真缺陷是跨标的/跨线程窗口，独立复现 V1 bare=16/20000 -> r2 bare=0",
           "blocking_n1": "N1（P2 未登记）：_component_status 用 _STATUS_ALIASES.get(x,'') 令'终态保留原状态'分支对 CANCELED/EXPIRED/REJECTED/FILLED 永久失效；私有流真实路径 CANCELED+迟到成交 -> working=0.0143!=0、terminal=0，被判 WORKING_NONZERO_WHILE_TERMINAL，返回 PARTIALLY_FILLED/revision_only=False。V1 在同场景抛错（成交入不了账），r2 变成写入非法态 = **半修**。复验者实测一行修复（.get(x,x)）后作者套件仍 133/0。",
           "other": "N2 护栏空转（P3）、N3 非布尔 flat_confirmed、N4 mirrored_protection_views 无调用者"
+        },
+        {
+          "type": "author_fix_r3",
+          "head_commit": "f4e4663",
+          "commits": [
+            "531d2c8",
+            "a602211",
+            "f4e4663"
+          ],
+          "n1_fix": "_component_status 由 .get(x,'') 改为 .get(x,x)；兜底语义=别名未命中保留原值，但仅用于终态集合判定，未映射状态走分量推导分支 => 返回值恒在 OrderQuantity 词表内（不透传未知态）",
+          "n1_before_after": "BEFORE(r2) CANCELED+迟到成交 -> status=CANCELED working=0.0143 terminal=0，K04 不变量 working==0 为 False，OrderQuantity.checked REJECTED: WORKING_NONZERO_WHILE_TERMINAL，VERDICT=WRONG_TERMINAL（兜底矩阵 CANCELED/EXPIRED/REJECTED 全->PARTIALLY_FILLED）\nAFTER(r3) -> working=0 terminal=0.0143，守恒 True，契约 ACCEPTED，VERDICT=CORRECT_TERMINAL（矩阵 CANCELED->CANCELED / EXPIRED->EXPIRED / REJECTED->REJECTED）",
+          "regression_assertions": "test_execution_faults 第[11]节：CANCELED+迟到成交 4 条 + 第二笔 1 条 + 重复 trade_id 1 条 + EXPIRED 1 条 + reject 清零/拒单 fail-closed 3 条；在**未修的 r2 树上 4/4 FAIL**（非空转）",
+          "n3": "plan_protection_refresh 与 can_cancel_protection 均改 is True（fail-closed 降级而非抛错）；8 条断言在不修树上全 FAIL",
+          "n4": "mirrored_protection_views 已在方法 docstring 显式登记'无生产调用者'",
+          "n2_partial": "三断言改为同一 broker 实例 + 新增对生产实例的结构断言（V1 树上 FAIL 已实测）；并发现夹具 ledger_rows.symbol == inputs.symbol 使'跨标的'退化为同标的（已改显式不同标的）",
+          "verification": "集成态验收 154/0 exit 0；HEAD(补丁未应用) 130/0 exit 0；两种状态 smoke_u04 均 exit 0；smoke_contracts_v3 173/0；4 补丁独立 repo 根 apply --check 全 rc=0",
+          "patches_changed": [
+            "order_outbox.patch(N1 重新生成 +15 行)",
+            "protection_mirror.decimal_text.patch(仅 docstring 登记 N4)"
+          ],
+          "known_limits": [
+            "顺序断言仍无法区分 V1/r2（V1 失败轮会在返回前自改写标量），残余只在并发窗口可达，靠结构断言补齐",
+            "行 status 列对 EXPIRED_IN_MATCH 原样保留交易所别名（_update 既有行为，OrderQuantity Literal 不接受该串；作者称非本次范围）",
+            "原 4 条 known_limits 不变"
+          ],
+          "rollback": "git revert f4e4663 a602211 531d2c8"
         }
       ],
       "blockers": [],
@@ -1086,6 +1112,16 @@
           ],
           "verdict": "CHANGES_REQUESTED",
           "reports_dir": "docs/dispatch/reviews/U04/cc6de61/"
+        },
+        {
+          "round": "r3",
+          "stage": "聚焦复验",
+          "candidate": "f4e4663",
+          "sessions": [
+            "Q (reviews/U04/R3/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U04/f4e4663/"
         }
       ],
       "qa_runs": []
