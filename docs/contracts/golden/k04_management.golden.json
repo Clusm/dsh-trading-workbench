@@ -1,0 +1,316 @@
+{
+  "contract": "K04",
+  "title": "管理意图/授权与数量三分量正反 golden",
+  "version": "v3.0",
+  "independent": true,
+  "cases": [
+    {
+      "case_id": "K04-P1",
+      "kind": "positive",
+      "title": "三分量守恒：NEW/PARTIALLY_FILLED/CANCELED/FILLED",
+      "operation": "k04_quantity",
+      "derivation": "规格 §4 K04：accepted = cumulative_filled + working_leaves + terminal_unfilled。NEW/PARTIALLY_FILLED 的 terminal 必须为 0；终态的 working 必须为 0。四个样本逐项手工核对：10=2.5+7.5+0、1=0.0047+0.9953+0、1=0.0047+0+0.9953、1=1+0+0。",
+      "inputs": {
+        "quantities": [
+          {"order_id": "ord-1", "accepted_qty": "10", "cumulative_filled_qty": "2.5", "working_leaves_qty": "7.5", "terminal_unfilled_qty": "0", "status": "PARTIALLY_FILLED", "revision": 2, "cancel_requested": false, "cancel_confirmed": false},
+          {"order_id": "ord-2", "accepted_qty": "1", "cumulative_filled_qty": "0.0047", "working_leaves_qty": "0.9953", "terminal_unfilled_qty": "0", "status": "NEW", "revision": 0, "cancel_requested": false, "cancel_confirmed": false},
+          {"order_id": "ord-3", "accepted_qty": "1", "cumulative_filled_qty": "0.0047", "working_leaves_qty": "0", "terminal_unfilled_qty": "0.9953", "status": "CANCELED", "revision": 5, "cancel_requested": true, "cancel_confirmed": true},
+          {"order_id": "ord-4", "accepted_qty": "1", "cumulative_filled_qty": "1", "working_leaves_qty": "0", "terminal_unfilled_qty": "0", "status": "FILLED", "revision": 6, "cancel_requested": false, "cancel_confirmed": false}
+        ]
+      },
+      "expect": {"violations": [[], [], [], []]}
+    },
+    {
+      "case_id": "K04-P2",
+      "kind": "positive",
+      "title": "终态 CANCELED 的迟到 fill 修订累计成交事实",
+      "operation": "k04_late_fill",
+      "derivation": "规格 §4 K04：迟到 fill 可修正终态的累计成交事实，即使状态仍 CANCELED，也不得因“终态不可回退”丢成交。手工计算 0.0047+0.001=0.0057；终态剩余 0.0053-0.001=0.0043；accepted 0.01=0.0057+0+0.0043；revision 递增到 5。",
+      "inputs": {
+        "quantity": {
+          "order_id": "ord-synth-1",
+          "accepted_qty": "0.01",
+          "cumulative_filled_qty": "0.0047",
+          "working_leaves_qty": "0",
+          "terminal_unfilled_qty": "0.0053",
+          "status": "CANCELED",
+          "revision": 4,
+          "cancel_requested": true,
+          "cancel_confirmed": true
+        },
+        "fill_qty": "0.001"
+      },
+      "expect": {
+        "order_id": "ord-synth-1",
+        "status": "CANCELED",
+        "revision": "5",
+        "accepted_qty": "0.01",
+        "cumulative_filled_qty": "0.0057",
+        "working_leaves_qty": "0",
+        "terminal_unfilled_qty": "0.0043",
+        "violations": []
+      }
+    },
+    {
+      "case_id": "K04-P3",
+      "kind": "positive",
+      "title": "幂等键跨轮稳定且随触发事件变化",
+      "operation": "k04_idempotency",
+      "derivation": "规格 §4 K04：幂等键由生命周期、触发类型、规则版本、触发事件确定，不得每轮随机换ID。a/b 输入相同→同一键与同一 management_id；c 仅触发事件不同→键与 id 必须不同，避免把新事件误判成旧意图。",
+      "inputs": {
+        "a": {"lifecycle_id": "lc-1", "trigger_type": "time_stop", "policy_version": "policy-v3", "trigger_event_id": "evt-1"},
+        "b": {"lifecycle_id": "lc-1", "trigger_type": "time_stop", "policy_version": "policy-v3", "trigger_event_id": "evt-1"},
+        "c": {"lifecycle_id": "lc-1", "trigger_type": "time_stop", "policy_version": "policy-v3", "trigger_event_id": "evt-2"}
+      },
+      "expect": {
+        "key_a": "lc-1|time_stop|policy-v3|evt-1",
+        "key_b": "lc-1|time_stop|policy-v3|evt-1",
+        "stable": true,
+        "distinct_on_event_change": true
+      }
+    },
+    {
+      "case_id": "K04-P4",
+      "kind": "positive",
+      "title": "合法减仓请求在授权范围内放行",
+      "operation": "k04_authorization",
+      "derivation": "减仓 0.005 不超过授权 max_reduce_qty=0.01，且不超过当前仓量 0.01；账户/生命周期/方向一致；revision 相同；未过期；不撤保护；净敞口变化 0。全部检查通过→allowed=true。",
+      "inputs": {
+        "authorization": {
+          "authorization_id": "auth-synth-1",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "max_reduce_qty": "0.01",
+          "target_protection": {"sl_client_id": "sl-synth-1", "tp_client_id": "tp-synth-1", "is_last_protection": false},
+          "position_revision": 3,
+          "nonce": "nonce-synth-1",
+          "issued_at_ms": 1789862300000,
+          "expires_at_ms": 1789866000000
+        },
+        "request": {
+          "action": "REDUCE",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "reduce_qty": "0.005",
+          "current_position_qty": "0.01",
+          "requested_net_delta": "0",
+          "remove_protection": false
+        },
+        "now_ms": 1789862401000,
+        "current_revision": 3
+      },
+      "expect": {"allowed": true, "reason_codes": [], "authorization_id": "auth-synth-1"}
+    },
+    {
+      "case_id": "K04-N1",
+      "kind": "negative",
+      "title": "仓位 revision 更新后旧授权失效",
+      "operation": "k04_authorization",
+      "derivation": "规格 §4 K04：数量随新成交更新时生成有序 revision，撤销旧授权，防止多轮累计超减。授权绑定 revision=3，而当前真实 revision=4，旧授权必须拒绝。",
+      "inputs": {
+        "authorization": {
+          "authorization_id": "auth-synth-1",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "max_reduce_qty": "0.01",
+          "target_protection": {"sl_client_id": "sl-synth-1", "tp_client_id": "tp-synth-1", "is_last_protection": false},
+          "position_revision": 3,
+          "nonce": "nonce-synth-1",
+          "issued_at_ms": 1789862300000,
+          "expires_at_ms": 1789866000000
+        },
+        "request": {
+          "action": "REDUCE",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "reduce_qty": "0.005",
+          "current_position_qty": "0.01",
+          "requested_net_delta": "0",
+          "remove_protection": false
+        },
+        "now_ms": 1789862401000,
+        "current_revision": 4
+      },
+      "expect": {"allowed": false, "reason_codes": ["STALE_POSITION_REVISION"]}
+    },
+    {
+      "case_id": "K04-N2",
+      "kind": "negative",
+      "title": "OPEN 不属于管理动作，被拒绝",
+      "operation": "k04_authorization",
+      "derivation": "规格 §4 K04：管理能力凭证仅允许 close/reduce 或批准范围内的保护维护，不允许 OPEN。请求 action=OPEN，其他字段全部合法，仍必须拒绝。",
+      "inputs": {
+        "authorization": {
+          "authorization_id": "auth-synth-1",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "max_reduce_qty": "0.01",
+          "target_protection": {"sl_client_id": "sl-synth-1", "tp_client_id": "tp-synth-1", "is_last_protection": false},
+          "position_revision": 3,
+          "nonce": "nonce-synth-1",
+          "issued_at_ms": 1789862300000,
+          "expires_at_ms": 1789866000000
+        },
+        "request": {
+          "action": "OPEN",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "requested_net_delta": "0"
+        },
+        "now_ms": 1789862401000,
+        "current_revision": 3
+      },
+      "expect": {"allowed": false, "reason_codes": ["OPEN_NOT_ALLOWED"]}
+    },
+    {
+      "case_id": "K04-N3",
+      "kind": "negative",
+      "title": "不允许撤掉最后保护单",
+      "operation": "k04_authorization",
+      "derivation": "规格 §4 K04：不允许任意撤掉最后保护单；F03 要求“不先撤最后保护”。授权目标标记 is_last_protection=true，请求 remove_protection=true，必须拒绝。",
+      "inputs": {
+        "authorization": {
+          "authorization_id": "auth-synth-1",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "max_reduce_qty": "0.01",
+          "target_protection": {"sl_client_id": "sl-synth-1", "tp_client_id": null, "is_last_protection": true},
+          "position_revision": 3,
+          "nonce": "nonce-synth-1",
+          "issued_at_ms": 1789862300000,
+          "expires_at_ms": 1789866000000
+        },
+        "request": {
+          "action": "CLOSE",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "requested_net_delta": "0",
+          "remove_protection": true
+        },
+        "now_ms": 1789862401000,
+        "current_revision": 3
+      },
+      "expect": {"allowed": false, "reason_codes": ["CANNOT_REMOVE_LAST_PROTECTION"]}
+    },
+    {
+      "case_id": "K04-N4",
+      "kind": "negative",
+      "title": "撤单确认前 remaining 不得计 terminal",
+      "operation": "k04_quantity",
+      "derivation": "规格 §4 K04：撤单确认前不得把 remaining 计入 terminal_unfilled。样本 cancel_requested=true 但 cancel_confirmed=false，剩余 1.0 已计入 terminal（即提前结清），违反规则；三分量本身守恒，唯一违规应为 CANCEL_UNCONFIRMED_TERMINAL_COUNTED。",
+      "inputs": {
+        "quantities": [
+          {"order_id": "ord-9", "accepted_qty": "1", "cumulative_filled_qty": "0", "working_leaves_qty": "0", "terminal_unfilled_qty": "1", "status": "CANCELED", "revision": 7, "cancel_requested": true, "cancel_confirmed": false}
+        ]
+      },
+      "expect": {"violations": [["CANCEL_UNCONFIRMED_TERMINAL_COUNTED"]]}
+    },
+    {
+      "case_id": "K04-N5",
+      "kind": "negative",
+      "title": "不允许提高净敞口",
+      "operation": "k04_authorization",
+      "derivation": "规格 §4 K04：管理授权不允许提高净敞口。请求 requested_net_delta=+0.5（正数=增加敞口），即便数量与 revision 合法也必须拒绝。",
+      "inputs": {
+        "authorization": {
+          "authorization_id": "auth-synth-1",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "max_reduce_qty": "0.01",
+          "target_protection": {"sl_client_id": "sl-synth-1", "tp_client_id": "tp-synth-1", "is_last_protection": false},
+          "position_revision": 3,
+          "nonce": "nonce-synth-1",
+          "issued_at_ms": 1789862300000,
+          "expires_at_ms": 1789866000000
+        },
+        "request": {
+          "action": "REDUCE",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "reduce_qty": "0.005",
+          "requested_net_delta": "0.5",
+          "remove_protection": false
+        },
+        "now_ms": 1789862401000,
+        "current_revision": 3
+      },
+      "expect": {"allowed": false, "reason_codes": ["NET_EXPOSURE_INCREASE"]}
+    },
+    {
+      "case_id": "K04-N6",
+      "kind": "negative",
+      "title": "减仓数量超过授权上限",
+      "operation": "k04_authorization",
+      "derivation": "规格 §10.2：available_reduce_qty = 最新确认仓量 - 其他有效在途退出预留；多轮累计不得超减。请求减仓 0.02 超过授权 max_reduce_qty=0.01，必须拒绝。",
+      "inputs": {
+        "authorization": {
+          "authorization_id": "auth-synth-1",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "max_reduce_qty": "0.01",
+          "target_protection": {"sl_client_id": "sl-synth-1", "tp_client_id": "tp-synth-1", "is_last_protection": false},
+          "position_revision": 3,
+          "nonce": "nonce-synth-1",
+          "issued_at_ms": 1789862300000,
+          "expires_at_ms": 1789866000000
+        },
+        "request": {
+          "action": "REDUCE",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "reduce_qty": "0.02",
+          "requested_net_delta": "-0.02",
+          "remove_protection": false
+        },
+        "now_ms": 1789862401000,
+        "current_revision": 3
+      },
+      "expect": {"allowed": false, "reason_codes": ["REDUCE_EXCEEDS_AUTHORIZATION"]}
+    },
+    {
+      "case_id": "K04-N7",
+      "kind": "negative",
+      "title": "授权过期不得复用",
+      "operation": "k04_authorization",
+      "derivation": "规格 §10.2：授权的 nonce 与 deadline 用于防止重新提交；过期授权不能复用旧证据签署。now=1789866000000 已到达授权 expires_at_ms，拒绝。",
+      "inputs": {
+        "authorization": {
+          "authorization_id": "auth-synth-1",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "max_reduce_qty": "0.01",
+          "target_protection": {"sl_client_id": "sl-synth-1", "tp_client_id": "tp-synth-1", "is_last_protection": false},
+          "position_revision": 3,
+          "nonce": "nonce-synth-1",
+          "issued_at_ms": 1789862300000,
+          "expires_at_ms": 1789866000000
+        },
+        "request": {
+          "action": "REDUCE",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "reduce_qty": "0.005",
+          "requested_net_delta": "0",
+          "remove_protection": false
+        },
+        "now_ms": 1789866000000,
+        "current_revision": 3
+      },
+      "expect": {"allowed": false, "reason_codes": ["AUTHORIZATION_EXPIRED"]}
+    }
+  ]
+}

@@ -1,0 +1,382 @@
+{
+  "contract": "K03",
+  "title": "收入幂等/覆盖证明/成本归因正反 golden",
+  "version": "v3.0",
+  "independent": true,
+  "cases": [
+    {
+      "case_id": "K03-P1",
+      "kind": "positive",
+      "title": "重复 tran_id 幂等不重复插入，同键异内容隔离",
+      "operation": "k03_ingest",
+      "derivation": "规格 §10.1：幂等主键取 (environment, account_ref, income_type, tran_id)；缺重复ID但内容矛盾进入隔离，不按金额/时间猜测合并。page 中的 t-001 与已存在内容一致→duplicate；t-002 为新键→inserted；t-001 金额从 -0.123456 变为 -9.99→同键异内容→QUARANTINE，且不得覆盖既有记录。",
+      "inputs": {
+        "existing": [
+          {
+            "environment": "demo",
+            "account_ref": "SYNTH_ACCT",
+            "income_type": "FUNDING_FEE",
+            "tran_id": "t-001",
+            "symbol": "ZZZUSDT",
+            "asset": "USDT",
+            "amount": "-0.123456",
+            "event_time_ms": 1789862400000,
+            "received_at_ms": 1789862401000,
+            "source_hash": "src-synth-page-1"
+          }
+        ],
+        "page": [
+          {
+            "environment": "demo",
+            "account_ref": "SYNTH_ACCT",
+            "income_type": "FUNDING_FEE",
+            "tran_id": "t-001",
+            "symbol": "ZZZUSDT",
+            "asset": "USDT",
+            "amount": "-0.123456",
+            "event_time_ms": 1789862400000,
+            "received_at_ms": 1789862500000,
+            "source_hash": "src-synth-page-2"
+          },
+          {
+            "environment": "demo",
+            "account_ref": "SYNTH_ACCT",
+            "income_type": "REALIZED_PNL",
+            "tran_id": "t-002",
+            "symbol": "ZZZUSDT",
+            "asset": "USDT",
+            "amount": "5.5",
+            "event_time_ms": 1789863000000,
+            "received_at_ms": 1789862500100,
+            "source_hash": "src-synth-page-2"
+          },
+          {
+            "environment": "demo",
+            "account_ref": "SYNTH_ACCT",
+            "income_type": "FUNDING_FEE",
+            "tran_id": "t-001",
+            "symbol": "ZZZUSDT",
+            "asset": "USDT",
+            "amount": "-9.99",
+            "event_time_ms": 1789862400000,
+            "received_at_ms": 1789862500200,
+            "source_hash": "src-synth-page-2"
+          }
+        ]
+      },
+      "expect": {
+        "inserted": ["demo|SYNTH_ACCT|REALIZED_PNL|t-002"],
+        "duplicates": ["demo|SYNTH_ACCT|FUNDING_FEE|t-001"],
+        "quarantined": [
+          {"key": "demo|SYNTH_ACCT|FUNDING_FEE|t-001", "reason_code": "INCOME_ID_CONFLICT"}
+        ],
+        "reason_codes": ["INCOME_ID_CONFLICT"]
+      }
+    },
+    {
+      "case_id": "K03-P2",
+      "kind": "positive",
+      "title": "同毫秒满页继续翻页（不用 last_time+1）",
+      "operation": "k03_pagination",
+      "derivation": "规格 §10.1：接口使用 page/limit，同毫秒满页继续翻页，不能用 last_time+1 跳过同毫秒记录；冻结较早的 endTime 并重叠重查去重。5 条记录全部 event_time=1789862400000 且 page_limit=5，页满→CONTINUE；新起点必须仍是该毫秒（重叠查询），不能加 1ms，去重由幂等键保证。",
+      "inputs": {
+        "start_ms": 1789858800000,
+        "end_ms": 1789866000000,
+        "page_limit": 5,
+        "page": [
+          {"environment": "demo", "account_ref": "SYNTH_ACCT", "income_type": "FUNDING_FEE", "tran_id": "t-101", "symbol": "ZZZUSDT", "asset": "USDT", "amount": "-0.01", "event_time_ms": 1789862400000, "received_at_ms": 1789862401000, "source_hash": "src-synth-page-1"},
+          {"environment": "demo", "account_ref": "SYNTH_ACCT", "income_type": "FUNDING_FEE", "tran_id": "t-102", "symbol": "ZZZUSDT", "asset": "USDT", "amount": "-0.02", "event_time_ms": 1789862400000, "received_at_ms": 1789862401001, "source_hash": "src-synth-page-1"},
+          {"environment": "demo", "account_ref": "SYNTH_ACCT", "income_type": "FUNDING_FEE", "tran_id": "t-103", "symbol": "ZZZUSDT", "asset": "USDT", "amount": "-0.03", "event_time_ms": 1789862400000, "received_at_ms": 1789862401002, "source_hash": "src-synth-page-1"},
+          {"environment": "demo", "account_ref": "SYNTH_ACCT", "income_type": "FUNDING_FEE", "tran_id": "t-104", "symbol": "ZZZUSDT", "asset": "USDT", "amount": "-0.04", "event_time_ms": 1789862400000, "received_at_ms": 1789862401003, "source_hash": "src-synth-page-1"},
+          {"environment": "demo", "account_ref": "SYNTH_ACCT", "income_type": "FUNDING_FEE", "tran_id": "t-105", "symbol": "ZZZUSDT", "asset": "USDT", "amount": "-0.05", "event_time_ms": 1789862400000, "received_at_ms": 1789862401004, "source_hash": "src-synth-page-1"}
+        ]
+      },
+      "expect": {
+        "status": "CONTINUE",
+        "next_start_ms": 1789862400000,
+        "overlap_recheck": true,
+        "reason_codes": ["FULL_PAGE", "SAME_MS_BOUNDARY"]
+      }
+    },
+    {
+      "case_id": "K03-P3",
+      "kind": "positive",
+      "title": "短页即分页终止证据",
+      "operation": "k03_pagination",
+      "derivation": "page/limit 语义下，返回条数小于 limit 说明该窗口已读完，可作为 pagination_terminated_evidence；3<5 故 TERMINATED，不产生新起点。",
+      "inputs": {
+        "start_ms": 1789858800000,
+        "end_ms": 1789866000000,
+        "page_limit": 5,
+        "page": [
+          {"environment": "demo", "account_ref": "SYNTH_ACCT", "income_type": "COMMISSION", "tran_id": "t-201", "symbol": "ZZZUSDT", "asset": "USDT", "amount": "-0.01", "event_time_ms": 1789862400000, "received_at_ms": 1789862401000, "source_hash": "src-synth-page-1"},
+          {"environment": "demo", "account_ref": "SYNTH_ACCT", "income_type": "COMMISSION", "tran_id": "t-202", "symbol": "ZZZUSDT", "asset": "USDT", "amount": "-0.02", "event_time_ms": 1789862500000, "received_at_ms": 1789862501000, "source_hash": "src-synth-page-1"},
+          {"environment": "demo", "account_ref": "SYNTH_ACCT", "income_type": "COMMISSION", "tran_id": "t-203", "symbol": "ZZZUSDT", "asset": "USDT", "amount": "-0.03", "event_time_ms": 1789862600000, "received_at_ms": 1789862601000, "source_hash": "src-synth-page-1"}
+        ]
+      },
+      "expect": {
+        "status": "TERMINATED",
+        "next_start_ms": null,
+        "overlap_recheck": false,
+        "reason_codes": ["PAGE_SHORT"]
+      }
+    },
+    {
+      "case_id": "K03-P4",
+      "kind": "positive",
+      "title": "空窗口零费用可证明（完整覆盖+分页终止）",
+      "operation": "k03_zero_fee",
+      "derivation": "规格 §4 K03：窗口没有行不等于费用=0，需要来源正常、完整分页、时间范围覆盖与迟到数据复查。coverage [1789858800000,1789866000000) 状态 COMPLETE、watermark=end、终止证据为短页；来源正常、分页完整、迟到复查完成→可证明为零。",
+      "inputs": {
+        "coverage": {
+          "income_type": "FUNDING_FEE",
+          "start_ms": 1789858800000,
+          "end_ms": 1789866000000,
+          "watermark": 1789866000000,
+          "page_limit": 1000,
+          "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "coverage_status": "COMPLETE",
+          "gaps": [],
+          "synced_at_ms": 1789866100000
+        },
+        "source_available": true,
+        "pages_complete": true,
+        "late_recheck_done": true
+      },
+      "expect": {"provable": true, "reason_codes": []}
+    },
+    {
+      "case_id": "K03-P5",
+      "kind": "positive",
+      "title": "零费用可证明时 cost_status=COMPLETE 且归因状态独立",
+      "operation": "k03_finalize",
+      "derivation": "cost_status 与 attribution_status 是两组独立枚举：无可归因事件且零费用可证明时 cost_status=COMPLETE；归因状态为 ATTRIBUTED（无未归属暴露），并保留 COST_COMPLETE 作为完成依据。",
+      "inputs": {
+        "lifecycle_id": "lc-1",
+        "coverage": {
+          "income_type": "FUNDING_FEE",
+          "start_ms": 1789858800000,
+          "end_ms": 1789866000000,
+          "watermark": 1789866000000,
+          "page_limit": 1000,
+          "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "coverage_status": "COMPLETE",
+          "gaps": [],
+          "synced_at_ms": 1789866100000
+        },
+        "events": null,
+        "zero_fee_provable": true
+      },
+      "expect": {
+        "cost_status": "COMPLETE",
+        "coverage_status": "COMPLETE",
+        "attribution_status": "ATTRIBUTED",
+        "reason_codes": ["COST_COMPLETE"]
+      }
+    },
+    {
+      "case_id": "K03-P6",
+      "kind": "positive",
+      "title": "迟到收入触发 outcome_revision 且不新增闭合",
+      "operation": "k03_late_income",
+      "derivation": "规格 §10.1：后到费用触发 outcome_revision，原始 fill、收入和先前报告保持不可变；迟到收入只改变成本完整性，不能改开仓版本归属，也不能新增闭合。",
+      "inputs": {
+        "lifecycle_id": "lc-1",
+        "event": {
+          "environment": "demo",
+          "account_ref": "SYNTH_ACCT",
+          "income_type": "FUNDING_FEE",
+          "tran_id": "t-010",
+          "symbol": "ZZZUSDT",
+          "asset": "USDT",
+          "amount": "-0.25",
+          "event_time_ms": 1789862400000,
+          "received_at_ms": 1789867000000,
+          "source_hash": "src-synth-late-1"
+        },
+        "closed_outcomes": [
+          {"outcome_id": "oc-1", "lifecycle_id": "lc-1", "closed": true, "closed_at_ms": 1789860000000}
+        ]
+      },
+      "expect": {
+        "outcome_id": "oc-1",
+        "source_event_id": "demo|SYNTH_ACCT|FUNDING_FEE|t-010",
+        "reason_code": "LATE_INCOME",
+        "requires_recalculation": true,
+        "new_closed_outcome_created": false
+      }
+    },
+    {
+      "case_id": "K03-P7",
+      "kind": "positive",
+      "title": "明示权重的部分分摊守恒且可重放",
+      "operation": "k03_allocate",
+      "derivation": "规格 §10.1：部分平仓资金费分摊采用明示政策，守恒且可重放。源金额 10 按权重 3:1 → 7.5/2.5（10*3/4=7.5，余数 2.5 由末腿承接），Σ=10 精确等于源金额；方法/证据/版本随结果固化。",
+      "inputs": {
+        "source_amount": "10",
+        "weights": {"lc-1": "3", "lc-2": "1"},
+        "method": "funding_fee_prorata",
+        "version": "v1",
+        "evidence": "position_history:synth",
+        "event_id": "demo|SYNTH_ACCT|FUNDING_FEE|t-011"
+      },
+      "expect": {
+        "total": "10",
+        "allocations": [
+          {"lifecycle_id": "lc-1", "allocated_amount": "7.5", "method": "funding_fee_prorata", "version": "v1"},
+          {"lifecycle_id": "lc-2", "allocated_amount": "2.5", "method": "funding_fee_prorata", "version": "v1"}
+        ]
+      }
+    },
+    {
+      "case_id": "K03-P8",
+      "kind": "positive",
+      "title": "单边可证明仓位→ATTRIBUTED",
+      "operation": "k03_attribution",
+      "derivation": "按事件时点可证明仓位归因：事件时间 1789862400000 落在 lc-1 的开仓区间内（opened 1789850000000，未闭合），同 symbol 只有一个方向，归因唯一。coverage 为 COMPLETE，不阻断归因。",
+      "inputs": {
+        "events": [
+          {"event_id": "ev-1", "symbol": "ZZZUSDT", "event_time_ms": 1789862400000}
+        ],
+        "position_history": [
+          {"lifecycle_id": "lc-1", "symbol": "ZZZUSDT", "position_side": "LONG", "opened_at_ms": 1789850000000, "closed_at_ms": null}
+        ],
+        "coverage": {
+          "income_type": "FUNDING_FEE",
+          "start_ms": 1789858800000,
+          "end_ms": 1789866000000,
+          "watermark": 1789866000000,
+          "page_limit": 1000,
+          "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "coverage_status": "COMPLETE",
+          "gaps": [],
+          "synced_at_ms": 1789866100000
+        }
+      },
+      "expect": {
+        "allocation_status": "ATTRIBUTED",
+        "coverage_status": "COMPLETE",
+        "reason_codes": [],
+        "decisions": [
+          {"event_id": "ev-1", "status": "ATTRIBUTED", "lifecycle_id": "lc-1", "reason_codes": []}
+        ]
+      }
+    },
+    {
+      "case_id": "K03-N1",
+      "kind": "negative",
+      "title": "空窗口 PENDING 覆盖不得证明零费用",
+      "operation": "k03_zero_fee",
+      "derivation": "§10.1 官方接口逐页读取，页失败只保留已确认覆盖区间，不把总窗口标 COMPLETE。coverage 状态 PENDING 且 watermark 未到 end、无分页终止证据：即使查询返回 0 行也不能推出费用=0（历史只覆盖最近三个月，且迟到插入可能移页）。",
+      "inputs": {
+        "coverage": {
+          "income_type": "FUNDING_FEE",
+          "start_ms": 1789858800000,
+          "end_ms": 1789866000000,
+          "watermark": 1789860000000,
+          "page_limit": 1000,
+          "pagination_terminated_evidence": null,
+          "coverage_status": "PENDING",
+          "gaps": [],
+          "synced_at_ms": 1789860100000
+        },
+        "source_available": true,
+        "pages_complete": true,
+        "late_recheck_done": true
+      },
+      "expect": {
+        "provable": false,
+        "reason_codes": [
+          "COVERAGE_NOT_COMPLETE",
+          "PAGINATION_NOT_TERMINATED",
+          "WATERMARK_BEFORE_WINDOW_END"
+        ]
+      }
+    },
+    {
+      "case_id": "K03-N2",
+      "kind": "negative",
+      "title": "GAP 覆盖仅报告缺口，不填零",
+      "operation": "k03_zero_fee",
+      "derivation": "F10/F23：覆盖不虚报；接口范围/来源不支持时记录 GAP。存在区间缺口 [1789860600000,1789861200000) 时，即使分页终止、watermark 到位也不能证明整个窗口零费用。",
+      "inputs": {
+        "coverage": {
+          "income_type": "FUNDING_FEE",
+          "start_ms": 1789858800000,
+          "end_ms": 1789866000000,
+          "watermark": 1789866000000,
+          "page_limit": 1000,
+          "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "coverage_status": "GAP",
+          "gaps": [
+            {"start_ms": 1789860600000, "end_ms": 1789861200000, "reason": "source_gap"}
+          ],
+          "synced_at_ms": 1789866100000
+        },
+        "source_available": true,
+        "pages_complete": true,
+        "late_recheck_done": true
+      },
+      "expect": {"provable": false, "reason_codes": ["COVERAGE_GAP"]}
+    },
+    {
+      "case_id": "K03-N3",
+      "kind": "negative",
+      "title": "双向仓无法确定归属→UNATTRIBUTED",
+      "operation": "k03_attribution",
+      "derivation": "规格 §10.1：资金费按结算事件时点的可证明仓位归因，不使用“当前仓位”；双向仓（同 symbol 同时有 LONG 与 SHORT 生命周期）不凭符号硬分摊，无法确定结算时持仓归属时保留 UNATTRIBUTED。",
+      "inputs": {
+        "events": [
+          {"event_id": "ev-1", "symbol": "ZZZUSDT", "event_time_ms": 1789862400000}
+        ],
+        "position_history": [
+          {"lifecycle_id": "lc-long", "symbol": "ZZZUSDT", "position_side": "LONG", "opened_at_ms": 1789850000000, "closed_at_ms": null},
+          {"lifecycle_id": "lc-short", "symbol": "ZZZUSDT", "position_side": "SHORT", "opened_at_ms": 1789855000000, "closed_at_ms": null}
+        ],
+        "coverage": {
+          "income_type": "FUNDING_FEE",
+          "start_ms": 1789858800000,
+          "end_ms": 1789866000000,
+          "watermark": 1789866000000,
+          "page_limit": 1000,
+          "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "coverage_status": "COMPLETE",
+          "gaps": [],
+          "synced_at_ms": 1789866100000
+        }
+      },
+      "expect": {
+        "allocation_status": "UNATTRIBUTED",
+        "reason_codes": ["AMBIGUOUS_TWO_SIDED_POSITION"],
+        "decisions": [
+          {
+            "event_id": "ev-1",
+            "status": "UNATTRIBUTED",
+            "lifecycle_id": null,
+            "reason_codes": ["AMBIGUOUS_TWO_SIDED_POSITION"]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "K03-N4",
+      "kind": "negative",
+      "title": "分摊守恒失败→拒绝",
+      "operation": "k03_conservation",
+      "derivation": "规格 §4 K03：分摊金额总和必须等于源事件可归因金额。源 10.00，分配合计 4.00+5.00=9.00，差 1.00 不允许通过或自动补差，必须抛出 ConservationViolation。",
+      "inputs": {
+        "source_amount": "10.00",
+        "allocations": [
+          {"lifecycle_id": "lc-1", "event_id": "ev-1", "allocated_amount": "4.00", "method": "funding_fee_prorata", "evidence": "position_history:synth", "version": "v1"},
+          {"lifecycle_id": "lc-2", "event_id": "ev-1", "allocated_amount": "5.00", "method": "funding_fee_prorata", "evidence": "position_history:synth", "version": "v1"}
+        ]
+      },
+      "expect": {
+        "ok": false,
+        "error": "ConservationViolation",
+        "source_amount": "10.00",
+        "allocated_total": "9.00"
+      }
+    }
+  ]
+}

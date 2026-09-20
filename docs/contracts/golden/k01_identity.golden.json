@@ -1,0 +1,300 @@
+{
+  "contract": "K01",
+  "title": "RuntimeIdentity 与部署作用域正反 golden",
+  "version": "v3.0",
+  "independent": true,
+  "cases": [
+    {
+      "case_id": "K01-P1",
+      "kind": "positive",
+      "title": "策略卡内容变化只改变 strategy_hash",
+      "operation": "k01_hash_scope",
+      "derivation": "规格 §4 K01 要求 strategy_hash 必须覆盖实际策略卡；哈希是对规范化 JSON（键排序、UTF-8、无空格）的 sha256。variant 只改 knowledge/strategy_cards.json 的 exits.sl_pct（策略行为变化），其余四组输入逐字相同，因此按函数确定性只有 strategy_hash 必变。",
+      "inputs": {
+        "base": {
+          "artifact_files": {
+            "src/core/service.py": "def run(): pass\n",
+            "src/core/graph.py": "GRAPH = 1\n"
+          },
+          "dependency_lock_files": {
+            "requirements-lock.txt": "pydantic==2.13.5\n"
+          },
+          "strategy_cards": {
+            "version": "v1",
+            "cards": [
+              {"strategy_id": "S_SYNTH_1", "exits": {"sl_pct": 1.0, "tp_pct": 2.0}}
+            ]
+          },
+          "model_route": {
+            "model": "deepseek-v4-flash",
+            "effort": "xhigh",
+            "fallback_routes": [],
+            "profile_overrides": {}
+          },
+          "effective_config": {
+            "settings": {"execution": {"default_mode": "demo"}},
+            "profile_overrides": {},
+            "environment_overrides": {}
+          }
+        },
+        "variant": {
+          "artifact_files": {
+            "src/core/service.py": "def run(): pass\n",
+            "src/core/graph.py": "GRAPH = 1\n"
+          },
+          "dependency_lock_files": {
+            "requirements-lock.txt": "pydantic==2.13.5\n"
+          },
+          "strategy_cards": {
+            "version": "v1",
+            "cards": [
+              {"strategy_id": "S_SYNTH_1", "exits": {"sl_pct": 1.5, "tp_pct": 2.0}}
+            ]
+          },
+          "model_route": {
+            "model": "deepseek-v4-flash",
+            "effort": "xhigh",
+            "fallback_routes": [],
+            "profile_overrides": {}
+          },
+          "effective_config": {
+            "settings": {"execution": {"default_mode": "demo"}},
+            "profile_overrides": {},
+            "environment_overrides": {}
+          }
+        }
+      },
+      "expect": {
+        "changed": {
+          "artifact_hash": false,
+          "dependency_hash": false,
+          "strategy_hash": true,
+          "model_route_hash": false,
+          "effective_config_hash": false
+        }
+      }
+    },
+    {
+      "case_id": "K01-P2",
+      "kind": "positive",
+      "title": "改模型名/推理档→model_route_hash 变",
+      "operation": "k01_hash_scope",
+      "derivation": "K01 覆盖清单要求 model_route_hash 覆盖模型名、推理档、备用路由及 profile 覆盖值（决策链路报告 §3.1 的 deepseek-v4-flash/xhigh → deepseek-v4.1-flash/max 正是实际可能发生的路由漂移）。variant 只改 model_route，按哈希确定性只有 model_route_hash 必变。",
+      "inputs": {
+        "base": {
+          "artifact_files": {"src/core/service.py": "def run(): pass\n"},
+          "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
+          "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
+          "model_route": {
+            "model": "deepseek-v4-flash",
+            "effort": "xhigh",
+            "fallback_routes": [],
+            "profile_overrides": {}
+          },
+          "effective_config": {
+            "settings": {"execution": {"default_mode": "demo"}},
+            "profile_overrides": {},
+            "environment_overrides": {}
+          }
+        },
+        "variant": {
+          "artifact_files": {"src/core/service.py": "def run(): pass\n"},
+          "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
+          "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
+          "model_route": {
+            "model": "deepseek-v4.1-flash",
+            "effort": "max",
+            "fallback_routes": [{"provider": "opencode", "model": "union-alpha"}],
+            "profile_overrides": {"MTA_AI_DECISION_PROVIDER": "workbuddy"}
+          },
+          "effective_config": {
+            "settings": {"execution": {"default_mode": "demo"}},
+            "profile_overrides": {},
+            "environment_overrides": {}
+          }
+        }
+      },
+      "expect": {
+        "changed": {
+          "artifact_hash": false,
+          "dependency_hash": false,
+          "strategy_hash": false,
+          "model_route_hash": true,
+          "effective_config_hash": false
+        }
+      }
+    },
+    {
+      "case_id": "K01-P3",
+      "kind": "positive",
+      "title": "环境/profile 覆盖值变化→effective_config_hash 变",
+      "operation": "k01_hash_scope",
+      "derivation": "规格 §4 K01：配置哈希只取有效非敏感值，必须覆盖 profile 与环境覆盖后的结果，而不是原始 .env 整文件。variant 把 live 覆盖值从 0.0/1.0 改为 0.5/0.5（demo/live 通道覆盖差异），故 effective_config_hash 必变，其余组不变。",
+      "inputs": {
+        "base": {
+          "artifact_files": {"src/core/service.py": "def run(): pass\n"},
+          "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
+          "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
+          "effective_config": {
+            "settings": {"channels": {"ai": 1.0, "strategy": 1.0}},
+            "profile_overrides": {"live": {"channels": {"ai": 0.0, "strategy": 0.0}}},
+            "environment_overrides": {"EXECUTION_MODE": "demo"}
+          }
+        },
+        "variant": {
+          "artifact_files": {"src/core/service.py": "def run(): pass\n"},
+          "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
+          "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
+          "effective_config": {
+            "settings": {"channels": {"ai": 1.0, "strategy": 1.0}},
+            "profile_overrides": {"live": {"channels": {"ai": 0.5, "strategy": 0.5}}},
+            "environment_overrides": {"EXECUTION_MODE": "demo"}
+          }
+        }
+      },
+      "expect": {
+        "changed": {
+          "artifact_hash": false,
+          "dependency_hash": false,
+          "strategy_hash": false,
+          "model_route_hash": false,
+          "effective_config_hash": true
+        }
+      }
+    },
+    {
+      "case_id": "K01-P4",
+      "kind": "positive",
+      "title": "git_commit 不参与文件内容哈希但进入身份对比",
+      "operation": "k01_identity_diff",
+      "derivation": "规格 §4 K01：artifact_hash 是内容哈希，git_commit 是独立身份字段。variant 只改 git_commit 与 runtime_instance_id，文件内容逐字相同，因此 artifact_hash 必相等；默认身份对比忽略进程级 runtime_instance_id，只报 git_commit；显式不忽略时两个字段都出现。字段顺序按模型声明顺序。",
+      "inputs": {
+        "base": {
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "runtime_instance_id": "inst-synth-r1",
+          "artifact_files": {"src/core/service.py": "def run(): pass\n"},
+          "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
+          "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
+          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}}
+        },
+        "variant": {
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "git_commit": "89abcdef0123456789abcdef0123456789abcdef",
+          "runtime_instance_id": "inst-synth-r2",
+          "artifact_files": {"src/core/service.py": "def run(): pass\n"},
+          "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
+          "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
+          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}}
+        }
+      },
+      "expect": {
+        "artifact_hash_equal": true,
+        "identity_hash_equal": false,
+        "mismatch_fields": ["git_commit"],
+        "mismatch_ignoring_instance": ["git_commit", "runtime_instance_id"]
+      }
+    },
+    {
+      "case_id": "K01-P5",
+      "kind": "positive",
+      "title": "相同输入产生相同哈希（确定性）",
+      "operation": "k01_hash_scope",
+      "derivation": "哈希是纯函数：规范化 JSON 的键排序与无空格分隔保证同一输入在不同进程/机器上得到相同摘要。base 与 variant 逐字相同，故所有 changed 为 false。",
+      "inputs": {
+        "base": {
+          "artifact_files": {"src/core/service.py": "def run(): pass\n"},
+          "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
+          "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
+          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}}
+        },
+        "variant": {
+          "artifact_files": {"src/core/service.py": "def run(): pass\n"},
+          "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
+          "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
+          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}}
+        }
+      },
+      "expect": {
+        "changed": {
+          "artifact_hash": false,
+          "dependency_hash": false,
+          "strategy_hash": false,
+          "model_route_hash": false,
+          "effective_config_hash": false
+        }
+      }
+    },
+    {
+      "case_id": "K01-N1",
+      "kind": "negative",
+      "title": "含敏感键名的输入拒绝计算",
+      "operation": "k01_secret_rejected",
+      "derivation": "规格 §4 K01：配置哈希只取有效非敏感值，禁止对原始 .env 整文件导出哈希或输出秘密；F13 要求凭据不外泄。敏感键名匹配为子串、大小写不敏感（key/secret/token 等）。控制组使用无害键名，必须正常通过，证明拒绝来自键名而不是函数不可用。",
+      "inputs": {
+        "cases": [
+          {
+            "name": "model_route_api_key",
+            "group": "model_route",
+            "value": {"model": "deepseek-v4-flash", "api_key": "${BINANCE_API_KEY}"}
+          },
+          {
+            "name": "effective_config_secret",
+            "group": "effective_config",
+            "value": {"settings": {"mode": "demo"}, "secret_key": "test"}
+          },
+          {
+            "name": "strategy_nested_token",
+            "group": "strategy",
+            "value": {"cards": [{"strategy_id": "S1", "token": "${META_TOKEN}"}]}
+          }
+        ],
+        "control": {"group": "model_route", "value": {"model": "deepseek-v4-flash"}}
+      },
+      "expect": {
+        "rejected": {
+          "model_route_api_key": true,
+          "effective_config_secret": true,
+          "strategy_nested_token": true
+        },
+        "control_rejected": false
+      }
+    },
+    {
+      "case_id": "K01-N2",
+      "kind": "negative",
+      "title": "覆盖清单缺字段必须显式报告",
+      "operation": "k01_coverage",
+      "derivation": "K01 要求覆盖实际 requirements 锁、策略卡、模型路由与有效配置。依赖组只声明锁文件与比对结果、策略组声明策略卡、模型组声明模型与推理档但缺备用路由/profile 覆盖、有效配置组缺 profile 覆盖；按组声明顺序输出缺口，不得静默通过。",
+      "inputs": {
+        "coverage": {
+          "dependency": {
+            "requirements_lock": "requirements-lock.txt",
+            "comparison_status": "match"
+          },
+          "strategy": {"strategy_cards": "knowledge/strategy_cards.json"},
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
+          "effective_config": {
+            "settings": "config/settings.yaml",
+            "environment_overrides": {"EXECUTION_MODE": "demo"}
+          }
+        }
+      },
+      "expect": {
+        "missing": [
+          "model_route.fallback_routes",
+          "model_route.profile_overrides",
+          "effective_config.profile_overrides"
+        ]
+      }
+    }
+  ]
+}

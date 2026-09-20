@@ -1,0 +1,172 @@
+{
+  "$defs": {
+    "BlockingItem": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        },
+        "group": {
+          "title": "Group",
+          "type": "string"
+        },
+        "severity": {
+          "default": "BLOCKING",
+          "enum": [
+            "BLOCKING",
+            "WARNING"
+          ],
+          "title": "Severity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "group",
+        "code",
+        "detail"
+      ],
+      "title": "BlockingItem",
+      "type": "object"
+    },
+    "ReleaseEvidenceReport": {
+      "additionalProperties": false,
+      "description": "五组状态 + 阻断项；模型自身不携带任何整体 GO 判定字段。",
+      "properties": {
+        "blocking_items": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BlockingItem"
+          },
+          "title": "Blocking Items",
+          "type": "array"
+        },
+        "groups": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReleaseGroupEvidence"
+          },
+          "title": "Groups",
+          "type": "array"
+        },
+        "report_hash": {
+          "default": "",
+          "title": "Report Hash",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "3.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "title": "ReleaseEvidenceReport",
+      "type": "object"
+    },
+    "ReleaseGroupEvidence": {
+      "additionalProperties": false,
+      "description": "单组状态；组与组独立，一组 FAIL 不影响其余组的计算。",
+      "properties": {
+        "evidence_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Hash"
+        },
+        "group": {
+          "title": "Group",
+          "type": "string"
+        },
+        "identity_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identity Ref"
+        },
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "NO_DATA"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "window_end_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window End Ms"
+        },
+        "window_start_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window Start Ms"
+        }
+      },
+      "required": [
+        "group",
+        "status"
+      ],
+      "title": "ReleaseGroupEvidence",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "schema 导出与冒烟校验入口；不是运行期数据结构。",
+  "properties": {
+    "blocking_item": {
+      "$ref": "#/$defs/BlockingItem"
+    },
+    "group_evidence": {
+      "$ref": "#/$defs/ReleaseGroupEvidence"
+    },
+    "report": {
+      "$ref": "#/$defs/ReleaseEvidenceReport"
+    }
+  },
+  "required": [
+    "group_evidence",
+    "blocking_item",
+    "report"
+  ],
+  "title": "K06SchemaEnvelope",
+  "type": "object"
+}

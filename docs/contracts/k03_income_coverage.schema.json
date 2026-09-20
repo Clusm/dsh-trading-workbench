@@ -1,0 +1,543 @@
+{
+  "$defs": {
+    "AttributionDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "title": "Event Id",
+          "type": "string"
+        },
+        "lifecycle_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lifecycle Id"
+        },
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "UNKNOWN",
+            "UNATTRIBUTED",
+            "ATTRIBUTED"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "status"
+      ],
+      "title": "AttributionDecision",
+      "type": "object"
+    },
+    "AttributionResult": {
+      "additionalProperties": false,
+      "properties": {
+        "allocation_status": {
+          "enum": [
+            "UNKNOWN",
+            "UNATTRIBUTED",
+            "ATTRIBUTED"
+          ],
+          "title": "Allocation Status",
+          "type": "string"
+        },
+        "coverage_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "PENDING",
+                "COMPLETE",
+                "GAP"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coverage Status"
+        },
+        "decisions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AttributionDecision"
+          },
+          "title": "Decisions",
+          "type": "array"
+        },
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "allocation_status"
+      ],
+      "title": "AttributionResult",
+      "type": "object"
+    },
+    "CostAttribution": {
+      "additionalProperties": false,
+      "properties": {
+        "allocated_amount": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Allocated Amount"
+        },
+        "event_id": {
+          "title": "Event Id",
+          "type": "string"
+        },
+        "evidence": {
+          "title": "Evidence",
+          "type": "string"
+        },
+        "lifecycle_id": {
+          "title": "Lifecycle Id",
+          "type": "string"
+        },
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "lifecycle_id",
+        "event_id",
+        "allocated_amount",
+        "method",
+        "evidence",
+        "version"
+      ],
+      "title": "CostAttribution",
+      "type": "object"
+    },
+    "CostFinalization": {
+      "additionalProperties": false,
+      "properties": {
+        "attribution_status": {
+          "enum": [
+            "UNKNOWN",
+            "UNATTRIBUTED",
+            "ATTRIBUTED"
+          ],
+          "title": "Attribution Status",
+          "type": "string"
+        },
+        "cost_status": {
+          "enum": [
+            "UNKNOWN",
+            "INCOMPLETE",
+            "COMPLETE"
+          ],
+          "title": "Cost Status",
+          "type": "string"
+        },
+        "coverage_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "PENDING",
+                "COMPLETE",
+                "GAP"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coverage Status"
+        },
+        "lifecycle_id": {
+          "title": "Lifecycle Id",
+          "type": "string"
+        },
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "lifecycle_id",
+        "cost_status",
+        "attribution_status"
+      ],
+      "title": "CostFinalization",
+      "type": "object"
+    },
+    "IncomeCoverage": {
+      "additionalProperties": false,
+      "description": "一个 income_type 的同步覆盖证据；[start, end) 内部语义。",
+      "properties": {
+        "coverage_status": {
+          "default": "PENDING",
+          "enum": [
+            "PENDING",
+            "COMPLETE",
+            "GAP"
+          ],
+          "title": "Coverage Status",
+          "type": "string"
+        },
+        "end_ms": {
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "gaps": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RangeGap"
+          },
+          "title": "Gaps",
+          "type": "array"
+        },
+        "income_type": {
+          "title": "Income Type",
+          "type": "string"
+        },
+        "page_limit": {
+          "exclusiveMinimum": 0,
+          "title": "Page Limit",
+          "type": "integer"
+        },
+        "pagination_terminated_evidence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pagination Terminated Evidence"
+        },
+        "schema_version": {
+          "default": "3.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "start_ms": {
+          "title": "Start Ms",
+          "type": "integer"
+        },
+        "synced_at_ms": {
+          "default": 0,
+          "title": "Synced At Ms",
+          "type": "integer"
+        },
+        "watermark": {
+          "title": "Watermark",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "income_type",
+        "start_ms",
+        "end_ms",
+        "watermark",
+        "page_limit"
+      ],
+      "title": "IncomeCoverage",
+      "type": "object"
+    },
+    "IncomeEvent": {
+      "additionalProperties": false,
+      "description": "单条收入流水；tran_id 在同一用户同 incomeType 内唯一。",
+      "properties": {
+        "account_ref": {
+          "title": "Account Ref",
+          "type": "string"
+        },
+        "amount": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Amount"
+        },
+        "asset": {
+          "title": "Asset",
+          "type": "string"
+        },
+        "environment": {
+          "title": "Environment",
+          "type": "string"
+        },
+        "event_time_ms": {
+          "title": "Event Time Ms",
+          "type": "integer"
+        },
+        "income_type": {
+          "title": "Income Type",
+          "type": "string"
+        },
+        "received_at_ms": {
+          "title": "Received At Ms",
+          "type": "integer"
+        },
+        "schema_version": {
+          "default": "3.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_hash": {
+          "title": "Source Hash",
+          "type": "string"
+        },
+        "symbol": {
+          "title": "Symbol",
+          "type": "string"
+        },
+        "tran_id": {
+          "title": "Tran Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment",
+        "account_ref",
+        "income_type",
+        "tran_id",
+        "symbol",
+        "asset",
+        "amount",
+        "event_time_ms",
+        "received_at_ms",
+        "source_hash"
+      ],
+      "title": "IncomeEvent",
+      "type": "object"
+    },
+    "InsertResult": {
+      "additionalProperties": false,
+      "properties": {
+        "duplicates": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Duplicates",
+          "type": "array"
+        },
+        "inserted": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Inserted",
+          "type": "array"
+        },
+        "quarantined": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/QuarantineRecord"
+          },
+          "title": "Quarantined",
+          "type": "array"
+        },
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        }
+      },
+      "title": "InsertResult",
+      "type": "object"
+    },
+    "OutcomeRevision": {
+      "additionalProperties": false,
+      "description": "迟到收入只触发审计修订，不新增闭合、不改原始记录。",
+      "properties": {
+        "new_closed_outcome_created": {
+          "default": false,
+          "title": "New Closed Outcome Created",
+          "type": "boolean"
+        },
+        "original_closed_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Original Closed At Ms"
+        },
+        "outcome_id": {
+          "title": "Outcome Id",
+          "type": "string"
+        },
+        "reason_code": {
+          "default": "LATE_INCOME",
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "requires_recalculation": {
+          "default": true,
+          "title": "Requires Recalculation",
+          "type": "boolean"
+        },
+        "revision_version": {
+          "default": "3.0",
+          "title": "Revision Version",
+          "type": "string"
+        },
+        "source_event_id": {
+          "title": "Source Event Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "outcome_id",
+        "source_event_id"
+      ],
+      "title": "OutcomeRevision",
+      "type": "object"
+    },
+    "QuarantineRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "existing_content_hash": {
+          "title": "Existing Content Hash",
+          "type": "string"
+        },
+        "incoming_content_hash": {
+          "title": "Incoming Content Hash",
+          "type": "string"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "reason_code": {
+          "title": "Reason Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "reason_code",
+        "existing_content_hash",
+        "incoming_content_hash"
+      ],
+      "title": "QuarantineRecord",
+      "type": "object"
+    },
+    "RangeGap": {
+      "additionalProperties": false,
+      "properties": {
+        "end_ms": {
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        },
+        "start_ms": {
+          "title": "Start Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_ms",
+        "end_ms"
+      ],
+      "title": "RangeGap",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "schema 导出与冒烟校验入口；不是运行期数据结构。",
+  "properties": {
+    "attribution_decisions": {
+      "$ref": "#/$defs/AttributionDecision"
+    },
+    "attribution_result": {
+      "$ref": "#/$defs/AttributionResult"
+    },
+    "cost_attribution": {
+      "$ref": "#/$defs/CostAttribution"
+    },
+    "cost_finalization": {
+      "$ref": "#/$defs/CostFinalization"
+    },
+    "income_coverage": {
+      "$ref": "#/$defs/IncomeCoverage"
+    },
+    "income_event": {
+      "$ref": "#/$defs/IncomeEvent"
+    },
+    "insert_result": {
+      "$ref": "#/$defs/InsertResult"
+    },
+    "outcome_revision": {
+      "$ref": "#/$defs/OutcomeRevision"
+    },
+    "range_gap": {
+      "$ref": "#/$defs/RangeGap"
+    }
+  },
+  "required": [
+    "income_event",
+    "income_coverage",
+    "insert_result",
+    "attribution_decisions",
+    "attribution_result",
+    "cost_attribution",
+    "cost_finalization",
+    "outcome_revision",
+    "range_gap"
+  ],
+  "title": "K03SchemaEnvelope",
+  "type": "object"
+}

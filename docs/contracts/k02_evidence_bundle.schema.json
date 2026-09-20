@@ -1,0 +1,483 @@
+{
+  "$defs": {
+    "ClaimResult": {
+      "additionalProperties": false,
+      "properties": {
+        "actual": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Actual"
+        },
+        "claim_id": {
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected"
+        },
+        "expr": {
+          "title": "Expr",
+          "type": "string"
+        },
+        "reason_code": {
+          "default": "",
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "UNRESOLVED"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "claim_id",
+        "expr",
+        "status"
+      ],
+      "title": "ClaimResult",
+      "type": "object"
+    },
+    "DerivedFact": {
+      "additionalProperties": false,
+      "description": "由代码计算的派生事实；必须引用至少一个输入 ID。",
+      "properties": {
+        "computed_by": {
+          "const": "code",
+          "default": "code",
+          "title": "Computed By",
+          "type": "string"
+        },
+        "fact_id": {
+          "title": "Fact Id",
+          "type": "string"
+        },
+        "inputs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "array"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fact_id",
+        "kind",
+        "value"
+      ],
+      "title": "DerivedFact",
+      "type": "object"
+    },
+    "EvidenceBundle": {
+      "additionalProperties": false,
+      "description": "一次周期内单币种的证据快照；content_hash 自绑定。",
+      "properties": {
+        "as_of_ms": {
+          "title": "As Of Ms",
+          "type": "integer"
+        },
+        "bar_times": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Bar Times",
+          "type": "object"
+        },
+        "content_hash": {
+          "default": "",
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "cycle_id": {
+          "title": "Cycle Id",
+          "type": "string"
+        },
+        "derived_facts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DerivedFact"
+          },
+          "title": "Derived Facts",
+          "type": "array"
+        },
+        "evidence_id": {
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "expires_at_ms": {
+          "default": 0,
+          "title": "Expires At Ms",
+          "type": "integer"
+        },
+        "finality": {
+          "default": "unknown",
+          "enum": [
+            "closed",
+            "live",
+            "unknown"
+          ],
+          "title": "Finality",
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/$defs/RuntimeIdentity"
+        },
+        "inputs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceInput"
+          },
+          "title": "Inputs",
+          "type": "array"
+        },
+        "quality": {
+          "additionalProperties": true,
+          "title": "Quality",
+          "type": "object"
+        },
+        "symbol": {
+          "title": "Symbol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "cycle_id",
+        "identity",
+        "symbol",
+        "as_of_ms"
+      ],
+      "title": "EvidenceBundle",
+      "type": "object"
+    },
+    "EvidenceInput": {
+      "additionalProperties": false,
+      "description": "单个证据输入；value_ref 指向可复核的原始载荷。",
+      "properties": {
+        "bar_close_time_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bar Close Time Ms"
+        },
+        "event_time_ms": {
+          "title": "Event Time Ms",
+          "type": "integer"
+        },
+        "finality": {
+          "default": "unknown",
+          "enum": [
+            "closed",
+            "live",
+            "unknown"
+          ],
+          "title": "Finality",
+          "type": "string"
+        },
+        "input_id": {
+          "title": "Input Id",
+          "type": "string"
+        },
+        "interval": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Interval"
+        },
+        "received_time_ms": {
+          "title": "Received Time Ms",
+          "type": "integer"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Symbol"
+        },
+        "valid_until_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid Until Ms"
+        },
+        "value_ref": {
+          "title": "Value Ref",
+          "type": "string"
+        },
+        "values": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Values",
+          "type": "object"
+        }
+      },
+      "required": [
+        "input_id",
+        "source",
+        "event_time_ms",
+        "received_time_ms",
+        "value_ref"
+      ],
+      "title": "EvidenceInput",
+      "type": "object"
+    },
+    "EvidenceVerdict": {
+      "additionalProperties": false,
+      "description": "单个 intent 的校验结论；绑定 intent/symbol/evidence 三元组。",
+      "properties": {
+        "checked_at_ms": {
+          "title": "Checked At Ms",
+          "type": "integer"
+        },
+        "checked_intent_id": {
+          "title": "Checked Intent Id",
+          "type": "string"
+        },
+        "claim_results": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ClaimResult"
+          },
+          "title": "Claim Results",
+          "type": "array"
+        },
+        "evidence_id": {
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "intent_symbol": {
+          "title": "Intent Symbol",
+          "type": "string"
+        },
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "VALID",
+            "EVIDENCE_INVALID",
+            "EXPIRED",
+            "STALE",
+            "SYMBOL_MISMATCH"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "verdict_id": {
+          "default": "",
+          "title": "Verdict Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "checked_intent_id",
+        "intent_symbol",
+        "evidence_id",
+        "status",
+        "checked_at_ms"
+      ],
+      "title": "EvidenceVerdict",
+      "type": "object"
+    },
+    "ExecutionQuote": {
+      "additionalProperties": false,
+      "description": "执行前候选入场报价；OPEN 意图必须携带且有限、未过期。",
+      "properties": {
+        "expires_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At Ms"
+        },
+        "price": {
+          "title": "Price",
+          "type": "string"
+        },
+        "quote_time_ms": {
+          "title": "Quote Time Ms",
+          "type": "integer"
+        },
+        "symbol": {
+          "title": "Symbol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol",
+        "price",
+        "quote_time_ms"
+      ],
+      "title": "ExecutionQuote",
+      "type": "object"
+    },
+    "RuntimeIdentity": {
+      "additionalProperties": false,
+      "description": "一次运行的不可混淆身份；不得写入原始密钥或完整 .env。",
+      "properties": {
+        "account_ref": {
+          "title": "Account Ref",
+          "type": "string"
+        },
+        "artifact_hash": {
+          "title": "Artifact Hash",
+          "type": "string"
+        },
+        "dependency_hash": {
+          "title": "Dependency Hash",
+          "type": "string"
+        },
+        "effective_config_hash": {
+          "title": "Effective Config Hash",
+          "type": "string"
+        },
+        "environment": {
+          "title": "Environment",
+          "type": "string"
+        },
+        "git_commit": {
+          "title": "Git Commit",
+          "type": "string"
+        },
+        "model_route_hash": {
+          "title": "Model Route Hash",
+          "type": "string"
+        },
+        "runtime_instance_id": {
+          "title": "Runtime Instance Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "3.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "strategy_hash": {
+          "title": "Strategy Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment",
+        "account_ref",
+        "artifact_hash",
+        "git_commit",
+        "dependency_hash",
+        "effective_config_hash",
+        "strategy_hash",
+        "model_route_hash",
+        "runtime_instance_id"
+      ],
+      "title": "RuntimeIdentity",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "schema 导出与冒烟校验入口；不是运行期数据结构。",
+  "properties": {
+    "bundle": {
+      "$ref": "#/$defs/EvidenceBundle"
+    },
+    "claim_result": {
+      "$ref": "#/$defs/ClaimResult"
+    },
+    "execution_quote": {
+      "$ref": "#/$defs/ExecutionQuote"
+    },
+    "verdict": {
+      "$ref": "#/$defs/EvidenceVerdict"
+    }
+  },
+  "required": [
+    "bundle",
+    "verdict",
+    "claim_result",
+    "execution_quote"
+  ],
+  "title": "K02SchemaEnvelope",
+  "type": "object"
+}
