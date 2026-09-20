@@ -48,7 +48,6 @@ from core.runtime_identity import (  # noqa: E402
     PROVIDER_CAPABILITY_UNPROVEN,
     PROVIDER_UNAVAILABLE,
     READINESS_UNPROVEN,
-    RUNTIME_GENERATION_UNPROVEN,
     RUNTIME_GENERATION_MALFORMED,
     SCOPE_HASH_MISMATCH,
     SCOPE_HASH_UNBOUND,
@@ -613,7 +612,7 @@ def check_defaults_are_not_effective_values() -> None:
 
 def check_model_route_priority() -> None:
     with tempfile.TemporaryDirectory() as raw:
-        tmp = make_root(Path(raw))
+        make_root(Path(raw))
         # agents.yaml > 环境变量 > settings 默认
         agent_wins = resolve_model_route(raw_settings=SETTINGS, raw_agents=AGENTS,
                                         env={"SENSENOVA_MODEL": "env-model"},
@@ -660,7 +659,7 @@ def check_model_route_priority() -> None:
 
 def check_mock_is_visible_and_blocking() -> None:
     with tempfile.TemporaryDirectory() as raw:
-        tmp = make_root(Path(raw))
+        make_root(Path(raw))
         mock_route = resolve_model_route(raw_settings=SETTINGS, raw_agents=AGENTS, env={},
                                         credentials_present={"SENSENOVA_API_KEY": False},
                                         execution_mode="demo")

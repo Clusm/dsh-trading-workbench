@@ -60,10 +60,8 @@ from pathlib import Path
 from typing import Any
 
 from core.contracts import (
-    IdentityCoverageError,
     ModelRoute,
     RuntimeIdentity,
-    SensitiveInputError,
     build_identity,
     hash_model_route,
     hash_strategy,
