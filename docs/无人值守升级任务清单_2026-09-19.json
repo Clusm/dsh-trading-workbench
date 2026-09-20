@@ -1963,6 +1963,31 @@
           "p2": "P2-3/6/9、P3-2/3 已修；P2-4 部分修（core 兼容读 schema 1/2/3，反向未修已登记）；P2-5 如实登记（需 U12 定义 live 恢复布局）；P2-8 半修（跨进程读改写已登记）；P2-7 + P3-4..9 如实登记",
           "warning": "**上一轮 a27fc17/ 补丁目录仍在 —— 二选一，勿两套都打**（本轮用 b55c4fb/）",
           "rollback": "git revert c216af6 c64435e b55c4fb；或整目录弃用补丁"
+        },
+        {
+          "type": "review_r2_verification",
+          "candidate": "c216af6",
+          "verdict": "PASS-with-notes",
+          "archived_path": "docs/dispatch/reviews/U13/c216af6/Q_r2.md",
+          "p1_2": "真闭合：23 例反例（损坏/删文件/删戳/戳伪造 null,false/字段缺失/目录/真实共享锁不可读）全拒，无'应拒却放行'",
+          "p1_3": "真闭合：真实 TradingService 端到端 40/40（启动 close_only+critical、set_control('normal') 被拦、auto/未确认/陈旧/未来/类型混淆/他账户证据全拒 EVIDENCE_ACCOUNT_MISMATCH、operator+确认->CLEARED 落盘、第二实例读到、HTTP 409/200）",
+          "strict_python_deviation": "**可接受**：无效 MTA_PYTHON -> 全局 ValueError（A2 面闭合）；安装/运行入口 allow_fallback=False + 白名单堵住 sys.executable 回退（A1 面闭合）；仅余 P3-7（计划校验器未接线，已登记）",
+          "delta": "独立逐脚本 73：pristine 1 失败 -> full 0，**新失败 0**，纯单向 smoke_windows_service_plan.py: fail->pass；本机无 MTA_STATE_ROOT/MTA_DATA_ROOT，作者清环境与官方入口等价、不影响结论",
+          "new_p3": [
+            "from_fallback 与 is_explicit 对 env 源互相矛盾",
+            "load 接受持久化 GATE_NOT_INSTALLED/未来时间戳",
+            "安装戳与被保护物同目录",
+            "ClockVerdict 仍不持久化 + 墙钟前跳重置重启窗口（F_r1 已登记）"
+          ],
+          "p2_registration": "P2-5 如实；P2-4 修复方向准确，但'反向未修'仅在代码注释、未进 README §3 残余清单（P3 完整性瑕疵，无'未修写成已修'）",
+          "residual": "官方单命令入口仍中止 = 未修的 P1-1（登记项，修法在 I 侧一行）"
+        },
+        {
+          "type": "patch_collision",
+          "status": "BLOCKED_AT_INTEGRATION",
+          "detail": "U13 的 12 个共享适配补丁按 base 0e522b1 生成，但集成 HEAD 已含其它任务对同样文件的改动（尤其 U15 改过 config_loader.py 与 app.py）-> 集成树上 11/12 直接应用失败，git apply --3way 在 6 个文件（config_loader/service/windows_service/app.py/smoke_windows_service_plan/windows_service_host）仍冲突。",
+          "handling": "已派 U13 r3 按**集成 HEAD 65644e79** 重新生成补丁，要求逐文件说明'其它任务的改动/你的改动/如何合并'，并在 HEAD 沙箱里自证 12 补丁应用 + **同时跑其它任务的关键验收**（U15 身份/控制面、U01 收入、U04 执行）证明未打坏别人。",
+          "lesson": "共享适配补丁必须针对**将被应用的那棵树**生成；当集成树已含他人改动时，作者需在集成版本之上叠加自己的改动，而不是只 diff 自己的 base。"
         }
       ],
       "blockers": [],
@@ -2025,7 +2050,7 @@
           "sessions": [
             "Q (reviews/U13/R2/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "PASS-with-notes",
           "reports_dir": "docs/dispatch/reviews/U13/<r2head>/"
         },
         {
@@ -2035,8 +2060,18 @@
           "sessions": [
             "Q (reviews/U13/R2/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "PASS-with-notes",
           "reports_dir": "docs/dispatch/reviews/U13/c216af6/"
+        },
+        {
+          "round": "r3",
+          "stage": "补丁重生成",
+          "candidate": null,
+          "sessions": [
+            "U13 author (r3)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U13/<r3head>/"
         }
       ],
       "qa_runs": []
