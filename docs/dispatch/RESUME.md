@@ -35,7 +35,7 @@
 |---|---|---|---|---|
 | CD | U05 真实耗时/模型降级/决策原因 | `task/U05` | **r2 复验 CHANGES_REQUESTED → r3 修复中** | r2 已闭合 P1-1（`AVG(latency_ms)=1234` 不再被污染）/P1-2/P1-3/P1-4 与全量 delta ∅。**P1-5 未真闭合**：注释/字符串面已合上，但**代码位置的裸明文凭据仍漏报**（`api_key=<64位key>`、.env 内容贴进 .py、顶层 YAML 行）—— 作者"裸值过不了语法解析"的理由不成立。另：**7/15 补丁在集成工作区（`autocrlf=false`）无法应用**（作者口径依赖未声明的 `autocrlf=true`）→ 会阻塞集成；P2-3/P3-3/P3-4/P3-5 **登记文字缺失**。r3 要求：把放宽收紧为"名字在模块符号表中确实被绑定"，并在**两种 git 配置**下补齐可应用性 + 补登记 |
 | EF | U13 托管/单实例/备份恢复 | `task/U13` | **✅ INTEGRATED** | 初审 P1×3 → r2 修（安装戳 fail-closed、`submit_recovery_reconcile()` 接线、KI02 收口）→ Q r2 **PASS-with-notes** → r3 按集成 HEAD **重生成 7 个补丁**（其余 5 文件零差异，因合并已带入 r1 共享改动）→ 7/7 干净应用 → **跨任务验收全绿**（U15/U01/U04 的套件均 exit 0）→ **KI02 消除：`smoke_windows_service_plan` 24/0**，**官方单命令入口首次端到端成功 `OFFLINE REGRESSION OK scripts=75`** |
-| B | U02 策略仓管理与有界退出 | `task/U02` @ `45ebdff` | **作者进行中** | 依赖 U00+U04+U15 **均已满足**；新建 `strategy_position_manager.py`/`management_authorization.py`；消费 U15 的绑定接口与 U04 的保护链路。**额外承担 U15 的跨任务阻塞项**：账本侧 `trade_reconciliation.py:66-69` 的 `account_ref=sha256(api_key)[:16]` 随轮换漂移且与 U15 派生值不一致 |
+| B | U02 策略仓管理与有界退出 | `task/U02` @ `45ebdff` | **初审 CHANGES_REQUESTED → r2 修复中** | 作者交付 head `5b71db4`（115/0、共享文件 UNCHANGED、无 schema 变更、delta ∅）。A 初审 P0×1/P1×4：**P0 预留泄漏 → 退出永久不可用**（`binance_futures.py:2018` 占量后异常不 release，稳定 guardian key 使其变 `duplicate_skipped` → 仓量永久占死，**正是 F03/R09 场景**）；P1 `_open:1430` 未定义 `reservation_key`（NameError）；P1 纸面回退键使同名标的第二次退出永久被吞。**账本硬结论**：声明 `MTA_ACCOUNT_REF` 后**旧数据不可幂等**（同 trade_id 两域各一行、唯一索引拦不住），且作者 README 的**迁移 SQL 不可执行**（撞 UNIQUE/非原子/不可重入/漏 `trade_reconciliation_jobs`）→ 归入 `U02-LEDGER-PARTITION` |
 | CD | U06a / U08 | — | 待派发 | 线内串行：U05 → U06a → U08 |
 | EF | U14 / U10a | — | 待派发 | 线内串行：U13 → U14 → U10a |
 
