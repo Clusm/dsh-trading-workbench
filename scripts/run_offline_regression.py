@@ -144,6 +144,10 @@ def main() -> int:
     env = os.environ.copy()
     env["EXECUTION_MODE"] = "paper"
     env.pop("MTA_PROFILE", None)
+    # 研发机可能导出 MTA_STATE_ROOT/MTA_DATA_ROOT 指向**真实**状态根或数据根；
+    # 统一清掉，保证回归只碰临时目录（U14 P2-2 建议）。
+    env.pop("MTA_STATE_ROOT", None)
+    env.pop("MTA_DATA_ROOT", None)
     env["MTA_NO_PROXY"] = "1"
     # GitHub Windows runner 默认可能是 CP1252；冒烟脚本包含中文测试名，
     # 强制 UTF-8，避免仅因控制台编码而把通过的逻辑误报为失败。

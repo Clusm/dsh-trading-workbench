@@ -2442,6 +2442,30 @@
             "P1-2 ops_status **fail-open**：空队列 + 仅配置 verified=true 即报 OPS_OK（与自身 docstring 矛盾）；且历史上任一 DELIVERED 会让 NO_CONFIRMED_DELIVERY 永不触发，卡住的告警 300 秒内报 OPS_OK（:1565-1575）",
             "P1-3 回执不绑定消息身份/无上界：他消息回执、非字符串（12345）、未来 10^12ms 时间戳均可标 DELIVERED（:1319-1341）-> 违反 R14（供应商接受!=送达）"
           ]
+        },
+        {
+          "type": "author_fix_r2",
+          "head_commit": "6ef116b",
+          "commits": [
+            "a89eaa5",
+            "6ef116b"
+          ],
+          "p1_fixed": {
+            "P1-1": "dispatch_due 对容差内偏斜归一 + 写 PROVIDER_CLOCK_SKEW_TOLERATED 审计；超容差/阶梯异常按**单条**隔离（TRANSITION_REJECTED+last_error+退避）后 continue，新增 rejected 计数。前后：round0/1/2 全 AlertLadderViolation、{ACCEPTED:3,UNKNOWN:1}、t+300s 再抛 -> round0 4/4、round1/2 0/0、{DELIVERED:4}、t+300s reasons=[]",
+            "P1-2": "判据改为 pending>0 or not confirmed_states（**只看当前未闭合项**，不看历史行）。前后：4a OPS_OK -> OPS_DEGRADED['NO_CONFIRMED_DELIVERY']；4b t+10s/299s OPS_OK -> OPS_DEGRADED+NO_CONFIRMED_DELIVERY",
+            "P1-3": "新增 AlertReceiptRejected + bound_alert_id（缺省 fail-closed）、delivered_at_ms 上界与类型校验、receipt_bound_alert_id 落库。前后：他消息回执/12345/now+10^12 均可标 DELIVERED -> 依次 RECEIPT_BINDING_MISMATCH / RECEIPT_TYPE_INVALID / RECEIPT_TIMESTAMP_FUTURE 且行停在 ACCEPTED；transport 跨消息 confirmed=1 -> rejected=1/submitted=1/state=SUBMITTED"
+          },
+          "others": "P2-1/P3-1..5 已修（PROCESS_UNVERIFIED、常量名值一致+兼容别名、record_manual_ack 返回元组、证据时间不得晚于 now、SUBMITTED 也退避复查、负 uptime 不入宽限）；P2-2/P2-3 如实登记于补丁 README §7.3/§7.9",
+          "no_schema_change": "不新增迁移、不改既有表列；7c430c8/ 原样保留",
+          "verification": "验收 194/0（补丁态 212/0）；冒烟 34/0（补丁态 38/0）；沙箱 check_quality **OK files=264**、官方入口 **OFFLINE REGRESSION OK scripts=80**",
+          "patches": "a89eaa5/（01/02/04 逐字节未变，03 同步 bound_incident_key 绑定+类型校验）；apply --check 在**补丁基线 59660b2 与集成 HEAD e2376f7 两者**、两 git 配置下各 4/4 OK（仓库根执行 + diff --stat 核对 4 files +424/-12）",
+          "delta": "s0 79/79、s1 80/80、s2 80/80，失败集合差集 ∅、新增失败 0；本轮未现 smoke_llm_deadline 抖动",
+          "known_limits": [
+            "真实通道属 U12(D02)；**AlertQueue 仍无生产消费者 -> 不得认为无人值守告警已可用**",
+            "回执时间容差 120s 是**有界容忍**，不是'供应商时钟无问题'的证据",
+            "未做队列并发写压力模型"
+          ],
+          "i_side_done": "已按建议在 run_offline_regression.py 补 env.pop(MTA_STATE_ROOT)/env.pop(MTA_DATA_ROOT)"
         }
       ],
       "blockers": [],
@@ -2489,6 +2513,16 @@
           ],
           "verdict": "PENDING",
           "reports_dir": "docs/dispatch/reviews/U14/<r2head>/"
+        },
+        {
+          "round": "r3",
+          "stage": "修复复验",
+          "candidate": "6ef116b",
+          "sessions": [
+            "Q (reviews/U14/R3/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U14/6ef116b/"
         }
       ],
       "qa_runs": []
