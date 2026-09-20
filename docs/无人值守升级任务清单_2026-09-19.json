@@ -409,6 +409,28 @@
             "P3-1/2/4/5/7 与部分契约侧出口未改，作者登记在补丁 README 的「未修项登记」表"
           ],
           "rollback": "迁移 17 为纯新增表，回退代码即回滚"
+        },
+        {
+          "type": "review_r2_verification",
+          "candidate": "b4a322e",
+          "verdict": "CHANGES_REQUESTED",
+          "archived_path": "docs/dispatch/reviews/U01/b4a322e/Q_r2.md",
+          "closed": [
+            "P0-B 三段对照 CLOSED（复验者用自造数据 Σ=-2.80 独立复现：崩溃 / WIPED=True / events=4 Σ=-2.80）-> 「重放不抹账」独立成立",
+            "[9] CLOSED：SKIP 计数 0；走真实 AuditDatabase（临时 sqlite，迁移 17 生效）；把补丁换成垃圾 -> FAIL=1 exit=1（响亮失败而非 SKIP）",
+            "补丁 01 content_hash CLOSED：库内 hash 与 K03 income_content_hash 逐行 4/4 same=True（旧补丁 4/4 False）",
+            "补丁矩阵 CLOSED（并修正方法论：先前 --check 在 repo 子目录会静默 Skipped 属假阳性；改为独立 git repo 沙箱）；02↔04 约束属实",
+            "P1-1..P1-8 全部 CLOSED；P2-1/2/3/4/5/7/8 闭合，P2-6 部分",
+            "翻页/守卫无回归：真 TERMINATED 仍识别；整页滤掉不再误判"
+          ],
+          "blocking_p0": "P0（未登记）：补丁 01 的迁移版本 17 使 9 个既有共享冒烟**新增失败**（7 个 versions==list(range(1,17)) 断言、smoke_fault_matrix 手工插入 17 触发 UNIQUE constraint failed、smoke_release_acceptance 的 schema gate）。复验者以 69 项全清单 x pristine/已应用两态实测，且 combo_02/03/04 单独应用均不触发 -> 只归因于 01。作者 README 却写「对既有表零影响」且未登记该必需伴随修改 -> I 一应用 01 门禁即红",
+          "new_p3": [
+            "P3-N1 守卫在 income_events 为空时对任意分量键放行（非本批回归）",
+            "P3-N2 _income_row 对 falsy 金额强制转 '' 触发校验崩溃（fail-loud）",
+            "P3-N3 attribution=None 时 INCOME_ID_CONFLICT reason 被提前 return 掩盖",
+            "P3-N4 测试模式串硬编码「已应用」"
+          ],
+          "unfinished": "真实 Binance 翻页/改额（未联网）；run_offline_regression 全绿基线（smoke_windows_service_plan 在本环境 pristine 即失败=KI02，故只报增量）"
         }
       ],
       "blockers": [],
