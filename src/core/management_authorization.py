@@ -424,6 +424,11 @@ class ManagementReservationLedger:
     不会各自看到"尚未被预留"的同一份仓量（R09：在途 TP/退出不得重复消耗仓量）。
     """
 
+    #: 终结预留（CONSUMED/RELEASED）的保留上限：长进程里每次退出都会新增一条
+    #: 记录，不设上限就是内存泄漏。**只淘汰终结条目**，ACTIVE（在途）永不淘汰，
+    #: 因此守恒式与"在途不重复占量"不受影响。
+    MAX_TERMINAL_RESERVATIONS = 2000
+
     def __init__(
         self,
         *,
@@ -438,6 +443,17 @@ class ManagementReservationLedger:
         self.lifecycle_id = str(lifecycle_id or "")
         self._reservations = {}
         self._lock = lock or threading.Lock()
+
+    def _prune_locked(self) -> None:
+        """淘汰最旧的**终结**预留，保持内存有界（插入序 = 迭代序）。"""
+        if len(self._reservations) <= self.MAX_TERMINAL_RESERVATIONS:
+            return
+        for rid in list(self._reservations):
+            if len(self._reservations) <= self.MAX_TERMINAL_RESERVATIONS:
+                break
+            if self._reservations[rid].status == "ACTIVE":
+                continue
+            del self._reservations[rid]
 
     # -- 读侧 -------------------------------------------------------------- #
     @property
@@ -511,6 +527,7 @@ class ManagementReservationLedger:
                         created_at_ms=item.created_at_ms,
                     )
                     overflow -= take
+            self._prune_locked()
             return tuple(reasons)
 
     def reserve(
@@ -545,6 +562,7 @@ class ManagementReservationLedger:
             self._reservations[rid] = ManagementReservation(
                 reservation_id=rid, qty=amount,
                 created_at_ms=int(now_ms) if now_ms is not None else 0)
+            self._prune_locked()
             return ReservationOutcome(
                 accepted=True, duplicate=False, reservation_id=rid,
                 reserved_qty=self._reserved_qty_locked(), consumed_qty=Decimal(0),
@@ -627,6 +645,7 @@ class ManagementReservationLedger:
                 status="CONSUMED" if consumed >= item.qty else "ACTIVE",
                 created_at_ms=item.created_at_ms,
             )
+            self._prune_locked()
             return ReservationOutcome(
                 accepted=True, duplicate=False, reservation_id=rid,
                 reserved_qty=self._reserved_qty_locked(), consumed_qty=consumed,
@@ -653,6 +672,7 @@ class ManagementReservationLedger:
                 reason_code=str(reason or item.reason_code),
                 created_at_ms=item.created_at_ms,
             )
+            self._prune_locked()
             return ReservationOutcome(
                 accepted=True, duplicate=False, reservation_id=rid,
                 reserved_qty=self._reserved_qty_locked(), consumed_qty=item.consumed_qty,

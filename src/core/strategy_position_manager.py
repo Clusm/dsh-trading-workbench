@@ -330,6 +330,14 @@ def _position_field(position: Mapping[str, Any], *names: str) -> Any:
 class StrategyPositionManager:
     """预期持仓 / 硬退出 / 旧仓迁移 / 退出预留 的单一记账入口。"""
 
+    #: 退出幂等记忆的上限：只淘汰**已终结**（成交/释放过）的旧键，防止长进程
+    #: 无界增长。淘汰一个已终结的键只影响"极端老键上的重复抑制"——即使因此重发，
+    #: 也只会走 request_exit 的"只减 + 可减量夹逼"，不可能被做成反向开仓。
+    #: ACTIVE（在途）的键永不淘汰。
+    MAX_EXIT_KEYS = 2000
+    #: 释放审计环形缓冲的上限。
+    MAX_RELEASED_EXIT_AUDIT = 200
+
     def __init__(
         self,
         *,
@@ -651,7 +659,24 @@ class StrategyPositionManager:
             self._exit_keys[key] = outcome
             self._exit_ledgers[key] = str(lifecycle_id)
             self._exit_registered_at[key] = int(now_ms)
+            self._prune_exit_keys_locked()
             return outcome
+
+    def _prune_exit_keys_locked(self) -> None:
+        """淘汰最旧的**已终结**退出键；ACTIVE（在途）键永不淘汰。"""
+        if len(self._exit_keys) > self.MAX_EXIT_KEYS:
+            for key in list(self._exit_keys):
+                if len(self._exit_keys) <= self.MAX_EXIT_KEYS:
+                    break
+                ledger = self._ledgers.get(self._exit_ledgers.get(key, ""))
+                item = ledger.reservation(key) if ledger is not None else None
+                if item is not None and item.status == "ACTIVE":
+                    continue
+                self._exit_keys.pop(key, None)
+                self._exit_ledgers.pop(key, None)
+                self._exit_registered_at.pop(key, None)
+        if len(self._released_exits) > self.MAX_RELEASED_EXIT_AUDIT:
+            del self._released_exits[:-self.MAX_RELEASED_EXIT_AUDIT]
 
     def _ledger_for_exit(self, exit_key: str) -> ManagementReservationLedger | None:
         with self._lock:
@@ -735,6 +760,7 @@ class StrategyPositionManager:
             self._released_exits.append({
                 "exit_key": key, "reason": str(reason or ""),
                 "registered_at_ms": registered_at})
+            self._prune_exit_keys_locked()
         return True
 
     # -- R11：故障不得触发全平 --------------------------------------------- #
@@ -796,5 +822,6 @@ class StrategyPositionManager:
             "pending_legacy": [item.as_dict() for item in self.pending_legacy()],
             "migrations": [item.as_dict() for item in self.migrations()],
             "released_exits": [dict(item) for item in self._released_exits],
+            "exit_key_count": len(self._exit_keys),
             "ledgers": {key: ledger.as_dict() for key, ledger in self._ledgers.items()},
         }

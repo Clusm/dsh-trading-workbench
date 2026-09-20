@@ -424,6 +424,41 @@ def test_leaked_exit_reservation_is_reclaimable() -> None:
     check("巡检回收后守恒式成立", reservation_conserved(m2.ledger("lc-sweep")))
 
 
+def test_exit_idempotency_memory_is_bounded() -> None:
+    """幂等/审计记忆必须有界：长进程里 _exit_keys 只增不减就是内存泄漏。
+
+    淘汰**只**针对已终结（成交/释放）的旧键；ACTIVE（在途）键在任何情况下都
+    不被淘汰——否则"在途退出"的幂等保护会消失（那才是 R09 的失效形态）。
+    """
+    print("\n[4c] 幂等记忆有界（只淘汰已终结键）")
+    m = _manager()
+    domain = "lc-mem"
+    in_flight = m.request_exit(exit_key="keep-active", lifecycle_id=domain,
+                               symbol="ETHUSDT", position_side="LONG", qty="0.5",
+                               current_qty="1.0", now_ms=_NOW)
+    check("在途键建立成功", in_flight.accepted)
+    for index in range(m.MAX_EXIT_KEYS + 5):
+        key = f"mem-{index}"
+        m.request_exit(exit_key=key, lifecycle_id=domain, symbol="BTCUSDT",
+                       position_side="LONG", qty="1.0", current_qty="2.0",
+                       now_ms=_NOW + index)
+        m.confirm_exit(key, engaged_qty="1.0")   # 终结它，允许被淘汰
+    snapshot = m.as_dict()
+    check("幂等记忆被限制在上限内",
+          snapshot["exit_key_count"] <= m.MAX_EXIT_KEYS,
+          snapshot["exit_key_count"])
+    check("在途键不被淘汰（幂等保护仍在）",
+          m.request_exit(exit_key="keep-active", lifecycle_id=domain,
+                         symbol="ETHUSDT", position_side="LONG", qty="0.5",
+                         current_qty="1.0", now_ms=_NOW + 10).duplicate is True)
+    check("释放审计被限制为环形缓冲",
+          len(snapshot["released_exits"]) <= m.MAX_RELEASED_EXIT_AUDIT,
+          len(snapshot["released_exits"]))
+    check("淘汰后守恒式仍成立",
+          all(reservation_conserved(ledger) for ledger in
+              [m.ledger(domain)] if ledger is not None))
+
+
 def test_expired_authorization_does_not_block_unknown_reconcile() -> None:
     print("\n[5] 过期授权不阻断 UNKNOWN 查单/收口")
     generation = _generation()
@@ -666,6 +701,7 @@ def main() -> int:
     test_duplicate_exit_never_opens_reverse_position()
     test_reservation_conserves_under_concurrent_exits()
     test_leaked_exit_reservation_is_reclaimable()
+    test_exit_idempotency_memory_is_bounded()
     test_expired_authorization_does_not_block_unknown_reconcile()
     test_flat_close_preserves_manual_semantics_and_blocks_health_faults()
     test_k04_contract_binding_only_reduces()
