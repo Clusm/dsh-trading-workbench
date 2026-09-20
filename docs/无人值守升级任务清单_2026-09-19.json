@@ -478,8 +478,8 @@
       "id": "U03",
       "title": "逐意图可验证研究证据",
       "owner_role": "C",
-      "actual_assignee": null,
-      "status": "PLANNED",
+      "actual_assignee": "U03 作者会话（C 角色）",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -499,7 +499,45 @@
         "F13",
         "F17"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "3f49e03a6a1d8c90b7abea018e51f4994cca160b",
+          "commits": [
+            "23e51f8",
+            "3e10b72",
+            "ccfd7d9",
+            "545f090",
+            "3f49e03"
+          ],
+          "new_files": [
+            "src/agents/research_evidence.py (1240行)",
+            "tests/integration/test_research_evidence.py (598行)",
+            "tests/integration/test_market_evidence_quality.py (337行)",
+            "tests/fixtures/evidence/{market_tool_results.json,intent_scenarios.json,3个.patch}",
+            "scripts/smoke_u03_research_evidence.py",
+            "scripts/smoke_u03_market_evidence_quality.py"
+          ],
+          "shared_files_untouched": true,
+          "contract_untouched": true,
+          "orchestrator_verified": {
+            "smoke_contracts_v3": "PASS 173 / FAIL 0",
+            "test_research_evidence": "exit 0 (124 行)",
+            "test_market_evidence_quality": "exit 0 (57 行)",
+            "smoke_u03_research_evidence": "exit 0",
+            "smoke_u03_market_evidence_quality": "exit 0"
+          },
+          "known_limits": [
+            "不承诺全自然语言验真 (R05)",
+            "K02 无 live 源快照类别；分源快照仅入包审计、不作 claim 操作数",
+            "EvidenceVerdict 无 interval 字段（记于 binding_id）",
+            "缺省身份 UNPINNED (identity_pinned=False)，U15 需传真实身份",
+            "触发价等于收盘价按严格 > 拒绝",
+            "无在线/宿主验收"
+          ],
+          "important": "SCRIPTS 登记补丁必须与两个冒烟脚本同批应用，否则 _validate_smoke_manifest() 会因未登记冒烟直接 FAIL（作者已实测）"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "D",
@@ -536,12 +574,25 @@
         "DL02",
         "DL04"
       ],
-      "task_base_commit": null,
-      "contract_commit": null,
+      "task_base_commit": "ffdab443cae45c1451b5cc13b24e3e73c22038ff",
+      "contract_commit": "ffdab443cae45c1451b5cc13b24e3e73c22038ff",
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r1",
+          "stage": "初审",
+          "candidate": "3f49e03",
+          "sessions": [
+            "D (reviews/U03/D/r1)",
+            "B (reviews/U03/B/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U03/3f49e03/",
+          "note": "Q 独立验收安排在 I 组装的 integration_candidate 上进行"
+        }
+      ],
       "qa_runs": []
     },
     {
