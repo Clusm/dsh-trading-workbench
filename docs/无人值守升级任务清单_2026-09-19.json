@@ -565,6 +565,32 @@
           "ledger_hard_conclusion": "**未声明时与 base 逐字一致（成立）**；但'声明 MTA_ACCOUNT_REF 后旧数据不可幂等'**真实存在**（同一 trade_id 在两域各一行，唯一索引拦不住）。**README 的迁移建议不可执行**：逐字 UPDATE 在 execution_fills/position_lifecycles 上撞 UNIQUE 约束、非原子、不可重入；清单**漏 trade_reconciliation_jobs**（:2926 护栏按 account_ref 过滤，漏迁会重复生成 lifecycle）；lifecycle_fill_allocations 无该列（无效指令）。建议：**先迁移后声明**，加去重 + 单事务 + 幂等",
           "delta": "独立复跑 75 条：pristine 与 01..06 均 FAILED=1 ['smoke_windows_service_plan.py']（既有 KI02，沙箱缺 venv），差集 {} —— 注意该基线已含独占模块，delta 只隔离 6 个共享补丁",
           "positives": "未声明账户时行为与 base 逐字一致；6 补丁 apply --check OK；无 schema 变更"
+        },
+        {
+          "type": "author_fix_r2",
+          "head_commit": "4856aec",
+          "commits": [
+            "045a9a7",
+            "7b513bc",
+            "2fe7b2a",
+            "4856aec"
+          ],
+          "patch_baseline": "**补丁基线 = 当时集成 HEAD I@40ff52f**（逐个比对目标文件 blob==worktree 字节）—— 已吸取 U13 的教训",
+          "p0_fixed": "_close_or_reduce 占量后主体进 try/finally，异常路径释放并记 futures_exit_reservation_released；release_exit 成功后撤销该 key；新增 TTL 回收 reclaim_stale_exits/in_flight_ttl_ms + 每轮巡检 + 审计事件 STALE_EXIT_RESERVATION_RECLAIMED；CONSUMED 键永不回收。前后：4 项 FAIL（异常路径/可用量未恢复/稳定键无法重提/标的后仍不可退出）-> 全 PASS",
+          "p1_fixed": "删除 _open 中未定义的 reservation_key（NameError -> 优雅跳过）；纸面回退键改 paper-exit:<sym>:<side>:<本轮令牌>:<指纹>（同轮抑制、跨轮独立）",
+          "migration_rewritten": "先迁移后声明；去重 + BEGIN IMMEDIATE 单事务 + 幂等可重入；覆盖 execution_fills/position_lifecycles/trade_reconciliation_jobs（补漏）/income_*（含 account_ref_norm）/release_observations；lifecycle_fill_allocations 无此列不迁；冲突显式裁决、不可裁决即中止；校验和 + 回滚(bundle)。**阻断级登记：迁移脚本落地验证前不得在生产启用 MTA_ACCOUNT_REF**",
+          "constraint1_corrected": "按事实改写（只上 01 已切换账本分区；风险是'静默改分区无可见性'）",
+          "others": "P2-6 enforce=True 现 fail-closed 抛 ManagementEnforcementError（仍无生产调用方，已登记）；P2-7/P2-8/P3-3 修或登记",
+          "patches_apply": "6/6 在 autocrlf=false 与默认两种配置下 apply --check 全 OK（上下文按目标 mixed EOL 逐字节生成）",
+          "delta": "全量离线回归 76 条：pristine FAILED=0 []、sb FAILED=0 []、**新增失败差集 {}**（基线已因 KI02 修复而全绿）",
+          "tests": "test_strategy_position_manager PASS=144 FAIL=0；smoke_u02 exit 0（N1 142/2、N2 138/6 变异均被检出）；smoke_contracts_v3 173/0",
+          "known_limits": [
+            "未接真实交易所、未下单、未读 .env/data",
+            "P0 频率与 _open 分支可达性未量化",
+            "R09 仅单进程（P2-9 进程内易失）",
+            "释放在 FILL_UNCONFIRMED 后同 key 会重发（依赖交易所同 cid 拒重 + reduceOnly + 可减量夹逼）"
+          ],
+          "unfinished": "迁移脚本本身（属 U13）、filter_unbound_management 接线、set_expectation 生产写入者、MTA_ACCOUNT_REF 启动阻断校验"
         }
       ],
       "blockers": [],
@@ -613,6 +639,16 @@
           ],
           "verdict": "PENDING",
           "reports_dir": "docs/dispatch/reviews/U02/<r2head>/"
+        },
+        {
+          "round": "r2",
+          "stage": "修复复验",
+          "candidate": "4856aec",
+          "sessions": [
+            "Q (reviews/U02/R2/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U02/4856aec/"
         }
       ],
       "qa_runs": []
@@ -1233,7 +1269,7 @@
       "title": "真实耗时、模型降级和决策原因",
       "owner_role": "C",
       "actual_assignee": "U05 作者会话（C 角色）",
-      "status": "READY_FOR_REVIEW",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -1363,6 +1399,17 @@
             "N5 KI01 未修尽：`api_key=<已绑定变量名>)` 仍误报（非回归）"
           ],
           "unfinished": "KI02 真实失效原因未判；未联网/未接真实 LLM；租约仅假 pid；无 pytest（改用直连探针，未复跑 115/63/48/45）"
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "6197b83",
+          "code_identity": "git diff 6197b83 HEAD -- <U05 路径> 为空",
+          "patches": "65651df/ 的 15 个补丁在集成工作区配置（autocrlf=false）下 15/15 干净应用，无冲突",
+          "i_registration": "patch 15 已登记 4 个 U05 冒烟 -> MANIFEST OK（最终 included=75；KI04 豁免后 420 文件）",
+          "cross_task": "U13 supervision 166 检查、U15 identity/control、U04 execution faults、U01 income 140/0、smoke_ui 52/0、smoke_contracts_v3 173/0 均 exit 0",
+          "tests": "U05 四套 115/0、63/0、48/0、45/0；test_secret_scanner 36/0",
+          "gates": "**官方全量回归 OFFLINE REGRESSION OK scripts=79；check_quality QUALITY CHECK OK files=261** —— 两个 RC 门禁首次同时全绿",
+          "note": "VERIFIED 留待 U12 部署证据"
         }
       ],
       "blockers": [],
@@ -1414,7 +1461,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "5dfa1dd",
       "review_assignments": [
         {
           "round": "r2",
