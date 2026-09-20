@@ -22,7 +22,7 @@
 
 | 线 | 任务 | 作者 head | 状态 | 备注 |
 |---|---|---|---|---|
-| EF | U15 | `a136cb5`(+`6dd0d1a` 补丁) | **CHANGES_REQUESTED → r2 修复中** | 初审 E/B/C 三份一致 CHANGES_REQUESTED：**P0×2**（`authorize_new_entry` 省略 `expected` 即 fail-open；配置漂移失明——风险参数改动不变身份哈希）+ P1×17（含嵌套键凭据泄漏、`scope_hash` 从不比较、WorkBuddy live 写伪证据）。报告已归档 `docs/dispatch/reviews/U15/a136cb5/{E,B,C}_r1.md` |
+| EF | U15 | `38029e2` | **r2 修复完成 → 复验中** | 初审 E/B/C 一致 CHANGES_REQUESTED（P0×2 + P1×17）→ r2 九个提交，**两个 P0 均闭合**（省略 `expected` 由 `True/200`→`False/409`；19/19 漂移项现全部 CHANGED、六类来源入哈希）；14/15 项已修，第 15 项属 U02/U13 路径。4 个补丁 `apply --check` 全通过。**U02 阻塞项**：账本侧 `trade_reconciliation.py:66-69` 的 `account_ref=sha256(api_key)[:16]` 仍随轮换漂移且与 U15 派生值不一致。报告 `docs/dispatch/reviews/U15/a136cb5/{E,B,C}_r1.md` |
 | A | U01 | `c290c50` | **CHANGES_REQUESTED → r2 修复中** | 初审 B：P0×2（其一为 I 的登记项）+ P1×9。**关键 P0：真实存储幂等链断裂** —— `sync_income_window(existing=load_existing())` 崩溃（`:301-304` 把 key→hash 当事件），且补丁 01 的 `content_hash` 与 K03 口径不符（修好前者后重放会抹掉已入账事件）；作者测试 `[9]` 是 SKIP 故未覆盖。补丁约束：**02 必须与 04 同批**，只上 02 会让 `check_binance_request_policy.py` 失败（已复现）。报告归档 `docs/dispatch/reviews/U01/c290c50/B_r1.md` |
 | CD | U03 | `3f49e03` | **CHANGES_REQUESTED → r2 修复中** | 初审 D/B 一致 CHANGES_REQUESTED：D 的 **P1-1 模型自报 claims 完全覆盖程序生成 claim**（直接违反"模型不得覆盖行情事实"）+ B 的 P1（`identity=None` fail-open、畸形 claim 崩溃、`evidence_id` 不唯一不落地）。报告归档 `docs/dispatch/reviews/U03/3f49e03/{D,B}_r1.md` |
 | B | U04 | — | 作者进行中 | 已有 4 提交 |
