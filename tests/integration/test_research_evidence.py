@@ -456,8 +456,25 @@ def test_injection_and_side_effects(results: dict, scenarios: dict) -> None:
           not any(any(token in code for token in ("忽略", "SYSTEM", "system", "skip"))
                   for code in codes), codes)
     gate = report.decision_gate()
-    check("门禁视图只含丢单信息，不含权限/风险字段",
-          set(gate) == {"ok", "drop_intent_ids", "reasons"}, sorted(gate))
+    check("门禁视图只含丢单与身份固定信息，不含权限/风险字段",
+          set(gate) == {"ok", "identity_pinned", "drop_intent_ids", "reasons"},
+          sorted(gate))
+
+    print("\n[9b] U15 未接线时身份必须显式暴露为未固定")
+    unpinned = evidence.evaluate_open_intents(
+        scenarios["two_intents_partial_evidence"]["intents"],
+        build_snapshots(results, scenarios["two_intents_partial_evidence"]["snapshots"]),
+        now_ms=NOW_MS, cycle_id="cyc-unpinned",
+    )
+    check("缺省身份 → identity_pinned=False 且不冒充已验证",
+          unpinned.identity_pinned is False
+          and unpinned.as_dict()["identity_pinned"] is False)
+    check("显式传身份 → identity_pinned=True",
+          evidence.evaluate_open_intents(
+              scenarios["two_intents_partial_evidence"]["intents"],
+              build_snapshots(results, scenarios["two_intents_partial_evidence"]["snapshots"]),
+              now_ms=NOW_MS, identity=IDENTITY, cycle_id="cyc-pinned",
+          ).identity_pinned is True)
     item = report.by_intent("intent-eth-funding")
     check("注入文本不改变失败源的真实记录",
           "mark_funding=MISSING" in item.summary and "0.0000" not in item.summary,

@@ -58,6 +58,22 @@ from core.contracts.k02_evidence import CLAIM_KIND_REGISTRY
 SCHEMA_VERSION = "u03-research-evidence-1"
 FACT_SUMMARY_TEMPLATE_VERSION = "u03-fact-summary-1"
 
+#: U15 尚未接线时的未固定身份：内容哈希与逐意图绑定仍成立，但
+#: "本轮身份已核对"这一条**不成立**，报告里以 ``identity_pinned=False`` 显式暴露。
+#: 不允许把未固定身份当作已验证身份（U15/DL01 接线后必须传真实 RuntimeIdentity）。
+UNPINNED_IDENTITY = RuntimeIdentity(
+    schema_version="3.1",
+    environment="unpinned",
+    account_ref="unpinned",
+    artifact_hash="unpinned-u03-artifact",
+    git_commit="unpinned",
+    dependency_hash="unpinned",
+    effective_config_hash="unpinned",
+    strategy_hash="unpinned",
+    model_route_hash="unpinned",
+    runtime_instance_id="u03-unpinned",
+)
+
 # ---------------------------------------------------------------- 常量与口径
 
 #: 支持的 K 线周期与毫秒跨度（与 ``data.market_query.VALID_INTERVALS`` 同口径）。
@@ -313,6 +329,12 @@ def _source_from_payload(
     if payload.get("available") is False:
         payload = {}
     available = bool(payload)
+    # 适配后的工具出参把数值放在 ``values`` 子字典里（含交易所原名字段）；
+    # 旧口径则平铺在顶层。两种形态都按同一口径解析。
+    nested = payload.get("values")
+    if isinstance(nested, Mapping):
+        for key, value in nested.items():
+            payload.setdefault(key, value)
     source_at = None
     for key in time_keys:
         parsed = decimal_or_none(payload.get(key))
@@ -852,6 +874,7 @@ class ResearchEvidenceReport:
     cycle_id: str
     now_ms: int
     identity_hash: str
+    identity_pinned: bool = True
     intents: tuple[IntentEvidence, ...] = ()
     rejected_intent_ids: tuple[str, ...] = ()
     accepted_intent_ids: tuple[str, ...] = ()
@@ -869,6 +892,7 @@ class ResearchEvidenceReport:
             "cycle_id": self.cycle_id,
             "now_ms": self.now_ms,
             "identity_hash": self.identity_hash,
+            "identity_pinned": self.identity_pinned,
             "accepted_intent_ids": list(self.accepted_intent_ids),
             "rejected_intent_ids": list(self.rejected_intent_ids),
             "intents": [item.as_dict() for item in self.intents],
@@ -878,6 +902,7 @@ class ResearchEvidenceReport:
         """执行前门禁视图：只丢未通过证据门禁的 OPEN，不影响退出。"""
         return {
             "ok": self.ok,
+            "identity_pinned": self.identity_pinned,
             "drop_intent_ids": list(self.rejected_intent_ids),
             "reasons": {
                 item.intent_id: list(item.reason_codes)
@@ -966,7 +991,7 @@ def evaluate_open_intents(
     snapshots: Sequence[MarketSnapshot] | Mapping[str, MarketSnapshot],
     *,
     now_ms: int,
-    identity: RuntimeIdentity,
+    identity: RuntimeIdentity | Mapping[str, Any] | None = None,
     cycle_id: str = "",
     quotes: Mapping[str, Mapping[str, Any]] | None = None,
     max_bar_age_ms: int = DEFAULT_MAX_BAR_AGE_MS,
@@ -977,7 +1002,16 @@ def evaluate_open_intents(
     """逐意图校验研究证据；``now_ms`` 必传（不使用 bundle.as_of_ms 兜底）。
 
     每个 OPEN intent 得到自己的证据包与 verdict；非 OPEN 动作不进本门禁。
+    ``identity`` 缺省使用 :data:`UNPINNED_IDENTITY` 并在报告里置
+    ``identity_pinned=False``（U15 接线前不得把它当成"身份已核对"）。
     """
+    identity_pinned = identity is not None
+    if identity is None:
+        resolution: RuntimeIdentity = UNPINNED_IDENTITY
+    elif isinstance(identity, RuntimeIdentity):
+        resolution = identity
+    else:
+        resolution = RuntimeIdentity.model_validate(dict(identity))
     snapshot_list = list(snapshots.values()) if isinstance(snapshots, Mapping) else list(snapshots)
     quote_map = dict(quotes or {})
     results: list[IntentEvidence] = []
@@ -1050,7 +1084,7 @@ def evaluate_open_intents(
             list(bars) + source_inputs,
             rules,
             cycle_id=cycle_id,
-            identity=identity,
+            identity=resolution,
         )
 
         declared_claims = item.get("claims")
@@ -1163,7 +1197,8 @@ def evaluate_open_intents(
         ok=not rejected,
         cycle_id=str(cycle_id),
         now_ms=int(now_ms),
-        identity_hash=identity.identity_hash() if identity is not None else "",
+        identity_hash=resolution.identity_hash(),
+        identity_pinned=identity_pinned,
         intents=tuple(results),
         rejected_intent_ids=tuple(rejected),
         accepted_intent_ids=tuple(accepted),
