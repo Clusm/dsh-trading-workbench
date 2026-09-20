@@ -78,6 +78,8 @@ SCRIPTS = (
     "scripts/smoke_profile_isolation.py",
     "scripts/smoke_detached_profiles.py",
     "scripts/smoke_takeover_compatibility.py",
+    "scripts/smoke_llm_failover.py",
+    "scripts/smoke_contracts_v3.py",
 )
 EXCLUDED_SMOKE_SCRIPTS = {
     # 第[6]节直接调用 query_symbol_detail/query_symbol_cards 打公共行情接口，
