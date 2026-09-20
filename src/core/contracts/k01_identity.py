@@ -20,6 +20,11 @@ from .common import (
 )
 
 DEPENDENCY_SOURCE_FILES = ("requirements-lock.txt",)
+#: 策略卡来源文件：**声明标签**，不参与 ``_coverage_gaps`` 文件级校验。
+#: 与 ``DEPENDENCY_SOURCE_FILES`` 的差别在于载荷形态：依赖侧传入的是
+#: ``路径 -> 内容`` 映射（可校验锁文件名出现），策略侧传入的是卡片内容本身，
+#: 无法从内容反查文件来源。故 ``strategy`` 组只校验“已声明且非空”，
+#: 文件级来源由 U15 落地（README §12 L16，C r1 P2-6 残余处置）。
 STRATEGY_SOURCE_FILES = ("knowledge/strategy_cards.json",)
 MODEL_ROUTE_SOURCES = (
     "config/agents.yaml 的模型名与推理档",

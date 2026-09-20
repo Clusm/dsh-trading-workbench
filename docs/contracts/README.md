@@ -1,8 +1,10 @@
-# K01–K06 冻结契约 v3.1（U00 r3）
+# K01–K06 冻结契约 v3.1（U00 r5）
 
-状态：FROZEN 候选（r2 复审 Q/C 窄口 CHANGES_REQUESTED、B 有条件 GO；本版为 r3 修复轮，
-待 Q/C/B/I 复审后按流程打 `contract-v3.x` 标签）。复审报告：
-`docs/dispatch/reviews/U00/0b85bef/{Q,C,B}_w0r1_r2.md`。
+状态：FROZEN 候选（本版为 r5 修复轮，关闭 r4 复审的 2 项 P2 与 4 项 P3；r2 复审
+Q/C 窄口 CHANGES_REQUESTED、B 有条件 GO；待 Q/C/B/I 复审后按流程打 `contract-v3.x` 标签）。
+复审报告：`docs/dispatch/reviews/U00/0b85bef/{Q,C,B}_w0r1_r2.md`（r2）、
+`docs/dispatch/reviews/U00/b36d8a9/{Q,C,B}_w0r1_r3.md`（r3）、
+`docs/dispatch/reviews/U00/5ee082b/Q_w0r1_r4.md`（r4）。
 来源：[无人值守交付与多 Agent 执行规格 v3](../无人值守交付与多Agent执行规格_2026-09-19.md) §4/§10/§11.1/§12/§13；
 [决策链路专项评估与优化报告](../决策链路专项评估与优化报告_2026-09-19.md) §3/§5/§7/§9；U00 任务卡与 W0 指纹差异清单
 （`docs/dispatch/reviews/U00/w0/F_fingerprint_r1.md`）。
@@ -10,6 +12,13 @@
 r3 变更原则：继续 fail-closed。K06 非有限窗口不得崩溃；K02 规则/质量字段必须由验证方持有并可比对；
 非 OPEN 意图必须携带管理授权引用；K04 运行代/环境绑定缺失即拒绝；K05 必须先 ACK 才能 RESOLVED；
 零费用证明必须结构化并与窗口绑定。既有 golden 期望的每处修改都在 §11 changelog 逐条登记。
+
+r4/r5 变更原则（同一 fail-closed 方向，r4 引入、r5 收口）：
+`rules` 对 `validate_bundle`/`validate_intent` 为**必传**（`RULES_MISSING`），且其**内容**必须可
+规范化为 JSON（非 JSON 值/混合键型 → `RULES_MISMATCH`，不抛裸 `TypeError`）；
+`finalize_costs` **不信任**调用方 `ZeroFeeProof.provable`，一律由入参 coverage 重算可复核条件；
+`EvidenceBundle.dropped_input_ids` 落地为审计字段（形态受校验、集合不可重算，§12 L18）；
+K01 未知键按 `组.unknown_field:<键>` 报告。本节所有收紧均在 §10/§11 登记。
 
 ## 1. 内容与边界
 
@@ -23,7 +32,7 @@ r3 变更原则：继续 fail-closed。K06 非有限窗口不得崩溃；K02 规
 | `src/core/contracts/k05_trace.py` | DecisionTraceSpan/DecisionCounters、Incident 恢复、AlertDelivery 阶梯 |
 | `src/core/contracts/k06_release.py` | 五组 ReleaseEvidence 状态与阻断项清单 |
 | `docs/contracts/*.schema.json` | 六个 JSON schema（含 `BundleVerdict`/`ModelRoute`/`TerminationProof`/`ZeroFeeProof`/`PaginationDecision`），冒烟校验与模型同步 |
-| `docs/contracts/golden/*.golden.json` | 147 条正反 golden（44 正 / 103 反），每条含规格推导 `derivation` |
+| `docs/contracts/golden/*.golden.json` | 160 条正反 golden（45 正 / 115 反），每条含规格推导 `derivation` |
 | `scripts/smoke_contracts_v3.py` | 离线执行 golden 与 schema 同步断言；失败退出码非 0 |
 | `scripts/run_offline_regression.py` | 统一回归入口，已登记本冒烟 |
 
@@ -69,6 +78,15 @@ effective_config_hash, strategy_hash, model_route_hash, runtime_instance_id`。
   `effective_config.{settings,profile_overrides,environment_overrides}`；缺失逐项列入
   `IdentityCoverageError`（空组是合法声明，字段缺失仍拒绝）。离线迁移可用 `enforce_coverage=False`
   但需在审计中说明。
+- **覆盖口径（r4 冻结，Q NEW-D / C NR-3 残余）**：非 Mapping 载荷（列表/字符串/数值）不调用
+  `.get`，直接按 `组.*` 缺口结构化拒绝；Mapping 载荷中的**未知键**按
+  `组.unknown_field:<键>` 报告（如 `model_route.unknown_field:junk_field`）；字段为 `None`、
+  空串/空白串按 `组.<字段>` 报告，`model/effort` 另要求非空字符串。同一口径由
+  `build_identity` 强制；`validate_coverage` 只报缺失/空串、不报未知键（build 侧更严，
+  方向 fail-closed，见 §12 L19）。
+- **`STRATEGY_SOURCE_FILES`**：仅是“策略卡来源文件”的声明标签（`knowledge/strategy_cards.json`），
+  **不参与** `_coverage_gaps` 文件级校验——`strategy_cards` 载荷是卡片内容而非 `路径 -> 内容`
+  映射（对比 `dependency_lock_files`），无法从内容复核文件来源。见 §12 L16。
 - **ModelRoute**：类型化解析路由（`model/effort/fallback_routes/profile_overrides`，前两者非空、
   后两者可为显式空）；`hash_model_route` 接受 ModelRoute 或结构化 Mapping；capability/mock 标志
   属 U15/DL01 扩展面（§12 C8）。
@@ -81,20 +99,32 @@ effective_config_hash, strategy_hash, model_route_hash, runtime_instance_id`。
   - 收盘时间晚于 `as_of_ms` 或缺失 `close_time_ms` 的 bar 一律不判 closed（缺时间记 `UNDATED_BAR`）；
   - 跨 symbol 输入被隔离：不进入事实、`bar_times` 与最终性计算，并记入
     `quality.symbol_mismatch_inputs`，被引用时给 `INPUT_SYMBOL_MISMATCH`；
-  - 重复内容按 `(symbol, interval, close_time, values)` 去重；`quality` 记录
+  - 重复内容按 `(symbol, interval, close_time, values)` 去重；被丢弃的 input_id 记入
+    `dropped_input_ids`（审计字段，纳入 `content_hash`）；`quality` 记录
     `missing_intervals / stale_inputs / dedup_removed / unclosed_inputs / undated_inputs /
-    symbol_mismatch_inputs / required_intervals / required_claim_kinds / max_bar_age_ms`；
+    symbol_mismatch_inputs / required_intervals / required_claim_kinds / max_bar_age_ms /
+    as_of_ms / rules_hash`；`quality.dedup_removed` 恒为空（不可重算，§12 L18）；
+  - 畸形 `rules`（非 Mapping，或 Mapping 内容含 `set/bytes/object/datetime` 等非 JSON 值、
+    `{1:'x'}` 这类混合键型）抛 `RulesInputError`（结构化拒绝），不会退化成裸
+    `TypeError`/`AttributeError`（r5，NEW-R4-P2-1）；
   - `evidence_id` 未显式提供时由 cycle/symbol/as_of/输入 id 与值摘要派生（值变化即 id 变化）。
 - `validate_bundle(bundle, rules=None, identity=None) -> BundleVerdict`：**K02 完整性入口**。
   与 `build_bundle` 输出逐项对照：`content_hash` 重算、按最新/次新 bar 规则重建全部事实
   （id/kind/inputs/value，重复 id→`DUPLICATE_FACT_ID`、换指→`DERIVED_FACT_MISMATCH`）、
   missing/stale/unclosed/undated/symbol/bar_times/finality 全部质量字段重算、
-  quality 必需键缺失→`QUALITY_MISSING_FIELD`。**验证方应显式传 `rules`**：
-  `required_intervals/required_claim_kinds/max_bar_age_ms` 与 bundle.quality 逐项比对，
-  不一致→`RULES_MISMATCH`（阻止“改 rules/quality 重哈希即 VALID”）。其余 reason：
-  `CONTENT_HASH_MISMATCH/CONTENT_HASH_MISSING/DERIVED_FACT_INVALID/CROSS_SYMBOL_FACT/
-  DUPLICATE_INPUT_ID/QUALITY_MISMATCH/FINALITY_MISMATCH/INPUT_TIME_ORDER/
+  quality 必需键缺失→`QUALITY_MISSING_FIELD`。**`rules` 为必传参数**（r4 收紧，见 §10）：
+  缺省 `None` → `RULES_MISSING`；非 Mapping → `RULES_MISMATCH`；Mapping 内容不可规范化为
+  JSON（非 JSON 值/混合键型）→ 同样 `RULES_MISMATCH` 且不再逐字段比对；
+  可规范化时 `required_intervals/required_claim_kinds/max_bar_age_ms` 与 bundle.quality
+  逐项比对、整体哈希与 `quality.rules_hash` 比对，不一致→`RULES_MISMATCH`
+  （阻止“改 rules/quality 重哈希即 VALID”）。其余 reason：
+  `RULES_MISSING/CONTENT_HASH_MISMATCH/CONTENT_HASH_MISSING/DERIVED_FACT_INVALID/
+  CROSS_SYMBOL_FACT/DUPLICATE_INPUT_ID/QUALITY_MISMATCH/FINALITY_MISMATCH/INPUT_TIME_ORDER/
   BAR_RECEIVED_BEFORE_CLOSE/UNDATED_BAR/IDENTITY_MISMATCH`。
+- `dropped_input_ids` 的形态校验（r4/r5）：必须是 `tuple`/`list`（非序列形态如
+  `model_copy` 写入的 `int`、或裸字符串 → `QUALITY_MISMATCH`，不得逐字符迭代）、元素为
+  非空 `str`、唯一、与保留输入 ID 不相交，否则 `QUALITY_MISMATCH`。该字段是**审计提示**：
+  被丢弃输入的内容已不在包内，其集合无法由 `inputs` 重算（§12 L18）。
 - `validate_intent(intent, bundle, execution_quote, now_ms=None, rules=None)`：先过 `validate_bundle`
   （失败直接 EVIDENCE_INVALID），再逐 intent 校验：
   - `intent_id` 必填；`action ∈ {OPEN,CLOSE,REDUCE,ADJUST}`、`side ∈ {LONG,SHORT}` 否则
@@ -126,11 +156,11 @@ effective_config_hash, strategy_hash, model_route_hash, runtime_instance_id`。
 | `ingest_income(page, existing)` | 元组/列表主键按组件规范化，文本键去空白折叠大小写；同键同内容→duplicates，异内容→QUARANTINE |
 | `IncomeCoverage` | `[start,end)`、watermark、page_limit、**结构化 `termination_proof`**、`PENDING/COMPLETE/GAP`、gaps（每条校验半开区间） |
 | `plan_next_page` | 短页→TERMINATED；满页要求页内非降序（`PAGE_NOT_SORTED`）；`next_start=max(event_time)` 且必须 > 当前 start，否则 `PAGINATION_STALLED`；落在窗口末尾→`WINDOW_EXHAUSTED`；`page_limit` 非正整数→`INVALID_PAGE_LIMIT`（不崩溃） |
-| `zero_fee_proof` | 来源正常 + 分页终止（**TerminationProof 且与窗口绑定**：start/end 一致、last_page_size<page_limit、terminated_at≥end）+ watermark 覆盖 + **无已声明缺口** + 迟到复查；仅自由文本→`TERMINATION_PROOF_MISSING`，窗口不符→`TERMINATION_PROOF_MISMATCH`，页未读完→`TERMINATION_PROOF_INVALID` |
+| `zero_fee_proof` | 来源正常 + 分页终止（**TerminationProof 且与窗口绑定**：start/end 一致、last_page_size<page_limit、terminated_at≥end）+ watermark 覆盖 + **无已声明缺口** + 迟到复查；仅自由文本→`TERMINATION_PROOF_MISSING`，窗口不符→`TERMINATION_PROOF_MISMATCH`，页未读完→`TERMINATION_PROOF_INVALID`。返回对象回带 coverage 整体哈希；**“仅凭 coverage 可复核的条件”由 `finalize_costs` 重算**（r5） |
 | `attribute_income` | 事件时点可证明仓位；双向仓/多生命周期歧义→UNATTRIBUTED；**覆盖缺失/非 COMPLETE/有已声明缺口→UNKNOWN** |
 | `check_conservation` | Σallocated == 源金额（默认精确相等），不符抛 `ConservationViolation` |
 | `allocate_weighted` | 权重必须非负；末腿承接余数；任何与源金额符号矛盾的分量抛 `AllocationError` |
-| `finalize_costs` | cost_status 与 attribution_status 独立；无事件时必须传入 `ZeroFeeProof` 结果对象（不得自报布尔），未证明则回带其 reason_codes |
+| `finalize_costs` | cost_status 与 attribution_status 独立；无事件时必须传入 `ZeroFeeProof` 结果对象（不得自报布尔，否则 `ZERO_FEE_NOT_PROVABLE`），未证明则回带其 reason_codes。**（r5）不信任对象自报的 `provable`**：始终用入参 coverage 重算可复核条件（状态非 COMPLETE / 已声明缺口 / 缺 TerminationProof 或窗口·短页·时间不符 / watermark 未达窗口末尾 / 区间非法），任一不成立即以对应 reason code 拒绝；证明与入参 coverage 哈希不一致 → `ZERO_FEE_PROOF_MISMATCH`（跨窗口复用、手工构造对象均被拦）。签名不变。三个外部标志（`source_available`/`pages_complete`/`late_recheck_done`）仍由铸证方提供，见 §12 L17 |
 | `apply_late_income` | 只产生 `OutcomeRevision{revision_id, requires_recalculation=true, new_closed_outcome_created=false}`；闭合结果缺失或多义抛 `LookupError` |
 
 ## 6. K04 管理意图、授权与数量（fail-closed）
@@ -219,6 +249,20 @@ K06 与既有 `src/core/release_evidence.py`：K06 只冻结输出结构，U09 �
   `validate_authorization`/`zero_fee_proof`/`finalize_costs` 的 fail-closed 收紧。契约尚未被
   U01–U05 集成、未打标签，因此不承担旧调用兼容；集成后新增字段仍按“带默认值可选”约束，
   收紧判定必须登记为小版本行为变更。
+- **3.1 新增字段/常量（r4 + r5，带默认值，可选语义）**：
+  - `EvidenceBundle.dropped_input_ids: tuple[str, ...] = ()`（默认空，纳入 `content_hash`，
+    随 `k02_evidence_bundle.schema.json` 同步；r4 引入，r5 补形态守卫）；
+  - 新增 reason_code：`RULES_MISSING`（r4）、`ZERO_FEE_PROOF_MISMATCH`（r4）、
+    `RulesInputError`（r5 结构化异常，`build_bundle` 侧专用）；
+  - K01 覆盖缺口新标签：`<组>.unknown_field:<键>`（r4）。
+- **3.1 判定收紧登记（r4/r5，均为小版本行为变更，不留旧调用兼容）**：
+  | # | 收紧 | 影响 | golden |
+  |---|---|---|---|
+  | T1（r4） | `rules` 由“应传”变为**必传**：`validate_bundle`/`validate_intent` 缺省 `rules=None` → `RULES_MISSING` → `EVIDENCE_INVALID` | 未显式传 `rules` 的调用方（U03）从“跳过规则比对”变为一律 `EVIDENCE_INVALID`（方向 fail-closed） | K02-N32/N35 |
+  | T2（r4） | 对 `symbol=None` 的输入、越界 `bound_inputs`、非空 `dedup_removed` 一律结构化拒绝（此前可部分通过） | 幽灵输入/越界引用/不可重算字段自报不再放行 | K02-N31/N33/N34/P8 |
+  | T3（r5） | `rules` 的 **Mapping 内容**必须可规范化为 JSON：非 JSON 值/混合键型 → `RULES_MISMATCH`（validate 侧）/ `RulesInputError`（build 侧），不再抛裸 `TypeError` | 新拒绝面（原先崩溃） | 直接探针（JSON golden 无法表达 `set`/`object`/混合键型，见 §12 L20） |
+  | T4（r5） | `finalize_costs` 由入参 coverage **重算**零费用可复核条件，并新增 `ZERO_FEE_PROOF_MISMATCH`（证明哈希与入参 coverage 不一致）；不再采信对象自报 `provable` | 手工构造 `ZeroFeeProof(provable=True, coverage_hash=<正确哈希>)` 不再能跳过 TerminationProof 等条件（原先 `COST_COMPLETE`） | K03-N20/N21/P5（期望不变） |
+  | T5（r5） | `dropped_input_ids` 非 `tuple`/`list`（含裸字符串）→ `QUALITY_MISMATCH`，不迭代 | `model_copy` 绕过类型校验的形态不再崩溃/静默通过 | 直接探针（同 T3） |
 - **golden 期望修改规则（恢复）**：golden 追加新用例；**既有用例不得修改期望值**。如契约语义
   修复必须变更既有期望，须在 §11「golden changelog」逐条登记：用例号、变更前后、规格/审查依据，
   不得静默改期望。
@@ -272,7 +316,16 @@ $env:PYTHONUTF8=1
 | K03-P4/P5/P8/N2/N3/N6/N7（r3） | inputs 增加 `termination_proof`；P5/N7 的 `zero_fee_provable` 布尔改为 `zero_fee` 对象 | B N7/Q NEW-P2-8：证明必须结构化且不得自报布尔 |
 | K04 全部非 OPEN 授权用例（r3） | inputs 的 authorization/request 增加 `environment/runtime_instance_id`；N15 保持跨代请求 | B N1：绑定缺失即拒绝（语义收紧，期望不变） |
 | K02-N16（r3） | inputs 移除自由标签 `kind:"other_kind"`（期望不变） | kind 注册表落地后标签必须已注册，用例聚焦缺必需 kind |
+| K01-P3/P4/P5（r3） | inputs 增加显式空组：`model_route.fallback_routes/profile_overrides`、`effective_config.profile_overrides/environment_overrides`（期望不变） | C P1-3 残余：字段级覆盖强制后空组必须显式声明（Q P3-3 ≡ B N14 漏登，r5 补登） |
+| K03-N5（r3） | inputs 的 coverage 增加 `termination_proof`、顶层增加 `rules` 键（期望不变） | B N7：终止证据必须结构化；rules 由验证方持有（Q P3-3 ≡ B N14 漏登，r5 补登） |
+| K02-N1..N21、N23..N30、P1..P6（r4，共 35 条） | bundle 规格新增 `rules` 键（与顶层 rules 同源；期望不变） | Q NEW-R4-P3-1 ≡ B N14：`rules` 变为必传后 build 侧与 validate 侧规则必须同源（r5 补登；K02-N22 由 verify 路径构造，未受影响） |
+| K03-P5（r4） | 顶层增加 `rules` 键；`zero_fee` 由自报 dict `{"provable": true}` 改为 `{"from_coverage": true, source_available/pages_complete/late_recheck_done: true}`（期望不变） | G/Q P3-3：零费用证明不得自报布尔，必须由 `zero_fee_proof` 铸证（r5 补登） |
 | K02 全部用例（r2/r3） | identity `schema_version` 3.0→3.1 | 契约小版本升级 |
+
+**r5 轮登记**：本轮修复（T3/T4/T5）**未改动任何既有期望、也未新增 golden 用例**——r4 的
+“0 条期望变更”性质保持（`git diff` 上 golden 六文件零改动）。原因：新增拒绝面依赖 JSON
+无法表达的载荷形态（`set`/`bytes`/`object`/混合键型、`model_copy` 绕过类型校验），
+无法写成 golden fixture，改以直接探针复现（见 §12 L20 与复审报告 §3 的复现命令）。
 
 ## 12. 已知限制、P2 处置与下游缺口索引
 
@@ -290,6 +343,20 @@ FILLED 不可撤、空串 fill_id 拒绝、`submit_allowed` 计算属性与 `rev
 矛盾拒绝、DELIVERED 需 SUBMITTED 前件；K03 结构化 TerminationProof（窗口绑定/短页/时间）、
 `finalize_costs` 只接受 ZeroFeeProof 对象、gaps 归因 fail-closed、signed zero、page_limit 类型；
 K01 ModelRoute + 字段级覆盖。
+
+**已修（r4）**：`rules` 变为必传（`RULES_MISSING`）并新增整体哈希比对 `quality.rules_hash`；
+非 OPEN 意图必须携带管理授权引用；`bound_inputs` 覆盖 claim 引用、`symbol=None` 幽灵输入拒绝；
+`quality.dedup_removed` 不可自报（必须为空）且 `dropped_input_ids` 落地为审计字段；
+K01 `build_identity` 对非 Mapping 覆盖输入结构化拒绝（不再 `AttributeError`）与未知键
+`unknown_field` 口径；K04 运行代/环境绑定按 strip 后非空判定（空串视同缺）；
+K05 `UNKNOWN→ACCEPTED` 必须有 SUBMITTED 前件、恢复证据 int/bool 混淆拒绝；
+K03 `ZeroFeeProof` 回带 coverage 哈希并要求窗口绑定一致（`ZERO_FEE_PROOF_MISMATCH`）。
+
+**已修（r5）**：`rules` 的 Mapping **内容**不可规范化为 JSON 时结构化拒绝（`RULES_MISMATCH` /
+`RulesInputError`，不再抛裸 `TypeError`，NEW-R4-P2-1）；`finalize_costs` 由入参 coverage
+**重算**零费用可复核条件，不再采信对象自报 `provable`（NEW-R4-P2-2）；`dropped_input_ids`
+迭代前加 `tuple`/`list` 守卫（`model_copy` 绕过类型校验不再崩溃/静默通过，NEW-R4-P3-3）；
+README 与 r4 实现同步（§3/§4/§5/§10/§11/§12）。
 
 **已文档化（不在本包实现，按失败关闭约定由下游承担）**：
 
@@ -310,6 +377,11 @@ K01 ModelRoute + 字段级覆盖。
 | L13 | `content_hash` 是完整性自校验（无密钥自哈希），不是签名/封条 | 篡改后重算哈希仍可通过自洽；跨进程可信需签名 | U03/U15（精确意图集合签名 `ValidationBatch`） |
 | L14 | K02 无 bundle 级字段 `market_venue/account_profile/missing_fields/fresh_until` 与类型化 quality | 主网/Demo 同时间戳合并风险由调用侧标注 | U03（报告 §5.3） |
 | L15 | K03 `coverage_problems` 与 `zero_fee_proof` 为两个职责面（自洽性 vs 可证明），watermark 命名仍有两套 | 需同时消费两函数的报告注意口径 | U01（可收敛为单一判定源） |
+| L16 | `STRATEGY_SOURCE_FILES`（`knowledge/strategy_cards.json`）仅作来源标签，`_coverage_gaps` **不**做策略卡文件级校验 | 身份只证明“策略卡内容已声明且非空”，不证明该内容来自 `knowledge/strategy_cards.json`；改卡仍改身份（`strategy_hash`） | U15（C r1 P2-6 残余；已在 §3 明写口径，r5 登记） |
+| L17 | `finalize_costs` 由 coverage 重算零费用条件，但 `source_available`/`pages_complete`/`late_recheck_done` 三个外部标志仍由铸证方提供（`ZeroFeeProof` 不携带原始布尔） | 具备正确 coverage 哈希的伪证仍可对这**三个标志**说谎（coverage 侧条件已不可伪造）；要彻底关闭需给 `finalize_costs` 增加原始条件入参（签名变更） | U01（Q NEW-R4-P2-2 残余，r5 登记；与 L11 同类“构造器不内建校验”） |
+| L18 | `dropped_input_ids` 是**审计提示**，其去重集合无法由包内 `inputs` 重算（被丢弃输入的内容已不在包内） | 可凭空申报“丢弃过 N 个输入”（仅形态受校验：`tuple`/`list`、非空 str、唯一、与保留输入不相交）；无判定消费者 | U01/U03（Q NEW-R4-P3-2，r5 登记；若要强制需新增“被丢弃输入载荷”字段 = 小版本新增字段） |
+| L19 | `validate_coverage` 不报未知键（`build_identity` 报 `组.unknown_field:<键>`） | 两个入口口径不同：build 侧更严，方向 fail-closed（不会放行）；手工构造身份文本时未知键不被 `validate_coverage` 检出 | U15（C NR-3 残余 / Q NEW-D，r5 登记） |
+| L20 | 非 JSON 载荷形态（`set`/`bytes`/`object`/`datetime`/混合键型）与 `model_copy` 绕过类型校验的形态**无法写成 JSON golden fixture** | 冒烟（golden 驱动）覆盖不到这些拒绝面，只由直接探针验证；冒烟不得因此被当成“全覆盖” | I/Q（r5 登记：T3/T5 的新拒绝面，见 §10、§11） |
 
 **下游缺口索引（r2 复审 C §4 八项 + B §5 八项，按任务分列）**：
 
@@ -333,6 +405,9 @@ K01 ModelRoute + 字段级覆盖。
 | B-O8 | 授权→意图→命令（Outbox）关联 ID 与重启后只读恢复形态 | U02/U04 |
 | 补充 | `income_type` 枚举/大小写治理与覆盖分裂（r3 仅做键归一化） | U01 |
 | 补充 | `AlertDelivery` 去重/退避/冷却与 `Incident` 结构化 reason_code | U14 |
+| 补充 | 策略卡**文件级**来源校验（`STRATEGY_SOURCE_FILES` 落地为覆盖检查，L16） | U15 |
+| 补充 | `finalize_costs` 接收原始零费用条件入参以关闭“三标志自报”（L17，小版本签名新增） | U01 |
+| 补充 | `dropped_input_ids` 可重算（新增“被丢弃输入载荷”字段，L18） | U01/U03 |
 
 其余接口缺口（C r1 报告 §5 其余项、B r1 报告 §5 清单）不改本契约冻结面，
 由 I 在分派时按 `implementation_requires` 对应任务登记；新增字段仍按 §10 规则小版本演进。
