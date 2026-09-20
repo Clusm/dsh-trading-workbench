@@ -1257,6 +1257,25 @@
           "impact": "S03 的 market_query 侧适配未落地（U05 称有替代 API）；后续任何需要动 market_query.py 的任务都会被同一约束挡住。",
           "owner": "U12（或 U03 后续）",
           "action": "应让该测试改用**固定的 pristine 基线**（如 git show <base>:<file>）或自带 fixture 副本，而不是读现网文件；否则 market_query 成为事实上不可改的共享文件。"
+        },
+        {
+          "type": "review_r1_B",
+          "candidate": "04a2c30",
+          "verdict": "CHANGES_REQUESTED",
+          "counts": "P0=0 / P1 x5 / P2 x9 / P3 x6",
+          "archived_path": "docs/dispatch/reviews/U05/04a2c30/B_r1.md",
+          "registered_fp_safe": "机制**安全**：精确 (路径,行号,规则) 三元组；正向只剔除同规则同行；反向用 raw_hits() 做 STALE_ALLOWANCE 使登记过期即失败（复核 pristine 4 处命中与 3 条登记逐一吻合）",
+          "but_patch13_weakens": "**但 patch 13 另外引入的 .py 裸标识符放宽削弱了密钥检测**：放宽作用于逐行文本而非 AST，故 .py 的**注释/docstring/内嵌 YAML/JSON 片段**里的明文凭据（如 `# api_key = abcdefghijklmnop1234`）在 .py 视图下**静默漏报**且无留痕。**注意：这正是编排者此前建议的修法方向，其安全缺陷由独立审查抓出。**",
+          "market_query": "撤回约束**真实存在且更强**：作者引用的 ValueError 精确复现；纯 EOF 追加虽能过反向应用，却会让集成树的身份断言 apply(前像,补丁)==现网 失败。S03 影响可接受（11/12 helper 与 reason_from_source_errors 在生产 src/ 零调用方），但应登记为显式偏差",
+          "delta": "独立双树沙箱、同一 77 条清单同 env 逐条非 fail-fast -> pristine 与 patched 失败集合均为 {smoke_windows_service_plan.py}(KI02) -> **新增失败 = ∅**；15 补丁 --check 15/15、应用 15/15；作者自测 95/54/48/45 与两态可运行均属实",
+          "blocking": [
+            "P1-1 补丁 09 列映射错位：latency_ms 填的是 failed_rounds（实测 failed_rounds=3 -> latency_ms=3），**污染 agent_runs 共享耗时列**，被 src/agents/review.py:231-237 的 AVG(latency_ms) 聚合进每日复盘",
+            "P1-2 classify_evidence_report 不读 report.ok/decision_gate()：门禁整体失败被读成 NO_EDGE + details evidence_gate_ok，与 report.ok=False 直接矛盾",
+            "P1-3 S02 静默 Mock 判定被自身抵销：缺 key 时 build_llm_for_agent 仍返回 Mock 不报错，而 route_expectation.mock_allowed 由**同一条件**推出 True -> 守卫把该降级报为'干净'（fail-open）",
+            "P1-4 run_protection_first 在期限耗尽时被 span 违规从 finally 抛出击穿（保护已执行却拿不到结果，对账/模型不再执行）",
+            "P1-5 patch 13 的 .py 裸标识符放宽削弱密钥检测（见上）"
+          ],
+          "other": "U05 全部运行时 API 在 src/ 零调用方（生产路径未接线）"
         }
       ],
       "blockers": [],
@@ -1309,7 +1328,18 @@
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r2",
+          "stage": "修复复验",
+          "candidate": null,
+          "sessions": [
+            "Q (reviews/U05/R2/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U05/<r2head>/"
+        }
+      ],
       "qa_runs": []
     },
     {
@@ -3035,6 +3065,14 @@
         "owner": "I/U12",
         "blocks": "无（当前无生产调用点）",
         "note": "直 SET status=? 绕过 _update；白名单含 EXPIRED_IN_MATCH -> 别名可落库、行不可重水化；不做三分量同步（合法 CANCELED 也留 working=0.02）。r3 起既存、无生产调用点。**本项未在作者侧登记，由 I 在此登记**（否则按标尺应判 CHANGES_REQUESTED）。另 docstring 自愈描述过宽、N2 登记计数不精确（实 8/11 而非 7），属文档准确性。U12 接线前必须处置。"
+      },
+      {
+        "id": "U05-COUPLING-REVIEW",
+        "title": "U05 patch 09 污染 agent_runs.latency_ms，经 U01 review.py 的 AVG(latency_ms) 影响每日复盘",
+        "status": "OPEN",
+        "owner": "U05",
+        "blocks": "复盘统计正确性（U01 已集成）",
+        "note": "跨任务耦合：U04/U05 的决策 trace 写入 agent_runs 的 latency_ms 列，而 U01 的 review.py:231-237 用 AVG(latency_ms) 做聚合。列语义必须统一。U05 r2 修复。"
       }
     ],
     "contract_candidate": "71f8109",
