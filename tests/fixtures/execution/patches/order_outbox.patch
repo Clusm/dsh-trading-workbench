@@ -1,5 +1,5 @@
 diff --git a/src/exchange/order_outbox.py b/src/exchange/order_outbox.py
-index 477374d..4b2a6f1 100644
+index 477374d..2658e7e 100644
 --- a/src/exchange/order_outbox.py
 +++ b/src/exchange/order_outbox.py
 @@ -8,7 +8,23 @@ from datetime import datetime, timedelta, timezone
@@ -26,7 +26,7 @@ index 477374d..4b2a6f1 100644
  
  
  _ACTIVE = {"SUBMITTING", "UNKNOWN", "ACKNOWLEDGED", "NEW", "PARTIALLY_FILLED"}
-@@ -21,6 +37,40 @@ _RANK = {
+@@ -21,6 +37,51 @@ _RANK = {
  }
  
  
@@ -52,10 +52,21 @@ index 477374d..4b2a6f1 100644
 +    ``working`` 非零、``terminal`` 归零，该行随即违反 K04 终态不变量。词表外的状态
 +    不会因此外泄：它们不落在终态集合里，一律落到下面的分量推导分支，返回值恒为
 +    ``OrderQuantity`` 词表内的状态（未知状态走 fail-safe 推导，不原样透传）。
++
++    **``FILLED`` 必须由分量背书（N6）**：``apply_event`` 的帧序是"先
++    ``_update(status=X)`` 再 ``apply_fill_revision(l)``"，因此处理 ``X="FILLED"`` 帧
++    时落库的 ``status`` 已经是 ``FILLED``，而本帧的成交**尚未入账**——这是一个中间
++    态。若照搬"终态保留原状态"，调用方会走 ``working, terminal = 0, 0`` 分支，于是
++    ``accepted(0.02) != filled(0.0105) + 0 + 0`` 触发守恒违规、``QuantityError`` 被
++    ``apply_event`` 吞掉：**本帧成交永远丢失、行永久非法且不可自愈**（任何后续修订都
++    命中同一分支）。判据只能是分量：``status="FILLED"`` 而 ``filled < accepted`` 时
++    它不是终态事实，退回分量推导（此时得到 ``PARTIALLY_FILLED``/``NEW``），由
++    ``apply_fill`` 在成交入账后把状态自行推进到 ``FILLED``。``CANCELED``/``EXPIRED``/
++    ``REJECTED`` 不受影响——它们的终态不依赖 ``filled``。
 +    """
 +    stored = _STATUS_ALIASES.get(str(stored_status or "").upper(),
 +                                 str(stored_status or "").upper())
-+    if stored in _QUANTITY_TERMINAL:
++    if stored in _QUANTITY_TERMINAL and not (stored == "FILLED" and filled < accepted):
 +        return stored
 +    if filled <= 0:
 +        return "NEW"
@@ -67,7 +78,7 @@ index 477374d..4b2a6f1 100644
  class PendingOrderConflict(RuntimeError):
      """同一业务键已有未决开仓命令。"""
  
-@@ -40,6 +90,9 @@ class OrderOutbox:
+@@ -40,6 +101,9 @@ class OrderOutbox:
                   max_reconcile_per_cycle: int = 5) -> None:
          self.db = db
          self.environment = str(environment)
@@ -77,7 +88,7 @@ index 477374d..4b2a6f1 100644
          self.last_event_at: float | None = None
          self.last_reconcile_at: float | None = None
          self.last_error: str | None = None
-@@ -55,9 +108,20 @@ class OrderOutbox:
+@@ -55,9 +119,20 @@ class OrderOutbox:
      def prepare(self, *, client_order_id: str, symbol: str, side: str,
                  position_side: str | None, order_type: str, purpose: str,
                  qty: float, price: float | None, reduce_only: bool,
@@ -100,7 +111,7 @@ index 477374d..4b2a6f1 100644
          key = self.business_key(symbol=symbol, side=side,
                                  position_side=position_side, purpose=purpose)
          with self.db.lock:
-@@ -82,14 +146,17 @@ class OrderOutbox:
+@@ -82,14 +157,17 @@ class OrderOutbox:
                      """INSERT INTO order_outbox(
                          client_order_id,release_id,environment,business_key,symbol,side,position_side,
                          order_type,purpose,qty,price,reduce_only,endpoint,status,request_json,
@@ -121,7 +132,7 @@ index 477374d..4b2a6f1 100644
                  )
                  self.db.conn.commit()
              except sqlite3.IntegrityError as exc:
-@@ -135,18 +202,115 @@ class OrderOutbox:
+@@ -135,39 +213,179 @@ class OrderOutbox:
              self.db.conn.commit()
  
      def reject(self, client_order_id: str, exc: BaseException) -> None:
@@ -234,6 +245,17 @@ index 477374d..4b2a6f1 100644
 -                resolved_at: str | None = None) -> None:
 +                resolved_at: str | None = None,
 +                zero_quantities: bool = False) -> None:
++        """状态迁移 + 终态三分量同步。
++
++        **落库的 ``status`` 必须落在 ``OrderQuantity`` 词表内（N7）**：私有流会把
++        交易所别名 ``EXPIRED_IN_MATCH`` 原样送进来，而该串不在词表里——直接落库会让
++        整行**永久无法重水化**（任何按行读取的对账/审计重放都抛 ``ValidationError``），
++        且因为它不在 ``_QUANTITY_TERMINAL``，下面的终态同步分支不执行，留下一行
++        ``working = accepted`` 的"终态"行（违反 K04）。这里沿用
++        ``_STATUS_ALIASES`` 先归一（``EXPIRED_IN_MATCH -> EXPIRED``），与
++        ``_component_status``/``apply_fill_revision`` 的返回值口径一致；顺带把
++        **历史遗留**的别名行也归一，使旧行在下一个事件到达时自愈。
++        """
          with self.db.lock:
              previous = self.db.conn.execute(
 -                "SELECT status FROM order_outbox WHERE client_order_id=?",
@@ -241,7 +263,14 @@ index 477374d..4b2a6f1 100644
                  (client_order_id,),
              ).fetchone()
              if not previous:
-@@ -156,18 +320,46 @@ class OrderOutbox:
+                 return
+-            previous_status = str(previous["status"] or "SUBMITTING")
++            alias = _STATUS_ALIASES.get(str(status).upper())
++            if alias:
++                status = alias
++            previous_raw = str(previous["status"] or "SUBMITTING")
++            previous_status = _STATUS_ALIASES.get(previous_raw.upper(), previous_raw)
+             if (previous_status in _TERMINAL and status != previous_status) or (
                      previous_status not in _TERMINAL and
                      _RANK.get(status, 0) < _RANK.get(previous_status, 0)):
                  return
@@ -289,7 +318,7 @@ index 477374d..4b2a6f1 100644
                   client_order_id),
              )
              self.db.conn.commit()
-@@ -193,6 +385,26 @@ class OrderOutbox:
+@@ -193,6 +411,26 @@ class OrderOutbox:
          self._update(client_id, status=status,
                       exchange_order_id=str(order.get("i") or "") or None,
                       response=order, error_type=None, resolved_at=resolved)
@@ -316,7 +345,7 @@ index 477374d..4b2a6f1 100644
          self.last_event_at = time.time()
          self.last_error = None
          return True
-@@ -219,6 +431,28 @@ class OrderOutbox:
+@@ -219,6 +457,28 @@ class OrderOutbox:
                      found = isinstance(response, dict) and response.get("orderId")
                  if found:
                      self.acknowledge(str(row["client_order_id"]), response)

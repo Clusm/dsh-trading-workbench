@@ -1095,6 +1095,15 @@ def section_schema_and_guard(tmpdir: Path) -> None:
         # 永远是新鲜值；残余只有**并发窗口**内才可达（复验者用 20000 轮双线程实证
         # 16->0）。所以这里补一条**确定性**的结构断言：失败类别必须由**生产实例**按
         # 标的存放（V1 只有进程级标量 ``last_protection_sync_reason``，没有该对象）。
+        #
+        # **已登记的残余（N2'，P3，不要当成已完整覆盖）**：该结构断言只检查"对象里
+        # 存了什么"，不检查"读路径是否真从该对象按标的取值"。复验者已用受控反例
+        # 实测：保留按标的、每轮 ``begin()`` 复位的 ``protection_sync`` **完全正确**，
+        # 仅把 ``_ensure_protection_from_order`` 的**读**改回进程级标量，本节 7 条
+        # 断言（含本条）**全部通过**，而并发实测仍有 6~20/20000 次裸仓。也就是说，
+        # 它挡得住"对象本身坏了/退回 V1 标量"的回归，**挡不住"对象正确、读路径退化"
+        # 的回归**；后者只能靠并发行为断言（``setswitchinterval`` + 双线程）暴露，
+        # 本轮未纳入。此残余已如实登记，不得据此声称跨标的窗口缺陷已被完全覆盖。
         production_reasons = getattr(shared, "protection_sync", None)
         check("生产实例按标的存放失败类别（V1 的进程级标量不满足）",
               production_reasons is not None
@@ -1355,6 +1364,213 @@ def section_fill_revision_wiring(tmpdir: Path) -> None:
           and str(expired_row["terminal_unfilled_qty_text"]) == "0.0143"
           and row_quantity_violations(expired_row) == (),
           f"actual={dict(expired_row) if expired_row else None}")
+
+    # ----------------------------------------------------------------- #
+    # 防复发（r4 / N6）：``X="FILLED"`` 帧里的成交必须真正入账。
+    #
+    # ``apply_event`` 的帧序是"先 ``_update(status=X)`` 再 ``apply_fill_revision(l)``"，
+    # 所以处理 ``X="FILLED"`` 帧时落库的 ``status`` **已经是 FILLED**，而本帧成交
+    # **尚未入账**——这是一个中间态。r3 的 ``_component_status`` 把"终态保留原状态"
+    # 照搬到它身上，调用方随即走 ``working, terminal = 0, 0`` 分支，于是
+    # ``accepted != filled + 0 + 0`` 触发守恒违规、``QuantityError`` 被 ``apply_event``
+    # 的 ``except`` 吞掉：**本帧成交被静默丢弃（行留成非法态且此后不可自愈）**。
+    # 这是订单生命周期的**主路径**，不是边界：任何"部分成交后最终全成"的限价单都会走
+    # 这条帧序，"从零一笔全成"则整笔丢失。此前的用例只发 ``PARTIALLY_FILLED`` 与
+    # ``CANCELED``/``EXPIRED``，从未发送 ``X="FILLED"`` 帧，因此漏掉了它。
+    # ----------------------------------------------------------------- #
+    def fill_skip_events(client: str) -> list[Any]:
+        return reopened.db.fetch_all(
+            "SELECT details FROM risk_events WHERE action_taken='fill revision skipped' "
+            "AND details LIKE ?", (f"%{client}%",))
+
+    # (N6-a) "部分成交 -> 全成"：真实 USER_STREAM 形状（z 推进到 q，l 为最后一档）。
+    n6a_id = "synth-u04-filled-frame-partial"
+    reopened.prepare(
+        client_order_id=n6a_id, symbol=symbol, side="BUY", position_side="LONG",
+        order_type="LIMIT", purpose="ENTRY", qty=0.02, price=100.0,
+        reduce_only=False, endpoint="/fapi/v1/order",
+        request={"symbol": symbol, "newClientOrderId": n6a_id, "quantity": "0.02"},
+        qty_text="0.02")
+    reopened.apply_event(ExchangeEvent(
+        event_key="f1", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=n6a_id, exchange_order_id="904", trade_id="88801",
+        payload={"o": dict(event, **{"c": n6a_id, "i": 904, "X": "PARTIALLY_FILLED",
+                                     "z": "0.0105", "l": "0.0105", "t": 88801})},
+        supported=True))
+    n6a_partial = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (n6a_id,))
+    check("FILLED 帧之前：前档部分成交 0.0105 已入账（working=0.0095）",
+          str(n6a_partial["cumulative_filled_qty_text"]) == "0.0105"
+          and str(n6a_partial["working_leaves_qty_text"]) == "0.0095"
+          and str(n6a_partial["status"]) == "PARTIALLY_FILLED",
+          f"actual={dict(n6a_partial) if n6a_partial else None}")
+    # 全成帧：``X="FILLED"``，本帧成交量在 ``l`` 里，累计量在 ``z`` 里。
+    reopened.apply_event(ExchangeEvent(
+        event_key="f2", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=n6a_id, exchange_order_id="904", trade_id="88802",
+        payload={"o": dict(event, **{"c": n6a_id, "i": 904, "X": "FILLED",
+                                     "z": "0.02", "l": "0.0095", "t": 88802})},
+        supported=True))
+    n6a_row = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (n6a_id,))
+    check("FILLED 帧的成交量真正入账（0.0105 -> 0.02，不被静默丢弃）",
+          str(n6a_row["cumulative_filled_qty_text"]) == "0.02",
+          f"filled={n6a_row['cumulative_filled_qty_text']}")
+    check("FILLED 帧后行合法且守恒（working=0、terminal=0、契约接受）",
+          str(n6a_row["status"]) == "FILLED"
+          and str(n6a_row["working_leaves_qty_text"]) == "0"
+          and Decimal(str(n6a_row["terminal_unfilled_qty_text"])) == 0
+          and str(n6a_row["accepted_qty_text"]) == "0.02"
+          and row_quantity_violations(n6a_row) == (),
+          f"actual={dict(n6a_row) if n6a_row else None}")
+    check("FILLED 帧的成交 id 被持久化（重启重放不二次计账的依据）",
+          "88802" in str(n6a_row["applied_fill_ids_json"]),
+          f"applied={n6a_row['applied_fill_ids_json']}")
+    check("FILLED 帧未产生「私有流成交未能落库」风险事件（失败不是被静默吞掉的）",
+          fill_skip_events(n6a_id) == [], f"events={fill_skip_events(n6a_id)}")
+    # at-least-once：重复投递同一 FILLED 帧不得二次计账、不得破坏行
+    reopened.apply_event(ExchangeEvent(
+        event_key="f2", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=n6a_id, exchange_order_id="904", trade_id="88802",
+        payload={"o": dict(event, **{"c": n6a_id, "i": 904, "X": "FILLED",
+                                     "z": "0.02", "l": "0.0095", "t": 88802})},
+        supported=True))
+    n6a_replay = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (n6a_id,))
+    check("重复投递同一 FILLED 帧不二次计账且行仍合法",
+          str(n6a_replay["cumulative_filled_qty_text"]) == "0.02"
+          and row_quantity_violations(n6a_replay) == (),
+          f"actual={dict(n6a_replay) if n6a_replay else None}")
+
+    # (N6-b) "一笔全成"：首帧即 ``X="FILLED"``（``z == l == q``），无前档成交。
+    n6b_id = "synth-u04-filled-frame-oneshot"
+    reopened.prepare(
+        client_order_id=n6b_id, symbol=symbol, side="BUY", position_side="LONG",
+        order_type="LIMIT", purpose="ENTRY", qty=0.02, price=100.0,
+        reduce_only=False, endpoint="/fapi/v1/order",
+        request={"symbol": symbol, "newClientOrderId": n6b_id, "quantity": "0.02"},
+        qty_text="0.02")
+    reopened.apply_event(ExchangeEvent(
+        event_key="g1", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=n6b_id, exchange_order_id="905", trade_id="88901",
+        payload={"o": dict(event, **{"c": n6b_id, "i": 905, "X": "FILLED",
+                                     "z": "0.02", "l": "0.02", "t": 88901})},
+        supported=True))
+    n6b_row = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (n6b_id,))
+    check("一笔全成：整笔成交入账（filled=0.02，不是 0）",
+          str(n6b_row["cumulative_filled_qty_text"]) == "0.02",
+          f"filled={n6b_row['cumulative_filled_qty_text']}")
+    check("一笔全成：行合法且守恒（FILLED、working=0、terminal=0、契约接受）",
+          str(n6b_row["status"]) == "FILLED"
+          and str(n6b_row["working_leaves_qty_text"]) == "0"
+          and Decimal(str(n6b_row["terminal_unfilled_qty_text"])) == 0
+          and row_quantity_violations(n6b_row) == (),
+          f"actual={dict(n6b_row) if n6b_row else None}")
+    check("一笔全成：未产生「私有流成交未能落库」风险事件",
+          fill_skip_events(n6b_id) == [], f"events={fill_skip_events(n6b_id)}")
+
+    # (N6-c) 顺序退化：``X="FILLED"`` 帧先到、本帧没带成交（``l=0``），成交随后才
+    # 入账（重启对账/延迟帧都走这条）。中间行必须**可被后续成交修订救回**——
+    # 这正是 r3 的"永久非法且不可自愈"要否定的。
+    #
+    # 已登记的已知限制（既有，非本轮引入；Q_r3 §9 的 S4/N9）：若该"不带成交的全成帧"
+    # 之后**再没有**成交到达，``_update`` 写下的 ``status='FILLED'`` 无人背书，该行会
+    # 停在 ``FILLED + filled < accepted`` 的非法态（r3 同样非法，只是分量口径不同）。
+    # 触发序列要求"全成帧不带最后一档成交"，与交易所语义矛盾（全成帧必带 ``l``），
+    # 故离线判为不可达；本轮不扩大改动范围去重写 ``_update`` 的终态语义。
+    n6c_id = "synth-u04-filled-frame-early"
+    reopened.prepare(
+        client_order_id=n6c_id, symbol=symbol, side="BUY", position_side="LONG",
+        order_type="LIMIT", purpose="ENTRY", qty=0.02, price=100.0,
+        reduce_only=False, endpoint="/fapi/v1/order",
+        request={"symbol": symbol, "newClientOrderId": n6c_id, "quantity": "0.02"},
+        qty_text="0.02")
+    reopened.apply_event(ExchangeEvent(
+        event_key="h1", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=n6c_id, exchange_order_id="906", trade_id="88911",
+        payload={"o": dict(event, **{"c": n6c_id, "i": 906, "X": "PARTIALLY_FILLED",
+                                     "z": "0.0105", "l": "0.0105", "t": 88911})},
+        supported=True))
+    reopened.apply_event(ExchangeEvent(
+        event_key="h2", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=n6c_id, exchange_order_id="906", trade_id=None,
+        payload={"o": dict(event, **{"c": n6c_id, "i": 906, "X": "FILLED",
+                                     "l": "0", "t": 0})},
+        supported=True))
+    # 中间行若真不可自愈，这里会抛 QuantityError —— 捕获它并记成失败项，而不是让它
+    # 中断整节（否则后面的检查全部被跳过，"失败"变成"没跑"）。
+    try:
+        booked = reopened.apply_fill_revision(n6c_id, fill_qty="0.0095", fill_id="88912")
+        booked_status = booked and booked["status"]
+        booking_error = None
+    except Exception as exc:  # noqa: BLE001 - 契约拒绝就是本项要抓的失败
+        booked, booked_status, booking_error = None, None, f"{type(exc).__name__}: {exc}"
+    n6c_row = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (n6c_id,))
+    check("FILLED 帧早到（成交未入账）后补入账：终态正确且行自愈为合法",
+          booking_error is None and booked_status == "FILLED"
+          and str(n6c_row["status"]) == "FILLED"
+          and str(n6c_row["cumulative_filled_qty_text"]) == "0.02"
+          and str(n6c_row["working_leaves_qty_text"]) == "0"
+          and Decimal(str(n6c_row["terminal_unfilled_qty_text"])) == 0
+          and row_quantity_violations(n6c_row) == (),
+          f"actual={dict(n6c_row) if n6c_row else None} booking_error={booking_error}")
+
+    # ----------------------------------------------------------------- #
+    # N7（别名落库）：私有流会把交易所状态别名 ``EXPIRED_IN_MATCH`` 原样送进来，
+    # 该串**不在** ``OrderQuantity`` 词表内 —— 原样落库会让整行永久无法重水化
+    # （任何按行读取的对账/审计重放都抛 ``ValidationError``），且它不在
+    # ``_QUANTITY_TERMINAL``，终态三分量同步分支不执行，留下 ``working=accepted``
+    # 的"终态"行（违反 K04）。落库口径必须与 ``apply_fill_revision`` 的返回值一致。
+    # ----------------------------------------------------------------- #
+    eim_id = "synth-u04-expired-in-match"
+    reopened.prepare(
+        client_order_id=eim_id, symbol=symbol, side="BUY", position_side="LONG",
+        order_type="LIMIT", purpose="ENTRY", qty=0.02, price=100.0,
+        reduce_only=False, endpoint="/fapi/v1/order",
+        request={"symbol": symbol, "newClientOrderId": eim_id, "quantity": "0.02"},
+        qty_text="0.02")
+    reopened.apply_event(ExchangeEvent(
+        event_key="i1", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=eim_id, exchange_order_id="907", trade_id=None,
+        payload={"o": dict(event, **{"c": eim_id, "i": 907, "X": "EXPIRED_IN_MATCH",
+                                     "l": "0", "t": 0})},
+        supported=True))
+    eim_row = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (eim_id,))
+    check("EXPIRED_IN_MATCH 落库为词表内的终态（行可重水化，不再抛 ValidationError）",
+          str(eim_row["status"]) == "EXPIRED"
+          and row_quantity_violations(eim_row) == (),
+          f"actual={dict(eim_row) if eim_row else None} "
+          f"viol={row_quantity_violations(eim_row)}")
+    check("EXPIRED_IN_MATCH 无成交时三分量同步（working 归零、余量进 terminal）",
+          str(eim_row["working_leaves_qty_text"]) == "0"
+          and str(eim_row["terminal_unfilled_qty_text"]) == "0.02",
+          f"actual={dict(eim_row) if eim_row else None}")
+    reopened.apply_event(ExchangeEvent(
+        event_key="i2", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=eim_id, exchange_order_id="907", trade_id="88921",
+        payload={"o": dict(event, **{"c": eim_id, "i": 907, "X": "EXPIRED_IN_MATCH",
+                                     "z": "0.001", "l": "0.001", "t": 88921})},
+        supported=True))
+    eim_late = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (eim_id,))
+    check("EXPIRED_IN_MATCH 后的迟到成交仍保留别名映射后的终态且行合法",
+          str(eim_late["status"]) == "EXPIRED"
+          and str(eim_late["cumulative_filled_qty_text"]) == "0.001"
+          and str(eim_late["working_leaves_qty_text"]) == "0"
+          and str(eim_late["terminal_unfilled_qty_text"]) == "0.019"
+          and row_quantity_violations(eim_late) == (),
+          f"actual={dict(eim_late) if eim_late else None}")
 
     # 第 4 项已闭合行为的回归对照（r3 必须不破坏）：reject 清零 + 拒单后成交 fail-closed。
     # K04 要求 REJECTED 的 accepted/filled 必须为 0；清零是后续任何成交/对账路径

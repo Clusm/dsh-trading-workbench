@@ -1,0 +1,16 @@
+tree=C:\Users\Tao\Desktop\币安\mat-wt\B\_scratch_B\r4\tree_r4
+
+[B1 无成交（挂单在撮合中 STP 过期）]
+  落库行: status='EXPIRED' accepted=0.02 filled=0 working=0 terminal=0.02
+  重水化 -> ()
+  迟到成交后: status='EXPIRED' filled=0.001 working=0 terminal=0.019 rev_status=EXPIRED
+  重水化 -> ()
+
+[B2 部分成交后过期]
+  落库行: status='EXPIRED' accepted=0.02 filled=0.0047 working=0 terminal=0.0153
+  重水化 -> ()
+  迟到成交后: status='EXPIRED' filled=0.0057 working=0 terminal=0.0143 rev_status=EXPIRED
+  重水化 -> ()
+
+[B3 历史遗留别名行的自愈]
+  自愈后: status='EXPIRED' working=0 terminal=0.02 重水化 -> ()
