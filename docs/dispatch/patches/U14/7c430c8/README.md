@@ -20,7 +20,7 @@
 
 ```bash
 BASE=C:/Users/Tao/Desktop/币安/mat-wt/I      # 基线 59660b2
-P=docs/dispatch/patches/U14/5249004
+P=docs/dispatch/patches/U14/7c430c8
 for f in 01_core_health_watch 02_scripts_health_watch \
          03_audit_database_alert_deliveries 04_run_offline_regression_registration; do
   git -C "$BASE" apply "$P/$f.diff"
@@ -29,7 +29,7 @@ done
 
 ## 2. `git apply --check`（两种 git 配置，均在**补丁基线那棵树**上验证）
 
-验证方式：`git archive 5249004` 导出独立沙箱 + `git init`（使 `core.autocrlf` 生效），
+验证方式：`git archive` 导出作者树（head `7c430c8`） + `git init`（使 `core.autocrlf` 生效），
 逐个补丁检查。本机 main 仓库 `.git/config` 里 `core.autocrlf=false`（故“默认”一列为
 autocrlf=true 的更严口径，来源 `git config --show-origin`）。
 
@@ -138,9 +138,10 @@ autocrlf=true 的更严口径，来源 `git config --show-origin`）。
 
 ## 6. 补丁目录命名
 
-目录名 `5249004` 是生成 diff 时的作者 head。作者在生成后**追加了两个 docs/test 提交**
-（不含共享文件），基线提交仍为 `59660b2`，故 diff 内容有效；I 应用时请以
-`task/U14` 的**最终 head** 归档（或直接把本目录改名为最终 head，内容不变）。
+目录名 = **作者交付 head `7c430c8`**（`task/U14`）。diff 在更早的 head `5249004` 生成，
+此后仅追加了 docs/test 提交（**不含**任何共享文件），故 diff 内容与基线
+`59660b2` 的对应关系不变；`git apply --check` 在最终树上重新验证通过（§2）。
+若 I 之后在 `task/U14` 上再追加提交，请以“补丁基线 59660b2”为准钉住应用目标。
 
 ## 7. known_limits（如实登记，未验证项必须明说）
 
