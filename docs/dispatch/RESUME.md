@@ -37,7 +37,7 @@
 | EF | U13 托管/单实例/备份恢复 | `task/U13` | **✅ INTEGRATED** | 初审 P1×3 → r2 修（安装戳 fail-closed、`submit_recovery_reconcile()` 接线、KI02 收口）→ Q r2 **PASS-with-notes** → r3 按集成 HEAD **重生成 7 个补丁**（其余 5 文件零差异，因合并已带入 r1 共享改动）→ 7/7 干净应用 → **跨任务验收全绿**（U15/U01/U04 的套件均 exit 0）→ **KI02 消除：`smoke_windows_service_plan` 24/0**，**官方单命令入口首次端到端成功 `OFFLINE REGRESSION OK scripts=75`** |
 | B | U02 策略仓管理与有界退出 | `task/U02` | **✅ INTEGRATED** | A 初审 P0×1 → r2 闭 P0+P1（迁移方案升级为"可执行"）→ r3 闭 3 条 P2（`_consumed_ids` 事实判重 / `release()` 幂等 / `confirm_exit` 结算使声明成真）→ **Q r3 PASS-with-notes** → 集成：6 补丁在 U13/U05 集成后**仍 6/6 干净应用**、登记冒烟（MANIFEST OK 76）、158/0、**check_quality OK files=280**、**OFFLINE REGRESSION OK scripts=80**。**残余（重要）**：`_consumed_ids` 是**纯内存 set** → "已消费不可重发"**仅在进程内成立**，重启后同 `exit_key` 会再次 `SUBMIT_REDUCE`（已登记 P2-9） |
 | CD | U06a 影子最小隔离与口径修正 | `task/U06a` | **r2 修复完成 → 复验中** | 初审硬结论：**影子样本确实会进发布门槛**（实测 50B+50C → 方向候选 200→300）→ 判为**范围外依赖且作者披露准确**，登记为 **U09 硬前置**（`S08-SHADOW-GATE-LEAK`）。r2 已修 **P2-1 陈旧当新值**（只在成功时更新缓存、失败记 `state=FAILED/stale=True`，年龄锚上次成功；交叉污染 m3 由 1.101 回到真实 2.202）与 **P2-2 披露未渲染**（新增卡片整段引用披露字段；可见区 3 项 MISS → 7 项全 HIT）；P2-6、P3-8/9/10/11 已修。head `e8f0873`；**分支 11 新增/0 修改**、5 共享文件 diff 0 行、`release_evidence.py` 零改动且未建第二套 GO；补丁 `a01d088/` 在两基线两配置下 OK；delta ∅ |
-| EF | U14 外部告警送达与主机失联 | `task/U14` | **r2 修复完成 → 复验中** | 初审 P1×3 → r2 全修：**①**容差内偏斜归一 + `PROVIDER_CLOCK_SKEW_TOLERATED` 审计，超容差按**单条**隔离后 `continue`（前后：`{ACCEPTED:3,UNKNOWN:1}` 每轮复发 → `{DELIVERED:4}`、`next_attempt=None`）**②**判据改 `pending>0 or not confirmed_states`（只看当前未闭合项；前后 `OPS_OK` → `OPS_DEGRADED+NO_CONFIRMED_DELIVERY`）**③**新增 `bound_alert_id`（缺省 fail-closed）+ 时间戳上界/类型校验（前后：他消息回执/`12345`/未来时间戳均可标 DELIVERED → `RECEIPT_BINDING_MISMATCH`/`RECEIPT_TYPE_INVALID`/`RECEIPT_TIMESTAMP_FUTURE`）。head `6ef116b`；补丁 `a89eaa5/` **在补丁基线与集成 HEAD 两者、两配置各 4/4 OK**；验收 194/0；**delta ∅**。**known_limit**：`AlertQueue` **仍无生产消费者 → 不得认为无人值守告警已可用** |
+| EF | U14 外部告警送达与主机失联 | `task/U14` | **r3 修复中（P1-4）** | r2 闭 P1×3 后 r3 复验发现 **P1-1 只闭合一半 → P1-4**：单条隔离的 `except` **只收 `(AlertLadderViolation, AlertReceiptRejected)`**，捕获集合小于需防集合 —— ①**`transport.submit()` 自身抛的任何异常**（Timeout/OSError/Runtime…）穿出 `dispatch_due` → 整批中断 + 无退避 + **每轮复发**（真实网关一次抖动即永久停摆）②模块**自己**为空白回执抛的**裸 `ValueError`**、`int()` 对非数值抛的 `ValueError/TypeError` 同样漏网。**在 r2 之前的树上结果完全一致 ⇒ 未触及的残留，非新回归**。P1-2/P1-3 真闭合、抽验 8/8 通过、delta ∅。head `6ef116b`；**`AlertQueue` 仍无生产消费者 → 不得认为无人值守告警已可用** |
 | CD | U08 策略漏斗与管理责任展示 | — | 待派发 | 线内串行：U06a → U08 |
 | EF | U10a 可运行发布包与运维说明 | — | 待派发 | 线内串行：U14 → U10a |
 
@@ -101,6 +101,9 @@
 13. **新增失败模式：agent stall（`no progress for 600s`，watchdog 未恢复）**。U06a 首轮即如此，与之前的"截断式中止"不同 —— 它**静默停住约 10 分钟**（cron 观察到 3 分钟零写入）。**且该会话违反了增量提交**：跑了约 40 分钟、**零提交**，中断后只能靠 WIP 保全（`f0c0e48`），当时 `shadow_status.py` 未完成、测试不存在、共享文件 `src/intel/service.py` 被改并混进 WIP。
     - **处置**：WIP 保全 → 派续做会话，并要求它**先把共享文件改动导出为补丁、再用 `git checkout <base> -- <file>` 从分支还原**（任务分支最终不得含共享文件改动）。
     - **教训**：① 增量提交不是形式要求，是**这个环境里唯一可靠的损失上限**；② 续做提示词必须写明"上一会话零提交"并要求**开头就提交一次**；③ 作者工作树里出现共享文件改动时，续做会话有义务把它转成补丁并还原。
+14. **建审查 worktree 后必须回读确认**（与 lesson 10 同源，针对**审查区**）。U14 r3 复验时我**没成功建出** `reviews/U14/R3/r1`，却已在提示词里把它写成工作区；复验者落到一个**普通目录**，自行用 `git archive` 沙箱实现了 detached 语义并产出完整报告（**结果可用**），但这属于**运气**：提示词指向不存在的工作区时，不同会话可能做出不可预料的事。
+    - **做法**：`git worktree add --detach <path> <commit>` 之后**必须 `git -C <path> rev-parse --short HEAD` 回读**，确认路径存在且指向目标提交，再把它写进提示词。
+    - 附带发现：该会话的 Bash **无法把命令行里字面写出的中文路径透传给子进程**（`ls`/`python -c` 报 No such file or directory），它改用 `$(cd <glob>/mat-wt && pwd)` 动态取值绕过。派发时若涉及中文路径，宜让作者/复验者用动态取值而非字面量。
 
 > **判定规则（按序判断，避免重复派发）：**
 > 1. 若 `mat-wt/A|B|CD|EF` 四个 worktree 尚未创建 → 走 §2 步骤 1
