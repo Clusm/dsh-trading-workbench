@@ -1520,7 +1520,15 @@
         "F16",
         "F20"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "session_failure",
+          "failure_mode": "agent stalled（no progress for 600s, watchdog did not recover）",
+          "state_at_failure": "**零提交**（跑了约 40 分钟）；src/intel/shadow_status.py 已存在但未完成（23413 字节，停在 _refresh 的 load-budget/metrics-cache/disclosure 阶段）；tests/integration/test_shadow_status.py 不存在；无补丁包；无冒烟；src/intel/service.py（**共享文件**）被改 +220/-25 并混入 WIP",
+          "handling": "保全为 WIP f0c0e48（标注 INCOMPLETE）；派续做会话，要求**先导出 service.py 的共享适配补丁、再用 git checkout <base> -- src/intel/service.py 从分支还原**，然后完成任务并**每步提交**",
+          "lesson": "该会话违反增量提交 -> 40 分钟工作几乎全在未提交状态。增量提交是此环境唯一可靠的损失上限。"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "C",
