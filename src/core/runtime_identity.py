@@ -983,9 +983,17 @@ def resolve_model_route(
     if profile_effective:
         overrides["profile"] = profile_effective
 
+    if not _text(model):
+        # 结构化拒绝而不是让 ModelRoute 的 min_length 抛出第三方 ValidationError
+        # （调用方拿到的是本模块异常，原因码 MODEL_ROUTE_UNSET 仍可从
+        # model_route_blockers 取到）。
+        raise ModelRouteConfigError(
+            "MODEL_ROUTE_UNSET: no effective model could be resolved "
+            "(agents.yaml[agent].model / env model_var / settings.llm.default_model all empty)"
+        )
     route = ModelRoute(
-        model=model or "",
-        effort=effort or "",
+        model=model,
+        effort=effort or "default",
         fallback_routes=fallback_routes,
         profile_overrides=overrides,
     )
