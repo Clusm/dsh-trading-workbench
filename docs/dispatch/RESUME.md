@@ -22,14 +22,16 @@
 
 | 线 | 任务 | 作者 head | 状态 | 备注 |
 |---|---|---|---|---|
-| EF | U15 | `abf2eda` | **r3 修复完成 → 聚焦复验中** | r1 E/B/C 一致 CHANGES_REQUESTED（P0×2+P1×17）→ r2 闭两个 P0 → r2 复验仅剩 **NEW-A**（`authorize_new_entry` 不交叉校验 `bundle.identity`↔`generation`，demo bundle + live 异账户 gen 得 200）→ r3 已修（`IDENTITY_GENERATION_MISMATCH`/409，A1/A2/A3 全拒、A4 自洽仍 200 无假阳性）。另有 NEW-D 类型健壮性、NEW-E `compare_dependency_lock`、NEW-F `provider_env`、NEW-G 控制面语义。**NEW-H 经实测属 fail-closed 故仅登记**（`0:0:0:0:0:ffff:127.0.0.1` 只会误拒合法本机请求，不放行非回环）。233/63 PASS、契约 173/0、4 补丁 OK。**U02 阻塞项**：账本 `account_ref=sha256(api_key)[:16]` 仍漂移 |
+| EF | U15 | `abf2eda` | **✅ INTEGRATED** | r1 E/B/C → r2 闭两 P0 → r2 复验剩 NEW-A → r3 修（`IDENTITY_GENERATION_MISMATCH`/409，无假阳性）→ **Q r3 = PASS-with-notes** → 合并 `5ffa54d` + 补丁 `2954dce`。**代码与已验证 head 逐字节一致（git diff 为空）**；69/69 非基线脚本 PASS。**U02 阻塞项**：账本 `account_ref=sha256(api_key)[:16]` 仍漂移 |
 | A | U01 | `b4a322e` | **r2 修复完成 → 复验中** | 初审 B 曾判 CHANGES_REQUESTED（P0×2 + P1×9）→ r2 重生成补丁 01（**`content_hash` 改调 K03 单一真值源**、按窗口取数、冲突审计表）。**P0-B 三段对照**：崩溃 → **静默抹账（events=0 Σ=0）** → **NO_LOSS（events=4 Σ=-1.80）**；**`[9]` 不再 SKIP 且真实走 AuditDatabase**。income 139/0、review 44/0、契约 173/0。补丁 01/02/03/04 及组合 `apply --check` 全通过；**02↔04 同批约束已复现并写入补丁 README**。报告 `docs/dispatch/reviews/U01/c290c50/B_r1.md` |
 | CD | U03 | `c0e14c4` | **r3 修复完成 → 聚焦复验中** | r1 D/B CHANGES_REQUESTED → r2 修 6/7 → r2 复验剩两个 P2 → r3 已修：**Q-NEW-1 哨兵洗白**（新增 `is_unpinned_identity()`，`UNPINNED_IDENTITY`/`model_copy`/等价 dict）与 **Q-NEW-3**（接线缺省 `("ticker",)`，字段级分源门禁**默认真实生效**）；两处均**无假阳性**（真实身份仍 `pinned=True`、字段齐全仍放行）。138/0 与 46/0、契约 173/0。known_limits 归档 `docs/dispatch/reviews/U03/c0e14c4/` |
 | B | U04 | `8eb0480` | **CHANGES_REQUESTED → r2 修复中** | 初审 A：P0=0（模块本体质量高、守恒与 Decimal 全程成立）/ P1×5。三处行为：**`can_cancel_protection:1153` 把未确认归零当已确认 → 可撤掉最后一道保护**（与同模块 `plan_protection_refresh` 自相矛盾）；`guard_fault_action` 只拦 4 个健康类，未登记的落入 UNKNOWN **被放行全平**；补丁 `last_protection_sync_reason` 跨标的且成功路径不复位 → **抑制兜底平仓、保留裸仓**，而作者测试**直接赋值该字段掩盖了缺陷**。报告 `docs/dispatch/reviews/U04/8eb0480/A_r1.md` |
 
 **W1 出口状态**：**四条线作者全部交付**（U01/U03/U15/U04）；U01/U03/U15 已完成初审并进入 r2 修复/复验；U04 初审进行中。
 
-**集成时必须原子处理（否则 `run_offline_regression` 红）**：U01/U03 的 `scripts/smoke_*.py` 需在集成时与 `SCRIPTS` 登记**同批落地**（`run_offline_regression.py` 由 I 独占）。U15 用 `tests/acceptance/*.py` 命名，不触发该门禁。详见 JSON `dispatch.known_issues` 的 `W1-MANIFEST-TRANSIENT`。
+**集成时必须原子处理（否则 `run_offline_regression` 红）**：U01/U03/U04 的 `scripts/smoke_*.py` 需在集成时与 `SCRIPTS` 登记**同批落地**（`run_offline_regression.py` 由 I 独占）。U15 用 `tests/acceptance/*.py` 命名，不触发该门禁。详见 JSON `dispatch.known_issues` 的 `W1-MANIFEST-TRANSIENT*`。
+
+**KI02（既有基线缺陷，阻断完整回归）**：`scripts/smoke_windows_service_plan.py` 读 `config/windows_service.json`，其 `python_executable` 硬编码 `<project_root>/.venv/Scripts/python.exe` → **任意 worktree 内必然 `ValueError` 中止 `run_offline_regression`**（运行目录有 `.venv` 故不受影响）。已在 U15 补丁之前的提交上复现确认与 U15 无关。**集成其他任务时同样会遇到**：补跑中止点之后的脚本即可（用同一 harness 清单 + env），但该缺陷须由 U13/U10a 或 I 修复，不得静默忽略。详见 JSON `known_issues` 的 `KI02`。
 
 **已知基线缺陷（非本批次引入，勿重复排查）**：`scripts/smoke_windows_service_plan.py` 在部分 worktree 失败 —— `config/windows_service.json` 指向 worktree 内 `.venv`，而该 worktree 无 `.venv`（A 线作者实测发现）。
 
