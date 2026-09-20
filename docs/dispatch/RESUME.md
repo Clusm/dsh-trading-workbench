@@ -24,8 +24,8 @@
 |---|---|---|---|---|
 | EF | U15 | `38029e2` | **r2 修复完成 → 复验中** | 初审 E/B/C 一致 CHANGES_REQUESTED（P0×2 + P1×17）→ r2 九个提交，**两个 P0 均闭合**（省略 `expected` 由 `True/200`→`False/409`；19/19 漂移项现全部 CHANGED、六类来源入哈希）；14/15 项已修，第 15 项属 U02/U13 路径。4 个补丁 `apply --check` 全通过。**U02 阻塞项**：账本侧 `trade_reconciliation.py:66-69` 的 `account_ref=sha256(api_key)[:16]` 仍随轮换漂移且与 U15 派生值不一致。报告 `docs/dispatch/reviews/U15/a136cb5/{E,B,C}_r1.md` |
 | A | U01 | `c290c50` | **CHANGES_REQUESTED → r2 修复中** | 初审 B：P0×2（其一为 I 的登记项）+ P1×9。**关键 P0：真实存储幂等链断裂** —— `sync_income_window(existing=load_existing())` 崩溃（`:301-304` 把 key→hash 当事件），且补丁 01 的 `content_hash` 与 K03 口径不符（修好前者后重放会抹掉已入账事件）；作者测试 `[9]` 是 SKIP 故未覆盖。补丁约束：**02 必须与 04 同批**，只上 02 会让 `check_binance_request_policy.py` 失败（已复现）。报告归档 `docs/dispatch/reviews/U01/c290c50/B_r1.md` |
-| CD | U03 | `3f49e03` | **CHANGES_REQUESTED → r2 修复中** | 初审 D/B 一致 CHANGES_REQUESTED：D 的 **P1-1 模型自报 claims 完全覆盖程序生成 claim**（直接违反"模型不得覆盖行情事实"）+ B 的 P1（`identity=None` fail-open、畸形 claim 崩溃、`evidence_id` 不唯一不落地）。报告归档 `docs/dispatch/reviews/U03/3f49e03/{D,B}_r1.md` |
-| B | U04 | `8eb0480` | **READY_FOR_REVIEW** | 初审 A 已派发；6 提交、`test_execution_faults` exit 0（作者称 92/0）、契约 173/0、共享零改动、无越界；4 个共享补丁 + 登记补丁 `apply --check` 通过（临时树应用后 OFFLINE REGRESSION OK scripts=70）|
+| CD | U03 | `5ffc6c0` | **r2 复验 CHANGES_REQUESTED → r3 修复中** | r2 复验 CLOSED 6 / PARTIAL 1；阻断项：**Q-NEW-1 哨兵逃逸**（显式传 `UNPINNED_IDENTITY` 得 `identity_pinned=True/gate.ok=True`）+ **Q-NEW-3 字段级分源门禁在生产路径完全不生效**（`default_required_sources=()` 且 `TradeIntent` 无该字段）。报告 `docs/dispatch/reviews/U03/5ffc6c0/Q_r2.md` |
+| B | U04 | `8eb0480` | **CHANGES_REQUESTED → r2 修复中** | 初审 A：P0=0（模块本体质量高、守恒与 Decimal 全程成立）/ P1×5。三处行为：**`can_cancel_protection:1153` 把未确认归零当已确认 → 可撤掉最后一道保护**（与同模块 `plan_protection_refresh` 自相矛盾）；`guard_fault_action` 只拦 4 个健康类，未登记的落入 UNKNOWN **被放行全平**；补丁 `last_protection_sync_reason` 跨标的且成功路径不复位 → **抑制兜底平仓、保留裸仓**，而作者测试**直接赋值该字段掩盖了缺陷**。报告 `docs/dispatch/reviews/U04/8eb0480/A_r1.md` |
 
 **W1 出口状态**：**四条线作者全部交付**（U01/U03/U15/U04）；U01/U03/U15 已完成初审并进入 r2 修复/复验；U04 初审进行中。
 
