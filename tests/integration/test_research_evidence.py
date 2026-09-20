@@ -258,6 +258,21 @@ def test_interval_and_snapshot_quality(results: dict, scenarios: dict) -> None:
           has(reason_codes(report_time, "intent-time"), "EVIDENCE_TIME_MISMATCH"),
           reason_codes(report_time, "intent-time"))
 
+    print("\n[4e] F13：意图自报身份与快照身份不符时拒绝")
+    foreign_identity = dict(IDENTITY.model_dump(mode="json"),
+                            artifact_hash="artifact-from-another-release")
+    report_identity = evidence.evaluate_open_intents(
+        [{"intent_id": "intent-f13", "symbol": "BNBUSDT", "action": "OPEN",
+          "side": "LONG", "trigger_price": 744.0, "identity": foreign_identity,
+          "evidence": {"confirmation_interval": "1h", "trigger_price": 744.0,
+                       "risk_reward_ratio": 1.7778,
+                       "data_observed_at_ms": AS_OF_MS}}],
+        build_snapshots(results, ["BNBUSDT_1h"]), now_ms=NOW_MS,
+        identity=IDENTITY, cycle_id="cyc-f13",
+    )
+    codes = reason_codes(report_identity, "intent-f13")
+    check("身份不符被拒", not report_identity.ok and has(codes, "IDENTITY_MISMATCH"), codes)
+
 
 # --------------------------------------------------------------- 5 分源质量 S01
 

@@ -1116,6 +1116,10 @@ def evaluate_open_intents(
         declared_cycle = item.get("cycle_id")
         if declared_cycle:
             intent_payload["cycle_id"] = str(declared_cycle)
+        declared_identity = item.get("identity")
+        if isinstance(declared_identity, (Mapping, RuntimeIdentity)):
+            # F13：意图自报运行身份时交给 K02 比对，身份不符不发单。
+            intent_payload["identity"] = declared_identity
 
         quote = quote_map.get(intent_id) or quote_map.get(symbol)
         bundle_verdict = validate_bundle(bundle, rules=rules)
@@ -1152,19 +1156,21 @@ def evaluate_open_intents(
                 "value": fact.value,
                 "bar_close_time_ms": close_time,
             }
+        claim_rows = tuple({
+            "claim_id": claim.claim_id,
+            "expr": claim.expr,
+            "expected": claim.expected,
+            "actual": claim.actual,
+            "status": claim.status,
+            "reason_code": claim.reason_code,
+        } for claim in verdict.claim_results)
         sources = {name: snapshot.source(name) for name in SOURCE_NAMES} \
             if snapshot is not None else {}
         summary = render_fact_summary(
             symbol=symbol, interval=interval, evidence_id=bundle.evidence_id,
             status=verdict.status, facts=facts, quote=quote,
             sources={k: v for k, v in sources.items() if v is not None},
-            claims=[{
-                "claim_id": claim.claim_id,
-                "expr": claim.expr,
-                "expected": claim.expected,
-                "actual": claim.actual,
-                "status": claim.status,
-            } for claim in verdict.claim_results],
+            claims=claim_rows,
         )
         binding_id = "binding-" + canonical_hash({
             "intent": intent_id, "symbol": symbol, "interval": interval,
@@ -1176,14 +1182,7 @@ def evaluate_open_intents(
             accepted=accepted_intent, applies_to_open=True,
             reason_codes=reason_codes,
             bundle_reasons=tuple(bundle_verdict.reason_codes),
-            claims=tuple({
-                "claim_id": claim.claim_id,
-                "expr": claim.expr,
-                "expected": claim.expected,
-                "actual": claim.actual,
-                "status": claim.status,
-                "reason_code": claim.reason_code,
-            } for claim in verdict.claim_results),
+            claims=claim_rows,
             geometry=geometry,
             source_quality={name: snapshot.sources[name].as_dict()
                             for name in SOURCE_NAMES} if snapshot is not None else {},
