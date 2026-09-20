@@ -1,0 +1,245 @@
+diff --git a/src/core/windows_service.py b/src/core/windows_service.py
+index 786c9d8..edb1709 100644
+--- a/src/core/windows_service.py
++++ b/src/core/windows_service.py
+@@ -8,8 +8,10 @@
+ from __future__ import annotations
+ 
+ import json
++import os
+ import re
+ import subprocess
++import sys
+ from dataclasses import dataclass
+ from pathlib import Path
+ from typing import Any
+@@ -22,6 +24,19 @@ _FORBIDDEN_CONFIG_TOKENS = {
+     "http_proxy", "https_proxy", "all_proxy", "proxy_url",
+ }
+ 
++#: 显式注入解释器的环境变量（优先级高于配置里的相对路径）。
++PYTHON_EXECUTABLE_ENV_VAR = "MTA_PYTHON"
++#: 项目内约定虚拟环境（与配置里声明的 ``.venv/...`` 同义）。
++PYTHON_DEFAULT_RELATIVE = (
++    ".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python"
++)
++#: profile → 控制台端口。必须与 ``config_loader.Settings.console_port`` 同口径，
++#: 否则 SCM 会把 ``--port`` 显式传给一个与 profile 不符的端口（decl-6）。
++CONSOLE_PORT_BY_PROFILE = {"demo": 8000, "live": 8001}
++ALLOWED_PROFILES = ("demo", "live")
++#: 解释器回退来源标记（非 ``config`` 即为回退，部署审查必须能看到）。
++PYTHON_SOURCE_CONFIG = "config"
++
+ 
+ def _inside(root: Path, candidate: Path, *, label: str) -> Path:
+     """解析路径并确保它不能跳出项目根目录。"""
+@@ -34,6 +49,78 @@ def _inside(root: Path, candidate: Path, *, label: str) -> Path:
+     return resolved
+ 
+ 
++def resolve_python_executable(
++    root: Path,
++    declared: Any,
++    *,
++    override: str | Path | None = None,
++    require_files: bool = True,
++    strict: bool = False,
++    env: Any = None,
++) -> tuple[Path, str]:
++    """解析托管服务使用的 Python 解释器，返回 ``(路径, 来源)``。
++
++    **KI02**：配置里的 ``python_executable`` 是**相对代码根**的路径
++    （``.venv/Scripts/python.exe``）。把同一份配置放到没有 ``.venv`` 的目录
++    （worktree / 只读发布目录 / CI 检出）时，硬编码校验会直接 ``ValueError``
++    并中止整条离线回归。这里改为"可注入 + 可回退 + 记录来源"：
++
++    解析顺序（``require_files=False`` 时只做路径解析，不查存在性，与升级前
++    逐字节一致）：
++
++    1. ``override`` 形参（代码级注入，测试/演练用）；
++    2. ``MTA_PYTHON`` 环境变量（部署显式指定，推荐写法）；
++    3. 配置里声明的相对路径（**必须仍在项目根内**，防目录穿越）；
++    4. 项目内约定虚拟环境 ``.venv/...``；
++    5. ``VIRTUAL_ENV`` 指定的虚拟环境；
++    6. 当前解释器 ``sys.executable``。
++
++    第 2/5/6 项来自**进程级受信来源**（不是配置文件内容），因此不受第 3 项的
++    根目录边界约束；只有配置文件里的值才做 ``_inside`` 校验。
++
++    ``strict=True`` 时禁止回退：声明的路径不存在即报错（部署前自检用）。
++    """
++    environ = os.environ if env is None else env
++    resolved_root = Path(root).resolve()
++    declared_text = str(declared or "").strip()
++    declared_path: Path | None = None
++    if declared_text:
++        declared_path = _inside(
++            resolved_root, resolved_root / declared_text, label="python_executable",
++        )
++    if not require_files:
++        return (declared_path or (resolved_root / PYTHON_DEFAULT_RELATIVE), PYTHON_SOURCE_CONFIG)
++
++    candidates: list[tuple[Path, str]] = []
++    if override is not None:
++        candidates.append((Path(override), "argument"))
++    env_value = str(environ.get(PYTHON_EXECUTABLE_ENV_VAR) or "").strip()
++    if env_value:
++        candidates.append((Path(env_value), "env"))
++    if declared_path is not None:
++        candidates.append((declared_path, PYTHON_SOURCE_CONFIG))
++    candidates.append((resolved_root / PYTHON_DEFAULT_RELATIVE, "project-venv"))
++    virtual_env = str(environ.get("VIRTUAL_ENV") or "").strip()
++    if virtual_env:
++        candidates.append((Path(virtual_env) / (
++            "Scripts/python.exe" if os.name == "nt" else "bin/python"), "virtualenv"))
++    if sys.executable:
++        candidates.append((Path(sys.executable), "interpreter"))
++
++    if strict:
++        if declared_path is None:
++            raise ValueError("python_executable 未在托管配置中声明")
++        if not declared_path.is_file():
++            raise ValueError(f"python_executable 不存在（strict）: {declared_path}")
++        return declared_path, PYTHON_SOURCE_CONFIG
++
++    for candidate, source in candidates:
++        if candidate.is_file():
++            return candidate.resolve(), source
++    tried = ", ".join(f"{path}({source})" for path, source in candidates)
++    raise ValueError(f"找不到可用的 python_executable；已尝试: {tried}")
++
++
+ def _as_bool(value: Any, *, label: str) -> bool:
+     if isinstance(value, bool):
+         return value
+@@ -83,6 +170,17 @@ class WindowsServiceConfig:
+     log_path: Path
+     log_max_bytes: int
+     log_backup_count: int
++    #: decl-6：显式 profile（``None`` = 升级前的单 profile 语义）。
++    profile: str | None = None
++    #: 配置里声明的原始服务名（``service_name`` 在 profile 非空时带 profile 后缀）。
++    service_name_base: str = ""
++    #: 解释器来源：``config`` / ``argument`` / ``env`` / ``project-venv`` /
++    #: ``virtualenv`` / ``interpreter``。非 ``config`` 即发生了回退（KI02）。
++    python_executable_source: str = PYTHON_SOURCE_CONFIG
++
++    @property
++    def python_executable_from_fallback(self) -> bool:
++        return self.python_executable_source != PYTHON_SOURCE_CONFIG
+ 
+     @property
+     def service_host_script(self) -> Path:
+@@ -90,8 +188,14 @@ class WindowsServiceConfig:
+         return self.project_root / "scripts" / "windows_service_host.py"
+ 
+     def run_arguments(self) -> list[str]:
+-        """返回传给统一 Web 入口的参数；不从配置注入代理或凭据。"""
++        """返回传给统一 Web 入口的参数；不从配置注入代理或凭据。
++
++        decl-6：显式 profile 时追加 ``--profile``，让 SCM 托管的进程与配置
++        解析出的状态根/端口一致（``scripts/run_web.py`` 原生支持该参数）。
++        """
+         arguments = ["--host", self.host, "--port", str(self.port)]
++        if self.profile:
++            arguments.extend(["--profile", self.profile])
+         if self.interval_minutes is not None:
+             arguments.extend(["--interval-minutes", str(self.interval_minutes)])
+         if self.no_autostart:
+@@ -109,11 +213,16 @@ class WindowsServiceConfig:
+ 
+ def load_windows_service_config(
+     config_path: Path, *, project_root: Path | None = None, require_files: bool = False,
++    python_executable: str | Path | None = None, strict_python: bool = False,
+ ) -> WindowsServiceConfig:
+     """读取并严格校验托管模板。
+ 
+     ``require_files=False`` 用于发布包/CI 只检查配置语义；本机安装前应使用
+     ``require_files=True``，确保解释器和统一入口确实存在。
++
++    ``python_executable`` 是解释器的**显式注入点**（测试/演练/换目录部署），
++    ``strict_python=True`` 则禁止回退（解释器必须恰好是配置声明的那个）。二者
++    共同解决 KI02：配置里的相对 ``.venv`` 路径不应让整条离线回归硬失败。
+     """
+     path = Path(config_path).resolve()
+     root = Path(project_root or path.parents[1]).resolve()
+@@ -127,15 +236,35 @@ def load_windows_service_config(
+         raise ValueError("托管配置必须是 JSON 对象")
+     _assert_no_forbidden_values(raw)
+ 
+-    service_name = str(raw.get("service_name") or "").strip()
+-    if not _SERVICE_NAME.fullmatch(service_name):
++    service_name_base = str(raw.get("service_name") or "").strip()
++    if not _SERVICE_NAME.fullmatch(service_name_base):
+         raise ValueError("service_name 只能包含字母、数字、点、下划线和短横线")
++    profile_value = raw.get("profile")
++    if profile_value is None or str(profile_value).strip() == "":
++        profile: str | None = None
++    else:
++        profile = str(profile_value).strip().lower()
++        if profile not in ALLOWED_PROFILES:
++            raise ValueError(f"profile 只允许 {ALLOWED_PROFILES} 或 null")
++    # decl-6：双 profile 托管必须有**唯一**服务名，否则第二个实例会覆盖第一个。
++    # 用确定性的后缀，无需人工在两个配置文件之间保持同步。
++    service_name = (f"{service_name_base}-{profile.capitalize()}" if profile
++                    else service_name_base)
++    if not _SERVICE_NAME.fullmatch(service_name):
++        raise ValueError("service_name 加上 profile 后缀后不合法")
+     display_name = str(raw.get("display_name") or service_name).strip()[:256]
+     description = str(raw.get("description") or "").strip()[:1024]
+     host = str(raw.get("host") or "").strip().lower()
+     if host not in _LOOPBACK_HOSTS:
+         raise ValueError("托管服务只能绑定本机回环地址")
+     port = _as_int(raw.get("port"), label="port", minimum=1, maximum=65535)
++    if profile is not None and port != CONSOLE_PORT_BY_PROFILE[profile]:
++        # 端口必须与 profile 一致：run_web.py 收到显式 --port 时会覆盖
++        # console_port，两者不一致会让"SCM 托管的是哪个 profile"变成谜。
++        raise ValueError(
++            f"profile={profile} 要求 port={CONSOLE_PORT_BY_PROFILE[profile]}，"
++            f"配置为 {port}"
++        )
+     interval_value = raw.get("interval_minutes")
+     if interval_value is not None:
+         if isinstance(interval_value, bool) or not isinstance(interval_value, (int, float)):
+@@ -162,8 +291,9 @@ def load_windows_service_config(
+         raw.get("log_backup_count", 5), label="log_backup_count", minimum=1, maximum=20,
+     )
+ 
+-    python_executable = _inside(
+-        root, root / str(raw.get("python_executable") or ""), label="python_executable",
++    python_executable, python_source = resolve_python_executable(
++        root, raw.get("python_executable"),
++        override=python_executable, require_files=require_files, strict=strict_python,
+     )
+     entrypoint = _inside(
+         root, root / str(raw.get("entrypoint") or ""), label="entrypoint",
+@@ -177,12 +307,18 @@ def load_windows_service_config(
+         log_path.relative_to(data_dir)
+     except ValueError as exc:
+         raise ValueError("log_path 必须位于 data/ 内") from exc
++    if profile == "live":
++        # live 状态根是 data/live（RuntimePaths / config_loader 同口径）；
++        # 两个 profile 的 SCM 实例若共用一份日志，事故复盘分不清是谁写的。
++        try:
++            log_path.relative_to(data_dir / "live")
++        except ValueError as exc:
++            raise ValueError("profile=live 的 log_path 必须位于 data/live/ 内") from exc
+     expected_entrypoint = root / "scripts" / "run_web.py"
+     if entrypoint != expected_entrypoint.resolve():
+         raise ValueError("entrypoint 必须统一指向 scripts/run_web.py")
+     if require_files:
+         for candidate, label in (
+-            (python_executable, "python_executable"),
+             (entrypoint, "entrypoint"),
+             (working_directory, "working_directory"),
+         ):
+@@ -209,6 +345,9 @@ def load_windows_service_config(
+         stop_timeout_seconds=stop_timeout,
+         restart_delay_seconds=restart_delay,
+         log_path=log_path,
++        profile=profile,
++        service_name_base=service_name_base,
++        python_executable_source=python_source,
+         log_max_bytes=log_max_bytes,
+         log_backup_count=log_backup_count,
+     )
