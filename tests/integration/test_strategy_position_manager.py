@@ -20,7 +20,6 @@ U04 ``protection_commands`` 与 U02 的两个独占模块。
 from __future__ import annotations
 
 import sys
-import tempfile
 import threading
 from decimal import Decimal
 from pathlib import Path

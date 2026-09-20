@@ -43,7 +43,7 @@ def _run(module: Any) -> int:
 def _negative_account_ref_drift() -> int:
     module = _load_acceptance("u02_neg_drift")
     # 旧账本侧派生形态：账户引用随密钥漂移，与运行代派生值不一致。
-    module.ledger_account_ref = lambda generation: f"demo:8c9c2ba2efcdc984"
+    module.ledger_account_ref = lambda generation: "demo:8c9c2ba2efcdc984"
     return _run(module)
 
 
