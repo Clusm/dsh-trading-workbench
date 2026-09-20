@@ -1,0 +1,371 @@
+diff --git a/src/intel/service.py b/src/intel/service.py
+index 33d9eac..d37b250 100644
+--- a/src/intel/service.py
++++ b/src/intel/service.py
+@@ -21,6 +21,7 @@ import httpx
+ from data.binance_transport import request_json
+ from data.market_stream_cache import get_books, get_marks
+ from data.rate_limit import PublicMarketBudgetDeferred, PublicMarketCooldown
++from intel import shadow_status
+ from intel.models import FuturesFeature, IntelEvent
+ 
+ 
+@@ -55,7 +56,10 @@ class ReadOnlyIntelService:
+         self.config = dict(config or {})
+         self.enabled = bool(self.config.get("enabled", True))
+         self.shadow_only = True
+-        self.execution_weight = 0.0
++        # 执行权重是常量而不是配置：配置面写什么都不接受（只登记冲突）。
++        self.execution_weight = shadow_status.EXECUTION_WEIGHT
++        self.weight_guard = shadow_status.execution_weight_guard(self.config)
++        self.cohort_plan = shadow_status.emission_plan(self.config)
+         self.refresh_seconds = max(60.0, float(self.config.get("refresh_seconds", 300)))
+         self.fresh_seconds = max(60, int(self.config.get("fresh_seconds", 600)))
+         self.round_trip_fee_bps = max(0.0, float(self.config.get("round_trip_fee_bps", 10)))
+@@ -63,6 +67,10 @@ class ReadOnlyIntelService:
+         self.sample_retention_days = max(7, int(self.config.get("sample_retention_days", 90)))
+         self.priority_count = max(1, int(self.config.get("priority_count", 3)))
+         self.rotation_count = max(1, int(self.config.get("rotation_count", 4)))
++        # 研究负载必须有界：单轮预算用于降级可选阶段，汇总指标按最小间隔重算并缓存。
++        self.research_budget_ms = max(1000.0, float(self.config.get("research_budget_ms", 60000)))
++        self.metrics_refresh_seconds = max(
++            self.refresh_seconds, float(self.config.get("metrics_refresh_seconds", 900)))
+         self.symbols = [s for s in dict.fromkeys(symbols) if self._valid_symbol(s)]
+         self._symbol_set = set(self.symbols)
+         self._priority = self.symbols[:self.priority_count]
+@@ -71,6 +79,12 @@ class ReadOnlyIntelService:
+         self._lock = threading.RLock()
+         self._last_attempt = 0.0
+         self._liquidations: list[dict[str, Any]] = []
++        self._metrics_cache: dict[str, Any] | None = None
++        self._metrics_attempt_at: float | None = None
++        self._metrics_computed_at: str | None = None
++        self._sample_loss: dict[str, Any] = {}
++        self._skipped_emissions = 0
++        self._degraded_stages: list[str] = []
+         self._snapshot: dict[str, Any] = self._empty_snapshot("waiting" if self.enabled else "disabled")
+ 
+     def _valid_symbol(self, symbol: str) -> bool:
+@@ -83,7 +97,7 @@ class ReadOnlyIntelService:
+             "enabled": self.enabled,
+             "status": status,
+             "shadow_only": True,
+-            "execution_weight": 0.0,
++            "execution_weight": shadow_status.EXECUTION_WEIGHT,
+             "updated_at": None,
+             "fresh_until": None,
+             "source": "binance_usdm_public",
+@@ -100,6 +114,17 @@ class ReadOnlyIntelService:
+                 "mapped_count": len(contracts),
+                 "note": "只接受显式合约地址到 USD-M 白名单交易对的映射。",
+             },
++            # 旧口径披露：口径/权重/门禁角色/v2 标签状态（v2=DEFERRED）都在这里，
++            # 看板与下游消费者只读这一处，避免各自复述出现第二种口径。
++            "shadow_disclosure": shadow_status.build_disclosure(
++                config=self.config,
++                sample_loss=self._sample_loss,
++                cohort_state=shadow_status.cohort_configuration(self.config),
++                weight_guard=self.weight_guard,
++                isolation=shadow_status.isolation_facts(
++                    skipped_emissions=self._skipped_emissions,
++                    degraded_stages=tuple(self._degraded_stages)),
++            ),
+         }
+ 
+     def snapshot(self) -> dict[str, Any]:
+@@ -257,6 +282,7 @@ class ReadOnlyIntelService:
+         return values, event_ms, errors
+ 
+     def _refresh(self) -> dict[str, Any]:
++        started = time.monotonic()
+         selected = self._selected_symbols()
+         received = datetime.now(timezone.utc)
+         fresh_until = received + timedelta(seconds=self.fresh_seconds)
+@@ -273,6 +299,7 @@ class ReadOnlyIntelService:
+ 
+         rows: list[dict[str, Any]] = []
+         errors: list[str] = []
++        skipped = 0
+         for symbol in selected:
+             premium = premium_by.get(symbol) or {}
+             ratio_values, ratio_ms, symbol_errors = ratios.get(symbol, ({}, None, ["missing_ratio_result"]))
+@@ -317,12 +344,23 @@ class ReadOnlyIntelService:
+             errors.extend(f"{symbol}:{item}" for item in symbol_errors)
+             self.db.upsert_futures_feature(feature=dumped)
+             self._persist_event(feature)
+-            self.db.log_shadow_decision(
+-                decision_id=str(uuid.uuid4()), symbol=symbol, signal=signal,
+-                reference_price=mark, confidence=self._confidence(directional),
+-                source="B_contract_market", execution_weight=0.0,
+-                feature_json=json.dumps(dumped, ensure_ascii=False),
+-            )
++            # 只有「已配置 + 方向明确 + 参考价有效」才写影子样本行：neutral/unknown
++            # 不产生绩效行，避免用无效数据充样本。
++            if shadow_status.should_emit_sample(
++                    source=shadow_status.SOURCE_B, config=self.config,
++                    signal=signal, reference_price=mark):
++                self.db.log_shadow_decision(
++                    decision_id=str(uuid.uuid4()), symbol=symbol, signal=signal,
++                    reference_price=mark, confidence=self._confidence(directional),
++                    source=shadow_status.SOURCE_B,
++                    execution_weight=shadow_status.EXECUTION_WEIGHT,
++                    feature_json=json.dumps(
++                        {**dumped,
++                         "shadow_cohort": shadow_status.sample_marker(shadow_status.SOURCE_B)},
++                        ensure_ascii=False),
++                )
++            else:
++                skipped += 1
+         # premiumIndex 是全市场快照，可让所有白名单影子决策按 5 分钟频率回看，
+         # 不受分层轮转采集间隔影响。
+         all_prices = {
+@@ -332,29 +370,73 @@ class ReadOnlyIntelService:
+         self.db.record_mark_price_samples(
+             sampled_at=received.isoformat(timespec="milliseconds"), prices=all_prices,
+             retention_days=self.sample_retention_days)
+-        self.db.evaluate_shadow_decisions(prices=all_prices,
+-                                          grace_minutes=max(10, int(self.refresh_seconds / 30)),
+-                                          round_trip_fee_bps=self.round_trip_fee_bps,
+-                                          slippage_bps=self.slippage_bps)
++        # 研究负载有界：本轮已超预算就降级可选阶段（打标签/汇总指标），并如实留痕；
++        # 缺的标签由覆盖率计数披露，不静默丢弃。
++        metrics_age = self._metrics_age_seconds()
++        load_plan = shadow_status.research_load_plan(
++            elapsed_ms=(time.monotonic() - started) * 1000.0,
++            budget_ms=self.research_budget_ms,
++            metrics_age_seconds=metrics_age,
++            metrics_refresh_seconds=self.metrics_refresh_seconds)
++        if load_plan["allow_labeling"]:
++            self.db.evaluate_shadow_decisions(prices=all_prices,
++                                              grace_minutes=max(10, int(self.refresh_seconds / 30)),
++                                              round_trip_fee_bps=self.round_trip_fee_bps,
++                                              slippage_bps=self.slippage_bps)
+         wallet_tracker = self._refresh_wallet_tracker(received, fresh_until)
+         token_audit = self._refresh_token_audit(received, fresh_until)
+-        self._record_fused_shadows(rows, wallet_tracker, token_audit)
++        skipped += self._record_fused_shadows(rows, wallet_tracker, token_audit)
++        metrics_state = self._refresh_metrics_summary(load_plan, errors)
++        self._skipped_emissions = skipped
++        self._degraded_stages = list(load_plan["degraded"])
++        cohort_state = shadow_status.cohort_configuration(
++            self.config,
++            credential_available=str(wallet_tracker.get("status") or "") != "unavailable")
++        disclosure = shadow_status.build_disclosure(
++            config=self.config, metrics=metrics_state, sample_loss=self._sample_loss,
++            isolation=shadow_status.isolation_facts(
++                degraded_stages=tuple(load_plan["degraded"]), skipped_emissions=skipped),
++            cohort_state=cohort_state, weight_guard=self.weight_guard, load_plan=load_plan)
+         return {
+             **self._empty_snapshot("ok" if rows and not errors else "degraded"),
+             "updated_at": received.isoformat(timespec="milliseconds"),
+             "fresh_until": fresh_until.isoformat(timespec="milliseconds"),
+             "symbols": rows,
+             "errors": errors[:20],
++            "shadow_disclosure": disclosure,
++            "shadow_metrics": {
++                "caliber": shadow_status.LEGACY_CALIBER_ID,
++                "state": metrics_state["state"],
++                "age_seconds": metrics_state["age_seconds"],
++                "auto_promotion": False,
++                "execution_weight": shadow_status.EXECUTION_WEIGHT,
++                "v2_labels": shadow_status.V2_LABELS_STATE,
++                "evaluations": shadow_status.legacy_metric_view(
++                    (self._metrics_cache or {}).get("evaluations"), sample_loss=self._sample_loss),
++            },
+             "coverage": {"collected": len(rows), "whitelist": len(self.symbols), "rotation_cursor": self._cursor},
+             "wallet_tracker": wallet_tracker,
+             "token_audit": token_audit,
+-            "shadow_evaluation": self.db.intel_observability(),
++            # 汇总指标走缓存（见 _refresh_metrics_summary），不再每轮全表聚合。
++            "shadow_evaluation": dict(self._metrics_cache or {}),
+         }
+ 
+     def record_baseline_shadow(self, *, run_id: str, decision: Any,
+-                               prices: dict[str, float]) -> int:
+-        """记录 A 组：当前系统开仓决策的零权重副本。"""
+-        if decision is None:
++                               prices: dict[str, float],
++                               candidate_facts: dict[str, Any] | None = None) -> int:
++        """记录 A 组：当前系统开仓决策的零权重副本。
++
++        Args:
++            run_id: 本轮慢决策的 run id，用于生成幂等的 ``decision_id``。
++            decision: 决策对象；``None`` 或未启用影子组时不写任何行。
++            prices: 本轮已知的最新价（按 symbol）。
++            candidate_facts: 该轮的候选资格事实（是否允许新开仓/原因码），只随样本
++                留痕供 U09 按证据来源重算 200 候选，本方法不据此增删计数。
++
++        Returns:
++            实际写入的行数。
++        """
++        if decision is None or not self.cohort_plan.get(shadow_status.SOURCE_A, False):
+             return 0
+         intents = list(getattr(decision, "intents", None) or [])
+         inserted = 0
+@@ -366,24 +448,127 @@ class ReadOnlyIntelService:
+             reference = _safe_float(prices.get(symbol))
+             if symbol not in self._symbol_set or side not in {"LONG", "SHORT"} or not reference:
+                 continue
++            signal = "bullish" if side == "LONG" else "bearish"
++            if not shadow_status.should_emit_sample(
++                    source=shadow_status.SOURCE_A, config=self.config,
++                    signal=signal, reference_price=reference):
++                continue
+             payload = (intent.model_dump() if hasattr(intent, "model_dump") else {
+                 "symbol": symbol, "side": side, "action": "open",
+             })
++            payload = {
++                **payload,
++                "shadow_cohort": {
++                    **shadow_status.sample_marker(shadow_status.SOURCE_A),
++                    "candidate": shadow_status.candidate_facts(**(candidate_facts or {})),
++                },
++            }
+             self.db.log_shadow_decision(
+                 decision_id=f"A:{run_id}:{symbol}:{side}", symbol=symbol,
+-                signal="bullish" if side == "LONG" else "bearish",
++                signal=signal,
+                 reference_price=reference,
+                 confidence=float(getattr(intent, "confidence", 0.5) or 0.5),
+-                source="A_current_baseline", execution_weight=0.0,
++                source=shadow_status.SOURCE_A,
++                execution_weight=shadow_status.EXECUTION_WEIGHT,
+                 feature_json=json.dumps(payload, ensure_ascii=False),
+             )
+             inserted += 1
+         return inserted
+ 
++    def _refresh_metrics_summary(self, load_plan: dict[str, Any],
++                                 errors: list[str]) -> dict[str, Any]:
++        """按最小间隔重算汇总指标并缓存；失败如实标 ``UNAVAILABLE``。
++
++        旧实现每轮都全表聚合一次（``intel_observability``），是侧车占用 DB 写锁的
++        主要长查询。这里改为「到期才算 + 缓存复用」，并顺带刷新缺失样本计数。
++
++        Args:
++            load_plan: :func:`shadow_status.research_load_plan` 的结论。
++            errors: 本轮错误列表（就地追加，便于看板显示）。
++
++        Returns:
++            含 ``state``/``age_seconds``/``computed_at`` 的缓存元信息。
++        """
++        if load_plan["allow_metrics"]:
++            self._metrics_attempt_at = time.monotonic()
++            try:
++                self._metrics_cache = dict(self.db.intel_observability())
++                self._metrics_computed_at = datetime.now(timezone.utc).isoformat(
++                    timespec="milliseconds")
++            except Exception as exc:
++                errors.append(f"metrics:{type(exc).__name__}")
++            self._sample_loss = self._sample_loss_by_source()
++        age = self._metrics_age_seconds()
++        if self._metrics_cache is None:
++            state = "UNAVAILABLE"
++            age = None
++        elif load_plan["allow_metrics"]:
++            state = "REFRESHED"
++        else:
++            state = "CACHED"
++        return {"state": state, "age_seconds": age, "computed_at": self._metrics_computed_at,
++                "cached": state == "CACHED", "bounded": True,
++                "min_refresh_seconds": self.metrics_refresh_seconds}
++
++    def _metrics_age_seconds(self) -> float | None:
++        """返回距上次尝试汇总指标的秒数；从未尝试时返回 ``None``。"""
++        if self._metrics_attempt_at is None:
++            return None
++        return round(max(0.0, time.monotonic() - self._metrics_attempt_at), 3)
++
++    def _sample_loss_by_source(self) -> dict[str, Any]:
++        """按来源统计旧口径的标签覆盖率；查询失败如实标 UNAVAILABLE。
++
++        只统计窗口内、方向明确且参考价有效的决策行，与
++        ``evaluate_shadow_decisions`` 的选取口径一致；命中
++        ``idx_shadow_decisions_symbol_time``/主键，不含全表聚合。
++
++        Returns:
++            ``{source: missing_sample_accounting(...)}``。
++        """
++        window = f"-{max(7, int(self.sample_retention_days))} days"
++        out: dict[str, Any] = {}
++        for spec in shadow_status.COHORTS:
++            try:
++                row = self.db.fetch_one(
++                    """SELECT COUNT(*) AS decided,
++                              SUM(CASE WHEN EXISTS(SELECT 1 FROM shadow_outcomes o
++                                                   WHERE o.decision_id=d.decision_id)
++                                       THEN 1 ELSE 0 END) AS labeled
++                       FROM shadow_decisions d
++                       WHERE d.source=? AND d.reference_price>0
++                         AND d.signal IN ('bullish','bearish')
++                         AND datetime(d.created_at)>=datetime('now', ?)""",
++                    (spec.source, window))
++            except Exception as exc:
++                out[spec.source] = shadow_status.missing_sample_accounting(
++                    decided=0, labeled=0, unavailable_reason=type(exc).__name__)
++                continue
++            decided = int(row["decided"] or 0) if row is not None else 0
++            labeled = int(row["labeled"] or 0) if row is not None else 0
++            out[spec.source] = shadow_status.missing_sample_accounting(
++                decided=decided, labeled=labeled)
++        return out
++
+     def _record_fused_shadows(self, rows: list[dict[str, Any]],
+                               wallet_tracker: dict[str, Any],
+-                              token_audit: dict[str, Any]) -> None:
+-        """记录 C 组；无明确 Web3 方向时必须为 unknown。"""
++                              token_audit: dict[str, Any]) -> int:
++        """记录 C 组融合研究样本；返回未写库的行数。
++
++        C 组未显式配置（钱包 + 合约映射）或本轮没有明确 Web3 方向时**一行都不写**：
++        旧实现会把每条采集都写成 ``signal='unknown'`` 的绩效行，占统计空间且事后
++        会被计入样本数（F11 / 必达要点 2）。
++
++        Args:
++            rows: 本轮采集的合约市场特征行。
++            wallet_tracker: 钱包跟踪结果（未配置时为 ``unconfigured``）。
++            token_audit: Token Audit 结果（红牌会否决方向）。
++
++        Returns:
++            因未配置或无明确方向而未写入的样本行数。
++        """
++        if not self.cohort_plan.get(shadow_status.SOURCE_C, False):
++            return len(rows)
+         wallet_by: dict[str, dict[str, Any]] = {}
+         for event in list(wallet_tracker.get("events") or []):
+             symbol = str(event.get("symbol") or "")
+@@ -393,20 +578,30 @@ class ReadOnlyIntelService:
+             str(item.get("symbol")): list(item.get("red_flags") or [])
+             for item in list(token_audit.get("audits") or [])
+         }
++        skipped = 0
+         for row in rows:
+             symbol = str(row["symbol"])
+             wallet = wallet_by.get(symbol)
+             red_flags = flags_by.get(symbol, [])
+             signal = str(wallet.get("inferred_signal")) if wallet and not red_flags else "unknown"
+-            confidence = min(float(row.get("signal") != "unknown") * 0.25 + 0.55, 0.9) if signal != "unknown" else 0.0
++            reference = _safe_float(row.get("mark_price"))
++            if not shadow_status.should_emit_sample(
++                    source=shadow_status.SOURCE_C, config=self.config,
++                    signal=signal, reference_price=reference):
++                skipped += 1
++                continue
++            confidence = min(float(row.get("signal") != "unknown") * 0.25 + 0.55, 0.9)
+             payload = {"contract_market": row, "wallet_event": wallet,
+-                       "token_red_flags": red_flags, "fusion_available": signal != "unknown"}
++                       "token_red_flags": red_flags, "fusion_available": True,
++                       "shadow_cohort": shadow_status.sample_marker(shadow_status.SOURCE_C)}
+             self.db.log_shadow_decision(
+                 decision_id=str(uuid.uuid4()), symbol=symbol, signal=signal,
+-                reference_price=_safe_float(row.get("mark_price")), confidence=confidence,
+-                source="C_contract_plus_web3", execution_weight=0.0,
++                reference_price=reference, confidence=confidence,
++                source=shadow_status.SOURCE_C,
++                execution_weight=shadow_status.EXECUTION_WEIGHT,
+                 feature_json=json.dumps(payload, ensure_ascii=False),
+             )
++        return skipped
+ 
+     def _contract_map(self) -> dict[tuple[str, str], str]:
+         """返回 (chain_id, lowercase contract) -> 白名单 USD-M symbol。"""

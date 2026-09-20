@@ -1,0 +1,57 @@
+diff --git a/src/dashboard/templates/decisions.html b/src/dashboard/templates/decisions.html
+index fa58950..dc096af 100644
+--- a/src/dashboard/templates/decisions.html
++++ b/src/dashboard/templates/decisions.html
+@@ -146,6 +146,21 @@
+         <div class="label">Token Audit · {{ (wi.token_audit or {}).status or 'unconfigured' }}</div>
+         <div class="value">{{ (wi.token_audit or {}).note or '尚未配置合约地址映射' }}</div>
+       </div>
++      {% set sd = wi.shadow_disclosure or {} %}
++      {% set sdw = sd.execution_weight or {} %}
++      <div class="intel-box">
++        <div class="label">影子口径 · {{ (sd.caliber or {}).state or '未知' }}</div>
++        <div class="value">{{ (sd.caliber or {}).label or '旧口径 v1（轮转刷新取价，仅研究参考）' }}；
++          执行权重 {{ sdw.effective|default(0, true) }}（配置声明不可抬升{{ '，已登记冲突' if sdw.conflict else '' }}）；
++          v2 固定时点标签 {{ (sd.v2_labels or {}).state or 'DEFERRED' }}；
++          计入发布门槛 {{ '是' if (sd.release_gate or {}).shadow_counted else '否' }}</div>
++      </div>
++      {% set na = sd.cohorts or {} %}
++      <div class="intel-box">
++        <div class="label">A/B/C 研究隔离</div>
++        <div class="value">{% for key, item in na.items() %}{{ item.group or key }}={{ item.status or '未知' }}{% if not loop.last %} · {% endif %}{% endfor %}
++          {% if not na %}状态未知{% endif %}</div>
++      </div>
+     </div>
+     {% if wi.symbols %}
+     <div class="table-wrap" style="margin-top:10px">
+@@ -165,7 +180,8 @@
+       </table>
+     </div>
+     {% endif %}
+-    {% set evals = (wi.shadow_evaluation or {}).evaluations or [] %}
++    {# 优先用影子披露层已标注「研究参考/不计门禁」的行；缺失时回落到旧汇总，不改变既有语义。 #}
++    {% set evals = (wi.shadow_metrics or {}).evaluations or (wi.shadow_evaluation or {}).evaluations or [] %}
+     {% if evals %}
+     <div class="table-wrap" style="margin-top:10px">
+       <table>
+@@ -179,11 +195,19 @@
+             <td class="num">{% if ev.avg_mfe_pct is not none %}{{ '%.3f'|format(ev.avg_mfe_pct) }}/{{ '%.3f'|format(ev.avg_mae_pct) }}%{% else %}—{% endif %}</td>
+             <td class="num">{{ ev.avg_path_samples }}/{{ ev.required_path_samples }}</td>
+             <td class="num">{{ ev.observation_span_days }}/7</td>
+-            <td><span class="badge {{ 'ok' if ev.promotion_ready else 'muted' }}">{{ '可人工评审' if ev.promotion_ready else '继续观察' }}</span></td></tr>
++            <td><span class="badge muted">{{ ev.review_label or ('研究评审参考（不改变执行权重）' if ev.promotion_ready else '继续观察') }}</span></td></tr>
+         {% endfor %}
+         </tbody>
+       </table>
+     </div>
++    <div class="value" style="font-size:11.5px;color:var(--muted);margin-top:6px">
++      以上为旧口径（{{ (wi.shadow_disclosure or {}).caliber.label if (wi.shadow_disclosure or {}).caliber else 'legacy v1' }}）研究参考，
++      执行权重恒为 0，不计入发布门槛；v2 固定时点标签为
++      {{ (wi.shadow_disclosure or {}).v2_labels.state if (wi.shadow_disclosure or {}).v2_labels else 'DEFERRED' }}。
++      <details class="chain-raw" style="margin-top:6px"><summary>旧口径已知缺陷（{{ ((wi.shadow_disclosure or {}).caliber or {}).limitations|length }} 条）</summary>
++        <ul style="margin:6px 0 0 18px">{% for item in ((wi.shadow_disclosure or {}).caliber or {}).limitations or [] %}<li>{{ item }}</li>{% endfor %}</ul>
++      </details>
++    </div>
+     {% endif %}
+     <details class="chain-raw">
+       <summary>查看 Web3/合约市场情报原始输出</summary>
