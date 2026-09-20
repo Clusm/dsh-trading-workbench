@@ -16,6 +16,7 @@ from audit.jsonl_logger import JsonlLogger
 from core.action_space import ActionSpace, VALID_SIDES
 from core.agent_recorder import AgentRecorder
 from core.decision_policy import enforced_issues, evaluate_open_intent
+from agents.research_evidence import evaluate_open_intents, snapshot_from_tool_result
 from core.portfolio_policy import evaluate_portfolio_intent
 from data.market_query import TOOL_SPECS, execute_tool
 from llm.base import LLMClient, call_chat
@@ -680,6 +681,108 @@ def _check_open_query_provenance(intents: list[Any],
     return issues
 
 
+#: U15 未接线前：研究证据门禁在"身份未固定"下的放行开关。**缺省 False = fail-closed**
+#: ——未固定身份的 OPEN 一律丢单；只有显式置 True（仅限 paper/离线）才允许在
+#: identity_pinned=False 下开仓，且每轮都会写一条审计事件留痕。
+ALLOW_UNPINNED_RESEARCH_EVIDENCE = False
+
+#: 策略侧缺省必需分源（支持字段级写法，如 ``mark_funding.funding_rate``）。**非空 =
+#: 字段级分源门禁在生产路径真实生效**：每笔开仓都必须有可核对的实时报价源
+#: （源可用 + 有时点 + 未过期 + ``last_price/pct_24h/quote_volume_24h`` 一个不缺），
+#: 否则该意图结构化拒绝（``SOURCE_UNAVAILABLE/SOURCE_STALE/SOURCE_FIELD_*``）。
+#: **不要留空**：留空即等于该门禁整体关闭（D-P1-2 原始缺口）。策略卡就绪后可在此
+#: 加严到资金费/OI，例如 ``("ticker", "mark_funding.funding_rate")``；这是缺省下限，
+#: 意图自报只能加严、不能顶掉（模块内取并集）。
+RESEARCH_EVIDENCE_REQUIRED_SOURCES: tuple[str, ...] = ("ticker",)
+
+
+def _research_evidence_gate(decision: Any, snapshots: dict[Any, Any],
+                            db: AuditDatabase, run_id: str) -> tuple[Any, list[str]]:
+    """U03 逐意图证据门禁：只丢证据不足/数值矛盾的开仓意图，退出不受影响。
+
+    - claim 由程序比较真实快照数值（744.13>744.9、78550<78443 确定性拒绝）；
+      模型自报 claim 只能附加，不能替换程序基准、也不能用自报 claim 顶掉
+      "开仓必须给出可解析入场价"。
+    - 身份未固定（U15 未接线）时按 ALLOW_UNPINNED_RESEARCH_EVIDENCE fail-closed。
+    - 放行路径把逐意图 (evidence_id, binding_id) 写进审计事件，执行侧可证明
+      "这一单的证据是哪个"；把绑定落到订单字段属 K02 README §12 C#12 / U05 缺口。
+    - 只做减量：不改风险档/白名单/live 开关，不动 pipeline_authorized（授权位由
+      core.decision_pipeline 统一置位，避免误报"未授权开仓"critical 事件）。
+    """
+    open_indexes = [index for index, item in enumerate(decision.intents)
+                    if getattr(item, "action", None) == "open"]
+    if not open_indexes:
+        return decision, []
+
+    def _binding_key(index: int, item: Any) -> str:
+        # client_order_id 是执行集合里唯一稳定的逐单键（风险层 model_copy 会保留；
+        # 位置序号在缩减数量/跳过失败项后不再可靠），缺失时退回本轮序号。
+        return str(getattr(item, "client_order_id", None) or f"open[{index}]")
+
+    payloads: list[dict[str, Any]] = []
+    for index in open_indexes:
+        item = decision.intents[index]
+        payload = item.model_dump(mode="json")
+        payload["intent_id"] = _binding_key(index, item)
+        evidence = getattr(item, "evidence", None)
+        payload["interval"] = getattr(evidence, "confirmation_interval", None)
+        payloads.append(payload)
+    report = evaluate_open_intents(
+        payloads, list(snapshots.values()), now_ms=int(time.time() * 1000),
+        # 轮次分量必须非空：pipeline_decision_id 由 decision_pipeline.sign_execution
+        # 在 RiskGuard **之后**写入，门禁处恒为 None ⇒ 退回本轮 run_id（service 侧每轮
+        # uuid4），使 binding_id 不跨轮碰撞、同轮可复现。
+        cycle_id=str(getattr(decision, "pipeline_decision_id", "") or run_id or ""),
+        identity=None,  # TODO(U15): 接入 RuntimeIdentity 后改为传入真实身份
+        allow_unpinned=ALLOW_UNPINNED_RESEARCH_EVIDENCE,
+        default_required_sources=RESEARCH_EVIDENCE_REQUIRED_SOURCES,
+    )
+    accepted_bindings = [item for item in report.bindings() if item["accepted"]]
+    if accepted_bindings:
+        db.log_risk_event(
+            event_type="research_evidence_binding", severity="info",
+            details="逐意图证据绑定: " + "；".join(
+                f"{item['intent_id']}={item['evidence_id']}"
+                for item in accepted_bindings),
+            action_taken="passed open intents carry evidence binding",
+            raw={"run_id": run_id, "identity_pinned": report.identity_pinned,
+                 "unpinned_allowed": report.unpinned_allowed,
+                 "bindings": accepted_bindings},
+        )
+    blocked = {entry.intent_id for entry in report.intents if not entry.accepted}
+    if not blocked:
+        return decision, []
+    blocked_symbols: list[str] = []
+    kept: list[Any] = []
+    for index, item in enumerate(decision.intents):
+        if getattr(item, "action", None) != "open":
+            kept.append(item)
+            continue
+        if _binding_key(index, item) in blocked:
+            blocked_symbols.append(str(getattr(item, "symbol", "")))
+        else:
+            kept.append(item)
+    db.log_risk_event(
+        event_type="research_evidence_blocked", severity="critical",
+        details="；".join(
+            f"{entry.intent_id}:{','.join(entry.reason_codes)}"
+            for entry in report.intents if not entry.accepted
+        ),
+        action_taken="drop open intents; preserve exits",
+        raw={"run_id": run_id, "blocked": sorted(blocked),
+             "identity_pinned": report.identity_pinned,
+             "unpinned_allowed": report.unpinned_allowed},
+    )
+    action = ("close" if any(item.action in {"close", "reduce"} for item in kept)
+              else "adjust" if kept else "no_trade")
+    note = (" | [U03] 逐意图证据门禁拒绝开仓: " + ",".join(blocked_symbols)
+            + ("" if report.identity_pinned else " (identity_pinned=False)"))
+    return decision.model_copy(update={
+        "intents": kept, "decision": action,
+        "reasoning": (decision.reasoning or "") + note,
+    }), []
+
+
 def _build_decision(payload: dict[str, Any], *, strict: bool) -> tuple[TradeDecision, list[str]]:
     """构建 TradeDecision。
 
@@ -816,6 +919,7 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
     query_used = 0
     queried: list[str] = []
     query_evidence: dict[str, dict[str, Any]] = {}
+    query_snapshots: dict[tuple[str, str], Any] = {}
     query_details: dict[str, dict[str, Any]] = {}
     force_submit = False
     decision_was_downgraded = False
@@ -906,6 +1010,10 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                         decision, issues = _build_decision(args, strict=strict)
                         if not issues:
                             issues = _check_open_query_provenance(decision.intents, query_evidence)
+                            if not issues:
+                                decision, issues = _research_evidence_gate(
+                                    decision, query_snapshots, db, run_id,
+                                )
                             if issues and strict:
                                 raise DecisionValidationError(
                                     issues,
@@ -1014,6 +1122,14 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                                 if symbol and isinstance(quality, dict):
                                     query_evidence[symbol] = dict(quality)
                                     query_details[symbol] = dict(result)
+                                    # U03：保留本轮快照，供逐意图证据门禁按
+                                    # (symbol, interval) 独立建包（15m 不得冒充 4h）。
+                                    # 出参缺周期标签就不建快照（fail closed，不猜周期）。
+                                    _interval = str(result.get("interval") or "").strip()
+                                    if _interval:
+                                        query_snapshots[(symbol, _interval)] = (
+                                            snapshot_from_tool_result(
+                                                result, interval=_interval))
                                     research_detail_done = True
                             result["_budget"] = {
                                 "used": query_used,
@@ -1058,6 +1174,10 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                 last_error = None
                 if not issues:
                     issues = _check_open_query_provenance(decision.intents, query_evidence)
+                    if not issues:
+                        decision, issues = _research_evidence_gate(
+                            decision, query_snapshots, db, run_id,
+                        )
                 if not issues:
                     policy_checks = [
                         check

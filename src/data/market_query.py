@@ -100,6 +100,59 @@ def _sig(x: Any, n: int = 6) -> float:
         return 0.0
 
 
+SOURCE_TTL_SECONDS = {"ticker": 30.0, "mark_funding": 60.0, "open_interest": 60.0}
+
+
+def _source_number(payload: Any, key: str) -> float | None:
+    """按源取数值：缺失/非法/非有限一律 None，绝不折算成 0。
+
+    真实返回的 0 保留为 0（缺失 != 数值为零）。资金费缺失被读成“费率中性”、
+    标记价缺失被读成“价格为零”，都是这条口径被破坏后的直接后果（DC11）。
+    """
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get(key)
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def _source_quality(payload: Any, *, observed_at_ms: int, ttl_seconds: float,
+                    fields: tuple[str, ...]) -> dict[str, Any]:
+    """逐源证据质量：可用性/源时点/本地观测时点/有效期/缺失字段。
+
+    消费端据此判断“这个源这一轮到底有没有取到”，而不是把缺失当成 0 或中性值。
+    """
+    values = {field: _source_number(payload, field) for field in fields}
+    missing = sorted(field for field, value in values.items() if value is None)
+    source_at_ms = _source_number(payload, "source_at_ms")
+    close_time = _source_number(payload, "closeTime")
+    if close_time is not None:
+        source_at_ms = close_time
+    if source_at_ms is None:
+        source_at_ms = _source_number(payload, "time")
+    available = any(value is not None for value in values.values())
+    fresh_until_ms = None
+    if available:
+        # 源时钟晚于本地观测时以本地观测为准，避免把未来时间洗成“仍在有效期”。
+        base = observed_at_ms if source_at_ms is None else min(source_at_ms, observed_at_ms)
+        fresh_until_ms = int(base + ttl_seconds * 1000)
+    return {
+        "available": available,
+        "source_at_ms": int(source_at_ms) if source_at_ms is not None else None,
+        "observed_at_ms": int(observed_at_ms),
+        "fresh_until_ms": fresh_until_ms,
+        "missing_fields": missing,
+        "values": values,
+    }
+
+
 def _pack_candles(klines: list[list[Any]], interval: str, max_candles: int = 20) -> dict[str, Any]:
     """K 线列式压缩：时间戳改相对秒、价格按有效数字取整，同样信息约省 60% token。
 
@@ -168,26 +221,33 @@ def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
         klines, interval, observed_at_ms=observed_at_ms, min_closed=20,
         bar_metadata=get_bar_metadata(symbol, interval, klines),
     )
-    ticker_price = ticker.get("lastPrice")
-    mark_price = premium.get("markPrice")
+    ticker_price = _source_number(ticker, "lastPrice")
+    mark_price = _source_number(premium, "markPrice")
     live_price_available = bool(ticker_price or mark_price)
+    source_payloads = (
+        ("ticker", ticker, ("lastPrice", "priceChangePercent", "quoteVolume"),
+         SOURCE_TTL_SECONDS["ticker"]),
+        ("mark_funding", premium, ("markPrice", "lastFundingRate"),
+         SOURCE_TTL_SECONDS["mark_funding"]),
+        ("open_interest", oi, ("openInterest",),
+         SOURCE_TTL_SECONDS["open_interest"]),
+    )
     data_quality["sources"] = {
-        "ticker": {
-            "available": bool(ticker_price),
-            "source_at_ms": ticker.get("closeTime"),
-            "observed_at_ms": observed_at_ms,
-        },
-        "mark_funding": {
-            "available": bool(premium),
-            "source_at_ms": premium.get("time"),
-            "observed_at_ms": observed_at_ms,
-        },
-        "open_interest": {
-            "available": bool(oi),
-            "source_at_ms": oi.get("time"),
-            "observed_at_ms": observed_at_ms,
-        },
+        name: _source_quality(
+            payload, observed_at_ms=observed_at_ms, ttl_seconds=ttl, fields=fields,
+        )
+        for name, payload, fields, ttl in source_payloads
     }
+    data_quality["missing_fields"] = sorted(
+        f"{name}.{field}"
+        for name, item in data_quality["sources"].items()
+        for field in item["missing_fields"]
+    )
+    data_quality["fresh_until_ms"] = min(
+        (item["fresh_until_ms"] for item in data_quality["sources"].values()
+         if item["fresh_until_ms"] is not None),
+        default=None,
+    )
     if not live_price_available:
         data_quality["issues"].append("live_price_unavailable")
         data_quality["ok"] = False
@@ -216,8 +276,10 @@ def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
     volume_ratio = recent_vol / base_vol if base_vol > 0 else 0.0
     high_window = max(highs[-limit:])
     low_window = min(lows[-limit:])
-    funding_rate = float(premium.get("lastFundingRate") or 0.0)
-    oi_usd = float(oi.get("openInterest") or 0.0) * last if oi else None
+    # funding/OI 缺失一律保持 None：缺失不等于“费率中性/价格为零”（DC11）。
+    funding_rate = _source_number(premium, "lastFundingRate")
+    oi_contracts = _source_number(oi, "openInterest")
+    oi_usd = oi_contracts * last if (oi_contracts is not None and last) else None
 
     result = {
         "symbol": symbol,
@@ -237,7 +299,7 @@ def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
         if high_window > low_window else 50.0,
         "return_window_pct": round((closes[-1] / closes[0] - 1) * 100, 2) if len(closes) >= 2 else 0.0,
         "funding_rate": funding_rate,
-        "mark_price": float(premium.get("markPrice") or 0.0),
+        "mark_price": mark_price,
         "open_interest_usd": oi_usd,
         "candles": (_pack_candles(closed_klines, interval)
                     if include_candles else {"n": 0, "interval": interval}),
