@@ -1407,15 +1407,38 @@ def mint_runtime_generation(
 
     凭据纪元与密钥指纹 **不参与** ``generation_id``，所以轮换密钥不会产生
     新的运行代（账本连续归集不被轮换打断）。
+
+    U15 r2 收紧三处构造口径：
+
+    - ``environment`` 必须非空且属于 ``MODE_ALLOWED``（与
+      ``resolve_execution_scope`` 同口径，不再接受 ``prod``/空串/``unknown``）；
+    - 传 ``AccountRef`` 时 ``environment`` 形参**不得被静默忽略**：与
+      ``AccountRef.environment`` 不一致即结构化拒绝（否则会产出绑定到另一
+      环境的运行代，K04 只比对 environment 字段，等于 live 用 demo 授权放行）；
+    - 传裸字符串时一律经 :func:`derive_account_ref` 归一化（补 ``env:`` 前缀），
+      同一账户不会因构造入口不同得到两个 ``account_ref``。
     """
-    ref = account_ref if isinstance(account_ref, AccountRef) else AccountRef(
-        _text(account_ref), _text(environment).lower()[:32] or "unknown", False, "explicit",
-    )
+    env = _text(environment).lower()
+    if not env:
+        raise MissingRuntimeInputError(["environment"])
+    if env not in MODE_ALLOWED:
+        raise ExecutionModeError(
+            f"unknown environment {env!r}; allowed: {', '.join(MODE_ALLOWED)}"
+        )
+    if isinstance(account_ref, AccountRef):
+        if _text(account_ref.environment) != env:
+            raise ExecutionModeError(
+                f"environment {env!r} conflicts with AccountRef.environment "
+                f"{_text(account_ref.environment)!r}; refusing to silently prefer one"
+            )
+        ref = account_ref
+    else:
+        ref = derive_account_ref(
+            env, declared_account_ref=_text(account_ref), fallback_local=False,
+        )
     instance = _text(runtime_instance_id)
     if not instance:
         raise MissingRuntimeInputError(["runtime_instance_id"])
-    if not ref.value:
-        raise MissingRuntimeInputError(["account_ref"])
     if credential_epoch < 0:
         raise RuntimeIdentityError("credential_epoch must be >= 0")
     seed = "|".join((ref.environment, ref.value, instance, "" if started_at is None else f"{started_at:.6f}"))
@@ -1438,6 +1461,8 @@ def rotate_credential(
     generation: RuntimeGeneration, *, new_key_fingerprint: str | None,
 ) -> RuntimeGeneration:
     """轮换凭据：纪元 +1、指纹更新，**账户引用与运行代保持不变**。"""
+    if not isinstance(generation, RuntimeGeneration):
+        raise MalformedInputError(["generation must be a RuntimeGeneration"])
     if new_key_fingerprint is not None and (
             not isinstance(new_key_fingerprint, str) or not new_key_fingerprint.strip()):
         raise RuntimeIdentityError("new key fingerprint must be a non-empty string or None")
@@ -1527,11 +1552,29 @@ class IdentityBundle:
     git_state: GitState
     blockers: tuple[str, ...] = ()
     advisories: tuple[str, ...] = ()
+    #: 账户引用溯源。``identity.account_ref`` 是字符串值，这里保留
+    #: ``stable``/``source``，使 U02/看板不必二次派生，也让 ``<env>:local``
+    #: 回退可被检测（stable=False）。r2 起不再只存在于被丢弃的局部变量里。
+    account_ref_ref: AccountRef | None = None
 
     @property
     def entry_allowed(self) -> bool:
         """是否存在阻断新仓的身份类原因（空 = 无身份类阻断）。"""
         return not self.blockers
+
+    @property
+    def account_ref(self) -> AccountRef | None:
+        """账户引用溯源（不是字符串；字符串见 ``identity.account_ref``）。"""
+        return self.account_ref_ref
+
+    @property
+    def account_ref_stable(self) -> bool:
+        """``account_ref`` 是否来自显式声明（``<env>:local`` 回退时为 False）。"""
+        return bool(self.account_ref_ref and self.account_ref_ref.stable)
+
+    @property
+    def account_ref_source(self) -> str:
+        return self.account_ref_ref.source if self.account_ref_ref else "unavailable"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1543,6 +1586,10 @@ class IdentityBundle:
             "model_route": self.model_route.as_dict(),
             "strategy": self.strategy_source.as_dict(),
             "effective_config": self.effective_config.as_dict(),
+            "account_ref_provenance": (
+                self.account_ref_ref.as_dict() if self.account_ref_ref else None
+            ),
+            "account_ref_stable": self.account_ref_stable,
             "blockers": list(self.blockers),
             "advisories": list(self.advisories),
             "entry_allowed": self.entry_allowed,
@@ -1569,6 +1616,7 @@ def collect_runtime_identity(
     artifact_relatives: Sequence[str] | None = None,
     require_lock_file: bool = True,
     require_source_configs: bool = False,
+    fallback_local: bool | None = None,
 ) -> IdentityBundle:
     """从仓库事实装配 K01 身份（release_manifest / service 的单一入口）。
 
@@ -1582,6 +1630,19 @@ def collect_runtime_identity(
     ``effective_config.missing_sources`` 与 advisory。生产入口应传
     ``require_source_configs=True`` 把“六类来源必须齐备”升级为结构化拒绝
     （U15 r2 P0-2）。
+
+    ``fallback_local`` 控制 ``account_ref`` 的本地回退：
+
+    - ``None``（默认）→ 允许回退，但 live 下回退是**阻断项**
+      （``ACCOUNT_REF_UNPROVEN``）：身份工件仍可审计，`entry_allowed` 为假；
+    - ``True`` → 显式允许（live 下仍记 advisory，不再阻断）；
+    - ``False`` → 显式要求已声明账户引用，缺失即 ``MissingRuntimeInputError``
+      （生产入口建议用这一档）。
+
+    未声明账户时身份会把“哪个账户”退化成 ``<env>:local``：同环境所有账户共用
+    同一 ``account_ref``（跨账户碰撞）。r2 起这一事实通过
+    ``IdentityBundle.account_ref_stable``/``account_ref_source`` 与
+    advisory/blocker 暴露，不再只存在于被丢弃的局部变量里（U15 r2 P1-2）。
     """
     root = Path(project_root)
     if not isinstance(env, Mapping) and env is not None:
@@ -1597,13 +1658,27 @@ def collect_runtime_identity(
         execution_mode=execution_mode if execution_mode is not None else env_map.get("EXECUTION_MODE"),
         default_mode=_dig(raw_settings or {}, "execution.default_mode") or "demo",
     )
-    declared = declared_account_ref if declared_account_ref is not None else env_map.get("MTA_ACCOUNT_REF")
+    declared = declared_account_ref if declared_account_ref is not None \
+        else env_map.get(ACCOUNT_REF_KEYS[0])
     if isinstance(account_ref, AccountRef):
+        if _text(account_ref.environment) != _text(scope.mode).lower():
+            raise ExecutionModeError(
+                f"AccountRef.environment {_text(account_ref.environment)!r} does not match "
+                f"resolved execution scope {scope.mode!r}"
+            )
         ref = account_ref
-    elif account_ref:
-        ref = derive_account_ref(scope.mode, declared_account_ref=str(account_ref))
     else:
-        ref = derive_account_ref(scope.mode, declared_account_ref=declared)
+        # 未声明账户时是否允许回退到 <env>:local：
+        #   None（默认）= 允许回退，但 live 下由 ACCOUNT_REF_UNPROVEN 阻断
+        #                 （保留可审计的身份工件，绝不静默放行）；
+        #   False       = 直接要求已声明账户，缺失即结构化拒绝。
+        fallback_ok = True if fallback_local is None \
+            else bool(fallback_local)
+        explicit = account_ref if account_ref else declared
+        ref = derive_account_ref(
+            scope.mode, declared_account_ref=str(explicit) if explicit else None,
+            fallback_local=fallback_ok,
+        )
 
     lock_files = collect_dependency_lock_files(root, require_lock=require_lock_file)
     strategy = load_strategy_cards(root)
@@ -1641,11 +1716,19 @@ def collect_runtime_identity(
         model_route=route.route,
         effective_config=effective.as_payload(),
     )
-    scope_blockers: tuple[str, ...] = ()
+    scope_blockers: list[str] = []
     if not scope.locked and scope.mode == "live":
         # decl-7：未显式选择 profile 却要跑实盘 —— 状态根无法唯一确定
         # （config_loader.runtime_path 退回公共 data/），必须阻断而不是静默放行。
-        scope_blockers = (EXECUTION_SCOPE_UNLOCKED,)
+        scope_blockers.append(EXECUTION_SCOPE_UNLOCKED)
+    account_advisories: tuple[str, ...] = ()
+    if not ref.stable:
+        # 未声明账户 → <env>:local：同环境所有账户共用同一 account_ref。
+        # 隐式回退（fallback_local 未显式声明）在 live 下阻断；
+        # 调用方显式 True 表示已知情并接受，此时只留 advisory。
+        account_advisories = (ACCOUNT_REF_LOCAL_FALLBACK,)
+        if scope.mode == "live" and fallback_local is not True:
+            scope_blockers.append(ACCOUNT_REF_UNPROVEN)
     blockers = tuple(dict.fromkeys((
         *route.blockers, *scope_blockers, *git_state.hard_reasons(expected_git_commit),
     )))
@@ -1654,11 +1737,13 @@ def collect_runtime_identity(
     )
     advisories = tuple(dict.fromkeys((
         *git_state.advisory_reasons(), *scope.warnings, *missing_advisories,
+        *account_advisories,
     )))
     return IdentityBundle(
         identity=identity, model_route=route, execution_scope=scope,
         effective_config=effective, strategy_source=strategy,
         git_state=git_state, blockers=blockers, advisories=advisories,
+        account_ref_ref=ref,
     )
 
 

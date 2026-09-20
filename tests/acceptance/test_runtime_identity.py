@@ -26,6 +26,8 @@ from core.contracts import (  # noqa: E402
 )
 from core.contracts.common import sensitive_paths  # noqa: E402
 from core.runtime_identity import (  # noqa: E402
+    ACCOUNT_REF_LOCAL_FALLBACK,
+    ACCOUNT_REF_UNPROVEN,
     CONFIG_SOURCE_FILES,
     CONFIG_SOURCES_KEY,
     CONFIG_SOURCE_MISSING,
@@ -152,7 +154,9 @@ def make_root(tmp: Path) -> Path:
 def build(tmp: Path, *, env: dict | None = None, settings: dict | None = None,
           agents: dict | None = None, credentials: dict | None = None,
           profile: str | None = None, execution_mode: str = "demo",
-          expected_git_commit: str | None = None):
+          expected_git_commit: str | None = None,
+          declared_account_ref: str | None = None,
+          fallback_local: bool | None = None):
     return collect_runtime_identity(
         tmp,
         environment=execution_mode,
@@ -165,6 +169,8 @@ def build(tmp: Path, *, env: dict | None = None, settings: dict | None = None,
         raw_settings=settings if settings is not None else SETTINGS,
         raw_agents=agents if agents is not None else AGENTS,
         expected_git_commit=expected_git_commit,
+        declared_account_ref=declared_account_ref,
+        fallback_local=fallback_local,
     )
 
 
@@ -222,11 +228,14 @@ def check_identity_inputs_change_hash() -> None:
               env_egress.identity.effective_config_hash != base.identity.effective_config_hash
               and env_egress.identity.deployment_hash() != base_hash)
 
-        # profile 覆盖（live channels 覆盖值改变）
+        # profile 覆盖（live channels 覆盖值改变）；
+        # live 下必须声明账户引用（r2 起 live 不再允许 <env>:local 静默回退）
         live_settings = json.loads(json.dumps(SETTINGS))
         live_settings["profiles"]["live"]["channels"]["strategy_weight"] = 0.25
-        profile_changed = build(tmp, settings=live_settings, profile="live", execution_mode="live")
-        live_base = build(tmp, profile="live", execution_mode="live")
+        profile_changed = build(tmp, settings=live_settings, profile="live",
+                                execution_mode="live", declared_account_ref="acct-live")
+        live_base = build(tmp, profile="live", execution_mode="live",
+                          declared_account_ref="acct-live")
         check("profile-override-affects-identity",
               profile_changed.identity.effective_config_hash
               != live_base.identity.effective_config_hash
@@ -657,7 +666,8 @@ def check_provider_evidence_and_fallback() -> None:
           and not wb_ok.mock, str(wb_ok.as_dict()))
     with tempfile.TemporaryDirectory() as raw:
         tmp = make_source_root(Path(raw))
-        live_env = {"EXECUTION_MODE": "live", "MTA_AI_DECISION_PROVIDER": "workbuddy"}
+        live_env = {"EXECUTION_MODE": "live", "MTA_AI_DECISION_PROVIDER": "workbuddy",
+                    "MTA_ACCOUNT_REF": "acct-live"}
         unproven_bundle = collect_runtime_identity(
             tmp, environment="live", runtime_instance_id="rt-test", profile="live",
             execution_mode="live", env=live_env, credentials_present={},
@@ -850,7 +860,8 @@ def check_scope_is_locked_or_flagged() -> None:
     check("locked-scope-has-no-warning", locked.locked and locked.warnings == ())
     with tempfile.TemporaryDirectory() as raw:
         tmp = make_root(Path(raw))
-        live_unlocked = build(tmp, profile=None, execution_mode="live", env={})
+        live_unlocked = build(tmp, profile=None, execution_mode="live", env={},
+                              declared_account_ref="acct-live")
         check("live-without-profile-blocked",
               not live_unlocked.entry_allowed
               and EXECUTION_SCOPE_UNLOCKED in live_unlocked.blockers,
@@ -862,6 +873,73 @@ def check_scope_is_locked_or_flagged() -> None:
         check("demo-without-profile-not-blocked",
               EXECUTION_SCOPE_UNLOCKED not in demo_unlocked.blockers
               and EXECUTION_PROFILE_NOT_DECLARED in demo_unlocked.advisories)
+
+
+def check_account_ref_is_proven_or_blocked() -> None:
+    """r2 P1-2 关闭：account_ref 是否来自声明必须可见，live 不得静默回退。"""
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = make_root(Path(raw))
+        # demo：允许回退，但必须有 advisory + 溯源字段
+        demo = build(tmp, execution_mode="demo", env={})
+        check("local-fallback-labelled-in-bundle",
+              demo.identity.account_ref == "demo:local" and not demo.account_ref_stable
+              and demo.account_ref_source == "local-fallback"
+              and ACCOUNT_REF_LOCAL_FALLBACK in demo.advisories,
+              str(demo.as_dict()["account_ref_provenance"]))
+        check("local-fallback-not-blocking-in-demo",
+              ACCOUNT_REF_UNPROVEN not in demo.blockers)
+        # live：回退必须是阻断项（跨账户碰撞）
+        live = build(tmp, profile="live", execution_mode="live", env={})
+        check("local-fallback-blocked-in-live",
+              not live.entry_allowed and ACCOUNT_REF_UNPROVEN in live.blockers
+              and ACCOUNT_REF_LOCAL_FALLBACK in live.advisories,
+              str(live.blockers))
+        # 显式声明 → 稳定引用，无回退告警
+        declared = build(tmp, execution_mode="demo", env={},
+                         declared_account_ref="binance-main")
+        check("declared-account-ref-is-stable",
+              declared.identity.account_ref == "demo:binance-main"
+              and declared.account_ref_stable
+              and ACCOUNT_REF_LOCAL_FALLBACK not in declared.advisories)
+        # 显式允许 live 回退：可见但不阻断
+        live_allowed = build(tmp, profile="live", execution_mode="live", env={},
+                             fallback_local=True)
+        check("live-fallback-explicitly-allowed",
+              live_allowed.entry_allowed
+              and ACCOUNT_REF_LOCAL_FALLBACK in live_allowed.advisories)
+        # 显式禁止回退：缺失即结构化拒绝
+        expect_raises("fallback-local-false-rejects-missing-account",
+                      (MissingRuntimeInputError,), collect_runtime_identity, tmp,
+                      environment="demo", runtime_instance_id="rt-test",
+                      execution_mode="demo", env={},
+                      credentials_present={"SENSENOVA_API_KEY": True},
+                      raw_settings=SETTINGS, raw_agents=AGENTS,
+                      fallback_local=False)
+
+
+def check_generation_construction_is_strict() -> None:
+    """r2 P1-2/P1-3：mint 不得静默忽略 environment，裸字符串必须归一化。"""
+    demo_ref = derive_account_ref("demo", declared_account_ref="acct")
+    expect_raises("mint-rejects-conflicting-environment", (ExecutionModeError,),
+                  mint_runtime_generation, environment="live", account_ref=demo_ref,
+                  runtime_instance_id="rt-1")
+    expect_raises("mint-rejects-unknown-environment", (ExecutionModeError,),
+                  mint_runtime_generation, environment="prod",
+                  account_ref=derive_account_ref("prod", declared_account_ref="acct"),
+                  runtime_instance_id="rt-1")
+    expect_raises("mint-rejects-empty-environment", (MissingRuntimeInputError,),
+                  mint_runtime_generation, environment="", account_ref=demo_ref,
+                  runtime_instance_id="rt-1")
+    bare = mint_runtime_generation(environment="demo", account_ref="acct",
+                                   runtime_instance_id="rt-1")
+    via_ref = mint_runtime_generation(environment="demo", account_ref=demo_ref,
+                                      runtime_instance_id="rt-1")
+    check("bare-string-account-ref-is-normalised",
+          bare.account_ref == "demo:acct" and bare.account_ref == via_ref.account_ref
+          and bare.generation_id == via_ref.generation_id, bare.account_ref)
+    expect_raises("mint-rejects-empty-string-account-ref", (MissingRuntimeInputError,),
+                  mint_runtime_generation, environment="demo", account_ref="",
+                  runtime_instance_id="rt-1")
 
 
 # --------------------------------------------------------------------------
@@ -1081,6 +1159,8 @@ def main() -> int:
     check_gate_is_fail_closed()
     check_unknown_mode_is_strictest()
     check_scope_is_locked_or_flagged()
+    check_account_ref_is_proven_or_blocked()
+    check_generation_construction_is_strict()
     check_account_ref_decoupled_from_rotation()
     check_u02_binding_interface()
     check_dl01_cli_mis_selection()
