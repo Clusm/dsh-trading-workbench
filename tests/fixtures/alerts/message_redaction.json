@@ -1,0 +1,62 @@
+{
+  "case_id": "U14-MSG-1",
+  "kind": "message",
+  "operation": "validate_message",
+  "note": "所有值均为占位符，不含任何真实凭据；键名只用于验证脱敏边界会被拦住。",
+  "cases": [
+    {
+      "id": "P-pass",
+      "payload": {
+        "schema": "u14.alert.v1",
+        "profile": "live",
+        "host": "host-synthetic-01",
+        "object_ref": "trading_service",
+        "reason_code": "TRADING_STALLED",
+        "severity": "CRITICAL",
+        "impact": "new entry suspended; existing protection unchanged",
+        "new_entry_state": "SUSPENDED",
+        "handling_entry": "scripts/health_watch.py",
+        "occurred_at": "synthetic"
+      },
+      "expect": {"violations": []},
+      "derivation": "规格 §11.2 消息必含字段：profile、主机、故障对象、影响、新仓状态、处理入口。全部为脱敏标量且键名不含敏感子串 ⇒ 通过。"
+    },
+    {
+      "id": "N1-signature-key",
+      "payload": {
+        "profile": "live",
+        "object_ref": "trading_service",
+        "pipeline_signature": "<placeholder-not-a-real-signature>"
+      },
+      "expect": {"violations": ["pipeline_signature"]},
+      "derivation": "U04/K01 的管线签名不得进入任何外发消息（规格 §11.2『不包含密钥、签名或原始prompt』）⇒ 键名命中禁键清单。"
+    },
+    {
+      "id": "N2-raw-prompt-key",
+      "payload": {
+        "profile": "live",
+        "raw_prompt": "<placeholder-not-a-real-prompt>"
+      },
+      "expect": {"violations": ["raw_prompt"]},
+      "derivation": "规格 §11.2：消息不得含原始 prompt ⇒ raw_prompt 命中禁键清单。"
+    },
+    {
+      "id": "N3-sensitive-substring-key",
+      "payload": {
+        "profile": "live",
+        "provider_secret": "<placeholder-not-a-real-secret>"
+      },
+      "expect": {"violations": ["provider_secret"]},
+      "derivation": "复用 U15 `is_sensitive_name` 的保守子串口径（docs/contracts/README.md §2）：键名含 secret 子串即判敏感 ⇒ 必须被拦。只查键名、不扫描值内容（§12 L1 已登记的已知边界，本用例不假装覆盖值扫描）。"
+    },
+    {
+      "id": "N4-nested-key",
+      "payload": {
+        "profile": "live",
+        "context": {"inner": {"access_token": "<placeholder-not-a-real-token>"}}
+      },
+      "expect": {"violations": ["access_token"]},
+      "derivation": "递归遍历所有 Mapping/序列的键名：嵌套一层的敏感键同样必须被拦（否则把凭据塞进子对象即可绕过）。"
+    }
+  ]
+}

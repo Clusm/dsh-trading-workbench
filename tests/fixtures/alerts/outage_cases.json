@@ -1,0 +1,110 @@
+{
+  "case_id": "U14-OUTAGE-1",
+  "kind": "outage",
+  "operation": "classify_outage",
+  "time_base": "seconds",
+  "defaults": {
+    "startup_grace_seconds": 120.0,
+    "trading_evidence_max_age_seconds": 120.0
+  },
+  "discriminator": "host_uptime_seconds < trading_evidence_age_seconds ⇒ 证据缺口跨越了宿主重启 ⇒ HOST_DOWN；host_uptime_seconds >= trading_evidence_age_seconds ⇒ 宿主一直在运行、只有交易进程停摆 ⇒ PROCESS_MISSING。",
+  "cases": [
+    {
+      "id": "P1-healthy",
+      "process_alive": true,
+      "evidence_age_seconds": 5.0,
+      "host_uptime_seconds": 259200.0,
+      "expect": {
+        "kind": "HEALTHY",
+        "reason_codes": ["HEARTBEAT_OK"],
+        "host_continuity_proven": true
+      },
+      "derivation": "进程存活且交易证据 5 秒前 ⇒ 证据未陈旧（5 <= 120）⇒ HEALTHY。宿主连续性在此不需要（进程与证据都已证明健康）。"
+    },
+    {
+      "id": "P2-process-missing",
+      "process_alive": false,
+      "evidence_age_seconds": 600.0,
+      "host_uptime_seconds": 259200.0,
+      "expect": {
+        "kind": "PROCESS_MISSING",
+        "reason_codes": ["PROCESS_MISSING"],
+        "host_continuity_proven": true
+      },
+      "derivation": "uptime 259200s >= 证据年龄 600s ⇒ 最后一条证据出现时宿主早已在运行，这 600 秒里宿主从未重启 ⇒ 停摆的只能是交易进程本身 ⇒ PROCESS_MISSING（本机主进程故障）。"
+    },
+    {
+      "id": "P3-host-down",
+      "process_alive": false,
+      "evidence_age_seconds": 600.0,
+      "host_uptime_seconds": 300.0,
+      "expect": {
+        "kind": "HOST_DOWN",
+        "reason_codes": ["HOST_DOWN"],
+        "host_continuity_proven": true
+      },
+      "derivation": "uptime 300s < 证据年龄 600s ⇒ 宿主在最后一条交易证据之后才启动，缺口里发生过宿主重启/断电 ⇒ HOST_DOWN（主机关机）。与 P2 的输入只差 uptime，说明两者确实按成因分开判定，不得混成一类。"
+    },
+    {
+      "id": "P4-boundary-equal-not-host-down",
+      "process_alive": false,
+      "evidence_age_seconds": 600.0,
+      "host_uptime_seconds": 600.0,
+      "expect": {
+        "kind": "PROCESS_MISSING",
+        "reason_codes": ["PROCESS_MISSING"],
+        "host_continuity_proven": true
+      },
+      "derivation": "判别式取严格小于：uptime == 证据年龄 600s 表示宿主启动时刻不晚于（等于）最后一条证据，仍属『宿主一直在运行』⇒ PROCESS_MISSING。边界方向保守（不把进程故障升级成主机故障）。"
+    },
+    {
+      "id": "P5-trading-stalled",
+      "process_alive": true,
+      "evidence_age_seconds": 600.0,
+      "host_uptime_seconds": 259200.0,
+      "expect": {
+        "kind": "TRADING_STALLED",
+        "reason_codes": ["TRADING_STALLED"],
+        "host_continuity_proven": true
+      },
+      "derivation": "F22/R13 的核心场景：心跳发送进程还活着（process_alive=true）但交易证据已陈旧 600s > 120s ⇒ TRADING_STALLED，绝不判成 HEALTHY。"
+    },
+    {
+      "id": "P6-host-continuity-unknown",
+      "process_alive": false,
+      "evidence_age_seconds": 600.0,
+      "host_uptime_seconds": null,
+      "expect": {
+        "kind": "HOST_CONTINUITY_UNKNOWN",
+        "reason_codes": ["PROCESS_MISSING", "HOST_CONTINUITY_UNKNOWN"],
+        "host_continuity_proven": false
+      },
+      "derivation": "宿主连续运行时长不可得 ⇒ 不能证明『宿主机一直运行』，也不能断言『主机关机』⇒ 独立类别 HOST_CONTINUITY_UNKNOWN；原因码同时保留 PROCESS_MISSING（进程确已消失，这一条是确证的）与 HOST_CONTINUITY_UNKNOWN（宿主侧不可证明）。既不断言关机、也不把关机误报成进程故障。"
+    },
+    {
+      "id": "P7-just-booted-reboot-observed",
+      "process_alive": false,
+      "evidence_age_seconds": 600.0,
+      "host_uptime_seconds": 30.0,
+      "expect": {
+        "kind": "HOST_JUST_BOOTED",
+        "reason_codes": ["HOST_JUST_BOOTED", "HOST_REBOOT_OBSERVED"],
+        "host_continuity_proven": true,
+        "in_startup_grace": true
+      },
+      "derivation": "uptime 30s <= startup_grace_seconds 120s ⇒ 落在启动宽限内不升级告警；但证据年龄 600s > uptime 30s 已经能看出发生过宿主重启，故同时给 HOST_REBOOT_OBSERVED，宽限一过（uptime > 120s 而证据仍陈旧）即翻成 HOST_DOWN，不会被永久掩盖。"
+    },
+    {
+      "id": "P8-fresh-process-with-unknown-uptime",
+      "process_alive": true,
+      "evidence_age_seconds": 5.0,
+      "host_uptime_seconds": null,
+      "expect": {
+        "kind": "HEALTHY",
+        "reason_codes": ["HEARTBEAT_OK"],
+        "host_continuity_proven": false
+      },
+      "derivation": "进程存活且交易证据 5 秒前 ⇒ 无需宿主连续性即已证明健康；宿主 uptime 不可得只影响『区分两类失联』，不影响健康结论。"
+    }
+  ]
+}

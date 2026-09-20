@@ -1,0 +1,69 @@
+{
+  "case_id": "U14-QUEUE-1",
+  "kind": "queue",
+  "operation": "AlertQueue",
+  "time_base": "offsets_ms_from_now",
+  "cases": [
+    {
+      "id": "Q1-dedup-preserves-occurrence",
+      "capacity": 8,
+      "cooldown_seconds": 900,
+      "sequence": [
+        {"at_offset_ms": -600000, "incident": "svc|trading_service|TRADING_STALLED"},
+        {"at_offset_ms": -300000, "incident": "svc|trading_service|TRADING_STALLED"},
+        {"at_offset_ms": -1000, "incident": "svc|trading_service|TRADING_STALLED"}
+      ],
+      "expect": {
+        "rows": 1,
+        "occurrence_count": 3,
+        "occurrence_at_offset_ms": -600000,
+        "second_and_third_deduplicated": true
+      },
+      "derivation": "规格 §11.2『有限容量、指数退避、去重、冷却聚合和恢复消息』+『离线积压恢复后保留发生时间，不能误发为新故障』。三次发生落在同一 incident 且间隔 300000ms < cooldown 900000ms ⇒ 只保留 1 行；occurrence_count 累加到 3；occurrence_at_ms 必须仍是第一次发生的时刻（now-600000），不得被后两次刷新成 now-1000。"
+    },
+    {
+      "id": "Q2-bounded-capacity-drops-oldest",
+      "capacity": 2,
+      "cooldown_seconds": 0,
+      "sequence": [
+        {"at_offset_ms": -900000, "incident": "svc|a|E1"},
+        {"at_offset_ms": -800000, "incident": "svc|b|E2"},
+        {"at_offset_ms": -700000, "incident": "svc|c|E3"}
+      ],
+      "expect": {
+        "rows": 2,
+        "dropped_total": 1,
+        "dropped_incident": "svc|a|E1",
+        "remaining_incidents": ["svc|b|E2", "svc|c|E3"]
+      },
+      "derivation": "规格 §11.2『投递缓存…有限容量』。capacity=2 时第 3 条入队必须先淘汰**最早入队**的一条（now-900000 的 svc|a|E1），row 数恒为 2，并把淘汰计入可审计的 dropped_total=1。淘汰不得静默。"
+    },
+    {
+      "id": "Q3-exponential-backoff",
+      "capacity": 4,
+      "cooldown_seconds": 0,
+      "base_backoff_seconds": 30,
+      "max_backoff_seconds": 120,
+      "sequence": [
+        {"at_offset_ms": -1000, "incident": "svc|d|E4", "submit": false}
+      ],
+      "expect": {
+        "attempts": 1,
+        "backoff_seconds_after_attempt1": 30,
+        "backoff_formula": "min(base * 2**(attempt-1), max)"
+      },
+      "derivation": "规格 §11.2『指数退避』。第 1 次失败后重排延迟 = min(30 * 2**0, 120) = 30 秒；第 n 次 = min(30 * 2**(n-1), 120)，即 30/60/120/120…。用例只断言第 1 次（公式直算），其余由实现公式保证。"
+    },
+    {
+      "id": "Q4-queue-independent-from-trading-db",
+      "capacity": 4,
+      "cooldown_seconds": 0,
+      "sequence": [],
+      "expect": {
+        "queue_file_separate": true,
+        "trading_db_unopened": true
+      },
+      "derivation": "R14/F22『投递队列独立交易库』『主库损坏时仍能发送严重告警』。断言：队列文件路径与交易库不同；队列构造/enqueue/dispatch 全过程不打开交易库（用只读快照对比交易库文件字节与 mtime 前后一致证明）。"
+    }
+  ]
+}
