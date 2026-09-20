@@ -893,7 +893,7 @@
       "title": "部分成交、保护和重放验收",
       "owner_role": "B",
       "actual_assignee": "U04 作者会话（B 角色）；经 r2/r3 修复",
-      "status": "CHANGES_REQUESTED",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -1101,6 +1101,21 @@
           "delta": "delta=∅（70 条清单同 env，pristine 与打补丁失败集合逐条相同，唯一失败为既有 KI02）",
           "regression": "22 项全过",
           "unfinished": "无真实报文回放；N8 是否有仓库外运维调用未查"
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "aa510cd",
+          "code_identity_proof": "git diff aa510cd HEAD -- <U04 路径> 为空（除 I 侧登记与 scratch 清理）",
+          "patches_applied": [
+            "order_outbox.patch",
+            "protection_mirror.decimal_text.patch",
+            "binance_futures.u04_adaptation.patch"
+          ],
+          "i_registration": "smoke_u04_execution_faults.py 已写入 SCRIPTS（MANIFEST OK included=70）",
+          "test": "test_execution_faults **168 通过/0 失败**（集成态，含 r5 新增的 current_schema_version 检查）；smoke_u04 exit 0；smoke_order_outbox 26/0；smoke_protection_mirror 21/0；smoke_trade_reconciliation 23/0；test_income_reconciliation 140/0；smoke_contracts_v3 173/0（U01 与 U04 同改 binance_futures.py 未冲突）",
+          "offline_regression": "TOTAL=74 FAILED=1（唯一 smoke_windows_service_plan.py = KI02）-> **delta = ∅**",
+          "hygiene": "merge 带入的 41 个 `_scratch_B/**` 作者临时证据文件已从集成树移除（证据以 docs/dispatch/reviews/ 下的审查报告归档）",
+          "note": "VERIFIED 留待 U12 部署证据；残余 N8 见 known_issues U04-R4-FU1"
         }
       ],
       "blockers": [],
@@ -1139,7 +1154,7 @@
       "contract_commit": "ffdab443cae45c1451b5cc13b24e3e73c22038ff",
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "HEAD",
       "review_assignments": [
         {
           "round": "r1",
@@ -1930,6 +1945,24 @@
             "P1-3 complete_reconcile 无生产调用点、before_entry 未接入开仓链 -> 门禁永久停留 RECONCILE_REQUIRED，每次重启强制 close_only"
           ],
           "other": "P2-4 两套恢复包 schema 3<->{1,2} 互不兼容；P2-5 live 恢复门禁装错位置；P2 x9、P3 x9"
+        },
+        {
+          "type": "author_fix_r2",
+          "head_commit": "c216af6",
+          "commits": [
+            "b55c4fb",
+            "c64435e",
+            "c216af6"
+          ],
+          "patches_only": "**r2 已遵守只交补丁**：共享改动只以补丁交付（docs/dispatch/patches/U13/b55c4fb/，12 个），工作树里 7 个共享文件保持未提交仅用于本地验证",
+          "p1_2_fixed": "损坏->allowed=False[GATE_CORRUPT]；删除->allowed=False[GATE_MISSING]；state 未知->GATE_CORRUPT；**从未恢复（文件+安装戳都不存在）->allowed=True（合法未安装）**；CLEARED+新鲜->allowed=True（未误伤）。机制：安装戳 recovery_gate.json.installed；损坏态可经 operator 结构化对账显式收口（非死路）",
+          "p1_3_fixed": "生产接线：entry_readiness 新增 recovery_gate_allowed 事实；service.py 用 before_entry() 启动收紧 + _recovery_gate_facts() 接入开仓链 + set_control('normal') 门禁前置 + **新增 submit_recovery_reconcile()**（complete_reconcile 唯一生产调用点，operator+二次确认+进程身份）；app.py 新增 POST /api/recovery/reconcile。端到端（真实 TradingService、隔离 root）：启动 close_only+critical+readiness 含 RECONCILE_REQUIRED_BEFORE_ENTRY -> operator+确认+新鲜证据 ok=True CLEARED 落盘 -> readiness 不再含门禁 -> set_control('normal')=ok=True -> 重启第二实例不再被强制 close_only",
+          "ki02_closure": "(a) 显式 MTA_PYTHON 指向不存在路径：静默忽略 -> ValueError；(b) 安装期 allow_fallback=False -> ValueError；(c) 宿主脚本告警->失败。**未强制 strict_python=True**（会误伤官方推荐的 MTA_PYTHON 写法并改变 F 已复现的 A7-A9 语义），改用显式来源白名单，**登记为有意偏离**",
+          "verification": "验收 **166 PASS / 0 FAIL**（原 131）；两态：独占树（补丁未应用）140 PASS exit 0；smoke_u13 OK 两树；smoke_windows_service_plan 24/0；12/12 补丁（须 -c core.autocrlf=false -c core.eol=lf）apply --check OK 且应用后逐字节 SAME x12",
+          "delta": "pristine 73 脚本 1 失败(KI02)；打补丁树 74 脚本 **0 失败**；差集单向 {smoke_windows_service_plan.py}: fail->pass，**新失败 0**。官方单命令入口因未登记新冒烟首错即停 -> 用逐脚本口径；env 另清 MTA_STATE_ROOT/MTA_DATA_ROOT（与官方入口差异已如实说明）",
+          "p2": "P2-3/6/9、P3-2/3 已修；P2-4 部分修（core 兼容读 schema 1/2/3，反向未修已登记）；P2-5 如实登记（需 U12 定义 live 恢复布局）；P2-8 半修（跨进程读改写已登记）；P2-7 + P3-4..9 如实登记",
+          "warning": "**上一轮 a27fc17/ 补丁目录仍在 —— 二选一，勿两套都打**（本轮用 b55c4fb/）",
+          "rollback": "git revert c216af6 c64435e b55c4fb；或整目录弃用补丁"
         }
       ],
       "blockers": [],
@@ -1994,6 +2027,16 @@
           ],
           "verdict": "PENDING",
           "reports_dir": "docs/dispatch/reviews/U13/<r2head>/"
+        },
+        {
+          "round": "r2",
+          "stage": "修复复验",
+          "candidate": "c216af6",
+          "sessions": [
+            "Q (reviews/U13/R2/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U13/c216af6/"
         }
       ],
       "qa_runs": []
