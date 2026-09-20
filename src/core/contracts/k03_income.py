@@ -23,6 +23,7 @@ from .common import (
     half_open_contains,
     half_open_problems,
     join_key_parts,
+    model_content_hash,
     normalize_key_part,
 )
 
@@ -57,6 +58,7 @@ REASON_PAGINATION_STALLED = "PAGINATION_STALLED"
 REASON_TERMINATION_PROOF_MISSING = "TERMINATION_PROOF_MISSING"
 REASON_TERMINATION_PROOF_MISMATCH = "TERMINATION_PROOF_MISMATCH"
 REASON_TERMINATION_PROOF_INVALID = "TERMINATION_PROOF_INVALID"
+REASON_ZERO_FEE_PROOF_MISMATCH = "ZERO_FEE_PROOF_MISMATCH"
 
 
 class AllocationError(ValueError):
@@ -254,10 +256,13 @@ def coverage_problems(coverage: IncomeCoverage | Mapping[str, Any] | None) -> li
 
 
 class ZeroFeeProof(BaseModel):
+    """零费用证明结果；由 ``zero_fee_proof`` 产出并与当时 coverage 绑定。"""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     provable: bool
     reason_codes: tuple[str, ...] = ()
+    coverage_hash: str | None = None
 
 
 def zero_fee_proof(
@@ -267,7 +272,11 @@ def zero_fee_proof(
     pages_complete: bool,
     late_recheck_done: bool,
 ) -> ZeroFeeProof:
-    """空窗口“零费用”可证明条件：来源正常 + 完整分页 + 区间覆盖 + 无缺口 + 迟到复查。"""
+    """空窗口“零费用”可证明条件：来源正常 + 完整分页 + 区间覆盖 + 无缺口 + 迟到复查。
+
+    返回对象回带 coverage 的整体内容哈希，调用方不得自报布尔/字典；
+    ``finalize_costs`` 会重新计算哈希并要求一致，跨窗口复用一律拒绝。
+    """
     coverage_model = _coverage_model(coverage)
     reasons: list[str] = []
     if coverage_model is None:
@@ -308,7 +317,13 @@ def zero_fee_proof(
     if not late_recheck_done:
         reasons.append(REASON_LATE_RECHECK_MISSING)
     unique = list(dict.fromkeys(reasons))
-    return ZeroFeeProof(provable=not unique, reason_codes=tuple(unique))
+    return ZeroFeeProof(
+        provable=not unique,
+        reason_codes=tuple(unique),
+        coverage_hash=(
+            model_content_hash(coverage_model) if coverage_model is not None else None
+        ),
+    )
 
 
 class PaginationDecision(BaseModel):
@@ -595,17 +610,13 @@ def finalize_costs(
     """成本完成判定独立于归因判定；空窗口不等于零费用。
 
     无事件时必须传入 ``zero_fee_proof`` 的结果对象（``ZeroFeeProof``）：
-    不得用调用方自报布尔跳过零费用证明条件。
+    字典/布尔自报一律不构成证明（``ZERO_FEE_NOT_PROVABLE``），且证明必须与
+    传入 ``coverage`` 内容哈希一致，跨窗口复用 → ``ZERO_FEE_PROOF_MISMATCH``。
     """
     coverage_model = _coverage_model(coverage)
     coverage_status = coverage_model.coverage_status if coverage_model else None
     attribution_status = attribution.allocation_status if attribution else "UNKNOWN"
-    if isinstance(zero_fee, ZeroFeeProof):
-        proof: ZeroFeeProof | None = zero_fee
-    elif isinstance(zero_fee, Mapping):
-        proof = ZeroFeeProof.model_validate(zero_fee)
-    else:
-        proof = None
+    proof = zero_fee if isinstance(zero_fee, ZeroFeeProof) else None
     reasons: list[str] = []
     if coverage_model is None:
         return CostFinalization(
@@ -631,21 +642,30 @@ def finalize_costs(
             reason_codes=tuple(reasons),
         )
     if attribution is None or not attribution.decisions:
-        if proof is not None and proof.provable:
+        zero_fee_reasons: list[str] = []
+        if proof is None:
+            zero_fee_reasons.append(REASON_ZERO_FEE_NOT_PROVABLE)
+        else:
+            if proof.coverage_hash != model_content_hash(coverage_model):
+                zero_fee_reasons.append(REASON_ZERO_FEE_PROOF_MISMATCH)
+            if not proof.provable:
+                zero_fee_reasons.extend(
+                    proof.reason_codes or (REASON_ZERO_FEE_NOT_PROVABLE,)
+                )
+        if zero_fee_reasons:
             return CostFinalization(
                 lifecycle_id=lifecycle_id,
-                cost_status="COMPLETE",
+                cost_status="INCOMPLETE",
                 coverage_status=coverage_status,
-                attribution_status="ATTRIBUTED",
-                reason_codes=(REASON_COST_COMPLETE,),
+                attribution_status="UNKNOWN",
+                reason_codes=tuple(dict.fromkeys(zero_fee_reasons)),
             )
-        zero_fee_reasons = tuple(proof.reason_codes) if proof is not None else ()
         return CostFinalization(
             lifecycle_id=lifecycle_id,
-            cost_status="INCOMPLETE",
+            cost_status="COMPLETE",
             coverage_status=coverage_status,
-            attribution_status="UNKNOWN",
-            reason_codes=zero_fee_reasons or (REASON_ZERO_FEE_NOT_PROVABLE,),
+            attribution_status="ATTRIBUTED",
+            reason_codes=(REASON_COST_COMPLETE,),
         )
     if attribution.allocation_status == "UNKNOWN":
         return CostFinalization(

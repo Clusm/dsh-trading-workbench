@@ -428,6 +428,142 @@
           "lock_key_missing": ["dependency.requirements_lock"]
         }
       }
+    },
+    {
+      "case_id": "K01-N6",
+      "kind": "negative",
+      "title": "Mapping 覆盖载荷的空串/未知键/非 Mapping 一律结构化拒绝",
+      "operation": "k01_build_identity_coverage",
+      "derivation": "C 审查 NR-3 / Q NEW-R3-P2-6：build_identity 的 Mapping 路径曾接受空串 model/effort（与 validate_coverage 口径不一致）、接受未知键并计入哈希、对非 Mapping 载荷抛 AttributeError。契约 fail-closed：空串/空白按缺失计缺口，未知键按 `组.unknown_field:<键>` 报告，非 Mapping 按 `组.*` 报告，统一抛 IdentityCoverageError。",
+      "inputs": {
+        "base": {
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "runtime_instance_id": "inst-synth-r1",
+          "artifact_files": {
+            "src/core/service.py": "def run(): pass\n"
+          },
+          "dependency_lock_files": {
+            "requirements-lock.txt": "pydantic==2.13.5\n"
+          },
+          "strategy_cards": {
+            "cards": [
+              {
+                "strategy_id": "S_SYNTH_1"
+              }
+            ]
+          },
+          "model_route": {
+            "model": "deepseek-v4-flash",
+            "effort": "xhigh",
+            "fallback_routes": [],
+            "profile_overrides": {}
+          },
+          "effective_config": {
+            "settings": {
+              "execution": {
+                "default_mode": "demo"
+              }
+            },
+            "profile_overrides": {},
+            "environment_overrides": {}
+          }
+        },
+        "cases": [
+          {
+            "name": "route_blank_model_effort",
+            "overrides": {
+              "model_route": {
+                "model": "",
+                "effort": "   ",
+                "fallback_routes": [],
+                "profile_overrides": {}
+              }
+            }
+          },
+          {
+            "name": "route_unknown_field",
+            "overrides": {
+              "model_route": {
+                "model": "deepseek-v4-flash",
+                "effort": "xhigh",
+                "fallback_routes": [],
+                "profile_overrides": {},
+                "junk_field": 1
+              }
+            }
+          },
+          {
+            "name": "route_not_mapping",
+            "overrides": {
+              "model_route": [
+                "model",
+                "effort"
+              ]
+            }
+          },
+          {
+            "name": "config_blank_settings",
+            "overrides": {
+              "effective_config": {
+                "settings": "  ",
+                "profile_overrides": {},
+                "environment_overrides": {}
+              }
+            }
+          },
+          {
+            "name": "config_unknown_field",
+            "overrides": {
+              "effective_config": {
+                "settings": {
+                  "execution": {
+                    "default_mode": "demo"
+                  }
+                },
+                "profile_overrides": {},
+                "environment_overrides": {},
+                "junk_field": 1
+              }
+            }
+          },
+          {
+            "name": "config_not_mapping",
+            "overrides": {
+              "effective_config": "settings=config/settings.yaml"
+            }
+          },
+          {
+            "name": "control_all_present",
+            "overrides": {}
+          }
+        ]
+      },
+      "expect": {
+        "errors": {
+          "route_blank_model_effort": [
+            "model_route.model",
+            "model_route.effort"
+          ],
+          "route_unknown_field": [
+            "model_route.unknown_field:junk_field"
+          ],
+          "route_not_mapping": [
+            "model_route.*"
+          ],
+          "config_blank_settings": [
+            "effective_config.settings"
+          ],
+          "config_unknown_field": [
+            "effective_config.unknown_field:junk_field"
+          ],
+          "config_not_mapping": [
+            "effective_config.*"
+          ],
+          "control_all_present": []
+        }
+      }
     }
   ]
 }

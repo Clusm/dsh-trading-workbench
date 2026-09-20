@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -298,6 +299,16 @@ def op_k02_bundle_tamper(inputs: dict[str, Any]) -> dict[str, Any]:
         })
         bundle = bundle.model_copy(update={"inputs": bundle.inputs + (extra,)})
         bundle = bundle.model_copy(update={"content_hash": model_content_hash(bundle)})
+    elif kind == "add_symbolless_input":
+        extra = bundle.inputs[-1].model_copy(update={
+            "input_id": tamper["input_id"],
+            "symbol": None,
+            "finality": "closed",
+            "bar_close_time_ms": bundle.as_of_ms,
+            "values": {"close": "9.5"},
+        })
+        bundle = bundle.model_copy(update={"inputs": bundle.inputs + (extra,)})
+        bundle = bundle.model_copy(update={"content_hash": model_content_hash(bundle)})
     elif kind == "quality_field":
         bundle = bundle.model_copy(update={
             "quality": {**bundle.quality, tamper["key"]: tamper["value"]},
@@ -345,6 +356,8 @@ def op_k02_bundle_tamper(inputs: dict[str, Any]) -> dict[str, Any]:
     output: dict[str, Any] = {
         "bundle_valid": check.valid,
         "bundle_reasons": list(check.reason_codes),
+        "dropped_input_ids": list(bundle.dropped_input_ids),
+        "quality_dedup_removed": list(bundle.quality.get("dedup_removed") or []),
     }
     if inputs.get("intent") is not None:
         verdict = validate_intent(
@@ -497,11 +510,19 @@ def op_k03_finalize(inputs: dict[str, Any]) -> dict[str, Any]:
         attribution = attribute_income(
             inputs["events"], inputs.get("position_history") or [], coverage,
         )
+    zero_fee: Any = inputs.get("zero_fee")
+    if isinstance(zero_fee, Mapping) and zero_fee.get("from_coverage"):
+        zero_fee = zero_fee_proof(
+            zero_fee.get("coverage", coverage),
+            source_available=zero_fee["source_available"],
+            pages_complete=zero_fee["pages_complete"],
+            late_recheck_done=zero_fee["late_recheck_done"],
+        )
     result = finalize_costs(
         inputs["lifecycle_id"],
         coverage=coverage,
         attribution=attribution,
-        zero_fee=inputs.get("zero_fee"),
+        zero_fee=zero_fee,
     )
     return {
         "cost_status": result.cost_status,

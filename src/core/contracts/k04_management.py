@@ -103,6 +103,8 @@ class ManagementIntent(BaseModel):
 
     @model_validator(mode="after")
     def _bind_management_id(self) -> "ManagementIntent":
+        if self.environment is not None and not self.environment.strip():
+            raise ValueError("environment must be non-empty when provided")
         base_kwargs = {
             "lifecycle_id": self.lifecycle_id,
             "trigger_type": self.trigger_type,
@@ -231,8 +233,10 @@ def validate_authorization(
 ) -> AuthorizationVerdict:
     """核验管理请求；缺失/畸形/非正/超量输入一律拒绝并给出具体 reason。
 
-    ``reconcile_allowed`` 恒为 True：授权过期只限制新提交，不阻断按原
-    client ID 的 UNKNOWN 查单与对账（规格 §10.2）。
+    运行代/环境绑定按 strip 后非空判定：空串/空白视同未绑定
+    （``RUN_GENERATION_UNBOUND/ENVIRONMENT_UNBOUND``），fail-closed。
+    ``reconcile_allowed`` 仅当账户/生命周期/方向域匹配才为真；授权过期只
+    限制新提交，不阻断按原 client ID 的 UNKNOWN 查单与对账（规格 §10.2）。
     """
     reasons: list[str] = []
     action = str(request.get("action") or "").upper()
@@ -251,13 +255,21 @@ def validate_authorization(
         reasons.append(REASON_AUTHORIZATION_EXPIRED)
     if current_revision != authorization.position_revision:
         reasons.append(REASON_STALE_REVISION)
-    if authorization.runtime_instance_id is None:
+    runtime_bound = (
+        authorization.runtime_instance_id
+        if isinstance(authorization.runtime_instance_id, str)
+        else None
+    )
+    if runtime_bound is None or not runtime_bound.strip():
         reasons.append(REASON_RUN_GENERATION_UNBOUND)
-    elif str(request.get("runtime_instance_id") or "") != authorization.runtime_instance_id:
+    elif str(request.get("runtime_instance_id") or "") != runtime_bound:
         reasons.append(REASON_RUN_GENERATION_MISMATCH)
-    if authorization.environment is None:
+    environment_bound = (
+        authorization.environment if isinstance(authorization.environment, str) else None
+    )
+    if environment_bound is None or not environment_bound.strip():
         reasons.append(REASON_ENVIRONMENT_UNBOUND)
-    elif str(request.get("environment") or "") != authorization.environment:
+    elif str(request.get("environment") or "") != environment_bound:
         reasons.append(REASON_ENVIRONMENT_MISMATCH)
     if authorization.nonce and authorization.nonce in set(consumed_nonces):
         reasons.append(REASON_NONCE_REPLAY)

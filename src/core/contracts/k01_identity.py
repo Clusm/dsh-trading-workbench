@@ -147,6 +147,15 @@ def hash_model_route(route: ModelRoute | Mapping[str, Any]) -> str:
     return canonical_hash(_structured_mapping(route, name="model_route"))
 
 
+def _field_gap(value: Any, *, text_required: bool = False) -> bool:
+    """字段缺口判定：None、空串/空白串，或（要求文本时）非字符串。"""
+    if value is None:
+        return True
+    if text_required:
+        return not isinstance(value, str) or not value.strip()
+    return isinstance(value, str) and not value.strip()
+
+
 def _coverage_gaps(
     *,
     dependency_lock_files: Mapping[str, str],
@@ -154,7 +163,11 @@ def _coverage_gaps(
     model_route: ModelRoute | Mapping[str, Any],
     effective_config: Mapping[str, Any],
 ) -> list[str]:
-    """字段级覆盖缺口；空组是合法声明，但字段缺失/空值一律报告。"""
+    """字段级覆盖缺口；空组是合法声明，但字段缺失/空值/未知键一律报告。
+
+    非 Mapping 载荷（列表/字符串等）不调用 ``.get``，直接按 ``组.*`` 缺口
+    结构化拒绝；Mapping 载荷中的未知键按 ``组.unknown_field:<键>`` 报告。
+    """
     gaps: list[str] = []
     lock_names = {DEPENDENCY_SOURCE_FILES[0]}
     if not any(str(key).replace("\\", "/").split("/")[-1] in lock_names
@@ -166,16 +179,28 @@ def _coverage_gaps(
         and len(strategy_cards) == 0
     ):
         gaps.append("strategy.strategy_cards")
-    if isinstance(model_route, ModelRoute):
-        route_payload: Mapping[str, Any] = model_route.as_payload()
+    route_payload: Any = (
+        model_route.as_payload() if isinstance(model_route, ModelRoute) else model_route
+    )
+    if isinstance(route_payload, Mapping):
+        for key in sorted(str(key) for key in route_payload):
+            if key not in IDENTITY_COVERAGE["model_route"]:
+                gaps.append(f"model_route.unknown_field:{key}")
+        for field in IDENTITY_COVERAGE["model_route"]:
+            value = route_payload.get(field)
+            if _field_gap(value, text_required=field in ("model", "effort")):
+                gaps.append(f"model_route.{field}")
     else:
-        route_payload = model_route
-    for field in IDENTITY_COVERAGE["model_route"]:
-        if field not in route_payload or route_payload.get(field) is None:
-            gaps.append(f"model_route.{field}")
-    for field in IDENTITY_COVERAGE["effective_config"]:
-        if field not in effective_config or effective_config.get(field) is None:
-            gaps.append(f"effective_config.{field}")
+        gaps.append("model_route.*")
+    if isinstance(effective_config, Mapping):
+        for key in sorted(str(key) for key in effective_config):
+            if key not in IDENTITY_COVERAGE["effective_config"]:
+                gaps.append(f"effective_config.unknown_field:{key}")
+        for field in IDENTITY_COVERAGE["effective_config"]:
+            if _field_gap(effective_config.get(field)):
+                gaps.append(f"effective_config.{field}")
+    else:
+        gaps.append("effective_config.*")
     return gaps
 
 
@@ -199,6 +224,10 @@ def build_identity(
     策略卡、模型路由四字段（model/effort/fallback_routes/profile_overrides）
     与有效配置三字段（settings/profile_overrides/environment_overrides）
     缺失即抛 ``IdentityCoverageError``。
+
+    Mapping 载荷与 ``ModelRoute`` 同口径：``model/effort`` 必须是非空字符串，
+    其余字段空串/None 计缺口，未知键按 ``组.unknown_field:<键>`` 拒绝；
+    非 Mapping 载荷按 ``组.*`` 结构化拒绝，不触发 ``AttributeError``。
     """
     if enforce_coverage:
         gaps = _coverage_gaps(

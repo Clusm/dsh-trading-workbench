@@ -7,6 +7,15 @@
           "title": "Event Id",
           "type": "string"
         },
+        "status": {
+          "enum": [
+            "UNKNOWN",
+            "UNATTRIBUTED",
+            "ATTRIBUTED"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
         "lifecycle_id": {
           "anyOf": [
             {
@@ -26,15 +35,6 @@
           },
           "title": "Reason Codes",
           "type": "array"
-        },
-        "status": {
-          "enum": [
-            "UNKNOWN",
-            "UNATTRIBUTED",
-            "ATTRIBUTED"
-          ],
-          "title": "Status",
-          "type": "string"
         }
       },
       "required": [
@@ -56,6 +56,14 @@
           "title": "Allocation Status",
           "type": "string"
         },
+        "decisions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AttributionDecision"
+          },
+          "title": "Decisions",
+          "type": "array"
+        },
         "coverage_status": {
           "anyOf": [
             {
@@ -72,14 +80,6 @@
           ],
           "default": null,
           "title": "Coverage Status"
-        },
-        "decisions": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/AttributionDecision"
-          },
-          "title": "Decisions",
-          "type": "array"
         },
         "reason_codes": {
           "default": [],
@@ -99,6 +99,14 @@
     "CostAttribution": {
       "additionalProperties": false,
       "properties": {
+        "lifecycle_id": {
+          "title": "Lifecycle Id",
+          "type": "string"
+        },
+        "event_id": {
+          "title": "Event Id",
+          "type": "string"
+        },
         "allocated_amount": {
           "anyOf": [
             {
@@ -111,20 +119,12 @@
           ],
           "title": "Allocated Amount"
         },
-        "event_id": {
-          "title": "Event Id",
+        "method": {
+          "title": "Method",
           "type": "string"
         },
         "evidence": {
           "title": "Evidence",
-          "type": "string"
-        },
-        "lifecycle_id": {
-          "title": "Lifecycle Id",
-          "type": "string"
-        },
-        "method": {
-          "title": "Method",
           "type": "string"
         },
         "version": {
@@ -146,13 +146,8 @@
     "CostFinalization": {
       "additionalProperties": false,
       "properties": {
-        "attribution_status": {
-          "enum": [
-            "UNKNOWN",
-            "UNATTRIBUTED",
-            "ATTRIBUTED"
-          ],
-          "title": "Attribution Status",
+        "lifecycle_id": {
+          "title": "Lifecycle Id",
           "type": "string"
         },
         "cost_status": {
@@ -181,8 +176,13 @@
           "default": null,
           "title": "Coverage Status"
         },
-        "lifecycle_id": {
-          "title": "Lifecycle Id",
+        "attribution_status": {
+          "enum": [
+            "UNKNOWN",
+            "UNATTRIBUTED",
+            "ATTRIBUTED"
+          ],
+          "title": "Attribution Status",
           "type": "string"
         },
         "reason_codes": {
@@ -206,31 +206,21 @@
       "additionalProperties": false,
       "description": "一个 income_type 的同步覆盖证据；[start, end) 内部语义。",
       "properties": {
-        "coverage_status": {
-          "default": "PENDING",
-          "enum": [
-            "PENDING",
-            "COMPLETE",
-            "GAP"
-          ],
-          "title": "Coverage Status",
+        "income_type": {
+          "title": "Income Type",
           "type": "string"
+        },
+        "start_ms": {
+          "title": "Start Ms",
+          "type": "integer"
         },
         "end_ms": {
           "title": "End Ms",
           "type": "integer"
         },
-        "gaps": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/RangeGap"
-          },
-          "title": "Gaps",
-          "type": "array"
-        },
-        "income_type": {
-          "title": "Income Type",
-          "type": "string"
+        "watermark": {
+          "title": "Watermark",
+          "type": "integer"
         },
         "page_limit": {
           "exclusiveMinimum": 0,
@@ -249,20 +239,6 @@
           "default": null,
           "title": "Pagination Terminated Evidence"
         },
-        "schema_version": {
-          "default": "3.1",
-          "title": "Schema Version",
-          "type": "string"
-        },
-        "start_ms": {
-          "title": "Start Ms",
-          "type": "integer"
-        },
-        "synced_at_ms": {
-          "default": 0,
-          "title": "Synced At Ms",
-          "type": "integer"
-        },
         "termination_proof": {
           "anyOf": [
             {
@@ -274,9 +250,33 @@
           ],
           "default": null
         },
-        "watermark": {
-          "title": "Watermark",
+        "coverage_status": {
+          "default": "PENDING",
+          "enum": [
+            "PENDING",
+            "COMPLETE",
+            "GAP"
+          ],
+          "title": "Coverage Status",
+          "type": "string"
+        },
+        "gaps": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RangeGap"
+          },
+          "title": "Gaps",
+          "type": "array"
+        },
+        "synced_at_ms": {
+          "default": 0,
+          "title": "Synced At Ms",
           "type": "integer"
+        },
+        "schema_version": {
+          "default": "3.1",
+          "title": "Schema Version",
+          "type": "string"
         }
       },
       "required": [
@@ -293,8 +293,28 @@
       "additionalProperties": false,
       "description": "单条收入流水；tran_id 在同一用户同 incomeType 内唯一。",
       "properties": {
+        "environment": {
+          "title": "Environment",
+          "type": "string"
+        },
         "account_ref": {
           "title": "Account Ref",
+          "type": "string"
+        },
+        "income_type": {
+          "title": "Income Type",
+          "type": "string"
+        },
+        "tran_id": {
+          "title": "Tran Id",
+          "type": "string"
+        },
+        "symbol": {
+          "title": "Symbol",
+          "type": "string"
+        },
+        "asset": {
+          "title": "Asset",
           "type": "string"
         },
         "amount": {
@@ -309,41 +329,21 @@
           ],
           "title": "Amount"
         },
-        "asset": {
-          "title": "Asset",
-          "type": "string"
-        },
-        "environment": {
-          "title": "Environment",
-          "type": "string"
-        },
         "event_time_ms": {
           "title": "Event Time Ms",
           "type": "integer"
-        },
-        "income_type": {
-          "title": "Income Type",
-          "type": "string"
         },
         "received_at_ms": {
           "title": "Received At Ms",
           "type": "integer"
         },
-        "schema_version": {
-          "default": "3.1",
-          "title": "Schema Version",
-          "type": "string"
-        },
         "source_hash": {
           "title": "Source Hash",
           "type": "string"
         },
-        "symbol": {
-          "title": "Symbol",
-          "type": "string"
-        },
-        "tran_id": {
-          "title": "Tran Id",
+        "schema_version": {
+          "default": "3.1",
+          "title": "Schema Version",
           "type": "string"
         }
       },
@@ -365,20 +365,20 @@
     "InsertResult": {
       "additionalProperties": false,
       "properties": {
-        "duplicates": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Duplicates",
-          "type": "array"
-        },
         "inserted": {
           "default": [],
           "items": {
             "type": "string"
           },
           "title": "Inserted",
+          "type": "array"
+        },
+        "duplicates": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Duplicates",
           "type": "array"
         },
         "quarantined": {
@@ -405,25 +405,17 @@
       "additionalProperties": false,
       "description": "迟到收入只触发审计修订，不新增闭合、不改原始记录。",
       "properties": {
-        "new_closed_outcome_created": {
-          "default": false,
-          "title": "New Closed Outcome Created",
-          "type": "boolean"
-        },
-        "original_closed_at_ms": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Original Closed At Ms"
-        },
         "outcome_id": {
           "title": "Outcome Id",
+          "type": "string"
+        },
+        "source_event_id": {
+          "title": "Source Event Id",
+          "type": "string"
+        },
+        "revision_id": {
+          "default": "",
+          "title": "Revision Id",
           "type": "string"
         },
         "previous_revision_id": {
@@ -448,18 +440,26 @@
           "title": "Requires Recalculation",
           "type": "boolean"
         },
-        "revision_id": {
-          "default": "",
-          "title": "Revision Id",
-          "type": "string"
+        "new_closed_outcome_created": {
+          "default": false,
+          "title": "New Closed Outcome Created",
+          "type": "boolean"
+        },
+        "original_closed_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Original Closed At Ms"
         },
         "revision_version": {
           "default": "3.1",
           "title": "Revision Version",
-          "type": "string"
-        },
-        "source_event_id": {
-          "title": "Source Event Id",
           "type": "string"
         }
       },
@@ -473,6 +473,17 @@
     "PaginationDecision": {
       "additionalProperties": false,
       "properties": {
+        "status": {
+          "enum": [
+            "CONTINUE",
+            "TERMINATED",
+            "INVALID_PAGE_LIMIT",
+            "PAGE_NOT_SORTED",
+            "PAGINATION_STALLED"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
         "next_start_ms": {
           "anyOf": [
             {
@@ -497,17 +508,6 @@
           },
           "title": "Reason Codes",
           "type": "array"
-        },
-        "status": {
-          "enum": [
-            "CONTINUE",
-            "TERMINATED",
-            "INVALID_PAGE_LIMIT",
-            "PAGE_NOT_SORTED",
-            "PAGINATION_STALLED"
-          ],
-          "title": "Status",
-          "type": "string"
         }
       },
       "required": [
@@ -519,20 +519,20 @@
     "QuarantineRecord": {
       "additionalProperties": false,
       "properties": {
-        "existing_content_hash": {
-          "title": "Existing Content Hash",
-          "type": "string"
-        },
-        "incoming_content_hash": {
-          "title": "Incoming Content Hash",
-          "type": "string"
-        },
         "key": {
           "title": "Key",
           "type": "string"
         },
         "reason_code": {
           "title": "Reason Code",
+          "type": "string"
+        },
+        "existing_content_hash": {
+          "title": "Existing Content Hash",
+          "type": "string"
+        },
+        "incoming_content_hash": {
+          "title": "Incoming Content Hash",
           "type": "string"
         }
       },
@@ -548,6 +548,10 @@
     "RangeGap": {
       "additionalProperties": false,
       "properties": {
+        "start_ms": {
+          "title": "Start Ms",
+          "type": "integer"
+        },
         "end_ms": {
           "title": "End Ms",
           "type": "integer"
@@ -556,10 +560,6 @@
           "default": "",
           "title": "Reason",
           "type": "string"
-        },
-        "start_ms": {
-          "title": "Start Ms",
-          "type": "integer"
         }
       },
       "required": [
@@ -573,13 +573,12 @@
       "additionalProperties": false,
       "description": "分页终止的结构化证据；自由文本不足以证明“已读完窗口”。",
       "properties": {
-        "end_ms": {
-          "title": "End Ms",
+        "start_ms": {
+          "title": "Start Ms",
           "type": "integer"
         },
-        "last_page_size": {
-          "minimum": 0,
-          "title": "Last Page Size",
+        "end_ms": {
+          "title": "End Ms",
           "type": "integer"
         },
         "page_limit": {
@@ -587,8 +586,9 @@
           "title": "Page Limit",
           "type": "integer"
         },
-        "start_ms": {
-          "title": "Start Ms",
+        "last_page_size": {
+          "minimum": 0,
+          "title": "Last Page Size",
           "type": "integer"
         },
         "terminated_at_ms": {
@@ -608,6 +608,7 @@
     },
     "ZeroFeeProof": {
       "additionalProperties": false,
+      "description": "零费用证明结果；由 ``zero_fee_proof`` 产出并与当时 coverage 绑定。",
       "properties": {
         "provable": {
           "title": "Provable",
@@ -620,6 +621,18 @@
           },
           "title": "Reason Codes",
           "type": "array"
+        },
+        "coverage_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coverage Hash"
         }
       },
       "required": [
@@ -632,6 +645,15 @@
   "additionalProperties": false,
   "description": "schema 导出与冒烟校验入口；不是运行期数据结构。",
   "properties": {
+    "income_event": {
+      "$ref": "#/$defs/IncomeEvent"
+    },
+    "income_coverage": {
+      "$ref": "#/$defs/IncomeCoverage"
+    },
+    "insert_result": {
+      "$ref": "#/$defs/InsertResult"
+    },
     "attribution_decisions": {
       "$ref": "#/$defs/AttributionDecision"
     },
@@ -644,26 +666,17 @@
     "cost_finalization": {
       "$ref": "#/$defs/CostFinalization"
     },
-    "income_coverage": {
-      "$ref": "#/$defs/IncomeCoverage"
-    },
-    "income_event": {
-      "$ref": "#/$defs/IncomeEvent"
-    },
-    "insert_result": {
-      "$ref": "#/$defs/InsertResult"
-    },
     "outcome_revision": {
       "$ref": "#/$defs/OutcomeRevision"
-    },
-    "pagination_decision": {
-      "$ref": "#/$defs/PaginationDecision"
     },
     "range_gap": {
       "$ref": "#/$defs/RangeGap"
     },
     "zero_fee_proof": {
       "$ref": "#/$defs/ZeroFeeProof"
+    },
+    "pagination_decision": {
+      "$ref": "#/$defs/PaginationDecision"
     }
   },
   "required": [

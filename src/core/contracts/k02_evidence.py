@@ -83,6 +83,7 @@ REASON_CLAIM_OUTSIDE_BOUND_INPUTS = "CLAIM_OUTSIDE_BOUND_INPUTS"
 REASON_DUPLICATE_FACT_ID = "DUPLICATE_FACT_ID"
 REASON_QUALITY_MISSING_FIELD = "QUALITY_MISSING_FIELD"
 REASON_RULES_MISMATCH = "RULES_MISMATCH"
+REASON_RULES_MISSING = "RULES_MISSING"
 
 SUPPORTED_ACTIONS = ("OPEN", "CLOSE", "REDUCE", "ADJUST")
 AUTHORIZED_ACTIONS = ("CLOSE", "REDUCE", "ADJUST")
@@ -107,6 +108,7 @@ QUALITY_REQUIRED_KEYS = (
     "required_claim_kinds",
     "max_bar_age_ms",
     "as_of_ms",
+    "rules_hash",
 )
 
 _CLAIM_PATTERN = re.compile(
@@ -158,6 +160,7 @@ class EvidenceBundle(BaseModel):
     bar_times: dict[str, int] = Field(default_factory=dict)
     finality: Literal["closed", "live", "unknown"] = "unknown"
     inputs: tuple[EvidenceInput, ...] = ()
+    dropped_input_ids: tuple[str, ...] = ()
     derived_facts: tuple[DerivedFact, ...] = ()
     quality: dict[str, Any] = Field(default_factory=dict)
     expires_at_ms: int = 0
@@ -383,7 +386,7 @@ def _referenced_input_issues(
         if item is None:
             issues[input_id] = (REASON_CLAIM_UNRESOLVED,)
             continue
-        if item.symbol is not None and item.symbol != bundle.symbol:
+        if item.symbol != bundle.symbol:
             codes.append(REASON_INPUT_SYMBOL_MISMATCH)
         if item.finality == "closed" and item.bar_close_time_ms is None:
             codes.append(REASON_UNDATED_BAR)
@@ -473,7 +476,7 @@ def _expected_quality(
     unclosed: list[str] = []
     symbol_mismatch: list[str] = []
     for item in bundle.inputs:
-        if item.symbol is not None and item.symbol != bundle.symbol:
+        if item.symbol != bundle.symbol:
             symbol_mismatch.append(item.input_id)
         if item.bar_close_time_ms is None and item.finality in ("closed", "unknown"):
             undated.append(item.input_id)
@@ -493,6 +496,7 @@ def _expected_quality(
     return {
         "missing_intervals": missing_intervals,
         "stale_inputs": stale,
+        "dedup_removed": [],
         "unclosed_inputs": unclosed,
         "undated_inputs": undated,
         "symbol_mismatch_inputs": symbol_mismatch,
@@ -516,6 +520,10 @@ def _expected_finality(
     return "live"
 
 
+def _rules_hash(rules: Mapping[str, Any]) -> str:
+    return canonical_hash(dict(rules))
+
+
 def validate_bundle(
     bundle: EvidenceBundle,
     *,
@@ -525,13 +533,18 @@ def validate_bundle(
     """证据包完整性校验：content_hash、事实重建、输入时间与 quality 自洽。
 
     与 ``build_bundle`` 的输出逐项对照：事实集合（id/kind/inputs/value）、
-    missing/stale/unclosed/undated/symbol/dedup 之外的全部可推导 quality 字段、
+    missing/stale/dedup/unclosed/undated/symbol 等可推导 quality 字段、
     finality 与 bar_times。篡改输入值、换指事实、重复 fact_id 或删改 quality
     都会在此失败；``validate_intent`` 必须先调用本函数。
 
-    调用方（U03）应显式传入自己持有的 ``rules``：required_intervals /
-    required_claim_kinds / max_bar_age_ms 会与 bundle.quality 逐项比对，
-    从而阻止“改 rules 重哈希即 VALID”的路径。
+    ``rules`` 必须显式传入：缺省（None）或非 Mapping → ``RULES_MISSING``/
+    ``RULES_MISMATCH``；随后与 ``bundle.quality.rules_hash`` 做整体哈希比对，
+    并对 required_intervals / required_claim_kinds / max_bar_age_ms 逐项比对，
+    从而阻止“改 rules/quality 重哈希即 VALID”的路径。
+
+    ``symbol=None`` 的输入是 ``build_bundle`` 不可达形态（幽灵输入），
+    一律报 ``INPUT_SYMBOL_MISMATCH``；``dropped_input_ids`` 必须是非空字符串、
+    唯一且与保留输入 ID 不相交；``quality.dedup_removed`` 不可重算，必须为空。
     """
     reasons: list[str] = []
     expected_hash = model_content_hash(bundle)
@@ -545,6 +558,8 @@ def validate_bundle(
         if item.input_id in seen:
             reasons.append(REASON_DUPLICATE_INPUT_ID)
         seen.add(item.input_id)
+        if item.symbol is None:
+            reasons.append(REASON_INPUT_SYMBOL_MISMATCH)
         if item.event_time_ms > item.received_time_ms:
             reasons.append(REASON_INPUT_TIME_ORDER)
         if (
@@ -555,6 +570,18 @@ def validate_bundle(
             reasons.append(REASON_BAR_RECEIVED_BEFORE_CLOSE)
         if item.finality == "closed" and item.bar_close_time_ms is None:
             reasons.append(REASON_UNDATED_BAR)
+
+    seen_dropped: set[str] = set()
+    for dropped_id in bundle.dropped_input_ids:
+        if (
+            not isinstance(dropped_id, str)
+            or not dropped_id.strip()
+            or dropped_id in seen_dropped
+            or dropped_id in seen
+        ):
+            reasons.append(REASON_QUALITY_MISMATCH)
+            break
+        seen_dropped.add(dropped_id)
 
     missing_quality = [
         key for key in QUALITY_REQUIRED_KEYS if key not in bundle.quality
@@ -576,6 +603,7 @@ def validate_bundle(
     for key in (
         "missing_intervals",
         "stale_inputs",
+        "dedup_removed",
         "unclosed_inputs",
         "undated_inputs",
         "symbol_mismatch_inputs",
@@ -617,7 +645,13 @@ def validate_bundle(
     if seen_fact_ids != set(expected_facts):
         reasons.append(REASON_DERIVED_FACT_MISMATCH)
 
-    if rules is not None:
+    if rules is None:
+        reasons.append(REASON_RULES_MISSING)
+    elif not isinstance(rules, Mapping):
+        reasons.append(REASON_RULES_MISMATCH)
+    else:
+        if bundle.quality.get("rules_hash") != _rules_hash(rules):
+            reasons.append(REASON_RULES_MISMATCH)
         rule_intervals = [str(item) for item in (rules.get("required_intervals") or [])]
         declared_intervals = [
             str(item) for item in (bundle.quality.get("required_intervals") or [])
@@ -653,6 +687,11 @@ def build_bundle(
     只从已收盘 K 线生成派生事实；未闭合/未来/无收盘时间的 bar 保留为输入
     供审计，但不会进入事实计算。跨 symbol 输入被隔离且不参与事实与最终性。
     evidence_id 在未显式给出时是确定性的（含输入值摘要）。
+
+    重复内容按 ``(symbol, interval, close_time, values)`` 去重，被丢弃的
+    input_id 记入 ``dropped_input_ids``（审计记录，纳入 content_hash）；
+    ``quality.dedup_removed`` 保持为空（该字段不可重算，见 README §12）。
+    ``rules`` 的整体哈希写入 ``quality.rules_hash``，供验证方比对。
     """
     snap = dict(snapshot)
     if "symbol" not in snap or "as_of_ms" not in snap:
@@ -797,7 +836,7 @@ def build_bundle(
     quality = {
         "missing_intervals": missing_intervals,
         "stale_inputs": stale,
-        "dedup_removed": dropped,
+        "dedup_removed": [],
         "unclosed_inputs": [
             item.input_id for item in inputs if item.finality != "closed"
         ],
@@ -807,6 +846,7 @@ def build_bundle(
         "required_claim_kinds": required_claim_kinds,
         "max_bar_age_ms": int(max_age) if max_age is not None else None,
         "as_of_ms": as_of_ms,
+        "rules_hash": _rules_hash(rules),
     }
     bundle = EvidenceBundle(
         evidence_id=evidence_id,
@@ -817,6 +857,7 @@ def build_bundle(
         bar_times=bar_times,
         finality=bundle_finality,
         inputs=tuple(inputs),
+        dropped_input_ids=tuple(dropped),
         derived_facts=tuple(facts),
         quality=quality,
         expires_at_ms=int(expires_at_ms),
@@ -847,7 +888,9 @@ def validate_intent(
 
     非 OPEN 动作（CLOSE/REDUCE/ADJUST）必须携带 ``management_authorization_id``
     指向 K04 授权，否则 ``NEEDS_AUTH``；claim kind 必须来自有限注册表并与实际
-    谓词一致；``bound_inputs`` 必须覆盖 claim 实际引用的输入。
+    谓词一致；claim 实际引用的输入必须 ⊆ ``bound_inputs``：非 OPEN 空绑定下
+    任何引用必然越界（``CLAIM_OUTSIDE_BOUND_INPUTS``），OPEN 缺绑定由
+    ``MISSING_EVIDENCE_BINDING`` 承担。``rules`` 必须显式传入并比对哈希。
     """
     intent_id = str(intent.get("intent_id") or "")
     if not intent_id:
@@ -893,7 +936,11 @@ def validate_intent(
     elif side not in SUPPORTED_SIDES:
         note(STATUS_EVIDENCE_INVALID, REASON_INVALID_SIDE)
 
-    bound_inputs = [str(item) for item in (intent.get("bound_inputs") or [])]
+    bound_inputs = [
+        text for text in (
+            str(item).strip() for item in (intent.get("bound_inputs") or [])
+        ) if text
+    ]
     if action == "OPEN" and not bound_inputs:
         note(STATUS_EVIDENCE_INVALID, REASON_MISSING_EVIDENCE_BINDING)
     if action in AUTHORIZED_ACTIONS and not str(
@@ -948,10 +995,11 @@ def validate_intent(
             for ref in refs:
                 referenced[ref] = None
                 claim_refs.append(ref)
-    if bound_inputs:
-        bound_set = set(bound_inputs)
-        if any(ref not in bound_set for ref in claim_refs):
-            note(STATUS_EVIDENCE_INVALID, REASON_CLAIM_OUTSIDE_BOUND_INPUTS)
+    bound_set = set(bound_inputs)
+    if any(ref not in bound_set for ref in claim_refs) and (
+        action != "OPEN" or bound_inputs
+    ):
+        note(STATUS_EVIDENCE_INVALID, REASON_CLAIM_OUTSIDE_BOUND_INPUTS)
     input_issues = _referenced_input_issues(list(referenced), bundle, now)
     for codes in input_issues.values():
         for code in codes:

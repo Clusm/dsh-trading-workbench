@@ -239,6 +239,12 @@ def check_recovery(
             continue
         has_value = "value" in entry
         has_satisfied = "satisfied" in entry
+        if has_value and not isinstance(entry["value"], bool):
+            reasons.append(REASON_EVIDENCE_TYPE_INVALID)
+            continue
+        if has_satisfied and not isinstance(entry["satisfied"], bool):
+            reasons.append(REASON_EVIDENCE_TYPE_INVALID)
+            continue
         if has_value and has_satisfied and entry["value"] != entry["satisfied"]:
             reasons.append(REASON_EVIDENCE_TYPE_INVALID)
             continue
@@ -375,6 +381,8 @@ def transition_state(
         updates["submitted_at_ms"] = now_ms
     if target == "ACCEPTED" and not delivery.provider_receipt:
         raise TransitionError("ACCEPTED requires provider_receipt")
+    if target == "ACCEPTED" and delivery.submitted_at_ms is None:
+        raise TransitionError("ACCEPTED requires prior SUBMITTED fact")
     if target == "DELIVERED" and delivery.submitted_at_ms is None:
         raise TransitionError("DELIVERED requires prior SUBMITTED fact")
     if target == "DELIVERED" and not delivery.provider_receipt:

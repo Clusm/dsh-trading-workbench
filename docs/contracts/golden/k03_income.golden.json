@@ -167,7 +167,12 @@
           "synced_at_ms": 1789866100000
         },
         "events": null,
-        "zero_fee": {"provable": true, "reason_codes": []}
+        "zero_fee": {
+          "from_coverage": true,
+          "source_available": true,
+          "pages_complete": true,
+          "late_recheck_done": true
+        }
       },
       "expect": {
         "cost_status": "COMPLETE",
@@ -797,6 +802,145 @@
         "late_recheck_done": true
       },
       "expect": {"provable": false, "reason_codes": ["TERMINATION_PROOF_INVALID"]}
+    },
+    {
+      "case_id": "K03-N20",
+      "kind": "negative",
+      "title": "字典自报 provable=true 不构成零费用证明",
+      "operation": "k03_finalize",
+      "derivation": "Q NEW-R3-P2-1：finalize_costs 曾接受 Mapping 自报 {'provable': true}。无事件时必须传入 zero_fee_proof 产出的 ZeroFeeProof 对象；字典/布尔自报 → ZERO_FEE_NOT_PROVABLE，cost_status=INCOMPLETE。",
+      "inputs": {
+        "lifecycle_id": "lc-1",
+        "coverage": {
+          "income_type": "FUNDING_FEE",
+          "start_ms": 1789858800000,
+          "end_ms": 1789866000000,
+          "watermark": 1789866000000,
+          "page_limit": 1000,
+          "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "termination_proof": {
+            "start_ms": 1789858800000,
+            "end_ms": 1789866000000,
+            "page_limit": 1000,
+            "last_page_size": 3,
+            "terminated_at_ms": 1789866100000
+          },
+          "coverage_status": "COMPLETE",
+          "gaps": [],
+          "synced_at_ms": 1789866100000
+        },
+        "events": null,
+        "zero_fee": {
+          "provable": true,
+          "reason_codes": []
+        }
+      },
+      "expect": {
+        "cost_status": "INCOMPLETE",
+        "coverage_status": "COMPLETE",
+        "attribution_status": "UNKNOWN",
+        "reason_codes": [
+          "ZERO_FEE_NOT_PROVABLE"
+        ]
+      }
+    },
+    {
+      "case_id": "K03-N21",
+      "kind": "negative",
+      "title": "跨窗口零费用证明不得复用",
+      "operation": "k03_finalize",
+      "derivation": "Q NEW-R3-P2-1：证明曾与 coverage 零绑定，cov_b 的合法证明可用于 cov_a。ZeroFeeProof 回带 coverage 内容哈希，finalize_costs 重新计算并要求一致；窗口/水位等任一不同 → ZERO_FEE_PROOF_MISMATCH。",
+      "inputs": {
+        "lifecycle_id": "lc-1",
+        "coverage": {
+          "income_type": "FUNDING_FEE",
+          "start_ms": 1789858800000,
+          "end_ms": 1789866000000,
+          "watermark": 1789866000000,
+          "page_limit": 1000,
+          "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "termination_proof": {
+            "start_ms": 1789858800000,
+            "end_ms": 1789866000000,
+            "page_limit": 1000,
+            "last_page_size": 3,
+            "terminated_at_ms": 1789866100000
+          },
+          "coverage_status": "COMPLETE",
+          "gaps": [],
+          "synced_at_ms": 1789866100000
+        },
+        "events": null,
+        "zero_fee": {
+          "from_coverage": true,
+          "coverage": {
+            "income_type": "FUNDING_FEE",
+            "start_ms": 1789850000000,
+            "end_ms": 1789858800000,
+            "watermark": 1789858800000,
+            "page_limit": 1000,
+            "termination_proof": {
+              "start_ms": 1789850000000,
+              "end_ms": 1789858800000,
+              "page_limit": 1000,
+              "last_page_size": 5,
+              "terminated_at_ms": 1789858900000
+            },
+            "coverage_status": "COMPLETE",
+            "gaps": [],
+            "synced_at_ms": 1789858900000
+          },
+          "source_available": true,
+          "pages_complete": true,
+          "late_recheck_done": true
+        }
+      },
+      "expect": {
+        "cost_status": "INCOMPLETE",
+        "coverage_status": "COMPLETE",
+        "attribution_status": "UNKNOWN",
+        "reason_codes": [
+          "ZERO_FEE_PROOF_MISMATCH"
+        ]
+      }
+    },
+    {
+      "case_id": "K03-N22",
+      "kind": "negative",
+      "title": "布尔自报不得跳过零费用证明",
+      "operation": "k03_finalize",
+      "derivation": "Q NEW-R3-P2-1 / B N7：自由布尔参数已移除，非 ZeroFeeProof 对象一律视为无证明 → ZERO_FEE_NOT_PROVABLE。",
+      "inputs": {
+        "lifecycle_id": "lc-1",
+        "coverage": {
+          "income_type": "FUNDING_FEE",
+          "start_ms": 1789858800000,
+          "end_ms": 1789866000000,
+          "watermark": 1789866000000,
+          "page_limit": 1000,
+          "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "termination_proof": {
+            "start_ms": 1789858800000,
+            "end_ms": 1789866000000,
+            "page_limit": 1000,
+            "last_page_size": 3,
+            "terminated_at_ms": 1789866100000
+          },
+          "coverage_status": "COMPLETE",
+          "gaps": [],
+          "synced_at_ms": 1789866100000
+        },
+        "events": null,
+        "zero_fee": true
+      },
+      "expect": {
+        "cost_status": "INCOMPLETE",
+        "coverage_status": "COMPLETE",
+        "attribution_status": "UNKNOWN",
+        "reason_codes": [
+          "ZERO_FEE_NOT_PROVABLE"
+        ]
+      }
     }
   ]
 }

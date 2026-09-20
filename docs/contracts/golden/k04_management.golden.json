@@ -1058,6 +1058,138 @@
         "current_revision": 3
       },
       "expect": {"allowed": false, "reconcile_allowed": false, "reason_codes": ["ACCOUNT_MISMATCH"]}
+    },
+    {
+      "case_id": "K04-N28",
+      "kind": "negative",
+      "title": "空串绑定视同未绑定，一律拒绝",
+      "operation": "k04_authorization",
+      "derivation": "B N12 / Q NEW-R3-P2-4：runtime_instance_id=''/environment='' 曾使 UNBOUND 检查落空，未携带绑定的合法 REDUCE 被 allowed=true。绑定按 strip 后非空判定，空串视同未绑定 → RUN_GENERATION_UNBOUND + ENVIRONMENT_UNBOUND。",
+      "inputs": {
+        "authorization": {
+          "authorization_id": "auth-synth-1",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "max_reduce_qty": "0.01",
+          "target_protection": {
+            "sl_client_id": "sl-synth-1",
+            "tp_client_id": "tp-synth-1",
+            "is_last_protection": false
+          },
+          "position_revision": 3,
+          "nonce": "nonce-synth-1",
+          "issued_at_ms": 1789862300000,
+          "expires_at_ms": 1789866000000,
+          "environment": "",
+          "runtime_instance_id": ""
+        },
+        "request": {
+          "action": "REDUCE",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "reduce_qty": "0.005",
+          "current_position_qty": "0.01",
+          "requested_net_delta": "0",
+          "remove_protection": false
+        },
+        "now_ms": 1789862401000,
+        "current_revision": 3
+      },
+      "expect": {
+        "allowed": false,
+        "reason_codes": [
+          "RUN_GENERATION_UNBOUND",
+          "ENVIRONMENT_UNBOUND"
+        ]
+      }
+    },
+    {
+      "case_id": "K04-N29",
+      "kind": "negative",
+      "title": "空白字符串绑定视同未绑定，一律拒绝",
+      "operation": "k04_authorization",
+      "derivation": "B N12 同源边界：空白串是未配置项的常见默认值。strip 后为空一律视同未绑定，不得通过 RUN_GENERATION_MISMATCH 之外的路径放行。",
+      "inputs": {
+        "authorization": {
+          "authorization_id": "auth-synth-1",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "max_reduce_qty": "0.01",
+          "target_protection": {
+            "sl_client_id": "sl-synth-1",
+            "tp_client_id": "tp-synth-1",
+            "is_last_protection": false
+          },
+          "position_revision": 3,
+          "nonce": "nonce-synth-1",
+          "issued_at_ms": 1789862300000,
+          "expires_at_ms": 1789866000000,
+          "environment": "  ",
+          "runtime_instance_id": "   "
+        },
+        "request": {
+          "action": "REDUCE",
+          "account_ref": "demo:SYNTH_ACCT",
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "reduce_qty": "0.005",
+          "current_position_qty": "0.01",
+          "requested_net_delta": "0",
+          "remove_protection": false
+        },
+        "now_ms": 1789862401000,
+        "current_revision": 3
+      },
+      "expect": {
+        "allowed": false,
+        "reason_codes": [
+          "RUN_GENERATION_UNBOUND",
+          "ENVIRONMENT_UNBOUND"
+        ]
+      }
+    },
+    {
+      "case_id": "K04-N30",
+      "kind": "negative",
+      "title": "ManagementIntent 环境字段为空串被拒绝",
+      "operation": "k04_intent",
+      "derivation": "B N12 建议②：ManagementIntent.environment 提供时必须 strip 后非空；空串不是合法环境域，模型校验直接拒绝（ValidationError），不得静默归一化。",
+      "inputs": {
+        "intent": {
+          "management_id": "placeholder",
+          "identity": {
+            "schema_version": "3.1",
+            "environment": "demo",
+            "account_ref": "demo:SYNTH_ACCT",
+            "artifact_hash": "artifact-synth-hash",
+            "git_commit": "0123456789abcdef0123456789abcdef01234567",
+            "dependency_hash": "dependency-synth-hash",
+            "effective_config_hash": "effective-config-synth-hash",
+            "strategy_hash": "strategy-synth-hash",
+            "model_route_hash": "model-route-synth-hash",
+            "runtime_instance_id": "inst-synth-r1"
+          },
+          "lifecycle_id": "lc-1",
+          "position_side": "LONG",
+          "action": "CLOSE",
+          "max_reduce_qty": "0.01",
+          "position_revision": 3,
+          "reason_code": "TIME_STOP",
+          "policy_version": "policy-v3",
+          "expires_at_ms": 1789866000000,
+          "evidence_id": "eb-A",
+          "trigger_type": "time_stop",
+          "trigger_event_id": "evt-1",
+          "environment": ""
+        },
+        "rebind": true
+      },
+      "expect": {
+        "error": "ValidationError"
+      }
     }
   ]
 }
