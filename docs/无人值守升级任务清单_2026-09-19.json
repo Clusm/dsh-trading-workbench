@@ -105,6 +105,24 @@
         {
           "type": "planning_commit",
           "commit": "5295632c748882574a8691d3e7b4b9df2ad7bf37"
+        },
+        {
+          "type": "orchestrator_check",
+          "date": "2026-09-20",
+          "model": "deepseek-v4.1-flash",
+          "result": "Task(general) 子代理可用；2路并行完成 F/Q W0 任务；同模型偏差需声明"
+        },
+        {
+          "type": "qa_fixtures_w0",
+          "commit": "1c695b1a397c943112138b05451a602a23c3bd95",
+          "merge_commit": "212b296c521a81e1b184aabd52af55ee2606e09e",
+          "files": 5,
+          "path": "tests/acceptance/independent/fixtures/"
+        },
+        {
+          "type": "fingerprint_analysis",
+          "path": "docs/dispatch/reviews/U00/w0/F_fingerprint_r1.md",
+          "session": "ses_f40a4b1e1ffevvkMGfimxKGoLK"
         }
       ],
       "blockers": [],
@@ -146,7 +164,16 @@
       "pending_dependencies": [],
       "integration_candidate_commit": null,
       "review_assignments": [],
-      "qa_runs": []
+      "qa_runs": [
+        {
+          "session": "Q-w0r1",
+          "candidate": null,
+          "test_commit": "1c695b1a397c943112138b05451a602a23c3bd95",
+          "commands": "W0 fixture preparation only; runner registration pending",
+          "exit_code": null,
+          "evidence": "5 fixtures/888 lines; DC mapping proposal returned; I registered mappings"
+        }
+      ]
     },
     {
       "id": "U01",
@@ -175,7 +202,8 @@
         "F10",
         "F14",
         "F16",
-        "F23"
+        "F23",
+        "F25"
       ],
       "evidence": [],
       "blockers": [],
@@ -1465,121 +1493,227 @@
       "RV02": "U01",
       "RV03": "U01"
     },
-    "dc_test_cases_registration": "PENDING_Q_REGISTRATION_AT_W0",
-    "notes": "DL 映射见各任务 dl_work_packages；RV 复现转回归归 U01；DC01-DC16 由 Q 在 W0 登记进 F 矩阵，建议映射见 dc_test_cases。本登记不改变风险档、交易代码与运行状态。 v1.1补齐首批路径与验收；DL09为后置设计映射，不代表实现范围已经可分派，须后续登记所有权和重新批准。"
+    "dc_test_cases_registration": "REGISTERED_2026-09-20_BY_I_FROM_Q_W0R1",
+    "notes": "DL 映射见各任务 dl_work_packages；RV 复现转回归归 U01；DC01-DC16 由 Q 在 W0 登记进 F 矩阵，建议映射见 dc_test_cases。本登记不改变风险档、交易代码与运行状态。 v1.1补齐首批路径与验收；DL09为后置设计映射，不代表实现范围已经可分派，须后续登记所有权和重新批准。 F25已登记为矩阵扩展（复盘统计/归因/校准，归U01）。"
   },
   "dc_test_cases": [
     {
       "id": "DC01",
-      "proposed_task": "U01",
-      "proposed_fault_refs": "F10/F23",
+      "task": "U01",
+      "fault_refs": [
+        "F25"
+      ],
+      "cross_tasks": [],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "统计口径：NULL不计赢、持平独立、重算幂等；晚到/零归F10/F23附加断言"
     },
     {
       "id": "DC02",
-      "proposed_task": "U01",
-      "proposed_fault_refs": "F10",
+      "task": "U01",
+      "fault_refs": [
+        "F25"
+      ],
+      "cross_tasks": [],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "失效需触发事件（RV02）"
     },
     {
       "id": "DC03",
-      "proposed_task": "U01",
-      "proposed_fault_refs": "-",
+      "task": "U01",
+      "fault_refs": [
+        "F25"
+      ],
+      "cross_tasks": [],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "校准区分高/低估与小样本（RV03）"
     },
     {
       "id": "DC04",
-      "proposed_task": "U04",
-      "proposed_fault_refs": "F02/F03/F21",
+      "task": "U01",
+      "fault_refs": [
+        "F02",
+        "F03",
+        "F21"
+      ],
+      "cross_tasks": [
+        "U04"
+      ],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "生命周期配对不按最近symbol；执行侧fill守恒归U04"
     },
     {
       "id": "DC05",
-      "proposed_task": "U01",
-      "proposed_fault_refs": "F15",
+      "task": "U01",
+      "fault_refs": [
+        "F15",
+        "F18"
+      ],
+      "cross_tasks": [],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "查询无写副作用+跨profile隔离（F18路径语义）"
     },
     {
       "id": "DC06",
-      "proposed_task": "U03",
-      "proposed_fault_refs": "F09/F13",
+      "task": "U03",
+      "fault_refs": [
+        "F09",
+        "F07"
+      ],
+      "cross_tasks": [],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "去F13：无身份变更；NaN/Infinity归K02/F09"
     },
     {
       "id": "DC07",
-      "proposed_task": "U03",
-      "proposed_fault_refs": "F09",
+      "task": "U03",
+      "fault_refs": [
+        "F09"
+      ],
+      "cross_tasks": [],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": ""
     },
     {
       "id": "DC08",
-      "proposed_task": "U05",
-      "proposed_fault_refs": "F07",
+      "task": "U05",
+      "fault_refs": [
+        "F07"
+      ],
+      "cross_tasks": [],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": ""
     },
     {
       "id": "DC09",
-      "proposed_task": "U05",
-      "proposed_fault_refs": "F20",
+      "task": "U05",
+      "fault_refs": [
+        "F20"
+      ],
+      "cross_tasks": [
+        "U13"
+      ],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": ""
     },
     {
       "id": "DC10",
-      "proposed_task": "U08",
-      "proposed_fault_refs": "F19",
+      "task": "U08",
+      "fault_refs": [
+        "F19",
+        "F24",
+        "F07"
+      ],
+      "cross_tasks": [
+        "U05"
+      ],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "研究状态如实、管理优先"
     },
     {
       "id": "DC11",
-      "proposed_task": "U03",
-      "proposed_fault_refs": "F09",
+      "task": "U03",
+      "fault_refs": [
+        "F09"
+      ],
+      "cross_tasks": [],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "缺失≠0作F09附加断言"
     },
     {
       "id": "DC12",
-      "proposed_task": "U03",
-      "proposed_fault_refs": "F09/F15",
+      "task": "U03",
+      "fault_refs": [
+        "F09",
+        "F15"
+      ],
+      "cross_tasks": [],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "注入仅数据；实现主责U03/U05"
     },
     {
       "id": "DC13",
-      "proposed_task": "U04",
-      "proposed_fault_refs": "F02/F21",
+      "task": "U04",
+      "fault_refs": [
+        "F01",
+        "F02",
+        "F21"
+      ],
+      "cross_tasks": [],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "UNKNOWN不盲重下=F01语义"
     },
     {
       "id": "DC14",
-      "proposed_task": "U15",
-      "proposed_fault_refs": "F13",
+      "task": "U15",
+      "fault_refs": [
+        "F13",
+        "F07"
+      ],
+      "cross_tasks": [
+        "U05"
+      ],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "S05联合；缺key/Mock阻断新仓"
     },
     {
       "id": "DC15",
-      "proposed_task": "U06a",
-      "proposed_fault_refs": "F16",
+      "task": "U06a",
+      "fault_refs": [
+        "F16",
+        "F20"
+      ],
+      "cross_tasks": [
+        "U09"
+      ],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "侧车异常不得饿死管理；候选计数归U09"
     },
     {
       "id": "DC16",
-      "proposed_task": "U09",
-      "proposed_fault_refs": "F17/F24",
+      "task": "U09",
+      "fault_refs": [
+        "F17",
+        "F24",
+        "F18"
+      ],
+      "cross_tasks": [
+        "U13",
+        "U01"
+      ],
       "registration_owner": "Q",
-      "status": "PENDING_W0_REGISTRATION"
+      "status": "REGISTERED",
+      "verified_by": "Q-w0r1",
+      "note": "旧库迁移归F18；未来泄漏F24/F25附加断言"
     }
   ],
   "dispatch": {
@@ -1666,7 +1800,21 @@
       "freeze_contract_tag",
       "record_contract_commit_in_later_ledger_commit",
       "create_implementation_branches"
-    ]
+    ],
+    "orchestrator_check": {
+      "tool": "Task(general)",
+      "model": "deepseek-v4.1-flash",
+      "parallel_sessions_verified": 2,
+      "status": "PASS",
+      "date": "2026-09-20"
+    },
+    "review_workspaces": [
+      "mat-wt/reviews/U00/Q/w0r1",
+      "mat-wt/reviews/U00/C/w0r1",
+      "mat-wt/reviews/U00/B/w0r1",
+      "mat-wt/reviews/U00/F/w0r1"
+    ],
+    "qa_worktree": "mat-wt/Q (branch qa/U00/w0-fixtures)"
   },
   "dispatch_version": "v1.1",
   "increment_scope": [
@@ -1766,5 +1914,16 @@
       "paths": [],
       "acceptance": "完整经验库/校准v2另行登记，禁止以清理或纯重构提交夹带学习行为变化"
     }
-  ]
+  ],
+  "fault_matrix_extension": {
+    "F25": {
+      "title": "复盘统计、归因与校准",
+      "scope": "RV01-RV03：NULL不计赢、持平独立、失效需触发事件、校准区分高低估与小样本、重算幂等",
+      "owner_task": "U01",
+      "cross_review": "Q",
+      "registered_by": "I",
+      "date": "2026-09-20",
+      "note": "依报告§10『Q登记映射或新增编号』授权新增，作为F01-F24矩阵扩展；不改变其余矩阵项。"
+    }
+  }
 }
