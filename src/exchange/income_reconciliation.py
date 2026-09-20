@@ -55,9 +55,14 @@ from core.contracts import (
     zero_fee_proof,
 )
 
-#: ``QuarantineRecord`` 未在 ``core.contracts`` 的 ``__init__`` 再导出（该文件属契约侧、
-#: 本批不在作者独占范围内），因此从 K03 子模块直接引用，不复制其定义。
-from core.contracts.k03_income import QuarantineRecord  # noqa: E402
+#: ``QuarantineRecord`` / 覆盖聚合的 reason code 未在 ``core.contracts`` 的 ``__init__``
+#: 再导出（该文件属契约侧、本批不在作者独占范围内），因此从 K03 子模块直接引用，
+#: 不复制其定义。
+from core.contracts.k03_income import (  # noqa: E402
+    REASON_COVERAGE_NOT_COMPLETE,
+    REASON_NO_COVERAGE,
+    QuarantineRecord,
+)
 
 # --------------------------------------------------------------------------- #
 # 常量与 reason code
@@ -410,6 +415,7 @@ def sync_income_window(
         rows = list(fetch_page(page_no))
         pages = page_no
         last_page_size = len(rows)
+        wire_events: list[IncomeEvent] = []
         page_events: list[IncomeEvent] = []
         for row in rows:
             event = normalize_income_row(
@@ -417,6 +423,7 @@ def sync_income_window(
                 received_at_ms=received_at_ms,
                 source_hash=str(row.get("source_hash") or ""),
             )
+            wire_events.append(event)
             row_type = canonical_income_type(event.income_type)
             if row_type not in KNOWN_INCOME_TYPES:
                 unknown_types.add(row_type)
@@ -430,7 +437,11 @@ def sync_income_window(
                 continue
             page_events.append(event)
         page_ids = frozenset(idempotency_key_text(item) for item in page_events)
-        page_times = [item.event_time_ms for item in page_events]
+        # 翻页推进判定必须基于**线上原始页**（``wire_events``）而不是过滤后的事件：
+        # 一页若因类型/越窗被整页滤掉，其 ``len`` 仍是满页，用过滤后的空页去
+        # ``plan_next_page`` 会得到 TERMINATED ⇒ 提前终止且把后续页的未知类型
+        # 一起吞掉（覆盖率被谎报为 COMPLETE）。
+        page_times = [item.event_time_ms for item in wire_events]
         page_max_ms = max(page_times) if page_times else None
         if (
             prev_page_max_ms is not None
@@ -459,7 +470,7 @@ def sync_income_window(
             break
 
         decision = plan_next_page(
-            page_events, start_ms=start, end_ms=end, page_limit=page_limit
+            wire_events, start_ms=start, end_ms=end, page_limit=page_limit
         )
         if decision.status == "PAGE_NOT_SORTED":
             reason_codes.append(REASON_PAGE_NOT_SORTED)
@@ -1033,10 +1044,13 @@ def reconcile_session(
     )
 
 
-#: 分量键名中的「已由 fill 计入」标记：白名单式反向判定，不再只拦字面 `commission`。
+#: 分量键名中的「已由 fill 计入」标记：反向判定（命中标记即拒绝），不再只拦字面
+#: `commission`。每个类型可带多个标记——``income_fees``/``income_fee_usdt`` 这类真实
+#: 字段名不含 ``commission`` 字样，只靠单词匹配会漏拦（P1-5）。标记刻意避开
+#: ``net_fees_from_fills_usdt``（fill 侧唯一费用入口，合法可加分量）。
 _FILL_OWNED_KEY_MARKERS = {
-    INCOME_TYPE_COMMISSION: "commission",
-    INCOME_TYPE_REALIZED_PNL: "realized",
+    INCOME_TYPE_COMMISSION: ("commission", "income_fee"),
+    INCOME_TYPE_REALIZED_PNL: ("realized",),
 }
 
 
@@ -1052,11 +1066,12 @@ def assert_no_double_count(
     keys = [str(key) for key in components]
     for event in income_events:
         kind = canonical_income_type(event.income_type)
-        marker = _FILL_OWNED_KEY_MARKERS.get(kind)
-        if marker is None:
+        markers = _FILL_OWNED_KEY_MARKERS.get(kind)
+        if markers is None:
             continue
         for key in keys:
-            if marker in key.lower():
+            lowered = key.lower()
+            if any(marker in lowered for marker in markers):
                 raise DoubleCountError(
                     f"{REASON_DOUBLE_COUNT}: {kind} tran_id={event.tran_id} "
                     f"component_key={key}"
@@ -1252,6 +1267,15 @@ class CoverageAggregate:
         return cursor >= int(end_ms)
 
 
+#: 存储行携带、但不在 ``IncomeCoverage``（``extra="forbid"``）字段集内的审计列。
+_COVERAGE_STORAGE_ONLY_FIELDS = (
+    "id", "gaps_json", "termination_proof_json",
+    # 环境域/账户域列：覆盖证据本身不含这两个字段，域由查询参数绑定（P1-1）。
+    "environment", "account_ref",
+    "environment_norm", "account_ref_norm", "income_type_norm",
+)
+
+
 def income_coverage_from_row(row: Mapping[str, Any]) -> IncomeCoverage:
     """存储行 → :class:`IncomeCoverage`（解析 JSON 列，绝不把缺失折成零）。"""
     payload = dict(row)
@@ -1263,9 +1287,8 @@ def income_coverage_from_row(row: Mapping[str, Any]) -> IncomeCoverage:
         proof = json.loads(proof) if proof not in ("", "null") else None
     payload["gaps"] = tuple(gaps or ())
     payload["termination_proof"] = proof
-    payload.pop("gaps_json", None)
-    payload.pop("termination_proof_json", None)
-    payload.pop("id", None)
+    for name in _COVERAGE_STORAGE_ONLY_FIELDS:
+        payload.pop(name, None)
     return IncomeCoverage.model_validate(payload)
 
 

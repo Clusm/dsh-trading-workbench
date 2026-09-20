@@ -696,8 +696,15 @@ def test_cross_page_defenses(fx: dict) -> None:
           sum((Decimal(item.amount) for item in dup.events), Decimal(0))
           == Decimal("-1.50000000"),
           sum((Decimal(item.amount) for item in dup.events), Decimal(0)))
-    check("跨页重复只记 duplicates、不新增 inserted",
-          dup.insert.inserted == () and len(dup.insert.duplicates) == 1,
+    # 9003 在第 1 页已入账，第 2 页重投只记 duplicates：3 个唯一键各 insert 一次。
+    dup_9003 = idempotency_key_text(normalize_income_row(
+        ws["pages"][0][1], environment="demo", account_ref="SYNTH_ACCT_PLACEHOLDER",
+        received_at_ms=0))
+    check("跨页重复只记 duplicates、不重复计入 inserted",
+          len(dup.insert.inserted) == len(set(dup.insert.inserted)) == 3
+          and dup.insert.inserted.count(dup_9003) == 1
+          and dup.insert.duplicates == (dup_9003,)
+          and dup.insert.quarantined == (),
           (dup.insert.inserted, dup.insert.duplicates))
 
     # (b) 页序回退：后一页最大时间早于前一页 -> GAP（P1-3）
@@ -1055,10 +1062,12 @@ def test_real_store_integration(fx: dict) -> None:
               and {e.tran_id for e in replay.events}
               == {row["tran_id"] for row in before},
               [(e.tran_id, e.amount) for e in replay.events])
-        check("重放金额真值不变（Σ = -1.70）",
-              sum((Decimal(e.amount) for e in replay.events), Decimal(0))
-              == Decimal("-1.70000000"),
-              sum((Decimal(e.amount) for e in replay.events), Decimal(0)))
+        # W1 四条流水（-0.50 +0.25 -1.25 -0.30）真值 = -1.80；重放必须逐分不变。
+        first_pass_sum = sum((Decimal(e.amount) for e in sync.events), Decimal(0))
+        replay_sum = sum((Decimal(e.amount) for e in replay.events), Decimal(0))
+        check("重放金额真值不变（Σ == 首轮 Σ == -1.80）",
+              replay_sum == first_pass_sum == Decimal("-1.80000000"),
+              (first_pass_sum, replay_sum))
         check("重放后库内行数不减", len(db.fetch_income_events(
             environment="demo", account_ref="SYNTH_ACCT_PLACEHOLDER")) == 4)
         check("补丁 content_hash 与 K03 单一真值源一致（否则重放会被误判 ID 冲突）",
