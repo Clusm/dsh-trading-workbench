@@ -81,11 +81,9 @@ class _Allowance:
 #: 行号按**集成树**（本包的补丁基线）填写；指纹分支让同一登记在行号漂移的树上
 #: （如 U13 删掉一行 import 后的旧树）仍然生效，不需要改行号。
 _REGISTERED_FALSE_POSITIVES: dict[tuple[str, int, str], _Allowance] = {
-    ("docs/dispatch/reviews/U00/0b85bef/C_w0r1_r2.md", 31, "secret-assignment"):
-        _Allowance(
-            reason="U00 r2 评审报告引用被测字符串的原文片段（值为省略号+中文说明，非凭据）",
-            fingerprint="deab45caecdfeaaf",
-        ),
+    # 注：原先还有一条登记指向 docs/dispatch/reviews/U00/0b85bef/C_w0r1_r2.md:31。
+    # 该路径自 2026-09-21 起列入 KI04 的流程记录豁免范围（见 _EXEMPT_PREFIXES），
+    # 不再参与扫描，故这条登记必然过期；按 stale 即失败的口径必须删除而不是保留。
     ("tests/acceptance/test_runtime_identity.py", 523, "provider-token"):
         _Allowance(
             reason="U15 刻意构造的 sk- 形状哨兵（should-never-appear），用于断言凭据不外泄",
@@ -314,6 +312,25 @@ def _tracked_files(root: Path) -> list[Path]:
     return _git_files(root)
 
 
+#: 评审证据与流程台账的**范围豁免**（对应台账 KI04）。
+#:
+#: 理由：手册 §5 要求把审查报告归档进 ``docs/dispatch/reviews/``，台账 JSON 是唯一
+#: 状态源，两者都是**不可变的流程记录**；而"审查密钥扫描器本身"必然要引用它所要匹配
+#: 的模式 —— 于是每归档一份报告就自造新的假阳性，随报告数量单调增长（实测 22 条命中
+#: **全部**来自文档，其中 14 条来自针对扫描器的那几份审查报告；另有 4 条由编排者
+#: 在台账里写示例字面量自造）。这些路径不执行、不进发布包、不是交付物，且为保证据
+#: 完整性**不应被改写**。
+#: **豁免仅限此二者**：``src/``、``scripts/``、``config/`` 与 ``docs/`` 的其它内容
+#: 一律照扫。范围与理由须与台账 ``KI04`` 同步；若将来收窄或扩大，必须同时改这里与 KI04。
+_EXEMPT_PREFIXES = ("docs/dispatch/reviews/",)
+_EXEMPT_FILES = ("docs/无人值守升级任务清单_2026-09-19.json",)
+
+
+def _is_exempt(relative: str) -> bool:
+    """该相对路径是否属于 KI04 的流程记录豁免范围。"""
+    return relative.startswith(_EXEMPT_PREFIXES) or relative in _EXEMPT_FILES
+
+
 def scannable_files(root: Path) -> list[Path]:
     """返回待扫描文件 = 已跟踪文件 + 未跟踪但未被忽略的文件。
 
@@ -321,11 +338,19 @@ def scannable_files(root: Path) -> list[Path]:
     完全隐形，而它们随后就会被提交——密钥门禁的作用是在**提交之前**拦下来，
     不是等进了索引才看。未跟踪文件同样排除 .gitignore 命中的运行时目录
     （``data/``、``.env``、``.venv/`` 等），因此不会扫到本机真实凭据。
+
+    2026-09-21：再排除 KI04 的流程记录豁免范围（见 ``_EXEMPT_PREFIXES``）。
     """
     tracked = _git_files(root)
     untracked = _git_files(root, "--others", "--exclude-standard")
     merged: dict[str, Path] = {}
     for path in [*tracked, *untracked]:
+        try:
+            relative = path.resolve().relative_to(root.resolve()).as_posix()
+        except (ValueError, OSError):
+            relative = path.as_posix()
+        if _is_exempt(relative):
+            continue
         merged[str(path)] = path
     return sorted(merged.values())
 

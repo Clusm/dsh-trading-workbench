@@ -33,7 +33,6 @@ from exchange.order_outbox import (  # noqa: E402
 )
 from exchange.protection_commands import (  # noqa: E402
     REASON_CANCEL_NOT_EXECUTED,
-    REASON_FLAT_CLOSE_NOT_CONFIRMED,
     REASON_FLAT_NOT_CONFIRMED,
     REASON_HEALTH_NO_FLAT_CLOSE,
     REASON_PARTIAL_FILL_PRESENT,
@@ -961,7 +960,7 @@ def section_schema_and_guard(tmpdir: Path) -> None:
                                 ("legacy-2", "/fapi/v1/legacyUnknown")):
         db.conn.execute(
             f"INSERT INTO order_outbox({legacy_columns}) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (client_id, "demo", "legacy", f"ENTRY:ZZZUSDT:BOTH", "ZZZUSDT", "BUY", "BOTH",
+            (client_id, "demo", "legacy", "ENTRY:ZZZUSDT:BOTH", "ZZZUSDT", "BUY", "BOTH",
              "MARKET", "ENTRY", 0.1, None, 0, endpoint, "FILLED", "{}", 1, stamp, stamp),
         )
     db.conn.commit()

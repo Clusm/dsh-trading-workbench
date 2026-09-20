@@ -18,7 +18,6 @@ from core.contracts import (
 from exchange.event_models import ExchangeEvent
 from exchange.protection_commands import (
     CommandKind,
-    ExecutionCommandError,
     apply_late_fill,
     classify_endpoint,
     classify_row,

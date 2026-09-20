@@ -37,7 +37,6 @@ from enum import Enum
 from typing import Any
 
 from core.contracts import (
-    DuplicateFillError,
     NumericInputError,
     OrderQuantity,
     QuantityError,

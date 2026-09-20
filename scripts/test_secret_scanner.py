@@ -135,8 +135,11 @@ check("残余登记：明文与**同文件已绑定名**逐字同形时仍放行
       not find_secret_hits(BIND + ASSIGN + "\n", suffix=".py"))
 
 print("\n[5] 误报登记必须是显式且精确的（两向 fail-closed）")
-check("登记表非空（KI01 的三处误报已显式登记而非静默忽略）",
-      len(_REGISTERED_FALSE_POSITIVES) >= 3)
+# 注：数量不是重点（KI01 已由"须真被绑定"的结构性判定修好，不再需要登记；
+# U00 评审报告那条登记随 KI04 的流程记录豁免一并删除），要求的是**非空**：
+# 凡确需登记的误报必须显式列出，而不是靠放宽规则静默放过。
+check("登记表非空（确需登记的误报显式列出而非静默忽略）",
+      len(_REGISTERED_FALSE_POSITIVES) >= 1)
 check("登记项精确到行号与规则名",
       all(isinstance(key, tuple) and len(key) == 3 and isinstance(key[1], int)
           for key in _REGISTERED_FALSE_POSITIVES))
