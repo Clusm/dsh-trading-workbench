@@ -1871,6 +1871,22 @@
             "validate_windows_service_plan --require-files 未暴露 python_executable_source",
             "真实双 profile SCM 注册/宿主托管/真实告警演练 = U12 OPS（需 D01/D02）"
           ]
+        },
+        {
+          "type": "review_r1_F",
+          "candidate": "bf4c0cc",
+          "verdict": "CHANGES_REQUESTED（有条件GO）",
+          "counts": "P0=0 / P1 x3 / P2 x9 / P3 x9",
+          "archived_path": "docs/dispatch/reviews/U13/bf4c0cc/F_r1.md",
+          "confirmed": "11 补丁与作者分支逐字节一致（无漂移）；30/60/120、第4次->MANUAL_RECOVERY 且已持久化；单实例锁真实互斥；epoch/坏包/损坏守卫有效；门禁证据类型/时效/未来/未验证全被拒",
+          "ki02_verdict": "**基本安全但回退面未收口**：配置值仍受根边界校验（.. 逃逸与根外绝对路径均 ValueError，且先于 require_files 短路）；strict_python=True 真 fail-closed。**但**默认非 strict 时 .venv 缺失会回退 sys.executable（A1），安装期宿主脚本只 print warn 不失败；显式 MTA_PYTHON 指向不存在路径被**静默忽略**（A2）。建议安装期强制 strict",
+          "delta": "pristine 73 脚本 1 失败(KI02) -> 打补丁树 73 脚本 **0 失败**；新引入失败 0、修复 1。但官方入口 run_offline_regression 在打补丁树上**直接中止**（未登记 smoke_u13_supervision），需逐脚本口径才成立（属 I 的原子登记项）",
+          "blocking": [
+            "P1-1 官方回归入口被新 smoke 脚本阻断（集成必过项，属 I 的原子登记）",
+            "P1-2 **门禁 fail-open**：recovery_gate.json 损坏/删除 -> allowed=True",
+            "P1-3 complete_reconcile 无生产调用点、before_entry 未接入开仓链 -> 门禁永久停留 RECONCILE_REQUIRED，每次重启强制 close_only"
+          ],
+          "other": "P2-4 两套恢复包 schema 3<->{1,2} 互不兼容；P2-5 live 恢复门禁装错位置；P2 x9、P3 x9"
         }
       ],
       "blockers": [],
@@ -1923,8 +1939,18 @@
           "sessions": [
             "F (reviews/U13/F/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED（有条件GO）",
           "reports_dir": "docs/dispatch/reviews/U13/bf4c0cc/"
+        },
+        {
+          "round": "r2",
+          "stage": "修复复验",
+          "candidate": null,
+          "sessions": [
+            "Q (reviews/U13/R2/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U13/<r2head>/"
         }
       ],
       "qa_runs": []
