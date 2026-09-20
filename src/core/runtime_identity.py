@@ -2284,7 +2284,7 @@ FINGERPRINT_R1_DISPOSITION: dict[str, dict[str, str]] = {
     "fu-2": {"status": "registered", "note": "MTA_RELEASE_ID 可整体覆盖 release_id 且与哈希无绑定（service.py:135）：该变量在共享文件读取，U15 独占路径不可改；本模块不读它，也无法为它提供绑定接口", "owner": "U13"},
     "fu-3": {"status": "registered", "note": "release_observations 的 release_id 绑定是否足以在身份不符时拒绝开仓（release_evidence.py:328-391）：属报告期一致性，非启动门禁；归 U09/U13", "owner": "U09"},
     "fu-4": {"status": "registered", "note": "Windows SCM 双 profile 托管（同 decl-6）", "owner": "U13"},
-    "fu-5": {"status": "fixed", "note": "DC14/F13 与「指纹必变」的可执行负例：本任务交付 tests/acceptance/test_runtime_identity.py（148+ 项）与 test_control_boundary.py；执行层是否真的拒绝仍待 I 合入补丁后验证", "owner": "U15/I"},
+    "fu-5": {"status": "fixed", "note": "DC14/F13 与「指纹必变」的可执行负例：本任务交付 tests/acceptance/test_runtime_identity.py 与 test_control_boundary.py；r3 实测 233 PASS / exit 0 与 63 PASS / exit 0（含 NEW-A/D/E/F/G/H 的新增用例）；执行层是否真的拒绝仍待 I 合入补丁后验证", "owner": "U15/I"},
     "fu-paths": {"status": "registered", "note": "F 报告 §2 的 RuntimePaths 漂移清单（knowledge/review_lessons.json 随代码根漂移、binance_futures.py 兜底 data/ 路径、dashboard 读 data/ 而 service 写 data/live）整体归 U13；RuntimePaths 类尚不存在，U15 不提供也不改动这些共享文件", "owner": "U13"},
 }
 
