@@ -18,6 +18,11 @@ Broker、不改风险档与 pause/emergency 语义。它把四件在竞态下容
    ``duplicate`` 且 ``submit_qty=0``；退出方向由持仓侧唯一决定（LONG→SELL、
    SHORT→BUY），永远 ``reduce_only``、``opens_position=False``，且提交量被
    当前可减量（扣掉在途预留）夹逼——因此**不存在**把重复退出做成反向开仓的路径。
+   幂等的边界是"这次退出还没结束"：一旦 :meth:`release_exit` 释放了预留
+   （提交失败/成交未确认/异常路径），或 :meth:`reclaim_stale_exits` 回收了超过
+   TTL 仍未结算的在途预留，该 ``exit_key`` 就**恢复可重发**——否则一次异常就会
+   让该标的的退出通道被永久占死（U02/A_r1 P0-1）。已 ``CONSUMED``（成交已确认）
+   的键永远保持幂等。
 
 R11：:meth:`should_flat_close` 复用 U04 的故障分类，健康/传输/未知故障一律不得
 触发全平；只有"已确证的保护失败"与**人工 emergency** 可以。人工 pause/emergency
@@ -49,6 +54,10 @@ REASON_EXIT_EXCEEDS_POSITION = "EXIT_EXCEEDS_POSITION"
 REASON_EXPECTATION_UNATTRIBUTED = "EXPECTATION_UNATTRIBUTED"
 REASON_HARD_EXIT_RECORDED = "HARD_EXIT_RECORDED"
 REASON_LEGACY_MIGRATED = "LEGACY_POSITION_MIGRATED"
+#: 在途退出预留超时未结算 -> 回收并允许同键重发（否则该标的永久不可退出）。
+REASON_STALE_RESERVATION_RECLAIMED = "STALE_EXIT_RESERVATION_RECLAIMED"
+#: 迁移了一个**未知**生命周期（运营笔误）：不抛错，但必须可见（qty 会记成 0）。
+REASON_LEGACY_MIGRATION_UNKNOWN_LIFECYCLE = "LEGACY_MIGRATION_UNKNOWN_LIFECYCLE"
 
 BULK_EXIT_CONTEXTS = frozenset({"restart", "startup", "reconcile"})
 EXIT_ACTION_PREFIXES = ("close", "reduce", "flatten", "exit")
@@ -71,8 +80,10 @@ __all__ = [
     "REASON_HARD_EXIT_RECORDED",
     "REASON_IMPLICIT_BULK_EXIT_BLOCKED",
     "REASON_LEGACY_MIGRATED",
+    "REASON_LEGACY_MIGRATION_UNKNOWN_LIFECYCLE",
     "REASON_LEGACY_REQUIRES_MIGRATION",
     "REASON_NO_POSITION_TO_EXIT",
+    "REASON_STALE_RESERVATION_RECLAIMED",
 ]
 
 
@@ -210,7 +221,14 @@ class RestartPlan:
 
     @property
     def exit_actions(self) -> tuple[RestartAction, ...]:
-        return ()
+        """计划里**实际**的退出动作（按动作名筛选，不是字面空元组）。
+
+        本属性是"重启不含退出动作"这条不变量的证据位：它由 :meth:`StrategyPosition
+        Manager.plan_restart` 只产出 MIGRATE_EXPLICIT/ALREADY_MIGRATED/
+        ALIGN_EXPECTATION/NOOP 这一构造保证为真，而不再是恒真式。
+        """
+        return tuple(item for item in self.actions
+                     if str(item.kind or "").lower().startswith(EXIT_ACTION_PREFIXES))
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -218,7 +236,7 @@ class RestartPlan:
             "legacy": [item.as_dict() for item in self.legacy],
             "reason_codes": list(self.reason_codes),
             "implicit_bulk_exit": self.implicit_bulk_exit,
-            "exit_action_count": 0,
+            "exit_action_count": len(self.exit_actions),
         }
 
 
@@ -327,6 +345,8 @@ class StrategyPositionManager:
         self._migrations: list[LegacyMigrationRecord] = []
         self._exit_keys: dict[str, ExitRequestOutcome] = {}
         self._exit_ledgers: dict[str, str] = {}
+        self._exit_registered_at: dict[str, int] = {}
+        self._released_exits: list[dict[str, Any]] = []
         self._ledgers: dict[str, ManagementReservationLedger] = {}
         self._lock = lock or threading.Lock()
 
@@ -451,8 +471,19 @@ class StrategyPositionManager:
         legacy: list[PositionClassRecord] = []
         reasons: list[str] = []
         with self._lock:
+            migrated = {item.lifecycle_id for item in self._migrations}
             for position in positions or ():
                 record = self.classify_position(position)
+                if record.lifecycle_id and record.lifecycle_id in migrated:
+                    # 已显式迁移的生命周期不再被判为"待迁移"：`plan_restart` 每轮
+                    # 都跑，若在这里重新登记，运营者的 `migrate_legacy` 结果会在
+                    # 下一轮被撤销（U02/A_r1 P2-7）。
+                    actions.append(RestartAction(
+                        lifecycle_id=record.lifecycle_id, symbol=record.symbol,
+                        position_side=record.position_side, kind="ALREADY_MIGRATED",
+                        detail="该生命周期已由人工显式迁移，本轮不再重复标记",
+                        reason_code=REASON_LEGACY_MIGRATED))
+                    continue
                 if record.is_legacy:
                     self._legacy[record.lifecycle_id or record.symbol] = record
                     legacy.append(record)
@@ -475,7 +506,10 @@ class StrategyPositionManager:
                         position_side=record.position_side, kind="NOOP",
                         detail="预期持仓与归属均已记录，无需动作"))
             reasons.append(REASON_RESTART_NO_IMPLICIT_EXIT)
-            self.assert_no_implicit_bulk_exit(context="restart", actions=())
+            # 传入真实产出的动作（不是字面空元组）：护栏因此有实际检出能力，
+            # "重启零退出动作"由构造 + 护栏共同保证（U02/A_r1 P2-8）。
+            self.assert_no_implicit_bulk_exit(
+                context="restart", actions=[item.as_dict() for item in actions])
         return RestartPlan(actions=tuple(actions), legacy=tuple(legacy),
                            reason_codes=tuple(dict.fromkeys(reasons)),
                            implicit_bulk_exit=False)
@@ -503,7 +537,11 @@ class StrategyPositionManager:
                 symbol=record.symbol if record else "",
                 position_side=record.position_side if record else "",
                 qty=qty, target_source=str(target_source), actor=str(actor),
-                reason=str(reason), migrated_at_ms=int(now_ms))
+                reason=str(reason), migrated_at_ms=int(now_ms),
+                # 未知生命周期多半是运营笔误：不抛错（迁移动作已由人确认），但记
+                # 成一条**可见**的原因码，而不是静默写一条 qty=0 的记录。
+                reason_code=(REASON_LEGACY_MIGRATED if record is not None
+                             else REASON_LEGACY_MIGRATION_UNKNOWN_LIFECYCLE))
             self._migrations.append(migration)
             self._legacy.pop(key, None)
             return migration
@@ -541,22 +579,32 @@ class StrategyPositionManager:
         qty: Decimal | str | int,
         current_qty: Decimal | str | int,
         now_ms: int = 0,
+        in_flight_ttl_ms: int | None = None,
     ) -> ExitRequestOutcome:
         """注册一次退出请求；幂等、只减、方向固定，重复即 no-op。
 
         预留量在返回前即已占用，因此同一份仓量被两个并发退出请求同时读到
         "全部可用"的情形不会发生（R09）。提交量 = min(请求量, 可用量)，可用量
         为 0 时退化为 ``NO_POSITION_TO_EXIT`` 的 no-op，**不会**产生负仓/反向开仓。
+
+        ``in_flight_ttl_ms`` 是**泄漏回收**的兜底：同一 ``exit_key`` 重复到达时，
+        若它在账本里的预留仍是 ``ACTIVE`` 且已超过 TTL 未结算，说明上一轮既没有
+        成交也没有释放（典型是提交异常路径漏了释放）——此时先回收该预留再重新
+        占量，而不是把请求当成"重复"直接吞掉。省略该参数即保持严格幂等语义。
         """
         key = str(exit_key)
         side = exit_side_for(position_side)
         with self._lock:
             duplicate = self._exit_keys.get(key)
+            reclaimed: tuple[str, ...] = ()
             if duplicate is not None:
-                return ExitRequestOutcome(
-                    exit_key=key, accepted=False, duplicate=True, action="NOOP",
-                    side=duplicate.side, submit_qty=Decimal(0), reduce_only=True,
-                    reason_codes=(REASON_DUPLICATE_EXIT_IGNORED,))
+                reclaimed = self._reclaim_if_stale_locked(
+                    key, now_ms=int(now_ms), ttl_ms=in_flight_ttl_ms)
+                if not reclaimed:
+                    return ExitRequestOutcome(
+                        exit_key=key, accepted=False, duplicate=True, action="NOOP",
+                        side=duplicate.side, submit_qty=Decimal(0), reduce_only=True,
+                        reason_codes=(REASON_DUPLICATE_EXIT_IGNORED,))
             ledger = self._ledgers.get(str(lifecycle_id))
             authoritative = decimal_from_value(current_qty)
             if authoritative < 0:
@@ -574,7 +622,7 @@ class StrategyPositionManager:
             if requested < 0:
                 requested = Decimal(0)
             available = ledger.available_qty
-            reasons: list[str] = []
+            reasons: list[str] = list(reclaimed)
             if requested > available:
                 reasons.append(REASON_EXIT_EXCEEDS_POSITION)
             submit_qty = min(requested, available)
@@ -585,7 +633,9 @@ class StrategyPositionManager:
                     reason_codes=tuple(dict.fromkeys(
                         reasons + [REASON_NO_POSITION_TO_EXIT])))
                 return outcome
-            reservation = ledger.reserve(reservation_id=key, qty=submit_qty)
+            reservation = ledger.reserve(
+                reservation_id=key, qty=submit_qty,
+                now_ms=int(now_ms) or None)
             if not reservation.accepted:
                 outcome = ExitRequestOutcome(
                     exit_key=key, accepted=False, duplicate=False, action="NOOP",
@@ -600,12 +650,60 @@ class StrategyPositionManager:
                 reason_codes=tuple(reasons), opens_position=False)
             self._exit_keys[key] = outcome
             self._exit_ledgers[key] = str(lifecycle_id)
+            self._exit_registered_at[key] = int(now_ms)
             return outcome
 
     def _ledger_for_exit(self, exit_key: str) -> ManagementReservationLedger | None:
         with self._lock:
             lifecycle_id = self._exit_ledgers.get(str(exit_key))
             return self._ledgers.get(lifecycle_id) if lifecycle_id else None
+
+    def _reclaim_if_stale_locked(
+        self, exit_key: str, *, now_ms: int, ttl_ms: int | None,
+    ) -> tuple[str, ...]:
+        """回收同键下已超过 TTL 的在途预留；返回原因元组（未回收则为空）。
+
+        只在调用方显式给出 TTL 时生效：没有 TTL 就没有"多旧算泄漏"的依据，
+        严格幂等语义保持不变。**已 CONSUMED 的键永不回收**（那次退出确实成交了，
+        重发就是二次减仓）。
+        """
+        if not ttl_ms or int(ttl_ms) <= 0 or int(now_ms) <= 0:
+            return ()
+        ledger = self._ledgers.get(self._exit_ledgers.get(exit_key, ""))
+        reservation = ledger.reservation(exit_key) if ledger is not None else None
+        registered = self._exit_registered_at.get(exit_key, 0)
+        if reservation is not None and reservation.status == "CONSUMED":
+            return ()
+        if reservation is not None and reservation.status == "ACTIVE":
+            created = reservation.created_at_ms or registered
+            if created and int(now_ms) - created < int(ttl_ms):
+                return ()
+            if ledger is not None:
+                ledger.release(exit_key, reason=REASON_STALE_RESERVATION_RECLAIMED)
+        else:
+            # 预留已不在账本里（账本被重建/条目丢失）：键残留同样会永久占死退出，
+            # 只在登记时间明确超过 TTL 时回收。
+            if not registered or int(now_ms) - registered < int(ttl_ms):
+                return ()
+        self._exit_keys.pop(exit_key, None)
+        self._exit_ledgers.pop(exit_key, None)
+        self._exit_registered_at.pop(exit_key, None)
+        self._released_exits.append({
+            "exit_key": exit_key, "reason": REASON_STALE_RESERVATION_RECLAIMED,
+            "at_ms": int(now_ms)})
+        return (REASON_STALE_RESERVATION_RECLAIMED,)
+
+    def reclaim_stale_exits(self, *, now_ms: int, ttl_ms: int) -> tuple[str, ...]:
+        """全量回收超过 TTL 的在途退出预留（运维/每轮巡检用），返回被回收的键。"""
+        with self._lock:
+            keys = list(self._exit_keys)
+        reclaimed: list[str] = []
+        for key in keys:
+            with self._lock:
+                if self._reclaim_if_stale_locked(
+                        key, now_ms=int(now_ms), ttl_ms=int(ttl_ms)):
+                    reclaimed.append(key)
+        return tuple(reclaimed)
 
     def confirm_exit(
         self, exit_key: str, *, engaged_qty: Decimal | str | int | None = None,
@@ -617,10 +715,27 @@ class StrategyPositionManager:
         return bool(ledger.consume(str(exit_key), engaged_qty=engaged_qty).accepted)
 
     def release_exit(self, exit_key: str, *, reason: str = "") -> bool:
-        ledger = self._ledger_for_exit(exit_key)
+        """释放预留（这次退出没有发生）；**释放后同键可以重发**。
+
+        "释放"的语义是"该退出未执行/未确认"，如果继续把该键当作已受理，
+        下一轮同一稳定 key（guardian 的 ``mta-g-<sha24>``）会被判为 ``duplicate``
+        而永不重发——这正是"异常路径漏释放 -> 该标的永久不可退出"的第二半。
+        已 CONSUMED（成交回执已到）的键不在释放路径上，永远保持幂等。
+        """
+        key = str(exit_key)
+        ledger = self._ledger_for_exit(key)
         if ledger is None:
             return False
-        return bool(ledger.release(str(exit_key), reason=reason).accepted)
+        if not bool(ledger.release(key, reason=reason).accepted):
+            return False
+        with self._lock:
+            registered_at = self._exit_registered_at.pop(key, 0)
+            self._exit_keys.pop(key, None)
+            self._exit_ledgers.pop(key, None)
+            self._released_exits.append({
+                "exit_key": key, "reason": str(reason or ""),
+                "registered_at_ms": registered_at})
+        return True
 
     # -- R11：故障不得触发全平 --------------------------------------------- #
     def should_flat_close(
@@ -680,5 +795,6 @@ class StrategyPositionManager:
             "hard_exits": [item.as_dict() for item in self.hard_exits()],
             "pending_legacy": [item.as_dict() for item in self.pending_legacy()],
             "migrations": [item.as_dict() for item in self.migrations()],
+            "released_exits": [dict(item) for item in self._released_exits],
             "ledgers": {key: ledger.as_dict() for key, ledger in self._ledgers.items()},
         }

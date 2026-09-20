@@ -57,6 +57,9 @@ REASON_RESERVATION_CONSUME_EXCEEDS = "RESERVATION_CONSUME_EXCEEDS_RESERVED"
 REASON_RESERVATION_NON_POSITIVE = "RESERVATION_NON_POSITIVE_QUANTITY"
 REASON_RESERVATION_DUPLICATE = "DUPLICATE_RESERVATION_IGNORED"
 REASON_RESERVATION_STALE = "RESERVATION_RELEASED_POSITION_SHRUNK"
+#: 在途预留超过 TTL 仍未结算 -> 判定为泄漏并回收（关键：不回收就等于该标的
+#: 的可用量被永久占死，退出通道静默失效。见 U02/A_r1 P0-1）。
+REASON_RESERVATION_RECLAIMED = "STALE_EXIT_RESERVATION_RECLAIMED"
 
 REASON_REDUCE_ONLY_VIOLATED = "REDUCE_ONLY_VIOLATED"
 
@@ -83,6 +86,7 @@ __all__ = [
     "REASON_RESERVATION_DUPLICATE",
     "REASON_RESERVATION_EXCEEDS_POSITION",
     "REASON_RESERVATION_NON_POSITIVE",
+    "REASON_RESERVATION_RECLAIMED",
     "REASON_RESERVATION_STALE",
     "REASON_RESERVATION_UNKNOWN",
 ]
@@ -371,6 +375,8 @@ class ManagementReservation:
     consumed_qty: Decimal = Decimal(0)
     status: str = "ACTIVE"  # ACTIVE | CONSUMED | RELEASED
     reason_code: str = ""
+    #: 预留建立时刻（毫秒）。用于"在途预留超时回收"；0 表示未记录（不参与回收）。
+    created_at_ms: int = 0
 
     @property
     def remaining_qty(self) -> Decimal:
@@ -384,6 +390,7 @@ class ManagementReservation:
             "remaining_qty": str(self.remaining_qty),
             "status": self.status,
             "reason_code": self.reason_code,
+            "created_at_ms": self.created_at_ms,
         }
 
 
@@ -501,18 +508,24 @@ class ManagementReservationLedger:
                         status="ACTIVE" if item.remaining_qty - take > 0 else "RELEASED",
                         reason_code=REASON_RESERVATION_STALE if item.remaining_qty - take <= 0
                         else item.reason_code,
+                        created_at_ms=item.created_at_ms,
                     )
                     overflow -= take
             return tuple(reasons)
 
     def reserve(
         self, *, reservation_id: str, qty: Decimal | str | int,
+        now_ms: int | None = None,
     ) -> ReservationOutcome:
-        """预留退出量；重复 ID 幂等（不二次占用），超额即拒绝且不改变任何状态。"""
+        """预留退出量；重复 ID 幂等（不二次占用），超额即拒绝且不改变任何状态。
+
+        **已 RELEASED 的 ID 可以重新预留**（释放的语义是"这次退出没有发生"，
+        因此同一个退出键必须能重发）；已 CONSUMED 的 ID 永远不可重开。
+        """
         rid = str(reservation_id or "")
         with self._lock:
             existing = self._reservations.get(rid)
-            if existing is not None:
+            if existing is not None and existing.status != "RELEASED":
                 return ReservationOutcome(
                     accepted=False, duplicate=True, reservation_id=rid,
                     reserved_qty=self._reserved_qty_locked(),
@@ -530,12 +543,39 @@ class ManagementReservationLedger:
                 return self._rejected(
                     rid, REASON_RESERVATION_EXCEEDS_POSITION, existing=None)
             self._reservations[rid] = ManagementReservation(
-                reservation_id=rid, qty=amount)
+                reservation_id=rid, qty=amount,
+                created_at_ms=int(now_ms) if now_ms is not None else 0)
             return ReservationOutcome(
                 accepted=True, duplicate=False, reservation_id=rid,
                 reserved_qty=self._reserved_qty_locked(), consumed_qty=Decimal(0),
                 available_qty=self._available_locked(),
             )
+
+    def reclaim_stale(
+        self, *, now_ms: int, ttl_ms: int, reason: str = REASON_RESERVATION_RECLAIMED,
+    ) -> tuple[str, ...]:
+        """回收超过 TTL 仍在途的预留；返回被回收的 ID（可审计）。
+
+        这是"预留泄漏 -> 该标的永久不可退出"的**最后一道防线**：正常路径在
+        finally 里结算/释放，本方法只处理"结算与释放都没跑到"的残留。TTL 必须
+        显著大于一次提交+等待成交的时间，否则会误伤真正在途的退出。
+        """
+        if int(ttl_ms) <= 0 or int(now_ms) <= 0:
+            return ()
+        deadline = int(now_ms) - int(ttl_ms)
+        reclaimed: list[str] = []
+        with self._lock:
+            for rid, item in list(self._reservations.items()):
+                if item.status != "ACTIVE" or item.created_at_ms <= 0:
+                    continue
+                if item.created_at_ms > deadline:
+                    continue
+                self._reservations[rid] = ManagementReservation(
+                    reservation_id=item.reservation_id, qty=item.qty,
+                    consumed_qty=item.consumed_qty, status="RELEASED",
+                    reason_code=str(reason), created_at_ms=item.created_at_ms)
+                reclaimed.append(rid)
+        return tuple(reclaimed)
 
     def _rejected(
         self, rid: str, reason: str, *, existing: ManagementReservation | None,
@@ -585,6 +625,7 @@ class ManagementReservationLedger:
             self._reservations[rid] = ManagementReservation(
                 reservation_id=item.reservation_id, qty=item.qty, consumed_qty=consumed,
                 status="CONSUMED" if consumed >= item.qty else "ACTIVE",
+                created_at_ms=item.created_at_ms,
             )
             return ReservationOutcome(
                 accepted=True, duplicate=False, reservation_id=rid,
@@ -610,6 +651,7 @@ class ManagementReservationLedger:
                 reservation_id=item.reservation_id, qty=item.qty,
                 consumed_qty=item.consumed_qty, status="RELEASED",
                 reason_code=str(reason or item.reason_code),
+                created_at_ms=item.created_at_ms,
             )
             return ReservationOutcome(
                 accepted=True, duplicate=False, reservation_id=rid,

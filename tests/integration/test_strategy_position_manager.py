@@ -64,7 +64,9 @@ from core.strategy_position_manager import (  # noqa: E402
     PositionClass,
     REASON_DUPLICATE_EXIT_IGNORED,
     REASON_IMPLICIT_BULK_EXIT_BLOCKED,
+    REASON_LEGACY_MIGRATION_UNKNOWN_LIFECYCLE,
     REASON_LEGACY_REQUIRES_MIGRATION,
+    REASON_STALE_RESERVATION_RECLAIMED,
     StrategyPositionManager,
     exit_side_for,
 )
@@ -172,6 +174,25 @@ def test_legacy_positions_never_implicitly_exited_on_restart() -> None:
     check("显式迁移留下审计记录", migration.actor == "operator-1"
           and migration.lifecycle_id == "lc-old")
     check("迁移后不再待迁移", len(m.pending_legacy()) == 0)
+
+    # plan_restart 是**每轮**调用：迁移结果不得被下一轮撤销（U02/A_r1 P2-7）。
+    plan2 = m.plan_restart(positions, now_ms=_NOW + 2)
+    check("迁移结果不被下一轮重启计划撤销",
+          len(m.pending_legacy()) == 0
+          and not [a for a in plan2.actions
+                   if a.kind == "MIGRATE_EXPLICIT" and a.lifecycle_id == "lc-old"],
+          [a.as_dict() for a in plan2.actions])
+    check("已迁移生命周期在计划里显式标记",
+          any(a.kind == "ALREADY_MIGRATED" and a.lifecycle_id == "lc-old"
+              for a in plan2.actions), [a.as_dict() for a in plan2.actions])
+    check("下一轮计划仍不含退出动作",
+          plan2.exit_actions == () and plan2.as_dict()["exit_action_count"] == 0)
+    # 未知生命周期的迁移：运营笔误必须可见（原因码），而不是静默写 qty=0。
+    typo = m.migrate_legacy("lc-typo", target_source="strategy", actor="operator-1",
+                            reason="笔误", now_ms=_NOW + 3)
+    check("未知生命周期的迁移留下可见原因码",
+          typo.reason_code == REASON_LEGACY_MIGRATION_UNKNOWN_LIFECYCLE,
+          typo.as_dict())
 
     # 护栏：重启上下文里出现批量退出动作必须 fail-closed 抛错。
     blocked = False
@@ -313,6 +334,94 @@ def test_reservation_conserves_under_concurrent_exits() -> None:
     check("仓位收缩被读出后无可用量即 no-op",
           g3.action == "NOOP" and g3.submit_qty == Decimal(0), g3.as_dict())
     check("收缩后守恒式成立", reservation_conserved(m2.ledger("lc-9")))
+
+
+def test_leaked_exit_reservation_is_reclaimable() -> None:
+    """占量后异常（预留泄漏）不得让该标的永久不可退出（U02/A_r1 P0-1）。
+
+    泄漏的两个必要条件在集成路径上都已消除：① 提交异常时由 finally 释放；
+    ② 即便释放没跑到，同键重试也必须能回收超 TTL 的在途预留；③ 释放后同键
+    可重发（"这次退出没有发生"不等于"这次退出已受理"）；④ 已成交的键保持幂等。
+    """
+    print("\n[4b] 泄漏的退出预留可回收（同键可重发，不永久占死）")
+    m = _manager()
+    domain = "lc-leak"
+    t0 = _NOW
+
+    def _req(*, key: str, now: int, ttl: int | None = None, mgr=None):
+        return (mgr or m).request_exit(
+            exit_key=key, lifecycle_id=domain, symbol="BTCUSDT",
+            position_side="LONG", qty="1.0", current_qty="1.0", now_ms=now,
+            in_flight_ttl_ms=ttl)
+
+    first = _req(key="g-1", now=t0)
+    check("占量成功", first.accepted and first.submit_qty == Decimal("1.0"),
+          first.as_dict())
+    ledger = m.ledger(domain)
+    check("占量后可减量为 0", ledger.available_qty == Decimal("0"),
+          ledger.as_dict())
+
+    # 泄漏态（预留 ACTIVE 但结算与释放都没跑到）：未给 TTL 时严格幂等保持不变。
+    strict = _req(key="g-1", now=t0 + 1000)
+    check("未给 TTL 时同键严格幂等",
+          strict.duplicate is True and strict.submit_qty == Decimal(0),
+          strict.as_dict())
+    young = _req(key="g-1", now=t0 + 1000, ttl=60_000)
+    check("TTL 内同键仍视为在途", young.duplicate is True, young.as_dict())
+
+    stale = _req(key="g-1", now=t0 + 120_000, ttl=60_000)
+    check("超 TTL 的在途预留被回收并允许重发",
+          stale.accepted and not stale.duplicate
+          and stale.submit_qty == Decimal("1.0"), stale.as_dict())
+    check("回收原因码可见",
+          REASON_STALE_RESERVATION_RECLAIMED in stale.reason_codes,
+          stale.reason_codes)
+    check("回收后再占满可减量", ledger.available_qty == Decimal("0"),
+          ledger.as_dict())
+    check("回收后守恒式成立", reservation_conserved(ledger))
+    check("回收审计可见",
+          any(item["reason"] == REASON_STALE_RESERVATION_RECLAIMED
+              for item in m.as_dict()["released_exits"]),
+          m.as_dict()["released_exits"])
+
+    # 释放 = 这次退出没有发生 -> 同一个稳定 key（guardian）必须能重发。
+    check("释放在途退出成功", m.release_exit("g-1", reason="submit_failed") is True)
+    check("释放后可减量恢复", ledger.available_qty == Decimal("1.0"),
+          ledger.as_dict())
+    retried = _req(key="g-1", now=t0 + 200_000)
+    check("释放后同键可重发",
+          retried.accepted and retried.submit_qty == Decimal("1.0"),
+          retried.as_dict())
+
+    # 成交已确认（CONSUMED）的键永不回收：重发就是二次减仓。
+    check("成交确认成功", m.confirm_exit("g-1", engaged_qty="1.0") is True)
+    consumed = _req(key="g-1", now=t0 + 10 ** 9, ttl=1)
+    check("已成交的键即使超过 TTL 也保持幂等",
+          consumed.duplicate is True and consumed.submit_qty == Decimal(0),
+          consumed.as_dict())
+    check("已成交后该预留不再占用",
+          ledger.reservation("g-1").status == "CONSUMED",
+          ledger.reservation("g-1").as_dict())
+    # 口径说明：consume 不改变 position_qty（仓量只由 reconcile_position 校正），
+    # 因此"成交后可用量"必须等下一轮以交易所权威量校正后才归零。
+    ledger.reconcile_position("0.0")
+    check("以权威量校正后可用量归零", ledger.available_qty == Decimal("0"),
+          ledger.as_dict())
+    check("校正后守恒式仍成立", reservation_conserved(ledger))
+
+    # 逐轮巡检：不是同键重试，而是主动回收其他泄漏预留。
+    m2 = _manager()
+    m2.request_exit(exit_key="s-1", lifecycle_id="lc-sweep", symbol="ETHUSDT",
+                    position_side="SHORT", qty="0.5", current_qty="0.5", now_ms=t0)
+    swept = m2.reclaim_stale_exits(now_ms=t0 + 300_000, ttl_ms=60_000)
+    check("巡检回收泄漏预留", swept == ("s-1",), swept)
+    after = m2.request_exit(exit_key="s-1", lifecycle_id="lc-sweep", symbol="ETHUSDT",
+                            position_side="SHORT", qty="0.5", current_qty="0.5",
+                            now_ms=t0 + 300_001)
+    check("巡检回收后该标的仍可退出（方向仍为减仓）",
+          after.accepted and after.side == "BUY" and after.opens_position is False,
+          after.as_dict())
+    check("巡检回收后守恒式成立", reservation_conserved(m2.ledger("lc-sweep")))
 
 
 def test_expired_authorization_does_not_block_unknown_reconcile() -> None:
@@ -556,6 +665,7 @@ def main() -> int:
     test_legacy_positions_never_implicitly_exited_on_restart()
     test_duplicate_exit_never_opens_reverse_position()
     test_reservation_conserves_under_concurrent_exits()
+    test_leaked_exit_reservation_is_reclaimable()
     test_expired_authorization_does_not_block_unknown_reconcile()
     test_flat_close_preserves_manual_semantics_and_blocks_health_faults()
     test_k04_contract_binding_only_reduces()
