@@ -1651,6 +1651,37 @@
             "P2-2 '尚未按 source 过滤'只存 JSON 未渲染，页面却显示'研究样本可作执行候选 否'（误导）"
           ],
           "methodology_note": "复验者提醒：git apply 在子目录会静默 no-op，需 GIT_CEILING_DIRECTORIES；其首轮'delta ∅'是假绿，已重跑（此前 U01 的复验者也遇过同一坑）"
+        },
+        {
+          "type": "author_fix_r2",
+          "head_commit": "e8f0873",
+          "commits": [
+            "a01d088",
+            "e8f0873"
+          ],
+          "patch_dir": "docs/dispatch/patches/U06a/a01d088/（3 diff + README；旧 cd9c2a4/ 标注 superseded）",
+          "boundary": "分支相对 base：**11 个新增文件、0 个修改**；src/core/contracts、docs/contracts、run_offline_regression.py 均 0 改动；git diff 59660b2 HEAD -- <5 共享文件> = 0 行",
+          "fixed": {
+            "P2-1 陈旧当新值": "_refresh_metrics_summary 只在**成功**时更新缓存/computed_at/_metrics_success_at；失败记 state=FAILED, stale=True, last_error，年龄锚在**上次成功**不被重置。前后：state='REFRESHED' cached=False age=0.0 computed_at=旧 -> state='FAILED' cached=True age=1.101 stale=True；且 m3 年龄由被低估的 1.101 回到真实 2.202",
+            "P2-2 披露未渲染": "新增「发布门槛口径·残留缺口」卡片整段引用披露字段（与 JSON 同源）；「影子口径」与样本表下均写明'B/C 仍会计入方向候选分母'。前后：可见区三项 MISS -> 7 项全 HIT（判定只看页面可见区，排除原始 JSON 折叠块的假 HIT）",
+            "P2-6": "LEGACY_LIMITATIONS 补该条",
+            "P3-8/9/10/11": "未计算不再显示 0；渲染 state/age；sample_loss_state；gate_constants_source 声明副本 + 漂移测试"
+          },
+          "registered_not_fixed": {
+            "P1-1": "冒烟未登记（分支与 I@43210d8 均复现 RuntimeError）-> **I 的原子登记项**（按令未改 run_offline_regression.py）",
+            "P1-2": "release_evidence.py 未按 source 过滤 -> **U09 硬前置**；未改该文件、**未建第二套 GO**，只把 fact 写进披露 + residual_gap（机器可读）",
+            "P2-5": "偏差声明保留待 I 确认",
+            "P3-7": "登记（配置面/环境不可抬升，唯一路径是改源码）"
+          },
+          "verification": "test_shadow_status **264/0**（未打补丁 205/0）；smoke_u06a **52/0**（10/0）；契约 173/0；沙箱 check_quality **OK** files=264（集成树 283/0）",
+          "patches_apply": "在 **59660b2 与 I@43210d8 两者、默认与 autocrlf=false 两配置**下 --check 全 exit 0（独立 repo 根实应用 + diff --stat 3 文件 316+/31-）",
+          "delta": "e8f0873 树 pristine 80/0、patched 80/0，差集 ∅；集成树 81/0 vs 81/0，差集 ∅",
+          "known_limits": [
+            "FAILED 时仍供旧值（页面明示'旧值'）",
+            "gate_constants 是**副本**：U09 改阈值后运行时披露会先说旧数字（已有 gate_constants_source 声明 + 漂移测试）",
+            "_cursor 无锁自增为既有问题"
+          ],
+          "negative_finding": "CD 工作树 check_quality 红：**全部来自其它会话遗留的未跟踪 scratch**（_scratch_author_r2/r3/r4，含沙箱副本）。其交付路径与自身 scratch `ruff check` = All checks passed。未删他人证据，建议 I 清理后复跑门禁"
         }
       ],
       "blockers": [],
@@ -1698,6 +1729,16 @@
           ],
           "verdict": "PENDING",
           "reports_dir": "docs/dispatch/reviews/U06a/<r2head>/"
+        },
+        {
+          "round": "r3",
+          "stage": "修复复验",
+          "candidate": "e8f0873",
+          "sessions": [
+            "Q (reviews/U06a/R3/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U06a/e8f0873/"
         }
       ],
       "qa_runs": []
