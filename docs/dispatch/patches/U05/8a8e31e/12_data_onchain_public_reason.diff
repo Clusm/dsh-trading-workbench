@@ -1,0 +1,29 @@
+diff --git a/src/data/onchain_public.py b/src/data/onchain_public.py
+index 852df6c..73adf3c 100644
+--- a/src/data/onchain_public.py
++++ b/src/data/onchain_public.py
+@@ -6,9 +6,24 @@ from pathlib import Path
+ import httpx
+ 
+ from agents.models import OnchainBrief
++from core.decision_trace import DecisionReason, reason_from_source_errors
+ from data.cache import SnapshotCache
+ 
+ 
++def reason_from_errors(errors: list[str], *,
++                       degraded: bool = False) -> DecisionReason | None:
++    """把本模块收集的源级错误映射为 U05 原因码（无错误返回 ``None``）。
++
++    链上源"取不到就是缺失" → ``DATA_UNAVAILABLE``；``degraded``（这一轮用了
++    陈旧/部分数据）必须由**调用方**显式声明。旧口径的 ``len(errors) < 6`` 与源
++    集合大小耦合，源一增删就静默失准（B-r1 P2-6）。
++    """
++    if not errors:
++        return None
++    return reason_from_source_errors(list(errors), labels=("onchain_public",),
++                                     degraded=bool(degraded))
++
++
+ def _pct(cur: float, prev: float | None) -> str:
+     if prev is None or prev == 0:
+         return "n/a"
