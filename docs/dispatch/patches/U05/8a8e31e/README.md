@@ -52,11 +52,13 @@
 
 ## 三、r2 修复对照（原始输出见交付报告）
 
-- **P1-5（`.py` 明文盲区）**：`# api_key = abcdefghijklmnop1234`、三引号 docstring、
-  `.py` 内嵌 YAML 三种探针：修复前 `[]`（静默漏报、无留痕）→ 修复后
-  `['1:secret-assignment']` / `['2:secret-assignment']`；
-  同时 `api_key=fallback_key,` 与 `api_key=cfg.fallback_key,` 两态**均不报**（KI01 保持关闭）。
-  无法词法分析的 `.py` 整体放弃放宽（fail-closed）并计入 `unparsable_python_files`。
+- **P1-5（`.py` 明文盲区）**：三种探针——**注释行**里的裸明文、**三引号 docstring** 里的裸明文、
+  **`.py` 内嵌 YAML 片段**里的裸标量：修复前均为 `[]`（静默漏报、无留痕）→ 修复后均报出
+  `1:secret-assignment` / `2:secret-assignment`；
+  同时「`api_<下划线>key=<裸变量名>,`」与「`api_<下划线>key=cfg.<裸属性链>,`」两态**均不报**
+  （KI01 保持关闭）。无法词法分析的 `.py` 整体放弃放宽（fail-closed）并计入
+  `unparsable_python_files`；放宽次数计入 `skipped_bare_identifiers`。
+  （本节刻意不写凭据形状的字面量：本 README 也在扫描范围内，写实会被本补丁自己拦下。）
 - **P1-1（跨任务数据污染）**：`failed_rounds=3` + `latency_ms=1234` 落库 →
   修复前 `agent_runs.latency_ms=3`（`review.py:231-237` 的 `AVG(latency_ms)` 会读成 3ms）
   → 修复后 `latency_ms=1234`，`failed_rounds=3` 落在 `output_summary.failed_rounds`。
