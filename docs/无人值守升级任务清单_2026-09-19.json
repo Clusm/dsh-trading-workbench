@@ -591,6 +591,28 @@
             "释放在 FILL_UNCONFIRMED 后同 key 会重发（依赖交易所同 cid 拒重 + reduceOnly + 可减量夹逼）"
           ],
           "unfinished": "迁移脚本本身（属 U13）、filter_unbound_management 接线、set_expectation 生产写入者、MTA_ACCOUNT_REF 启动阻断校验"
+        },
+        {
+          "type": "review_r2_verification",
+          "candidate": "4856aec",
+          "verdict": "CHANGES_REQUESTED",
+          "archived_path": "docs/dispatch/reviews/U02/4856aec/Q_r2.md",
+          "p0_closed": "**真闭合**：自建前后对照 FAIL=8->0；异常在占量前/后/提交中/收口后各阶段均释放并记 futures_exit_reservation_released；finally 的 release 自身抛错也不产生假审计；超 TTL 由巡检/重复分支回收；TTL 恰好=TTL 回收、差 1ms 不回收、时钟回拨 fail-closed；8x400 并发 0 错误",
+          "clarification": "**「崩溃后 TTL 回收」场景不存在**：预留**不落库**（全仓无写预留状态的代码）-> 重启无残留、同键直接可退；TTL 只对**进程内**泄漏有意义",
+          "migration_verdict": "**可执行**：7/7 表清单完整、冲突键与真实唯一索引逐字一致、单事务去重+可重入实测通过、bundle 回滚脚本可用、'不可裁决即中止'可确定性检出",
+          "blocking_p2": [
+            "①CONSUMED 键被账本淘汰（>2000）后可被 TTL 回收并重发，**推翻'永不回收'声明**",
+            "②ledger.release() 对 CONSUMED 不幂等（可再 reserve）",
+            "③纸面『同轮抑制』声明与事实相反（同轮第二次同名同指纹会再执行；有界：min 夹逼+仓位已减，不反向不超量）"
+          ],
+          "p3": [
+            "迁移 README 两处引证/方向错误：trade_reconciliation_jobs 的理由引错表（:2926 查的是 position_lifecycles，该表无按 account_ref 的读取）；income_* 唯一键只建在 *_norm 而 README 方向写反",
+            "巡检失败无告警",
+            "默认 autocrlf=true 会把 3 个纯 LF 目标文件整文件转 CRLF"
+          ],
+          "confirmed": "P1 _open 未定义名已真删（静态 symtable 空 + 动态 qty=0->None）；约束 1 改写准确（only01+env->demo:acct-live；only02->ImportError）；阻断级登记在 README.md:79",
+          "delta": "80 条（I 已前移 + U05，非作者 76），两树 FAILED=0、差集 {}",
+          "unfinished": "无实盘（路径级证明）；P0 频率与 _open 分支可达性未量化；R09 单进程；迁移未在生产库规模验证"
         }
       ],
       "blockers": [],
@@ -637,7 +659,7 @@
           "sessions": [
             "Q (reviews/U02/R2/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED",
           "reports_dir": "docs/dispatch/reviews/U02/<r2head>/"
         },
         {
@@ -647,8 +669,18 @@
           "sessions": [
             "Q (reviews/U02/R2/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED",
           "reports_dir": "docs/dispatch/reviews/U02/4856aec/"
+        },
+        {
+          "round": "r3",
+          "stage": "修复复验",
+          "candidate": null,
+          "sessions": [
+            "U02 author (r3)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U02/<r3head>/"
         }
       ],
       "qa_runs": []
