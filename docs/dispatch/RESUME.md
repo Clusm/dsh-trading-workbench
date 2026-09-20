@@ -6,7 +6,7 @@
 
 ---
 
-更新时间：2026-09-21 02:00（北京时间）
+更新时间：2026-09-21 02:05（北京时间）
 更新者：I（claude-code 编排会话，接自 opencode 交接）
 
 ## 1. 当前状态
@@ -14,13 +14,17 @@
 - **U00 已完成并 INTEGRATED**；`contract-v3.0` 已冻结
 - **contract_commit = `ffdab443cae45c1451b5cc13b24e3e73c22038ff`**（tag `contract-v3.0`）
 - 已验收候选：`71f8109`（Q r5 复验 PASS-with-notes；与 tag 的差异仅为 dispatch 文档，`src/core/contracts` 与 `docs/contracts` 逐字节相同）
-- 当前步骤：**W1 派发**（建实现线 worktree → 启动 4 条线作者）
-- 集成区分支：`integration/unattended-v3` @ `ffdab44`
+- 集成区分支：`integration/unattended-v3` @ `ffdab44`（契约冻结后又有 1 个台账提交 `4fdc6bf`）
+- 四个实现线 worktree **已创建**（均从 `ffdab44`）：`mat-wt/A`(task/U01)、`mat-wt/B`(task/U04)、`mat-wt/CD`(task/U03)、`mat-wt/EF`(task/U15)
+- 当前步骤：**W1 四条线作者会话进行中**（U01 / U04 / U03 / U15，均为 claude-opus 作者会话）
 
-> **判定规则：**
-> - 若 `mat-wt/A|B|CD|EF` 四个 worktree **尚未创建** → 走 §2 步骤 1
-> - 若已创建但对应 `task/U01|U04|U03|U15` 上**无作者提交**，且无运行中的作者会话 → 说明作者会话中断 → 走 §5 恢复流程，**不要**重新派发整条线
-> - 若某任务已有作者提交但 `docs/dispatch/reviews/<ID>/<candidate>/` 下无对应审查报告 → 说明审查会话中断 → 重新派发**审查**（不是作者）
+> **判定规则（按序判断，避免重复派发）：**
+> 1. 若 `mat-wt/A|B|CD|EF` 四个 worktree 尚未创建 → 走 §2 步骤 1
+> 2. 若某 worktree 的 `task/U01|U04|U03|U15` 上**无作者提交**，且**确实没有**该线作者会话在运行 → 作者会话已中断 → 走 §5 恢复流程，**不要**重新派发整条线
+> 3. 若某任务已有作者提交但 `docs/dispatch/reviews/<ID>/<candidate>/` 下无对应审查报告，且无审查会话在运行 → 审查会话中断 → 重新派发**审查**（不是作者）
+> 4. 若作者会话**仍在运行** → 本回合**什么也不要做**，直接结束（避免并发重复劳动）
+>
+> 判断"是否仍在运行"：看 worktree 内 `git log`/`git status` 是否仍在变化，而不是凭 RESUME 的文字。
 
 ## 2. next_action（按顺序）
 
