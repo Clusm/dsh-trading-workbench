@@ -40,22 +40,34 @@ from core.ops.alert_delivery import (  # noqa: E402
     HOST_JUST_BOOTED,
     HOST_REBOOT_OBSERVED,
     MANUAL_ACK_ACTOR_INVALID,
+    MANUAL_ACK_NOTE_AND_CONFIRM_REQUIRED,
     MANUAL_ACK_ONLY,
+    MANUAL_ACK_REQUIRED,
     MANUAL_ACK_WITHOUT_SUBMISSION,
     NO_CONFIRMED_DELIVERY,
     OPS_BLOCKED,
     OPS_DEGRADED,
     OPS_OK,
     PROCESS_MISSING,
+    PROCESS_UNVERIFIED,
+    PROVIDER_CLOCK_SKEW_TOLERATED,
+    RECEIPT_BINDING_MISMATCH,
+    RECEIPT_TIMESTAMP_FUTURE,
+    RECEIPT_TYPE_INVALID,
+    RECEIPT_UNBOUND,
+    TRADING_EVIDENCE_FROM_FUTURE,
     TRADING_STALLED,
+    TRANSITION_REJECTED,
     Alert,
     AlertLadderViolation,
     AlertQueue,
+    AlertReceiptRejected,
     ChannelPolicy,
     Heartbeat,
     HeartbeatState,
     MaintenanceWindow,
     RecordingSink,
+    TransportOutcome,
     UnconfiguredTransport,
     advance_heartbeat,
     build_message,
@@ -276,7 +288,7 @@ def test_delivery_ladder() -> None:
         raised = ""
         try:
             queue.record_delivered(aid, now_ms=now2 + 10, delivered_at_ms=now2 + 10,
-                                   device_receipt="dev-x")
+                                   device_receipt="dev-x", bound_alert_id=aid)
         except AlertLadderViolation as exc:  # 阶梯自检必须拦住"跳级"
             raised = str(exc)
         except Exception as exc:  # noqa: BLE001 - 任何其它异常都不算通过
@@ -294,11 +306,12 @@ def test_delivery_ladder() -> None:
               empty_receipt)
         # 送达时间早于提交时间 → K05 TIME_ORDER_VIOLATION，必须被阶梯自检挡住。
         queue.record_submitted(aid, now_ms=now2 + 30)
-        queue.record_accepted(aid, now_ms=now2 + 30, provider_receipt="rcpt-order")
+        queue.record_accepted(aid, now_ms=now2 + 30, provider_receipt="rcpt-order",
+                              bound_alert_id=aid)
         order_error = ""
         try:
             queue.record_delivered(aid, now_ms=now2 + 40, delivered_at_ms=now2 + 10,
-                                   device_receipt="dev-order")
+                                   device_receipt="dev-order", bound_alert_id=aid)
         except AlertLadderViolation as exc:
             order_error = str(exc)
         check("送达时间早于提交时间 → TIME_ORDER_VIOLATION 被挡（不落库）",
@@ -314,7 +327,7 @@ def test_delivery_ladder() -> None:
         direct_error = ""
         try:
             queue.record_delivered(aid3, now_ms=now2 + 10, delivered_at_ms=now2 + 10,
-                                   device_receipt="dev-only")
+                                   device_receipt="dev-only", bound_alert_id=aid3)
         except AlertLadderViolation as exc:
             direct_error = str(exc)
         check("缺 provider_receipt 直接标 DELIVERED 被拒（原因码含目标状态）",
@@ -493,12 +506,18 @@ def test_ops_blocked() -> None:
         check("仅 HTTP200 ⇒ OPS 停在 OPS_DEGRADED 且含 NO_CONFIRMED_DELIVERY",
               verdict.status == OPS_DEGRADED and NO_CONFIRMED_DELIVERY in verdict.reason_codes,
               verdict.as_dict())
+        # 只有 SUBMITTED（无任何回执）也必须退避复查，不得每轮重新提交（P3-4）。
+        again = queue.dispatch_due(only_http200, verified_but_silent, now_ms=now + 1)
+        check("只有 HTTP200 的告警不忙轮询（冷却期内不重复提交）",
+              again["submitted"] == 0 and len(only_http200.submissions) == 1,
+              (again, len(only_http200.submissions)))
 
         # 真实送达后（有设备回执）才允许 OPS_OK。
-        good = RecordingSink(provider_receipt="rcpt-2", delivered_at_ms=now + 5,
+        delivered_at = now + 300_010
+        good = RecordingSink(provider_receipt="rcpt-2", delivered_at_ms=delivered_at,
                              device_receipt="dev-2")
-        queue.dispatch_due(good, verified_but_silent, now_ms=now + 10)
-        verdict = ops_status(queue, channel=verified_but_silent, now_ms=now + 10)
+        queue.dispatch_due(good, verified_but_silent, now_ms=delivered_at)
+        verdict = ops_status(queue, channel=verified_but_silent, now_ms=delivered_at)
         check("有设备回执的真实送达 ⇒ DELIVERED 且 OPS_OK",
               queue.get(aid)["state"] == "DELIVERED" and verdict.status == OPS_OK,
               (queue.get(aid)["state"], verdict.as_dict()))
@@ -883,10 +902,39 @@ def test_shared_adapter_two_states() -> None:
                     lying = str(exc)
                 check("补丁态：调用方自报状态与事实不符即拒绝",
                       "mismatch" in lying, lying)
+                # P1-3 同源：审计镜像同样要求回执**绑定本消息身份**，且类型相符。
+                unbound = ""
+                try:
+                    db.record_alert_delivery(**base, submitted_at_ms=now_ms,
+                                             provider_receipt="rcpt")
+                except ValueError as exc:
+                    unbound = str(exc)
+                check("补丁态：镜像回执不绑定消息身份即拒绝（RECEIPT_UNBOUND）",
+                      "RECEIPT_UNBOUND" in unbound, unbound)
+                mismatched = ""
+                try:
+                    db.record_alert_delivery(**base, submitted_at_ms=now_ms,
+                                             provider_receipt="rcpt",
+                                             bound_incident_key="acc|other|R")
+                except ValueError as exc:
+                    mismatched = str(exc)
+                check("补丁态：镜像回执绑定到别的消息即拒绝（RECEIPT_BINDING_MISMATCH）",
+                      "RECEIPT_BINDING_MISMATCH" in mismatched, mismatched)
+                bad_type = ""
+                try:
+                    db.record_alert_delivery(**base, submitted_at_ms=now_ms,
+                                             provider_receipt="rcpt",
+                                             device_receipt=12345,
+                                             bound_incident_key="acc|svc|R")
+                except ValueError as exc:
+                    bad_type = str(exc)
+                check("补丁态：镜像非字符串回执被拒（RECEIPT_TYPE_INVALID，不 str() 强转）",
+                      "RECEIPT_TYPE_INVALID" in bad_type, bad_type)
                 check("补丁态：带设备回执的真实送达可记录（DELIVERED）",
                       db.record_alert_delivery(
                           **base, submitted_at_ms=now_ms, provider_receipt="rcpt",
                           delivered_at_ms=now_ms + 5, device_receipt="dev-acc",
+                          bound_incident_key=base["incident_key"],
                           manual_ack_actor="operator", manual_ack_note="phone call-back"))
                 check("补丁态：同 attempt 的低阶重报不得把已记录状态降级",
                       db.record_alert_delivery(**base, submitted_at_ms=now_ms) is False
@@ -906,6 +954,250 @@ def test_shared_adapter_two_states() -> None:
 
 
 # --------------------------------------------------------------------------
+# 9. 修复轮 r2：P1-1 / P1-2 / P1-3 与 P2/P3 的回归锁
+# --------------------------------------------------------------------------
+
+
+class _PerAlertSink:
+    """按消息身份给出不同结果的 fake sink（用于"一条坏回执不拖垮整批"）。"""
+
+    name = "per-alert-sink"
+
+    def __init__(self, bad_alert_id: str, *, bad_delivered_at_ms: int) -> None:
+        self.bad_alert_id = bad_alert_id
+        self.bad_delivered_at_ms = int(bad_delivered_at_ms)
+        self.submissions: list[str] = []
+
+    def submit(self, *, alert: Alert, receiver_ref: str, attempt: int,
+               now_ms: int) -> TransportOutcome:
+        alert_id = alert.alert_id()
+        self.submissions.append(alert_id)
+        if alert_id == self.bad_alert_id:
+            return TransportOutcome(True, http_status=200, provider_receipt="rcpt-bad",
+                                    delivered_at_ms=self.bad_delivered_at_ms,
+                                    device_receipt="dev-bad", receipt_alert_id=alert_id)
+        return TransportOutcome(True, http_status=200, provider_receipt="rcpt-ok",
+                                delivered_at_ms=now_ms, device_receipt="dev-ok",
+                                receipt_alert_id=alert_id)
+
+
+def test_r2_regressions() -> None:
+    section("9. 修复轮 r2 回归锁（P1-1/P1-2/P1-3、P2-1、P3-1..P3-5）")
+    now = int(time.time() * 1000)
+
+    # ---- P1-1：回执时间略早于本地提交（真实网关常态）不得中断整批 ----
+    queue = AlertQueue(TMP / "r2-p11" / "q.sqlite", capacity=8, cooldown_seconds=0)
+    try:
+        ids = [queue.enqueue(make_alert(now, incident=f"live|early{i}|EARLY{i}"),
+                             now_ms=now).alert_id for i in range(4)]
+        early = RecordingSink(provider_receipt="rcpt-early", delivered_at_ms=now - 1,
+                              device_receipt="dev-early")
+        result = queue.dispatch_due(early, verified_channel(), now_ms=now)
+        check("P1-1: 回执早 1ms 不再抛异常（返回结构化结果）",
+              isinstance(result, dict), result)
+        check("P1-1: 整批继续投递（submitted=4 / confirmed=4 / rejected=0）",
+              result["submitted"] == 4 and result["confirmed"] == 4
+              and result["rejected"] == 0, result)
+        check("P1-1: 偏差被**如实标注**（PROVIDER_CLOCK_SKEW_TOLERATED）",
+              PROVIDER_CLOCK_SKEW_TOLERATED in result["reason_codes"], result["reason_codes"])
+        check("P1-1: 四条全部有确定归宿 DELIVERED",
+              [queue.get(a)["state"] for a in ids] == ["DELIVERED"] * 4,
+              [queue.get(a)["state"] for a in ids])
+        check("P1-1: 归一后 delivered_at_ms >= submitted_at_ms",
+              all(int(queue.get(a)["delivered_at_ms"]) >= int(queue.get(a)["submitted_at_ms"])
+                  for a in ids),
+              [queue.get(a)["delivered_at_ms"] for a in ids])
+        check("P1-1: 归一是可审计的（alert_audit 留有该原因码）",
+              any(entry["transition"] == PROVIDER_CLOCK_SKEW_TOLERATED
+                  for entry in queue.audit_trail(ids[0])),
+              [entry["transition"] for entry in queue.audit_trail(ids[0])])
+        later = queue.dispatch_due(early, verified_channel(), now_ms=now + 300_001)
+        check("P1-1: 300 秒后不再复发（无 due 行、无异常）",
+              later["submitted"] == 0 and later["rejected"] == 0, later)
+    finally:
+        queue.close()
+
+    # 超出容差的"回执早于提交"⇒ 隔离为该条失败，其余照常投递，且有退避不再每轮复发。
+    queue = AlertQueue(TMP / "r2-p11b" / "q.sqlite", capacity=8, cooldown_seconds=0)
+    try:
+        ids = [queue.enqueue(make_alert(now, incident=f"live|bad{i}|BAD{i}"),
+                             now_ms=now).alert_id for i in range(4)]
+        sink = _PerAlertSink(ids[1], bad_delivered_at_ms=now - 10 ** 7)
+        result = queue.dispatch_due(sink, verified_channel(), now_ms=now)
+        check("P1-1: 超容差的倒序回执被隔离为该条失败（rejected=1）",
+              result["rejected"] == 1, result)
+        check("P1-1: 其余三条照常送达（整批未被中断）",
+              result["confirmed"] == 3 and sorted(sink.submissions) == sorted(ids), result)
+        bad_row = queue.get(ids[1])
+        check("P1-1: 被隔离的告警停在 ACCEPTED 且留下失败记录（不伪造送达）",
+              bad_row["state"] == "ACCEPTED" and bad_row["delivered_at_ms"] is None
+              and TRANSITION_REJECTED in str(bad_row["last_error"]), dict(bad_row))
+        check("P1-1: 被隔离的告警有退避重排（不再每轮复发）",
+              bad_row["next_attempt_ms"] is not None
+              and int(bad_row["next_attempt_ms"]) > now, bad_row["next_attempt_ms"])
+        again = queue.dispatch_due(sink, verified_channel(), now_ms=now + 1)
+        check("P1-1: 退避窗口内不再重派（submitted=0）",
+              again["submitted"] == 0 and again["rejected"] == 0, again)
+    finally:
+        queue.close()
+
+    # ---- P1-2：ops_status 必须 fail-closed ----
+    empty = AlertQueue(TMP / "r2-p12-empty" / "q.sqlite", capacity=4)
+    try:
+        verdict = ops_status(empty, channel=verified_channel(), now_ms=now)
+        check("P1-2: 空队列 + 仅配置 verified=true **不得**报 OPS_OK",
+              verdict.status != OPS_OK, verdict.as_dict())
+        check("P1-2: 无确认送达证据 ⇒ NO_CONFIRMED_DELIVERY",
+              NO_CONFIRMED_DELIVERY in verdict.reason_codes, verdict.as_dict())
+    finally:
+        empty.close()
+
+    queue = AlertQueue(TMP / "r2-p12" / "q.sqlite", capacity=8, cooldown_seconds=0)
+    try:
+        good = queue.enqueue(make_alert(now, incident="live|good|R_GOOD"),
+                             now_ms=now).alert_id
+        stuck = queue.enqueue(make_alert(now, incident="live|stuck|R_STUCK"),
+                              now_ms=now).alert_id
+        queue.record_submitted(good, now_ms=now)
+        queue.record_accepted(good, now_ms=now, provider_receipt="r-good",
+                              bound_alert_id=good)
+        queue.record_delivered(good, now_ms=now + 5, delivered_at_ms=now + 5,
+                               device_receipt="dev-good", bound_alert_id=good)
+        queue.record_submitted(stuck, now_ms=now)
+        for elapsed in (10, 299):
+            verdict = ops_status(queue, channel=verified_channel(),
+                                 now_ms=now + elapsed * 1000)
+            check(f"P1-2: t+{elapsed}s 历史 DELIVERED 不得掩盖卡住的告警",
+                  verdict.status != OPS_OK
+                  and NO_CONFIRMED_DELIVERY in verdict.reason_codes, verdict.as_dict())
+    finally:
+        queue.close()
+
+    # ---- P1-3：回执必须绑定本消息身份 + 时间戳上界 + 类型相符 ----
+    queue = AlertQueue(TMP / "r2-p13" / "q.sqlite", capacity=4, cooldown_seconds=0)
+    try:
+        xid = queue.enqueue(make_alert(now, incident="live|victim|VICTIM"),
+                            now_ms=now).alert_id
+        queue.record_submitted(xid, now_ms=now)
+        other = "alert-belongs-to-someone-else"
+
+        def _rejection(fn) -> object:
+            try:
+                fn()
+            except AlertReceiptRejected as exc:
+                return list(exc.reason_codes)
+            except AlertLadderViolation as exc:
+                return list(exc.reason_codes)
+            return "ACCEPTED"
+
+        got = _rejection(lambda: queue.record_accepted(
+            xid, now_ms=now + 1, provider_receipt="receipt-of-other",
+            bound_alert_id=other))
+        check("P1-3: 他消息的 provider_receipt 被拒（RECEIPT_BINDING_MISMATCH）",
+              got == [RECEIPT_BINDING_MISMATCH], got)
+        got = _rejection(lambda: queue.record_accepted(
+            xid, now_ms=now + 1, provider_receipt="receipt-without-binding"))
+        check("P1-3: 未声明身份绑定的回执被拒（RECEIPT_UNBOUND，fail-closed）",
+              got == [RECEIPT_UNBOUND], got)
+        got = _rejection(lambda: queue.record_delivered(
+            xid, now_ms=now + 2, delivered_at_ms=now + 2, device_receipt=12345,
+            bound_alert_id=xid))
+        check("P1-3: 非字符串 device_receipt=12345 被结构化拒绝（不 str() 强转）",
+              got == [RECEIPT_TYPE_INVALID], got)
+        got = _rejection(lambda: queue.record_delivered(
+            xid, now_ms=now + 3, delivered_at_ms=now + 10 ** 12,
+            device_receipt="dev-future", bound_alert_id=xid))
+        check("P1-3: 未来 10^12 ms 的 delivered_at_ms 被拒（时间戳上界）",
+              got == [RECEIPT_TIMESTAMP_FUTURE], got)
+        row = queue.get(xid)
+        check("P1-3: 三类伪造都没有把告警标成 DELIVERED",
+              row["state"] == "SUBMITTED" and row["delivered_at_ms"] is None, dict(row))
+        queue.record_accepted(xid, now_ms=now + 4, provider_receipt="rcpt-ok",
+                              bound_alert_id=xid)
+        queue.record_delivered(xid, now_ms=now + 5, delivered_at_ms=now + 5,
+                               device_receipt="dev-ok", bound_alert_id=xid)
+        row = queue.get(xid)
+        check("P1-3: 绑定本消息的合法回执仍能送达（正常路径未被堵死）",
+              row["state"] == "DELIVERED" and row["receipt_bound_alert_id"] == xid,
+              {k: row[k] for k in ("state", "receipt_bound_alert_id")})
+        # 经 transport 的跨消息回执：该条被拒，但整批不中断。
+        by_transport = AlertQueue(TMP / "r2-p13b" / "q.sqlite", capacity=4)
+        try:
+            bid = by_transport.enqueue(make_alert(now, incident="live|victimb|VICTIMB"),
+                                       now_ms=now).alert_id
+            res = by_transport.dispatch_due(
+                RecordingSink(provider_receipt="rcpt-Y", delivered_at_ms=now + 1,
+                              device_receipt="dev-Y", receipt_alert_id=other),
+                verified_channel(), now_ms=now + 1)
+            check("P1-3: transport 回执声明属于他消息 ⇒ 该条被拒且整批不中断",
+                  res["rejected"] == 1 and res["submitted"] == 1
+                  and by_transport.get(bid)["state"] == "SUBMITTED", res)
+        finally:
+            by_transport.close()
+    finally:
+        queue.close()
+
+    # ---- P2-1：进程不可证与确证消失必须可区分 ----
+    unverified_proc = classify_outage(
+        now_seconds=1000.0, process_alive=None,
+        trading_evidence_at_seconds=400.0, host_uptime_seconds=259200.0)
+    gone_proc = classify_outage(
+        now_seconds=1000.0, process_alive=False,
+        trading_evidence_at_seconds=400.0, host_uptime_seconds=259200.0)
+    check("P2-1: process_alive=None 追加 PROCESS_UNVERIFIED（可区分于确证消失）",
+          unverified_proc.kind == PROCESS_MISSING
+          and PROCESS_UNVERIFIED in unverified_proc.reason_codes
+          and PROCESS_UNVERIFIED not in gone_proc.reason_codes,
+          (unverified_proc.as_dict(), gone_proc.as_dict()))
+
+    # ---- P3-1：常量名与值一致 ----
+    check("P3-1: MANUAL_ACK_NOTE_AND_CONFIRM_REQUIRED 名字与值一致（旧别名保持兼容）",
+          MANUAL_ACK_NOTE_AND_CONFIRM_REQUIRED == "MANUAL_ACK_NOTE_AND_CONFIRM_REQUIRED"
+          and MANUAL_ACK_REQUIRED == MANUAL_ACK_NOTE_AND_CONFIRM_REQUIRED,
+          (MANUAL_ACK_NOTE_AND_CONFIRM_REQUIRED, MANUAL_ACK_REQUIRED))
+
+    # ---- P3-2：record_manual_ack 只返回元组，不穿异常 ----
+    queue = AlertQueue(TMP / "r2-p32" / "q.sqlite", capacity=4, cooldown_seconds=0)
+    try:
+        aid = queue.enqueue(make_alert(now, incident="live|acked|ACKED"),
+                            now_ms=now).alert_id
+        queue.record_submitted(aid, now_ms=now)
+        queue.record_accepted(aid, now_ms=now, provider_receipt="r", bound_alert_id=aid)
+        queue.record_delivered(aid, now_ms=now + 100, delivered_at_ms=now + 100,
+                               device_receipt="dev", bound_alert_id=aid)
+        try:
+            ok_ack, reason_codes = queue.record_manual_ack(
+                aid, actor="operator", note="late ack", confirm=True, now_ms=now)
+            check("P3-2: 已送达告警用更早 now_ms 确认返回 (False, reasons) 而不抛异常",
+                  ok_ack is False and TRANSITION_REJECTED in reason_codes,
+                  (ok_ack, reason_codes))
+        except Exception as exc:  # noqa: BLE001 - 穿出异常即失败
+            check("P3-2: 已送达告警用更早 now_ms 确认返回 (False, reasons) 而不抛异常",
+                  False, f"{type(exc).__name__}: {exc}")
+        check("P3-2: 被拒的确认不降级已送达状态",
+              queue.get(aid)["state"] == "DELIVERED"
+              and queue.get(aid)["ack_at_ms"] is None, queue.get(aid)["state"])
+    finally:
+        queue.close()
+
+    # ---- P3-3：交易证据时间落在未来不得判健康 ----
+    future_evidence = Heartbeat(environment="live", emitted_at_ms=now + 4000,
+                                trading_evidence_at_ms=now + 3000, sequence=1)
+    _, verdict = advance_heartbeat(HeartbeatState(), future_evidence, now_ms=now)
+    check("P3-3: 未来交易证据时间 ⇒ TRADING_EVIDENCE_FROM_FUTURE（age 不得被夹成 0）",
+          not verdict.healthy and TRADING_EVIDENCE_FROM_FUTURE in verdict.reason_codes,
+          verdict.as_dict())
+
+    # ---- P3-5：负的宿主运行时长不得落入启动宽限 ----
+    negative_uptime = classify_outage(
+        now_seconds=1000.0, process_alive=False,
+        trading_evidence_at_seconds=400.0, host_uptime_seconds=-5.0)
+    check("P3-5: 负 uptime 不得报 HOST_JUST_BOOTED（读数无效 ⇒ 连续性不可证）",
+          negative_uptime.kind == HOST_CONTINUITY_UNKNOWN,
+          negative_uptime.as_dict())
+
+
+# --------------------------------------------------------------------------
 
 
 def main() -> int:
@@ -918,6 +1210,7 @@ def main() -> int:
         test_ops_blocked()
         test_queue_independence()
         test_message_redaction()
+        test_r2_regressions()
         test_shared_adapter_two_states()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)

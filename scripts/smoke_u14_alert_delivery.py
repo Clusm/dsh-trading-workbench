@@ -38,8 +38,13 @@ from core.ops.alert_delivery import (  # noqa: E402
     OPS_DEGRADED,
     OPS_OK,
     PROCESS_MISSING,
+    PROVIDER_CLOCK_SKEW_TOLERATED,
+    RECEIPT_BINDING_MISMATCH,
+    RECEIPT_TIMESTAMP_FUTURE,
+    RECEIPT_TYPE_INVALID,
     TRADING_STALLED,
     AlertQueue,
+    AlertReceiptRejected,
     ChannelPolicy,
     Heartbeat,
     HeartbeatState,
@@ -111,7 +116,8 @@ def main() -> None:  # noqa: C901 - 冒烟脚本按段落线性展开
         check("HTTP200 只到 SUBMITTED（不是送达）",
               queue.get(aid)["state"] == "SUBMITTED" and result["confirmed"] == 0,
               queue.get(aid)["state"])
-        accepted = queue.record_accepted(aid, now_ms=now + 10, provider_receipt="rcpt-synth")
+        accepted = queue.record_accepted(aid, now_ms=now + 10, provider_receipt="rcpt-synth",
+                                        bound_alert_id=aid)
         check("供应商接收 = ACCEPTED 且 delivered_at_ms 仍为空（≠送达）",
               accepted == "ACCEPTED" and queue.get(aid)["delivered_at_ms"] is None,
               accepted)
@@ -124,7 +130,7 @@ def main() -> None:  # noqa: C901 - 冒烟脚本按段落线性展开
         check("无设备回执不得标 DELIVERED",
               "device_receipt" in no_device, no_device)
         delivered = queue.record_delivered(aid, now_ms=now + 30, delivered_at_ms=now + 30,
-                                           device_receipt="dev-synth")
+                                           device_receipt="dev-synth", bound_alert_id=aid)
         check("有设备回执才到 DELIVERED", delivered == "DELIVERED", delivered)
     finally:
         queue.close()
@@ -195,11 +201,53 @@ def main() -> None:  # noqa: C901 - 冒烟脚本按段落线性展开
         check("验证通道 + 仅 HTTP200 ⇒ OPS_DEGRADED + NO_CONFIRMED_DELIVERY",
               v.status == OPS_DEGRADED and NO_CONFIRMED_DELIVERY in v.reason_codes,
               v.as_dict())
-        queue.dispatch_due(RecordingSink(provider_receipt="r2", delivered_at_ms=now + 1,
-                                         device_receipt="dev2"), _verified(), now_ms=now + 5)
+        # 空队列 + 仅配置 verified=true 也必须 fail-closed（不得报 OPS_OK）。
+        fresh = AlertQueue(TMP / "blocked-empty" / "q.sqlite", capacity=4)
+        try:
+            check("空队列 + 仅配置 verified=true 不报 OPS_OK（fail-closed）",
+                  ops_status(fresh, channel=_verified(), now_ms=now).status != OPS_OK,
+                  ops_status(fresh, channel=_verified(), now_ms=now).as_dict())
+        finally:
+            fresh.close()
+        # 只有 HTTP200 的告警按冷却间隔复查，不忙轮询（P3-4）。
+        again = queue.dispatch_due(RecordingSink(http_status=200), _verified(), now_ms=now + 1)
+        check("只有 HTTP200 时不忙轮询（冷却期内不重复提交）", again["submitted"] == 0, again)
+        # 冷却到期后再投递，拿到真实设备回执才 OPS_OK。
+        delivered_at = now + 300_010
+        queue.dispatch_due(RecordingSink(provider_receipt="r2", delivered_at_ms=delivered_at,
+                                         device_receipt="dev2"), _verified(),
+                           now_ms=delivered_at)
         check("真实送达 ⇒ OPS_OK",
-              ops_status(queue, channel=_verified(), now_ms=now + 5).status == OPS_OK,
+              ops_status(queue, channel=_verified(), now_ms=delivered_at).status == OPS_OK,
               queue.get(aid)["state"])
+    finally:
+        queue.close()
+
+    # ---- 4b. 修复轮 r2：回执身份绑定 / 时间戳上界 / 整批不中断 ------------
+    print("\n[4b] 回执身份绑定与时间戳上界（R14：供应商接受 ≠ 送达）")
+    queue = AlertQueue(TMP / "receipt-bound" / "q.sqlite", capacity=8, cooldown_seconds=0)
+    try:
+        aid = _enqueue(queue, now, "early-receipt")
+        res = queue.dispatch_due(
+            RecordingSink(provider_receipt="r-early", delivered_at_ms=now - 1,
+                          device_receipt="dev-early"), _verified(), now_ms=now)
+        check("回执略早于本地提交 ⇒ 有界容忍 + 如实标注，且整批不中断",
+              res["confirmed"] == 1
+              and PROVIDER_CLOCK_SKEW_TOLERATED in res["reason_codes"], res)
+        check("归一是可审计的（alert_audit 留痕）",
+              any(e["transition"] == PROVIDER_CLOCK_SKEW_TOLERATED
+                  for e in queue.audit_trail(aid)), [e["transition"]
+                                                     for e in queue.audit_trail(aid)])
+        victim = _enqueue(queue, now, "victim")
+        queue.record_submitted(victim, now_ms=now)
+        rejected = _receipt_rejections(queue, victim, now)
+        check("他消息回执 / 非字符串回执 / 未来时间戳 三类伪造全部被拒",
+              rejected == [RECEIPT_BINDING_MISMATCH, RECEIPT_TYPE_INVALID,
+                           RECEIPT_TIMESTAMP_FUTURE], rejected)
+        check("三类伪造都没有把告警标成 DELIVERED",
+              queue.get(victim)["state"] == "SUBMITTED"
+              and queue.get(victim)["delivered_at_ms"] is None,
+              {k: queue.get(victim)[k] for k in ("state", "delivered_at_ms")})
     finally:
         queue.close()
 
@@ -325,6 +373,29 @@ def main() -> None:  # noqa: C901 - 冒烟脚本按段落线性展开
     print(f"\nSMOKE_U14_ALERT_DELIVERY ok={ok} fail={fail}")
     if fail:
         raise SystemExit(1)
+
+
+def _receipt_rejections(queue, alert_id: str, now_ms: int) -> list[str]:
+    """三类回执伪造各自应得的原因码（返回顺序：绑定/类型/时间戳）。"""
+    outcomes: list[str] = []
+
+    def _reason(fn) -> str:
+        try:
+            fn()
+        except AlertReceiptRejected as exc:
+            return "+".join(exc.reason_codes)
+        return "ACCEPTED"
+
+    outcomes.append(_reason(lambda: queue.record_accepted(
+        alert_id, now_ms=now_ms + 1, provider_receipt="receipt-of-other",
+        bound_alert_id="alert-belongs-to-someone-else")))
+    outcomes.append(_reason(lambda: queue.record_delivered(
+        alert_id, now_ms=now_ms + 2, delivered_at_ms=now_ms + 2, device_receipt=12345,
+        bound_alert_id=alert_id)))
+    outcomes.append(_reason(lambda: queue.record_delivered(
+        alert_id, now_ms=now_ms + 3, delivered_at_ms=now_ms + 10 ** 12,
+        device_receipt="dev-future", bound_alert_id=alert_id)))
+    return outcomes
 
 
 def _try_bad_delivery(db) -> bool:

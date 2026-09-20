@@ -96,9 +96,11 @@ __all__ = [
     "OPS_OK",
     "OUTAGE_HEALTHY",
     "PROCESS_MISSING",
+    "PROCESS_UNVERIFIED",
     "Alert",
     "AlertLadderViolation",
     "AlertQueue",
+    "AlertReceiptRejected",
     "ChannelPolicy",
     "EnqueueOutcome",
     "Heartbeat",
@@ -157,6 +159,9 @@ HOST_DOWN = "HOST_DOWN"
 TRADING_STALLED = "TRADING_STALLED"
 #: 宿主连续运行时长不可得：**不**断言任何一种，避免把两类故障混为一类。
 HOST_CONTINUITY_UNKNOWN = "HOST_CONTINUITY_UNKNOWN"
+#: 进程存活状态**不可证**（锁文件缺失/损坏/PID 不可解析）。它与"确证进程消失"
+#: （``process_alive is False``）成因不同，必须能用原因码区分（P2-1）。
+PROCESS_UNVERIFIED = "PROCESS_UNVERIFIED"
 #: 宿主刚启动、仍在启动宽限内：不告警，也不算健康结论。
 HOST_JUST_BOOTED = "HOST_JUST_BOOTED"
 #: 宿主刚启动**且**最后一条交易证据早于本次启动 ⇒ 已经能看出发生过宿主重启，
@@ -188,7 +193,30 @@ TRANSPORT_FAILED = "TRANSPORT_FAILED"
 DELIVERED_WITHOUT_DEVICE_RECEIPT = "DELIVERED_WITHOUT_DEVICE_RECEIPT"
 MANUAL_ACK_WITHOUT_SUBMISSION = "MANUAL_ACK_WITHOUT_SUBMISSION"
 MANUAL_ACK_ACTOR_INVALID = "MANUAL_ACK_ACTOR_INVALID"
-MANUAL_ACK_CONFIRM_REQUIRED = "MANUAL_ACK_NOTE_AND_CONFIRM_REQUIRED"
+
+# --------------------------------------------------------------------------
+# 送达回执的身份绑定与时间戳边界（P1-3；R14：供应商接受 ≠ 送达）
+# --------------------------------------------------------------------------
+
+#: 回执未声明所属消息 ⇒ 无法证明它是**本条**告警的回执，拒绝。
+RECEIPT_UNBOUND = "RECEIPT_UNBOUND"
+#: 回执声明的所属消息与本条告警不一致 ⇒ 他消息的回执不得标送达，拒绝。
+RECEIPT_BINDING_MISMATCH = "RECEIPT_BINDING_MISMATCH"
+#: 回执类型不符（非字符串，如 ``12345``）⇒ 结构化拒绝，**不**做 ``str()`` 强转。
+RECEIPT_TYPE_INVALID = "RECEIPT_TYPE_INVALID"
+#: 回执时间戳落在未来（超出容差）⇒ 拒绝，避免用未来时间伪造"已送达"。
+RECEIPT_TIMESTAMP_FUTURE = "RECEIPT_TIMESTAMP_FUTURE"
+#: 供应商回执时间略早于本地提交时刻，已按有界容差归一（如实标注，不静默）。
+PROVIDER_CLOCK_SKEW_TOLERATED = "PROVIDER_CLOCK_SKEW_TOLERATED"
+
+#: 回执时间戳相对本地时钟的**有界**容差：供应商网关普遍上报自己的时钟，
+#: 与本地提交时刻存在有界偏斜；超出该容差的时间戳一律拒绝（不静默放大）。
+RECEIPT_TIMESTAMP_TOLERANCE_MS = 120_000
+
+#: 人工确认缺 note/confirm：常量名与值必须一致（旧名值不符会误导按名过滤日志的消费者）。
+MANUAL_ACK_NOTE_AND_CONFIRM_REQUIRED = "MANUAL_ACK_NOTE_AND_CONFIRM_REQUIRED"
+#: 兼容别名：值与 :data:`MANUAL_ACK_NOTE_AND_CONFIRM_REQUIRED` 相同，仅为不破坏既有导入。
+MANUAL_ACK_REQUIRED = MANUAL_ACK_NOTE_AND_CONFIRM_REQUIRED
 UNKNOWN_ALERT = "UNKNOWN_ALERT"
 
 DEFAULT_CAPACITY = 500
@@ -216,6 +244,20 @@ class AlertLadderViolation(RuntimeError):
     def __init__(self, reason_codes: Iterable[str]) -> None:
         self.reason_codes = tuple(reason_codes)
         super().__init__("alert ladder violated: " + ", ".join(self.reason_codes))
+
+
+class AlertReceiptRejected(ValueError):
+    """送达回执被**结构化**拒绝（P1-3）。
+
+    三类：类型不符（:data:`RECEIPT_TYPE_INVALID`）、未绑定/绑定他消息
+    （:data:`RECEIPT_UNBOUND` / :data:`RECEIPT_BINDING_MISMATCH`）、时间戳越界
+    （:data:`RECEIPT_TIMESTAMP_FUTURE`）。带 :attr:`reason_codes` 供调用方
+    按码分支，而不是靠解析字符串。
+    """
+
+    def __init__(self, reason_codes: Iterable[str]) -> None:
+        self.reason_codes = tuple(reason_codes)
+        super().__init__("alert receipt rejected: " + ", ".join(self.reason_codes))
 
 
 # --------------------------------------------------------------------------
@@ -343,10 +385,15 @@ def classify_outage(
     - 交易证据陈旧（超过 ``trading_evidence_max_age_seconds``）且**进程仍存活**
       ⇒ :data:`TRADING_STALLED`（R13/F22：心跳进程活着不等于交易健康）。
 
-    ``process_alive=None``（锁文件损坏/PID 不可解析）与 ``False``（确知进程消失）
-    都进入失联分支，但原因码不同：前者保留 :data:`HOST_CONTINUITY_UNKNOWN` 或
-    进程侧不可证；本函数只负责成因分类，进程可证性由探针方给出。
+    ``process_alive=None``（锁文件缺失/损坏/PID 不可解析）与 ``False``（确知进程消失）
+    都进入失联分支，但原因码不同：``None`` 时在既有原因码之外**追加**
+    :data:`PROCESS_UNVERIFIED`，消费者因此能区分"确证进程消失"与"进程状态不可读"；
+    本函数只负责成因分类，进程可证性由探针方给出。
     """
+    if host_uptime_seconds is not None and float(host_uptime_seconds) < 0:
+        # 负的宿主运行时长是**无效读数**而不是"刚启动"（否则会落入启动宽限报
+        # HOST_JUST_BOOTED，掩盖可能的关机）。归一为不可得 ⇒ 连续性不可证，不猜。
+        host_uptime_seconds = None
     age: float | None = None
     if trading_evidence_at_seconds is not None:
         age = max(0.0, float(now_seconds) - float(trading_evidence_at_seconds))
@@ -370,14 +417,18 @@ def classify_outage(
                              host_uptime_seconds, age, False)
 
     # 进程不可证（消失或不可解析）：按宿主连续性区分成因。
+    # process_alive is None ⇒ 进程侧"不可证"，与"确证消失"用独立原因码区分。
+    unverified = () if process_alive is not None else (PROCESS_UNVERIFIED,)
     if host_uptime_seconds is None or age is None:
+        process_code = (PROCESS_MISSING if process_alive is False
+                        else TRADING_EVIDENCE_MISSING)
         return OutageVerdict(HOST_CONTINUITY_UNKNOWN,
-                             (PROCESS_MISSING if process_alive is False else
-                              TRADING_EVIDENCE_MISSING, HOST_CONTINUITY_UNKNOWN),
+                             (process_code, *unverified, HOST_CONTINUITY_UNKNOWN),
                              host_uptime_seconds, age, False)
     if host_uptime_seconds < age:
-        return OutageVerdict(HOST_DOWN, (HOST_DOWN,), host_uptime_seconds, age, False)
-    return OutageVerdict(PROCESS_MISSING, (PROCESS_MISSING,),
+        return OutageVerdict(HOST_DOWN, (HOST_DOWN, *unverified),
+                             host_uptime_seconds, age, False)
+    return OutageVerdict(PROCESS_MISSING, (PROCESS_MISSING, *unverified),
                          host_uptime_seconds, age, False)
 
 
@@ -515,7 +566,8 @@ def evaluate_heartbeat(
       ``TRADING_EVIDENCE_REPLAY``（拒绝陈旧重放）；
     - 运行代/会话与预期不符 → ``HEARTBEAT_GENERATION_MISMATCH``；
     - 缺交易证据时间 → ``TRADING_EVIDENCE_MISSING``（心跳活着 ≠ 交易健康）；
-    - 交易证据时间晚于发送时间 → ``TRADING_EVIDENCE_FROM_FUTURE``；
+    - 交易证据时间晚于发送时间，**或晚于本地 ``now``** → ``TRADING_EVIDENCE_FROM_FUTURE``
+      （不得让"未来证据"被 ``max(0.0, …)`` 夹成 ``age=0`` 的假健康）；
     - 交易证据过旧 → ``TRADING_EVIDENCE_STALE``。
 
     维护窗口生效时 ``muted=True``（``healthy=False`` 但不升级告警）；窗口必须
@@ -556,7 +608,10 @@ def evaluate_heartbeat(
     else:
         evidence = int(evidence)
         age = max(0.0, (int(now_ms) - evidence) / 1000.0)
-        if evidence > emitted:
+        # 只比 emitted 不够：emitted 本身在容差内"略微向未来"时，未来证据会被判
+        # 健康且 age 被 max(0.0, …) 夹成 0 ⇒ 时钟异常可长期掩盖停摆。故**严格**
+        # 对比本地 now（证据由本机交易库产出，晚于本地当前时刻即属时钟异常）。
+        if evidence > emitted or evidence > int(now_ms):
             reasons.append(TRADING_EVIDENCE_FROM_FUTURE)
         if prev.trading_evidence_at_ms is not None and evidence < int(prev.trading_evidence_at_ms):
             reasons.append(TRADING_EVIDENCE_REPLAY)
@@ -937,6 +992,11 @@ class TransportOutcome:
 
     ``delivered_at_ms`` **必须**与 ``device_receipt`` 同时出现才被采纳
     （见 :meth:`AlertQueue.dispatch_due`）；HTTP 2xx 单独出现只到 ``SUBMITTED``。
+
+    ``receipt_alert_id`` 是回执的**身份绑定**：通道必须声明这次回执属于哪条消息
+    （真实实现可回带请求里的 ``alert_id``/cid/消息 id）。缺省 ``None`` ⇒ 未绑定，
+    :meth:`AlertQueue.dispatch_due` 会按 :data:`RECEIPT_UNBOUND` 拒绝，避免
+    "他消息的回执"把本告警标成送达（R14）。
     """
 
     ok: bool
@@ -945,6 +1005,7 @@ class TransportOutcome:
     delivered_at_ms: int | None = None
     device_receipt: str | None = None
     error: str = ""
+    receipt_alert_id: str | None = None
 
 
 class AlertTransport(Protocol):
@@ -976,6 +1037,9 @@ class RecordingSink:
     ``http_status=200``（⇒ 只能到 ``SUBMITTED``）。要模拟"供应商接受"必须显式
     传 ``provider_receipt``；要模拟"设备送达"必须**同时**传
     ``delivered_at_ms`` 与 ``device_receipt``。
+
+    回执身份绑定：默认回带**本次提交的那条消息**的 ``alert_id``（真实网关的正常
+    行为）；要构造"他消息的回执"这类伪造，显式传 ``receipt_alert_id``。
     """
 
     provider_receipt: str | None = None
@@ -983,6 +1047,7 @@ class RecordingSink:
     device_receipt: str | None = None
     http_status: int = 200
     fail_with: str = ""
+    receipt_alert_id: str | None = None
     name = "fake-sink"
     submissions: list[dict[str, Any]] = field(default_factory=list)
 
@@ -1002,6 +1067,9 @@ class RecordingSink:
             provider_receipt=self.provider_receipt,
             delivered_at_ms=self.delivered_at_ms,
             device_receipt=self.device_receipt,
+            receipt_alert_id=(self.receipt_alert_id
+                              if self.receipt_alert_id is not None
+                              else alert.alert_id()),
         )
 
 
@@ -1026,7 +1094,8 @@ CREATE TABLE IF NOT EXISTS alert_queue (
     submitted_at_ms INTEGER,
     delivered_at_ms INTEGER,
     ack_at_ms INTEGER,
-    receiver_ref TEXT
+    receiver_ref TEXT,
+    receipt_bound_alert_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_alert_queue_due ON alert_queue(state, next_attempt_ms);
 CREATE INDEX IF NOT EXISTS idx_alert_queue_incident ON alert_queue(incident_key, last_seen_at_ms);
@@ -1083,7 +1152,21 @@ class AlertQueue:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.executescript(_QUEUE_SCHEMA)
+        self._ensure_columns()
         self.conn.commit()
+
+    def _ensure_columns(self) -> None:
+        """幂等补列：``receipt_bound_alert_id`` 只为既存队列文件补（新库已含）。
+
+        ``ALTER TABLE ... ADD COLUMN`` 没有 ``IF NOT EXISTS``，故先读
+        ``PRAGMA table_info``；本表无历史数据需要迁移顺序约束，不涉及迁移版本。
+        """
+        existing = {str(row["name"]) for row in
+                    self.conn.execute("PRAGMA table_info(alert_queue)")}
+        if "receipt_bound_alert_id" not in existing:
+            self.conn.execute(
+                "ALTER TABLE alert_queue ADD COLUMN receipt_bound_alert_id TEXT")
+            self.conn.commit()
 
     # ---------------- 生命周期 ----------------
 
@@ -1302,25 +1385,72 @@ class AlertQueue:
                       note="transport accepted submission (no delivery receipt yet)")
         return delivery.state
 
-    def record_accepted(self, alert_id: str, *, now_ms: int, provider_receipt: str) -> str:
-        """供应商**接收**：``ACCEPTED`` ≠ 送达（R14 的核心区分）。"""
-        if not str(provider_receipt).strip():
-            raise ValueError("ACCEPTED requires a non-empty provider_receipt")
+    @staticmethod
+    def _bind_receipt(alert_id: str, receipt: object, *, field: str,
+                      bound_alert_id: object) -> str:
+        """回执的**身份绑定 + 类型**校验（P1-3）：不绑定本消息一律结构化拒绝。
+
+        顺序刻意如此：类型 → 非空 → 绑定存在 → 绑定一致。既有负例（空回执）仍拿到
+        含 ``field`` 名字的 ``ValueError``，其余情形拿到带原因码的
+        :class:`AlertReceiptRejected`。
+        """
+        if not isinstance(receipt, str):
+            raise AlertReceiptRejected((RECEIPT_TYPE_INVALID,))
+        if not receipt.strip():
+            raise ValueError(f"{field} required: 回执不得为空")
+        if not isinstance(bound_alert_id, str) or not bound_alert_id.strip():
+            raise AlertReceiptRejected((RECEIPT_UNBOUND,))
+        if bound_alert_id != alert_id:
+            raise AlertReceiptRejected((RECEIPT_BINDING_MISMATCH,))
+        return receipt
+
+    def _bind_receipt_columns(self, alert_id: str, bound_alert_id: str) -> None:
+        """把"回执已绑定到哪条消息"落库，供事后审计核对（P1-3）。"""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE alert_queue SET receipt_bound_alert_id=? WHERE alert_id=?",
+                (str(bound_alert_id), alert_id))
+            self.conn.commit()
+
+    def record_accepted(self, alert_id: str, *, now_ms: int, provider_receipt: str,
+                        bound_alert_id: str | None = None) -> str:
+        """供应商**接收**：``ACCEPTED`` ≠ 送达（R14 的核心区分）。
+
+        ``provider_receipt`` 必须是字符串且**声明属于本条消息**
+        （``bound_alert_id == alert_id``），否则结构化拒绝：他消息的回执不得把
+        本告警标成 ``ACCEPTED``。
+        """
+        self._bind_receipt(alert_id, provider_receipt, field="provider_receipt",
+                           bound_alert_id=bound_alert_id)
         row = self._require(alert_id)
         delivery = self._delivery(row)
         if delivery.submitted_at_ms is None:
             delivery = self._raise_to(delivery, "SUBMITTED", now_ms=now_ms)
-        delivery = delivery.model_copy(update={"provider_receipt": str(provider_receipt)})
+        delivery = delivery.model_copy(update={"provider_receipt": provider_receipt})
         delivery = self._raise_to(delivery, "ACCEPTED", now_ms=now_ms)
         self._persist(alert_id, delivery, now_ms=now_ms, transition="ACCEPTED",
                       note="provider receipt recorded; delivery NOT confirmed")
+        self._bind_receipt_columns(alert_id, str(bound_alert_id))
         return delivery.state
 
     def record_delivered(self, alert_id: str, *, now_ms: int, delivered_at_ms: int,
-                         device_receipt: str, provider_receipt: str | None = None) -> str:
-        """真实**送达**：必须同时有设备回执与送达时间，否则拒绝（不伪造 DELIVERED）。"""
-        if not str(device_receipt).strip():
-            raise ValueError(f"{DELIVERED_WITHOUT_DEVICE_RECEIPT}: device_receipt required")
+                         device_receipt: str, provider_receipt: str | None = None,
+                         bound_alert_id: str | None = None) -> str:
+        """真实**送达**：必须同时有设备回执与送达时间，否则拒绝（不伪造 DELIVERED）。
+
+        P1-3 的两道额外门槛：
+
+        - 设备回执必须**绑定本条消息**（``bound_alert_id == alert_id``，且为字符串）；
+        - ``delivered_at_ms`` 必须是非布尔整数，且不得超出 ``now + 容差``
+          （未来时间戳不得用来伪造"已送达"）；下界仍由 K05 ``delivery_violations``
+          的 ``TIME_ORDER_VIOLATION`` 把关（严格，不在此处放宽）。
+        """
+        self._bind_receipt(alert_id, device_receipt, field="device_receipt",
+                           bound_alert_id=bound_alert_id)
+        if not isinstance(delivered_at_ms, int) or isinstance(delivered_at_ms, bool):
+            raise AlertReceiptRejected((RECEIPT_TYPE_INVALID,))
+        if int(delivered_at_ms) > _now_ms(now_ms) + RECEIPT_TIMESTAMP_TOLERANCE_MS:
+            raise AlertReceiptRejected((RECEIPT_TIMESTAMP_FUTURE,))
         row = self._require(alert_id)
         delivery = self._delivery(row)
         if provider_receipt:
@@ -1332,11 +1462,13 @@ class AlertQueue:
         delivery = delivery.model_copy(update={"delivered_at_ms": int(delivered_at_ms)})
         delivery = self._raise_to(delivery, "DELIVERED", now_ms=now_ms)
         self._persist(alert_id, delivery, now_ms=now_ms, transition="DELIVERED",
-                      note=f"device_receipt={str(device_receipt)[:32]}")
+                      note=f"device_receipt={device_receipt[:32]} "
+                           f"bound_alert_id={bound_alert_id[:32]}")
         with self.conn:
             self.conn.execute(
-                "UPDATE alert_queue SET device_receipt=? WHERE alert_id=?",
-                (str(device_receipt), alert_id))
+                "UPDATE alert_queue SET device_receipt=?, receipt_bound_alert_id=? "
+                "WHERE alert_id=?",
+                (device_receipt, str(bound_alert_id), alert_id))
             self.conn.commit()
         return delivery.state
 
@@ -1348,6 +1480,10 @@ class AlertQueue:
         非空、``confirm is True``；且该告警**已经提交过**（否则没有任何"端到端
         演练"事实，只能记 ``MANUAL_ACK_WITHOUT_SUBMISSION`` 而不改状态）。
         结果状态是 ``ACKNOWLEDGED``，``delivered_at_ms`` 保持 NULL——**不**伪造送达。
+
+        本函数**只**返回 ``(bool, reasons)``，任何阶梯违规（例如对一条已 ``DELIVERED``
+        的告警用更早的 ``now_ms`` 确认）都收敛成 ``(False, (TRANSITION_REJECTED, …))``，
+        不把 :class:`AlertLadderViolation` 穿给调用方（P3-2）。
         """
         who = str(actor).strip()
         if not who or who.lower() in _AUTO_ACTORS:
@@ -1363,9 +1499,14 @@ class AlertQueue:
                 self.conn.commit()
             return False, (MANUAL_ACK_WITHOUT_SUBMISSION,)
         delivery = delivery.model_copy(update={"ack_at_ms": int(now_ms)})
-        delivery = self._raise_to(delivery, "ACKNOWLEDGED", now_ms=now_ms)
-        self._persist(alert_id, delivery, now_ms=now_ms, transition="ACKNOWLEDGED",
-                      actor=who, note=str(note))
+        try:
+            delivery = self._raise_to(delivery, "ACKNOWLEDGED", now_ms=now_ms)
+            self._persist(alert_id, delivery, now_ms=now_ms, transition="ACKNOWLEDGED",
+                          actor=who, note=str(note))
+        except AlertLadderViolation as exc:
+            # 本函数契约是返回 ``(bool, reasons)``：已 DELIVERED 的告警再用更早的
+            # now_ms 确认会触发阶梯时间序违规，必须收敛成元组而不是把异常穿给调用方。
+            return False, tuple(dict.fromkeys((TRANSITION_REJECTED, *exc.reason_codes)))
         return True, ()
 
     def record_recovery(self, incident_key: str, *, now_ms: int, evidence: str) -> int:
@@ -1400,13 +1541,26 @@ class AlertQueue:
     ) -> dict[str, Any]:
         """投递到期告警；通道未验证时**不**提交（除非显式 ``drill=True`` 演练）。
 
-        返回结构含 ``submitted``/``confirmed``/``blocked``/``slo_breached`` 与
-        原因码；``blocked=True`` 表示队列里已有到期告警但因通道未验证而未提交
-        （这一事实会让 :func:`ops_status` 保持 ``OPS_BLOCKED``）。
+        返回结构含 ``submitted``/``confirmed``/``rejected``/``failed``/``blocked``/
+        ``slo_breached`` 与原因码；``blocked=True`` 表示队列里已有到期告警但因通道
+        未验证而未提交（这一事实会让 :func:`ops_status` 保持 ``OPS_BLOCKED``）。
+
+        两条与真实网关有关的鲁棒性约束（P1-1 / P1-3）：
+
+        1. **回执时间略早于本地提交**是真实网关的常态（供应商上报自己的时钟）。
+           ``delivered_at_ms`` 落在 ``[submitted_at_ms - 容差, submitted_at_ms)`` 时
+           按有界容差归一到 ``submitted_at_ms`` 并记
+           :data:`PROVIDER_CLOCK_SKEW_TOLERATED` 审计行（如实标注，不静默掩盖）；
+           超出容差则交由阶梯自检拒绝。
+        2. **单条告警的阶梯/回执异常不得中断整批**：每条 due 行的
+           :class:`AlertLadderViolation` / :class:`AlertReceiptRejected` 都被收敛成
+           该条的失败记录（：data:`TRANSITION_REJECTED` + ``last_error``）并按退避
+           重排，然后 ``continue`` 处理其余行——不会再出现"一条坏回执让整批停摆、
+           且每轮复发"的卡死状态。
         """
         now = _now_ms(now_ms)
         result: dict[str, Any] = {
-            "submitted": 0, "confirmed": 0, "failed": 0, "skipped": 0,
+            "submitted": 0, "confirmed": 0, "failed": 0, "rejected": 0, "skipped": 0,
             "blocked": False, "slo_breached": False, "reason_codes": [],
         }
         if not channel.verified and not drill:
@@ -1423,39 +1577,85 @@ class AlertQueue:
             alert_id = str(row["alert_id"])
             attempt = int(row["attempts"]) + 1
             alert = _alert_from_row(row)
-            outcome = transport.submit(
-                alert=alert, receiver_ref=str(row["receiver_ref"] or channel.receiver_ref),
-                attempt=attempt, now_ms=now)
-            if not outcome.ok:
-                self._record_failure(alert_id, now_ms=now, attempt=attempt,
-                                     error=outcome.error or TRANSPORT_FAILED)
-                result["failed"] += 1
-                continue
-            self._record_attempt(alert_id, now_ms=now, attempt=attempt)
-            state = self.record_submitted(alert_id, now_ms=now,
-                                          receiver_ref=str(row["receiver_ref"] or ""))
-            result["submitted"] += 1
-            if outcome.provider_receipt:
-                state = self.record_accepted(alert_id, now_ms=now,
-                                             provider_receipt=outcome.provider_receipt)
-                if state == "ACCEPTED":
+            try:
+                outcome = transport.submit(
+                    alert=alert,
+                    receiver_ref=str(row["receiver_ref"] or channel.receiver_ref),
+                    attempt=attempt, now_ms=now)
+                if not outcome.ok:
+                    self._record_failure(alert_id, now_ms=now, attempt=attempt,
+                                         error=outcome.error or TRANSPORT_FAILED)
+                    result["failed"] += 1
+                    continue
+                self._record_attempt(alert_id, now_ms=now, attempt=attempt)
+                state = self.record_submitted(alert_id, now_ms=now,
+                                              receiver_ref=str(row["receiver_ref"] or ""))
+                result["submitted"] += 1
+                bound = outcome.receipt_alert_id
+                if outcome.provider_receipt:
+                    state = self.record_accepted(
+                        alert_id, now_ms=now, provider_receipt=outcome.provider_receipt,
+                        bound_alert_id=bound)
+                    if state == "ACCEPTED":
+                        self._schedule_recheck(alert_id, now_ms=now,
+                                               delay_seconds=accepted_poll_seconds)
+                if outcome.delivered_at_ms is not None and outcome.device_receipt:
+                    delivered_at = self._normalize_receipt_time(
+                        alert_id, delivered_at_ms=int(outcome.delivered_at_ms),
+                        submitted_at_ms=(int(row["submitted_at_ms"])
+                                         if row["submitted_at_ms"] is not None else now),
+                        now_ms=now, result=result)
+                    state = self.record_delivered(
+                        alert_id, now_ms=now, delivered_at_ms=delivered_at,
+                        device_receipt=outcome.device_receipt,
+                        provider_receipt=outcome.provider_receipt,
+                        bound_alert_id=bound)
+                elif outcome.delivered_at_ms is not None:
+                    result["reason_codes"].append(DELIVERED_WITHOUT_DEVICE_RECEIPT)
+                if state == "SUBMITTED":
+                    # 只有 HTTP 2xx、还没有任何回执：也要按冷却间隔复查，否则
+                    # next_attempt_ms 保持 NULL ⇒ 每轮 dispatch 都重新提交（无退避）。
                     self._schedule_recheck(alert_id, now_ms=now,
                                            delay_seconds=accepted_poll_seconds)
-            if outcome.delivered_at_ms is not None and outcome.device_receipt:
-                state = self.record_delivered(
-                    alert_id, now_ms=now, delivered_at_ms=int(outcome.delivered_at_ms),
-                    device_receipt=str(outcome.device_receipt),
-                    provider_receipt=outcome.provider_receipt)
-            elif outcome.delivered_at_ms is not None:
-                result["reason_codes"].append(DELIVERED_WITHOUT_DEVICE_RECEIPT)
-            if state in ("DELIVERED", "ACKNOWLEDGED"):
-                result["confirmed"] += 1
-            latency = (now - int(row["occurrence_at_ms"])) / 1000.0
-            if state in ("DELIVERED", "ACKNOWLEDGED") and latency > DELIVERY_SLO_SECONDS:
-                result["slo_breached"] = True
-                result["reason_codes"].append(BREACH_DELIVERY_SLO)
+                if state in ("DELIVERED", "ACKNOWLEDGED"):
+                    result["confirmed"] += 1
+                latency = (now - int(row["occurrence_at_ms"])) / 1000.0
+                if state in ("DELIVERED", "ACKNOWLEDGED") and latency > DELIVERY_SLO_SECONDS:
+                    result["slo_breached"] = True
+                    result["reason_codes"].append(BREACH_DELIVERY_SLO)
+            except (AlertLadderViolation, AlertReceiptRejected) as exc:
+                codes = getattr(exc, "reason_codes", ())
+                self._record_failure(
+                    alert_id, now_ms=now, attempt=attempt,
+                    error=":".join((TRANSITION_REJECTED, *codes)) or TRANSITION_REJECTED)
+                result["rejected"] += 1
+                result["reason_codes"].extend(codes or (TRANSITION_REJECTED,))
+                continue
         result["reason_codes"] = list(dict.fromkeys(result["reason_codes"]))
         return result
+
+    def _normalize_receipt_time(self, alert_id: str, *, delivered_at_ms: int,
+                                submitted_at_ms: int | None, now_ms: int,
+                                result: dict[str, Any]) -> int:
+        """把"略早于本地提交"的供应商回执时间按**有界**容差归一（P1-1）。
+
+        返回可交给 :meth:`record_delivered` 的时间戳；超出容差时原样返回，让 K05 的
+        ``TIME_ORDER_VIOLATION`` 去拒绝（不在这里放宽阶梯）。归一事实写入审计行与
+        返回结构的 ``PROVIDER_CLOCK_SKEW_TOLERATED``，不静默。
+        """
+        if submitted_at_ms is None or delivered_at_ms >= int(submitted_at_ms):
+            return delivered_at_ms
+        skew_ms = int(submitted_at_ms) - delivered_at_ms
+        if skew_ms > RECEIPT_TIMESTAMP_TOLERANCE_MS:
+            return delivered_at_ms
+        with self.conn:
+            self._audit(alert_id, PROVIDER_CLOCK_SKEW_TOLERATED, int(now_ms),
+                        note=f"provider delivered_at_ms={delivered_at_ms} earlier than "
+                             f"submitted_at_ms={int(submitted_at_ms)} by {skew_ms}ms "
+                             f"(<= tolerance {RECEIPT_TIMESTAMP_TOLERANCE_MS}ms); clamped")
+            self.conn.commit()
+        result["reason_codes"].append(PROVIDER_CLOCK_SKEW_TOLERATED)
+        return int(submitted_at_ms)
 
     def _record_attempt(self, alert_id: str, *, now_ms: int, attempt: int) -> None:
         with self.conn:
@@ -1543,10 +1743,15 @@ def ops_status(
        （配置里写 ``verified=true`` 只改变通道声明；这里还要真实回执，规格
        "仅将 verified=true 写入配置不通过 OPS"）；
     2. 队列里有到期未投递 / 积压超时 → :data:`OPS_BLOCKED` / ``BACKLOG_OVERDUE``；
-    3. 有待投递但通道不支持送达回执 → 保留 ``OPS_DEGRADED`` + ``NO_CONFIRMED_DELIVERY``；
-    4. 只有人工确认（``ACKNOWLEDGED``）无任何设备回执 → ``OPS_DEGRADED`` +
+    3. **当前**没有任何已确认送达证据（``DELIVERED``/``ACKNOWLEDGED`` 都为 0）
+       → ``OPS_DEGRADED`` + ``NO_CONFIRMED_DELIVERY``：空队列 + 只写配置
+       ``verified=true`` **也**不通过 OPS（配置不是送达证据）；
+    4. **还存在待投递项**（``UNKNOWN``/``SUBMITTED``/``ACCEPTED``）→ 追加
+       ``NO_CONFIRMED_DELIVERY``：队列里别的行曾经 ``DELIVERED`` **不能**作为
+       当前这条卡住告警的健康证据（判据只看**当前**未闭合告警，不看历史行）；
+    5. 只有人工确认（``ACKNOWLEDGED``）无任何设备回执 → ``OPS_DEGRADED`` +
        ``MANUAL_ACK_ONLY``（可审计，但**不等于**送达）；
-    5. 队列空且通道已验证 → :data:`OPS_OK`。
+    6. 只有"当前无待投递项 **且** 有已确认送达证据"才可能 :data:`OPS_OK`。
     """
     now = _now_ms(now_ms)
     counts = queue.states()
@@ -1564,7 +1769,9 @@ def ops_status(
         reasons.append(BACKLOG_OVERDUE)
     if pending == 0 and confirmed["DELIVERED"] == 0 and confirmed["ACKNOWLEDGED"] > 0:
         reasons.append(MANUAL_ACK_ONLY)
-    if pending > 0 and not confirmed_states:
+    # fail-closed：待投递项本身就是"未闭合"证据，无论队列别处是否有历史 DELIVERED；
+    # 而"当前无任何已确认送达证据"同样不得报 OPS_OK。
+    if pending > 0 or not confirmed_states:
         reasons.append(NO_CONFIRMED_DELIVERY)
 
     status = OPS_OK
