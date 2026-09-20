@@ -599,6 +599,36 @@
             "P1 binding_id/evidence_id 全不落地、放行路径零审计；同周期同币两单 evidence_id 完全相同"
           ],
           "positives": "跨周期隔离、数值矛盾拒绝、rules 必传、时效过期均成立；S01 补丁可应用且无破坏消费者"
+        },
+        {
+          "type": "author_fix_r2",
+          "head_commit": "5ffc6c0",
+          "commits": [
+            "6b841ff",
+            "5ffc6c0"
+          ],
+          "fixed": [
+            "D-P1-1 程序 claim 权威化：自报宽松 claim VALID->REJECTED(CLAIM_DECLARATION_REJECTED+K02:CLAIM_FALSE)；缺入场价 -> MISING_TRIGGER_PRICE；程序 claim 恒并入不可删，自报仅附加且仍受程序校验",
+            "B-P1-1 identity=None -> ok=False accepted=() IDENTITY_UNPINNED；显式 allow_unpinned=True 仍 gate.ok=False",
+            "B-P1-2 畸形 claim 元素全部结构化拒绝不崩溃",
+            "D-P1-2 required_sources 字段级门禁（SOURCE_FIELD_MISSING:mark_funding.funding_rate）",
+            "B-P1-3 evidence_id 唯一化 + binding_id 绑身份/轮次 + bindings()/decision_gate()['bindings'] + 补丁写 research_evidence_binding 事件",
+            "D-P2-1 status/accepted 自相矛盾消除",
+            "其余作者声称已修项（fresh_until 只可缩短、异周期 bar 剔除、interval 冲突点名、重复 id 结构化拒绝等）"
+          ],
+          "orchestrator_verified": {
+            "smoke_contracts_v3": "PASS 173 / FAIL 0",
+            "tests": "exit 0",
+            "shared_and_runner_untouched": true
+          },
+          "known_limits": [
+            "U15 未接线 -> 生产按 fail-closed 丢全部 OPEN（需 I 决定先接 U15 还是显式开 allow_unpinned）",
+            "required_sources 仍默认自报（可用 default_required_sources 收紧）",
+            "出参回带 0 无独立识别（S01 补丁覆盖）",
+            "退出无证据绑定归 K04；订单级绑定归 U05",
+            "orchestrator 未实跑（仅静态+补丁校验）"
+          ],
+          "patch_updated": "u03_orchestrator_integration.patch 已更新（纯插入 112 行，apply --check CLEAN，AST 通过）"
         }
       ],
       "blockers": [],
@@ -654,6 +684,17 @@
           "verdict": "CHANGES_REQUESTED (D 已回；B 待回)",
           "reports_dir": "docs/dispatch/reviews/U03/3f49e03/",
           "note": "Q 独立验收安排在 I 组装的 integration_candidate 上进行"
+        },
+        {
+          "round": "r2",
+          "stage": "修复复验",
+          "candidate": "5ffc6c0",
+          "sessions": [
+            "Q (reviews/U03/R2/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U03/5ffc6c0/",
+          "note": "为确保预算，D 与 B 两方发现的复验合并为单一独立会话（原独立初审已分别由 D、B 完成）；复验方需自建探针、不得采信作者前后对照"
         }
       ],
       "qa_runs": []
