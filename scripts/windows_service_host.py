@@ -31,15 +31,25 @@ from core.windows_service import (  # noqa: E402
 def _load_config(path: Path) -> WindowsServiceConfig:
     """加载正式配置并要求本机解释器、入口和工作目录存在。
 
-    KI02：解释器按"可注入 + 可回退 + 记录来源"解析（``MTA_PYTHON`` 优先），
-    与 ``validate_windows_service_plan.py`` 使用同一 ``resolve_python_executable``
+    KI02：解释器按"可注入 + 记录来源"解析（``MTA_PYTHON`` 优先），与
+    ``validate_windows_service_plan.py`` 使用同一 ``resolve_python_executable``
     口径——安装期与运行期不会解析出两个不同的解释器。
+
+    r2 收口（KI02 回退面）：本函数是**安装期与运行期同一个入口**，
+    ``allow_fallback=False`` 让"声明/显式指定的解释器不存在"**失败**，而不是
+    回退到 ``sys.executable`` 后只打印一条 warn（SCM 场景下 warn 通常只落进
+    服务日志，等于把"到底哪份运行时在跑"变成不可审计）。显式来源
+    （``config`` / ``env`` / ``argument``）照常接受，因此 ``MTA_PYTHON``
+    这条官方推荐的部署写法不受影响。
     """
-    config = load_windows_service_config(path, project_root=PROJECT_ROOT, require_files=True)
-    if config.python_executable_from_fallback:
-        # 不静默：回退解释器会影响"到底是哪份运行时在跑"的复盘判断。
-        print(f"warn: python_executable 回退到 {config.python_executable} "
-              f"(source={config.python_executable_source})", flush=True)
+    config = load_windows_service_config(
+        path, project_root=PROJECT_ROOT, require_files=True, allow_fallback=False)
+    if not config.python_executable_is_explicit:
+        # 兜底断言：allow_fallback=False 之后仍出现猜测性来源，说明解析链被改坏；
+        # 宁可拒绝启动，也不要"跑起来了但不知道是谁"。
+        raise RuntimeError(
+            "解释器来源不是显式声明（拒绝启动）: "
+            f"{config.python_executable} (source={config.python_executable_source})")
     return config
 
 

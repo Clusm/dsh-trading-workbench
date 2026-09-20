@@ -36,6 +36,15 @@ CONSOLE_PORT_BY_PROFILE = {"demo": 8000, "live": 8001}
 ALLOWED_PROFILES = ("demo", "live")
 #: 解释器回退来源标记（非 ``config`` 即为回退，部署审查必须能看到）。
 PYTHON_SOURCE_CONFIG = "config"
+#: **显式**来源：调用方/部署方主动指定的解释器（不是"猜"出来的）。
+#: KI02 收口（r2）：安装期的"不得回退"只禁止**猜测性**来源
+#: （``project-venv`` / ``virtualenv`` / ``interpreter``），不禁止显式指定，
+#: 否则 ``MTA_PYTHON`` 这条官方推荐的部署写法会被误伤。
+PYTHON_SOURCE_ARGUMENT = "argument"
+PYTHON_SOURCE_ENV = "env"
+EXPLICIT_PYTHON_SOURCES = (PYTHON_SOURCE_ARGUMENT, PYTHON_SOURCE_ENV, PYTHON_SOURCE_CONFIG)
+#: **猜测性**来源（按约定猜的路径）：安装期必须拒绝这些来源。
+FALLBACK_PYTHON_SOURCES = ("project-venv", "virtualenv", "interpreter")
 
 
 def _inside(root: Path, candidate: Path, *, label: str) -> Path:
@@ -56,6 +65,7 @@ def resolve_python_executable(
     override: str | Path | None = None,
     require_files: bool = True,
     strict: bool = False,
+    allow_fallback: bool = True,
     env: Any = None,
 ) -> tuple[Path, str]:
     """解析托管服务使用的 Python 解释器，返回 ``(路径, 来源)``。
@@ -79,6 +89,16 @@ def resolve_python_executable(
     根目录边界约束；只有配置文件里的值才做 ``_inside`` 校验。
 
     ``strict=True`` 时禁止回退：声明的路径不存在即报错（部署前自检用）。
+
+    r2 收口（KI02 回退面）：
+
+    - **显式声明必须有效**：``MTA_PYTHON`` 一旦被显式设置，指向不存在的路径时
+      直接 ``ValueError``——"我指定的解释器不存在"与"我没指定"是两件事，绝不
+      静默落到 ``sys.executable``；
+    - ``allow_fallback=False``（安装期/宿主脚本口径）只接受**显式来源**
+      （``override`` / ``MTA_PYTHON`` / 配置声明），拒绝 ``project-venv`` /
+      ``virtualenv`` / ``sys.executable`` 这些**猜测性**来源；全都不可用时
+      ``ValueError``（失败，而不是回退后只打印一条 warn）。
     """
     environ = os.environ if env is None else env
     resolved_root = Path(root).resolve()
@@ -93,19 +113,24 @@ def resolve_python_executable(
 
     candidates: list[tuple[Path, str]] = []
     if override is not None:
-        candidates.append((Path(override), "argument"))
+        candidates.append((Path(override), PYTHON_SOURCE_ARGUMENT))
     env_value = str(environ.get(PYTHON_EXECUTABLE_ENV_VAR) or "").strip()
     if env_value:
-        candidates.append((Path(env_value), "env"))
+        # 显式声明但无效 → fail-closed（不静默忽略、不继续回退）。
+        if not Path(env_value).is_file():
+            raise ValueError(
+                f"{PYTHON_EXECUTABLE_ENV_VAR} 显式指定的解释器不存在: {env_value}")
+        candidates.append((Path(env_value), PYTHON_SOURCE_ENV))
     if declared_path is not None:
         candidates.append((declared_path, PYTHON_SOURCE_CONFIG))
-    candidates.append((resolved_root / PYTHON_DEFAULT_RELATIVE, "project-venv"))
-    virtual_env = str(environ.get("VIRTUAL_ENV") or "").strip()
-    if virtual_env:
-        candidates.append((Path(virtual_env) / (
-            "Scripts/python.exe" if os.name == "nt" else "bin/python"), "virtualenv"))
-    if sys.executable:
-        candidates.append((Path(sys.executable), "interpreter"))
+    if allow_fallback:
+        candidates.append((resolved_root / PYTHON_DEFAULT_RELATIVE, "project-venv"))
+        virtual_env = str(environ.get("VIRTUAL_ENV") or "").strip()
+        if virtual_env:
+            candidates.append((Path(virtual_env) / (
+                "Scripts/python.exe" if os.name == "nt" else "bin/python"), "virtualenv"))
+        if sys.executable:
+            candidates.append((Path(sys.executable), "interpreter"))
 
     if strict:
         if declared_path is None:
@@ -118,6 +143,12 @@ def resolve_python_executable(
         if candidate.is_file():
             return candidate.resolve(), source
     tried = ", ".join(f"{path}({source})" for path, source in candidates)
+    if not allow_fallback:
+        # 安装期/宿主脚本：**不得**回退到"猜"出来的解释器，必须失败。
+        raise ValueError(
+            "解释器解析失败（安装期禁止回退到猜测性来源）: "
+            f"没有任何显式声明的解释器存在；已尝试: {tried}"
+        )
     raise ValueError(f"找不到可用的 python_executable；已尝试: {tried}")
 
 
@@ -183,6 +214,15 @@ class WindowsServiceConfig:
         return self.python_executable_source != PYTHON_SOURCE_CONFIG
 
     @property
+    def python_executable_is_explicit(self) -> bool:
+        """解释器是否来自**显式**指定（配置/``MTA_PYTHON``/注入参数）。
+
+        与 :attr:`python_executable_from_fallback` 的区别：``MTA_PYTHON``
+        属于显式部署指定，不算"猜出来的回退"——安装期禁止的是后者。
+        """
+        return self.python_executable_source in EXPLICIT_PYTHON_SOURCES
+
+    @property
     def service_host_script(self) -> Path:
         """返回 SCM 实际调用的服务入口。"""
         return self.project_root / "scripts" / "windows_service_host.py"
@@ -214,6 +254,7 @@ class WindowsServiceConfig:
 def load_windows_service_config(
     config_path: Path, *, project_root: Path | None = None, require_files: bool = False,
     python_executable: str | Path | None = None, strict_python: bool = False,
+    allow_fallback: bool = True,
 ) -> WindowsServiceConfig:
     """读取并严格校验托管模板。
 
@@ -223,6 +264,9 @@ def load_windows_service_config(
     ``python_executable`` 是解释器的**显式注入点**（测试/演练/换目录部署），
     ``strict_python=True`` 则禁止回退（解释器必须恰好是配置声明的那个）。二者
     共同解决 KI02：配置里的相对 ``.venv`` 路径不应让整条离线回归硬失败。
+
+    ``allow_fallback=False``（r2 收口）用于**安装期/宿主脚本**：只接受显式来源，
+    拒绝猜测性回退（不存在的声明 → 失败，而不是回退后只打印 warn）。
     """
     path = Path(config_path).resolve()
     root = Path(project_root or path.parents[1]).resolve()
@@ -294,6 +338,7 @@ def load_windows_service_config(
     python_executable, python_source = resolve_python_executable(
         root, raw.get("python_executable"),
         override=python_executable, require_files=require_files, strict=strict_python,
+        allow_fallback=allow_fallback,
     )
     entrypoint = _inside(
         root, root / str(raw.get("entrypoint") or ""), label="entrypoint",

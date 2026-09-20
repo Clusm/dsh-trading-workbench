@@ -101,6 +101,12 @@ def evaluate_entry_readiness(
     - ``identity_blockers``：身份类阻断原因码逐个并入 ``blocking_reasons``；
     - ``model_route_ok``：仅在键存在时判定，非 ``True`` 产出
       ``MODEL_ROUTE_UNPROVEN``（没有证据）或 ``MODEL_ROUTE_INVALID``（明确失败）。
+
+    U13/F14 追加一条 **存在性触发** 的事实：
+
+    - ``recovery_gate_allowed``：恢复门禁（``core.ops.recovery.RecoveryGate``）
+      的开仓判定。非 ``True`` 时把 ``recovery_gate_reason_codes`` 并入阻断原因，
+      因此"恢复完直接开仓"在执行层被拒，而不是只靠控制面状态间接兜底。
     """
     facts = facts or {}
     observed_at = float(time.time() if now is None else now)
@@ -164,6 +170,25 @@ def evaluate_entry_readiness(
 
     # 身份类阻断：仅当调用方显式提供事实时并入（存在性触发）。
     reasons.extend(_identity_blocker_reasons(facts))
+
+    # U13/F14 恢复后先对账再开仓：调用方（TradingService）把
+    # ``RecoveryGate.before_entry()`` 的判定作为事实注入。键不存在时完全不判定，
+    # 避免给旧调用方新增闸门；键存在时非 True 即阻断，原因码用门禁自己的
+    # （``RECONCILE_REQUIRED_BEFORE_ENTRY`` / ``GATE_CORRUPT`` / ``GATE_MISSING``
+    # / ``EVIDENCE_STALE``），保证"看板红灯"与"执行层拒绝"是同一个判定。
+    if "recovery_gate_allowed" in facts:
+        gate_ok = _fact_bool(facts, "recovery_gate_allowed")
+        if gate_ok is not True:
+            provided = facts.get("recovery_gate_reason_codes")
+            codes: tuple[Any, ...] = ()
+            if isinstance(provided, str):
+                codes = (provided,)
+            elif isinstance(provided, (list, tuple, set, frozenset)):
+                codes = tuple(provided)
+            gate_reasons = tuple(
+                dict.fromkeys(
+                    str(item).strip() for item in codes if str(item).strip()))
+            reasons.extend(gate_reasons or ("RECOVERY_GATE_UNPROVEN",))
 
     # 模型路由证明：键不存在时完全不判定，避免给旧调用方新增闸门。
     if "model_route_ok" in facts:

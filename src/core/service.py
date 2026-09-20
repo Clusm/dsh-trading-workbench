@@ -38,7 +38,7 @@ from data.rate_limit import (
 )
 from core.intel_cache import IntelCache
 from core.instance_lock import InstanceLock
-from core.ops.recovery import GATE_STATE_RECONCILE_REQUIRED, RecoveryGate
+from core.ops.recovery import RecoveryGate
 from core.ops.supervision import RunRegistry
 from core.quotas import TradeQuotaManager
 from core.runtime_paths import RuntimePaths
@@ -276,20 +276,28 @@ class TradingService:
             # 首次接入先保护和核对已有仓位；运营确认后通过控制台恢复新增仓位。
             self.control.set_state("close_only")
         # U13 / F14：从恢复包启动（或接管）后 **必须先对账再开仓**。
-        # 门禁只收紧不放松：RECONCILE_REQUIRED 时强制 close_only 并留 critical 事件，
-        # 结构化对账证据齐备后由 ops.recovery 收口；"恢复完就直接开仓"不可达。
+        # 门禁是安全控制且 fail-closed：损坏/被删/未对账/证据过期都强制 close_only
+        # 并留 critical 事件；结构化对账证据齐备后由 submit_recovery_reconcile 收口。
         self.recovery_gate = RecoveryGate.load(self.runtime_paths.recovery_gate_file)
-        if self.recovery_gate.state == GATE_STATE_RECONCILE_REQUIRED:
+        # 恢复包安装门禁时服务还没起，门禁不知道运行代；启动时补齐绑定，
+        # 之后的每份对账证据都必须来自同一账户 + 同一运行代（P2-6）。
+        self.recovery_gate.bind_runtime(
+            account_ref=str(getattr(self.run_generation, "account_ref", "") or ""),
+            runtime_instance_id=str(self.runtime_instance_id or ""),
+        )
+        gate_decision = self.recovery_gate.before_entry()
+        if gate_decision.allowed:
+            self.db.resolve_risk_incidents_by_type("recovery_reconcile_required")
+        else:
             self.db.log_risk_event(
                 event_type="recovery_reconcile_required", severity="critical",
                 details=(f"epoch={self.recovery_gate.epoch_id} "
-                         f"account_ref={self.recovery_gate.account_ref}"),
+                         f"account_ref={self.recovery_gate.account_ref} "
+                         f"reasons={','.join(gate_decision.reason_codes)}"),
                 action_taken="fail closed to close_only; reconcile before new entry",
             )
             if self.control.state == "normal":
                 self.control.set_state("close_only")
-        else:
-            self.db.resolve_risk_incidents_by_type("recovery_reconcile_required")
         if self.control.recovery_required:
             self.db.log_risk_event(
                 event_type="control_state_corrupt", severity="critical",
@@ -366,6 +374,8 @@ class TradingService:
             "environment": self.broker.environment,
             "runtime_instance_id": self.runtime_instance_id,
             "component_versions": {"readiness": 1, "scope": 1},
+            # U13/F14：冷启动的快照也必须带上恢复门禁判定（不能等第一次循环刷新）。
+            **self._recovery_gate_facts(),
         }
         self._entry_readiness_snapshot: ReadinessSnapshot = evaluate_entry_readiness(
             self._entry_readiness_facts,
@@ -744,6 +754,28 @@ class TradingService:
             return bool(row["matched"])
         return bool(row["matched"] or row["initialized"])
 
+    def _recovery_gate_facts(self) -> dict[str, Any]:
+        """把恢复门禁的判定做成开仓事实（U13/F14 接线）。
+
+        **存在性触发**：键存在即参与判定（``evaluate_entry_readiness`` 会把
+        ``recovery_gate_reason_codes`` 并入 ``blocking_reasons``），因此"恢复后
+        先对账再开仓"在执行层生效，而不是只靠控制面状态间接兜底。
+        """
+        gate = getattr(self, "recovery_gate", None)
+        if gate is None:
+            return {}
+        try:
+            decision = gate.before_entry()
+        except Exception as exc:  # 门禁读盘异常 = 不可证明 → 阻断，不放行
+            return {"recovery_gate_allowed": False,
+                    "recovery_gate_reason_codes": ["RECOVERY_GATE_UNPROVEN"],
+                    "recovery_gate_state": f"error:{type(exc).__name__}"}
+        return {
+            "recovery_gate_allowed": bool(decision.allowed),
+            "recovery_gate_reason_codes": list(decision.reason_codes),
+            "recovery_gate_state": decision.state,
+        }
+
     def _collect_entry_readiness_facts(self) -> dict[str, Any]:
         """只读收集当前开仓闸门事实；严禁在这里发交易所网络请求。"""
         environment = str(getattr(self.broker, "environment", "paper") or "paper")
@@ -755,6 +787,7 @@ class TradingService:
             "environment": environment,
             "runtime_instance_id": self.runtime_instance_id,
         })
+        facts.update(self._recovery_gate_facts())
         market_rate = rate_limit_status()
         data_window = market_rate.get("data_endpoint_window") or {}
         try:
@@ -1157,8 +1190,65 @@ class TradingService:
         with self._lock:
             return dict(self._latest)
 
+    def submit_recovery_reconcile(
+        self, evidence: Any, *, actor: str, confirm: bool,
+        now_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """**生产对账入口**（F14）：operator 提交结构化对账证据，收口恢复门禁。
+
+        这是 ``RecoveryGate.complete_reconcile`` 在生产路径上的唯一调用点，
+        并额外强制两件事：
+
+        - **人工二次确认**：``actor`` 必须是 operator 且 ``confirm=True``
+          （与 U15 控制面同向：自动路径不得解除恢复阻断）；
+        - **身份不由请求体自证**：账户/运行代取自**本进程**（运行代持久化 +
+          实例锁元数据），调用方无法用一份对账洗白另一个账户（P2-6）。
+
+        返回 ``{"ok": bool, "allowed": bool, "reason_codes": [...], "state": ...}``。
+        """
+        if not isinstance(actor, str) or actor.strip().lower() != "operator":
+            return {"ok": False, "allowed": False, "state": self.recovery_gate.state,
+                    "reason_codes": ["OPERATOR_CONFIRM_REQUIRED"]}
+        if not confirm:
+            return {"ok": False, "allowed": False, "state": self.recovery_gate.state,
+                    "reason_codes": ["OPERATOR_CONFIRM_REQUIRED"]}
+        # 重新读盘：门禁可能在别的进程里被改过（服务被重启/被接管）。
+        self.recovery_gate = RecoveryGate.load(self.runtime_paths.recovery_gate_file)
+        account_ref = str(getattr(self.run_generation, "account_ref", "") or "")
+        decision = self.recovery_gate.complete_reconcile(
+            evidence, now_ms=now_ms,
+            account_ref=account_ref, runtime_instance_id=str(self.runtime_instance_id or ""),
+        )
+        self.db.log_risk_event(
+            event_type="recovery_reconcile_submitted",
+            severity="info" if decision.allowed else "warning",
+            details=(f"allowed={decision.allowed} state={decision.state} "
+                     f"account_ref={self.recovery_gate.account_ref} "
+                     f"reasons={','.join(decision.reason_codes)}"),
+            action_taken=("clear recovery gate; new entry allowed"
+                          if decision.allowed else "keep blocking new entry"),
+        )
+        if decision.allowed:
+            # 收口时同步清掉"必须先对账"事件；控制状态仍由 operator 显式恢复
+            # （本方法**不**放宽控制面，避免一处漏洞同时解锁状态与门禁）。
+            self.db.resolve_risk_incidents_by_type("recovery_reconcile_required")
+        self._refresh_entry_readiness()
+        return {"ok": decision.allowed, "allowed": decision.allowed,
+                "state": decision.state, "reason_codes": list(decision.reason_codes)}
+
     def set_control(self, new_state: str) -> dict[str, Any]:
         """更新控制状态；emergency 会在状态落盘后执行多轮紧急平仓。"""
+        if str(new_state) == "normal":
+            # U13/F14 接线：恢复门禁未收口时不允许把控制面拨回 normal，
+            # 否则"恢复完先对账"可以被控制台一步绕过。
+            gate_decision = self.recovery_gate.before_entry()
+            if not gate_decision.allowed:
+                return {
+                    "ok": False,
+                    "error": "recovery gate blocked: "
+                             + ",".join(gate_decision.reason_codes)
+                             + "（先提交对账证据 /api/recovery/reconcile）",
+                }
         if not self.control.set_state(new_state):
             return {"ok": False, "error": "invalid state"}
         receipts = []
