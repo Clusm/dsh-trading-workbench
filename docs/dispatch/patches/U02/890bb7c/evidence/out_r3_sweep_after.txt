@@ -4,4 +4,4 @@ PASS 5_sweep_failure_does_not_block_exit
 INFO db_down_res_skip=False
 PASS 5_alert_failure_does_not_break_exit 
 
-R3_SWEEP_ALERT_PROBE tree=sb_int FAIL=0 []
+R3_SWEEP_ALERT_PROBE tree=_sb_int_r3 FAIL=0 []

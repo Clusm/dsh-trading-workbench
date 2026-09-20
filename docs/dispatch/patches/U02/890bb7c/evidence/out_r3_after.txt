@@ -18,4 +18,4 @@ PASS E_conserved_B
 PASS E_conserved_C 
 PASS E_conserved_D 
 
-R3_CONSUMED_PROBE tree=after FAIL=0 []
+R3_CONSUMED_PROBE tree=_sb_int_r3 FAIL=0 []
