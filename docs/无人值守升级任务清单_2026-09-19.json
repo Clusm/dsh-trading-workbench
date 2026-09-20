@@ -686,6 +686,37 @@
           "allow_unpinned_judgement": "受控降级，不是新 fail-open（显式 kwarg、默认 False、无配置入口、全程落审计、gate.ok 仍要求无拒绝项）；真正的 fail-open 是同族 Q-NEW-1",
           "regression": "9/9 仍成立；三个补丁 apply --check EXIT=0；orchestrator 补丁纯插入 112/0",
           "note": "README 无 U03 known-limits，残留 P2 未登记"
+        },
+        {
+          "type": "author_fix_r3",
+          "head_commit": "c0e14c4",
+          "commits": [
+            "e381eca",
+            "e902d65",
+            "0480b62",
+            "0a6af77",
+            "c0e14c4"
+          ],
+          "fixed": {
+            "Q-NEW-1": "新增 is_unpinned_identity()，identity_pinned = not is_unpinned_identity(resolution)；哨兵/model_copy/等值裸 dict/environment='unpinned' 一律判未固定。前后：ok=True/pinned=True/gate.ok=True/accepted=('A',) -> ok=False/pinned=False/gate.ok=False/drop=['A'] reasons=['IDENTITY_UNPINNED']；真实身份仍 pinned=True（无假阳性）",
+            "Q-NEW-3": "接线 RESEARCH_EVIDENCE_REQUIRED_SOURCES=('ticker',) 非空缺省 -> 字段级分源门禁默认真实生效。前后：缺 ticker.pct_24h/quote_volume_24h 时 accepted=('A',) 放行 -> accepted=() 且 reasons=['SOURCE_FIELD_MISSING:ticker.pct_24h',...]",
+            "Q-NEW-2": "接线 cycle_id = pipeline_decision_id or run_id（service.py:777 每轮 uuid4）-> binding_id 轮次分量非空",
+            "Q-NEW-4/5": "required_sources 改并集；畸形声明 -> SOURCE_DECLARATION_REJECTED"
+          },
+          "registered_honestly": {
+            "残余": "资金费/OI 未进缺省 + TradeIntent 无 required_sources；同 run_id 复用；Q-NEW-6/8/9",
+            "i_owned": "Q-NEW-7（smoke_u03_*.py 未登记）属 I；作者未动冒烟脚本与 run_offline_regression.py"
+          },
+          "known_limits_path": "docs/dispatch/reviews/U03/c0e14c4/known_limits.md（作者产出、I 归档）",
+          "orchestrator_verified": {
+            "smoke_contracts_v3": "PASS 173/0",
+            "test_research_evidence": "exit 0（作者称 138/0）",
+            "test_market_evidence_quality": "exit 0（46/0）",
+            "shared_contract_runner_untouched": true
+          },
+          "patch_updated": "u03_orchestrator_integration.patch +8 行，apply --check EXIT=0，numstat 120/0 纯插入",
+          "unfinished": "接线补丁未应用、未跑端到端（仅静态+内存副本+单测）—— 归 I 集成",
+          "rollback": "git revert e381eca"
         }
       ],
       "blockers": [],
@@ -752,6 +783,16 @@
           "verdict": "CHANGES_REQUESTED（1 PARTIAL）",
           "reports_dir": "docs/dispatch/reviews/U03/5ffc6c0/",
           "note": "为确保预算，D 与 B 两方发现的复验合并为单一独立会话（原独立初审已分别由 D、B 完成）；复验方需自建探针、不得采信作者前后对照"
+        },
+        {
+          "round": "r3",
+          "stage": "聚焦复验",
+          "candidate": "c0e14c4",
+          "sessions": [
+            "Q (reviews/U03/R3/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U03/c0e14c4/"
         }
       ],
       "qa_runs": []
