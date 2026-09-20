@@ -1,0 +1,2 @@
+BEFORE enforce=True -> kept_intents= 0 decision= no_trade unbound= ['BTCUSDT']
+BEFORE 结论：合法的退出意图被静默摘除（该退出永远无法提交），且没有任何报错
