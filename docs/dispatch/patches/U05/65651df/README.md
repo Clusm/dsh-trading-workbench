@@ -4,7 +4,8 @@
 
 - **补丁基线 = 集成 HEAD `78526d7`**（已含 U01/U03/U04/U13/U15；`OFFLINE REGRESSION OK scripts=75`）。
   15 个 diff 的上下文与 blob 哈希都取自该提交，**不是** `0e522b1`/`8a8e31e`。
-  目录名即补丁基线：U05 分支侧**不携带任何共享文件**（见下），故没有"U05 侧的树"可命名。
+- 目录名 = **引入本包的 U05 分支提交 `65651df`**（r3 内容提交 = r3 完成时的 `task/U05` head）。
+  U05 分支侧**不携带任何共享文件**（见下），故没有"U05 侧的树"可作补丁基线；基线一律以集成 HEAD 为准。
 - 本包上下文 = `task/U05` head（r3 修复提交）。该提交只改作者**独占**路径
   （`src/core/decision_trace.py`、`tests/integration/test_{decision_trace,model_route_safety,
   background_refresh_budget,cross_process_llm_admission}.py`、`scripts/smoke_u05_*.py`），
