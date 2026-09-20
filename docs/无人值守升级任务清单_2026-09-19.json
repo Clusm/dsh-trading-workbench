@@ -333,7 +333,7 @@
       "title": "资金费流水与成本闭环",
       "owner_role": "A",
       "actual_assignee": "U01 作者会话（A 角色）；经 r2(接续)/r3 修复",
-      "status": "READY_FOR_REVIEW",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -443,6 +443,22 @@
           "regression": "抽样 6 项全过（[9] 真跑 SKIP=0 PASS=140；content_hash 对 K03 4/4；重放不抹账 rows 4->4 Σ-2.80 不变；PASS 140/44/44/173 一致）",
           "new_p3": "docs/双进程双账本…:222,224 与 docs/实盘账户并行接入…:202,363,472 仍写死 current_schema_version()==16 作验收断言（补丁后 DB=17，fail-closed，未登记）；_patched_database_dir 的 else '未应用' 为死分支",
           "uncovered": "真实 Binance/账户/联网行为；I 侧原子登记是否已执行"
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "fb12a38",
+          "code_identity_proof": "git diff fb12a38 HEAD -- <U01 路径> 为空 -> U01 代码与 Q r3 验证过的 head 逐字节一致",
+          "patches_applied": [
+            "01_audit_database_income_store",
+            "02_exchange_binance_futures_income_endpoint",
+            "03_exchange_trade_reconciliation_funding_cashflow",
+            "04_data_binance_request_policy_income_weight",
+            "05_migration17_assertions"
+          ],
+          "i_registration": "smoke_u01_income / smoke_u01_review_statistics 已写入 SCRIPTS（MANIFEST OK included=69）",
+          "tests": "test_income_reconciliation PASS=140/0；test_review_statistics 44/0；smoke_u01_* 140/44；smoke_contracts_v3 173/0；smoke_db_migrations 13/0；smoke_fault_matrix 37/0；smoke_release_acceptance 17/0；smoke_order_outbox 26/0；smoke_trade_reconciliation 23/0",
+          "offline_regression": "TOTAL=73 FAILED=1（唯一 smoke_windows_service_plan.py = KI02 既有环境缺陷）-> 相对 pristine delta = ∅",
+          "note": "VERIFIED 留待 U12 部署证据"
         }
       ],
       "blockers": [],
@@ -488,7 +504,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "HEAD",
       "review_assignments": [
         {
           "round": "r1",
