@@ -19,6 +19,7 @@ B. **证据层口径**（``agents.research_evidence``）对 patched / legacy 两
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import sys
@@ -338,6 +339,56 @@ def test_legacy_zero_echo_is_not_trusted(results: dict) -> None:
           "mark_funding.mark_price" in snap.missing_fields, snap.missing_fields)
 
 
+# ------------------------------------------------- C. 接线补丁的缺省口径（r3）
+
+
+def load_patched_orchestrator() -> tuple[str, str]:
+    """把 U03 接线补丁打到 ``src/agents/orchestrator.py`` 的内存副本上（不写仓库）。"""
+    original = (ROOT / "src" / "agents" / "orchestrator.py").read_bytes().decode("utf-8")
+    patch = (FIXTURES / "u03_orchestrator_integration.patch").read_bytes().decode("utf-8")
+    return original, apply_unified_diff(original, patch)
+
+
+def _literal_assignment(source: str, name: str):
+    """取 ``NAME = <literal>`` 的求值结果（接线常量断言用）。"""
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.AnnAssign):
+            target, value = node.target, node.value
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        else:
+            continue
+        if isinstance(target, ast.Name) and target.id == name:
+            return ast.literal_eval(value)
+    raise AssertionError(f"{name} 未在补丁结果中出现")
+
+
+def test_orchestrator_wiring_policy() -> None:
+    """r3（Q-NEW-2/3）：接线补丁必须在**默认配置**下让两道控制真实生效。"""
+    print("\n[C] U03 接线补丁：分源门禁缺省生效 + 轮次分量非空")
+    original, patched = load_patched_orchestrator()
+    check("补丁确实改变了 orchestrator", patched != original)
+    patch_text = (FIXTURES / "u03_orchestrator_integration.patch").read_text(encoding="utf-8")
+    check("补丁仍是纯插入（无删除行）",
+          not [line for line in patch_text.splitlines()
+               if line.startswith("-") and not line.startswith("---")])
+    check("身份开关缺省 False（未固定身份下开仓仍 fail-closed）",
+          _literal_assignment(patched, "ALLOW_UNPINNED_RESEARCH_EVIDENCE") is False)
+    floor = _literal_assignment(patched, "RESEARCH_EVIDENCE_REQUIRED_SOURCES")
+    check(f"策略侧缺省必需源**非空**（默认路径下字段级分源门禁真实生效）：{floor!r}",
+          isinstance(floor, tuple) and len(floor) > 0)
+    for source in floor:
+        check(f"缺省源 {source!r} 是模块认识的源名（源级或字段级）",
+              str(source).split(".")[0] in evidence.SOURCE_NAMES)
+    check("门禁处 identity=None（未固定身份，待 U15 接线）",
+          "identity=None" in patched)
+    check("门禁传 allow_unpinned=ALLOW_UNPINNED_RESEARCH_EVIDENCE（不写死 True）",
+          "allow_unpinned=ALLOW_UNPINNED_RESEARCH_EVIDENCE" in patched)
+    check("轮次分量不再恒为空串（pipeline_decision_id 之后才写入）",
+          'or run_id or ""' in patched
+          and 'pipeline_decision_id", "") or ""' not in patched)
+
+
 def main() -> int:
     results = json.loads(
         (FIXTURES / "market_tool_results.json").read_text(encoding="utf-8"))["results"]
@@ -350,6 +401,7 @@ def main() -> int:
     test_source_quality_contract(results)
     test_injection_does_not_change_permissions(results)
     test_legacy_zero_echo_is_not_trusted(results)
+    test_orchestrator_wiring_policy()
     print("\n" + "=" * 72)
     print(f"结果：PASS {PASS} / FAIL {FAIL}")
     if FAILURES:

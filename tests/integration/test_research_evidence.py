@@ -840,6 +840,113 @@ def test_identity_and_binding(results: dict, scenarios: dict) -> None:
             check(f"{name} 越界被拒（冻结上界）", False, "未抛 ValueError")
 
 
+def test_unpinned_sentinel_cannot_be_laundered(results: dict) -> None:
+    """r3（Q-NEW-1）：未固定身份**不论形态**都不得被当成"身份已固定"。
+
+    ``identity is not None`` 会把模块自带哨兵 ``UNPINNED_IDENTITY``（及其
+    ``model_copy`` 副本、等值裸 dict、``environment="unpinned"`` 的手工构造）
+    判成已固定 ⇒ 报告输出 ``identity_pinned=True`` 的虚假背书、门禁整门放行。
+    """
+    print("\n[12h] 未固定身份不得被任何形态洗白（哨兵 / 副本 / 等值 dict）")
+    snaps = build_snapshots(results, ["BNBUSDT_1h"])
+    intent = [{
+        "intent_id": "A", "symbol": "BNBUSDT", "action": "OPEN", "side": "LONG",
+        "trigger_price": 744.0, "stop_loss": 700.0, "take_profit": 800.0,
+        "evidence": {"confirmation_interval": "1h", "data_observed_at_ms": AS_OF_MS},
+    }]
+    sentinel = evidence.UNPINNED_IDENTITY
+    forms = {
+        "模块自带哨兵": sentinel,
+        "model_copy 副本": sentinel.model_copy(),
+        "model_copy 改实例号": sentinel.model_copy(update={"runtime_instance_id": "x"}),
+        "等值裸 dict": sentinel.model_dump(mode="json"),
+        "environment=unpinned": sentinel.model_copy(update={"environment": "unpinned"}),
+    }
+    for name, value in forms.items():
+        rep = evidence.evaluate_open_intents(
+            intent, snaps, now_ms=NOW_MS, identity=value, cycle_id="cyc-sentinel")
+        gate = rep.decision_gate()
+        check(f"{name} 判为未固定（identity_pinned=False / 丢单 / 门禁不放行）",
+              rep.identity_pinned is False and rep.ok is False
+              and has(reason_codes(rep, "A"), "IDENTITY_UNPINNED")
+              and gate["ok"] is False and gate["drop_intent_ids"] == ["A"],
+              (rep.identity_pinned, rep.ok, reason_codes(rep, "A"), gate))
+    unpinned = evidence.evaluate_open_intents(
+        intent, snaps, now_ms=NOW_MS, identity=sentinel, cycle_id="cyc-sentinel",
+        allow_unpinned=True)
+    # 显式 allow_unpinned=True 是**受控降级**（默认 False、无配置入口）：放行但如实
+    # 记录 identity_pinned=False/unpinned_allowed=True，不冒充"身份已核对"。
+    check("显式 allow_unpinned 下哨兵仍不冒充已固定（降级被如实记录）",
+          unpinned.identity_pinned is False
+          and unpinned.as_dict()["identity_pinned"] is False
+          and unpinned.decision_gate()["unpinned_allowed"] is True,
+          unpinned.decision_gate())
+    pinned = evidence.evaluate_open_intents(
+        intent, snaps, now_ms=NOW_MS, identity=IDENTITY, cycle_id="cyc-pinned-ctl")
+    check("对照组：真实身份仍判为已固定（哨兵判定没有误伤 pinned 路径）",
+          pinned.identity_pinned is True and pinned.decision_gate()["ok"] is True
+          and evidence.is_unpinned_identity(IDENTITY) is False,
+          pinned.decision_gate())
+
+
+def test_required_sources_policy_floor(results: dict) -> None:
+    """r3（Q-NEW-4/5）：策略缺省是下限（取并集），畸形声明 fail-closed。"""
+    print("\n[12i] 分源门禁：策略缺省是下限（并集）+ 畸形声明结构化拒绝")
+    snap = evidence.snapshot_from_records(
+        symbol="BNBUSDT", interval="1h", observed_at_ms=AS_OF_MS,
+        bars=[{"input_id": "b1", "interval": "1h", "close_time_ms": AS_OF_MS - 1,
+               "values": {"close": "744.13"}, "finality": "closed"}],
+        source_payloads={
+            "mark_funding": {"available": True, "markPrice": "744.2",
+                             "source_at_ms": AS_OF_MS - 1000},
+            "ticker": {"available": True, "lastPrice": "744.2",
+                       "closeTime": AS_OF_MS - 500},
+        },
+    )
+    check("夹具前提：ticker 缺 pct_24h/quote_volume_24h（源级声明会拒绝）",
+          set(snap.source("ticker").missing_fields) == {"pct_24h", "quote_volume_24h"},
+          snap.source("ticker").missing_fields)
+
+    def run(required=None, default=None) -> list[str]:
+        payload = {
+            "intent_id": "i-floor", "symbol": "BNBUSDT", "action": "OPEN", "side": "LONG",
+            "trigger_price": 744.0, "stop_loss": 700.0, "take_profit": 800.0,
+            "evidence": {"confirmation_interval": "1h", "data_observed_at_ms": AS_OF_MS},
+        }
+        if required is not None:
+            payload["required_sources"] = required
+        kwargs = {"default_required_sources": default} if default is not None else {}
+        rep = evidence.evaluate_open_intents(
+            [payload], [snap], now_ms=AS_OF_MS + 1000, identity=IDENTITY,
+            cycle_id="cyc-floor", **kwargs)
+        return reason_codes(rep, "i-floor")
+
+    check("策略侧缺省非空即真实生效（意图未声明也拒绝）",
+          has(run(default=["ticker"]), "SOURCE_FIELD_MISSING:ticker.pct_24h"),
+          run(default=["ticker"]))
+    codes = run(required=["mark_funding.mark_price"], default=["ticker"])
+    check("自报更弱的集合不能顶掉策略下限（并集：两者都查）",
+          has(codes, "SOURCE_FIELD_MISSING:ticker.pct_24h")
+          and not has(codes, "SOURCE_FIELD_MISSING:mark_funding.mark_price"), codes)
+    codes = run(required=["ticker.last_price"], default=["mark_funding.funding_rate"])
+    check("并集反向同样成立（自报不覆盖 default）",
+          has(codes, "SOURCE_FIELD_MISSING:mark_funding.funding_rate")
+          and not has(codes, "SOURCE_FIELD_MISSING:ticker.last_price"), codes)
+    check("两者都空 = 不声明源依赖（控制组，不误伤）",
+          not has(run(), "SOURCE_FIELD_MISSING") and not has(run(), "SOURCE_UNKNOWN"), run())
+    for name, value in (("裸字符串", "mark_funding"), ("数字", 123), ("字典", {"a": 1})):
+        codes = run(required=value)
+        check(f"非序列声明（{name}）fail-closed，不再静默无门禁",
+              has(codes, "SOURCE_DECLARATION_REJECTED:not_a_sequence"), codes)
+    for name, value in (("尾点 mark_funding.", ["mark_funding."]),
+                        ("空条目", [""]),
+                        ("纯空白条目", ["   "]),
+                        ("前导点", [".funding_rate"])):
+        codes = run(required=value)
+        check(f"畸形条目（{name}）fail-closed",
+              has(codes, "SOURCE_DECLARATION_REJECTED"), codes)
+
+
 def main() -> int:
     results = load("market_tool_results.json")["results"]
     scenarios = load("intent_scenarios.json")["scenarios"]
@@ -864,6 +971,8 @@ def main() -> int:
     test_program_claims_not_overridable(results, scenarios)
     test_field_level_source_gate(results)
     test_identity_and_binding(results, scenarios)
+    test_unpinned_sentinel_cannot_be_laundered(results)
+    test_required_sources_policy_floor(results)
 
     print("\n" + "=" * 72)
     print(f"结果：PASS {PASS} / FAIL {FAIL}")

@@ -34,6 +34,9 @@
    意图判 ``IDENTITY_UNPINNED`` 进入丢单集合；只有调用方显式声明
    ``allow_unpinned=True``（仅供离线条测）才不因身份未固定丢单，且
    ``decision_gate()["ok"]`` 仍为 False。缺省拒绝，不靠调用方约定。
+   **未固定不论形态**：显式传入模块自带哨兵 ``UNPINNED_IDENTITY``、它的
+   ``model_copy`` 副本、等值裸 dict，或 ``environment="unpinned"`` 的手工构造，
+   一律按 :func:`is_unpinned_identity` 判为未固定（见该函数 docstring）。
 6. **逐意图证据绑定可追溯**
    每个 intent 得到**自己的** ``evidence_id``（种子含 intent_id/轮次/输入摘要），
    同轮同币同周期两单不再共享同一 id；``binding_id`` 额外绑定身份哈希与轮次。
@@ -52,7 +55,9 @@
   两种写法；源级声明等价于"该源已声明字段全必需"——源"部分可用"（例如只有
   ``markPrice`` 没有 ``lastFundingRate``）同样拒绝，``missing_fields`` 不只是留痕。
   未声明时可用 ``default_required_sources`` 由策略侧给缺省集合（本模块不替策略
-  猜默认值，缺省即空集合）。
+  猜默认值，缺省即空集合）。两者是**并集**语义：策略侧缺省是下限，意图自报只能
+  加严，不能用更弱/更窄的自报集合顶掉策略口径。畸形声明（非序列、空条目、
+  ``mark_funding.`` 尾点）一律 ``SOURCE_DECLARATION_REJECTED``，不静默降级。
 - 新增 Decimal 一律经 ``decimal_from_value`` / ``decimal_from_float`` 适配；不改变
   既有 ``TradeIntent`` 字段与 SQLite REAL 口径，不触发全仓重构（R16）。
 
@@ -98,6 +103,21 @@ UNPINNED_IDENTITY = RuntimeIdentity(
     model_route_hash="unpinned",
     runtime_instance_id="u03-unpinned",
 )
+
+
+def is_unpinned_identity(identity: RuntimeIdentity) -> bool:
+    """该身份是否属于"未固定身份"（哨兵本身或等值副本）。
+
+    堵的是 B-P1-1 的同族逃逸：``identity is not None`` 会把模块自带的哨兵
+    ``UNPINNED_IDENTITY``（或它的 ``model_copy`` / 等值裸 dict）判成"身份已固定"，
+    报告随之输出 ``identity_pinned=True`` 的**虚假备份**、门禁整门放行。
+    这里按语义判：字段全等 ⇒ 是哨兵；``environment`` 为 ``unpinned`` ⇒ 是哨兵族
+    （手改 ``runtime_instance_id`` 之类的近等值副本同样不放过）。
+    """
+    if identity == UNPINNED_IDENTITY:
+        return True
+    return str(identity.environment).strip().lower() == UNPINNED_IDENTITY.environment
+
 
 # ---------------------------------------------------------------- 常量与口径
 
@@ -190,6 +210,9 @@ REASON_INTERVAL_CONFLICT = "INTERVAL_DECLARATION_CONFLICT"
 REASON_INTERVAL_MISLABELED = "INTERVAL_MISLABELED"
 #: 工具出参没有周期标签：不猜，fail-closed。
 REASON_INTERVAL_UNVERIFIED = "INTERVAL_UNVERIFIED"
+#: 必需源声明形态畸形（非序列、空条目、``mark_funding.`` 尾点等）：拼错即 fail-closed，
+#: 不再静默降级成"无门禁"（非序列）或"源级声明"（尾点）。
+REASON_SOURCE_DECLARATION_REJECTED = "SOURCE_DECLARATION_REJECTED"
 
 STATUS_VALID = "VALID"
 STATUS_REJECTED = "REJECTED"
@@ -1006,9 +1029,11 @@ def normalise_intent(intent: Any) -> dict[str, Any]:
     item["reported_rr"] = evidence.get("risk_reward_ratio", raw.get("risk_reward_ratio"))
     item["evidence_at_ms"] = evidence.get("data_observed_at_ms")
     item["breakout"] = bool(raw.get("breakout") or raw.get("breakout_confirm"))
-    required_sources = raw.get("required_sources")
-    item["required_sources"] = tuple(str(x) for x in required_sources) \
-        if isinstance(required_sources, (list, tuple)) else ()
+    declared_sources, source_issues = required_sources_or_issues(
+        raw.get("required_sources"))
+    item["required_sources"] = declared_sources
+    # 形态畸形的声明（非序列）不留白：理由是意图级拒绝，在主循环里并入 issues。
+    item["required_sources_issues"] = tuple(source_issues)
     return item
 
 
@@ -1213,14 +1238,32 @@ def render_fact_summary(
 # ---------------------------------------------------------------- 主入口
 
 
+def required_sources_or_issues(value: Any) -> tuple[tuple[str, ...], list[str]]:
+    """必需源声明的形态守卫（与 :func:`declared_claims_or_issues` 同口径）。
+
+    非序列声明（例如裸字符串 ``"mark_funding"``）过去被静默摊成空元组 ⇒
+    "声明了却完全无门禁"；这里改为结构化拒绝，拼错/形态错一律 fail-closed。
+    ``None`` 表示"未声明"（合法），交给策略侧缺省集合。
+    """
+    if value is None:
+        return (), []
+    if not isinstance(value, (list, tuple)):
+        return (), [f"{REASON_SOURCE_DECLARATION_REJECTED}:not_a_sequence"]
+    return tuple(str(item) for item in value), []
+
+
 def _resolve_required_sources(
     declared: Sequence[str],
     default_required_sources: Sequence[str],
 ) -> tuple[str, ...]:
-    """意图未声明必需源时用策略侧缺省集合；两者都空 = 该意图不声明源依赖。"""
-    if declared:
-        return tuple(str(item) for item in declared)
-    return tuple(str(item) for item in default_required_sources)
+    """意图自报与策略侧缺省取**并集**（去重保序，自报在前）。
+
+    上一版是"自报非空即完全顶掉策略缺省"，被门禁者只要自报一个更弱集合就能降低
+    策略口径（Q-NEW-4）。并集语义下策略缺省是下限，自报只能加严；两者都空 =
+    该意图不声明源依赖（由 K02 的其他控制承担）。
+    """
+    merged = (str(item) for item in tuple(declared) + tuple(default_required_sources))
+    return tuple(dict.fromkeys(merged))
 
 
 def _source_gate(
@@ -1241,10 +1284,16 @@ def _source_gate(
     for entry in required_sources:
         text = str(entry).strip()
         if not text:
+            # 空条目过去被静默忽略；现在记一条理由（该意图整体拒绝）。
+            issues.append(f"{REASON_SOURCE_DECLARATION_REJECTED}:empty")
             continue
-        name, _, field = text.partition(".")
+        name, dot, field = text.partition(".")
         name = name.strip()
         field = field.strip()
+        if not name or (dot and not field):
+            # 形如 ``.funding_rate`` / ``mark_funding.``：拼错，不静默降级成源级声明。
+            issues.append(f"{REASON_SOURCE_DECLARATION_REJECTED}:{text}")
+            continue
         item = snapshot.source(name)
         if item is None or not item.available:
             issues.append(f"{REASON_SOURCE_UNAVAILABLE}:{name}")
@@ -1296,13 +1345,16 @@ def evaluate_open_intents(
         name="max_snapshot_age_ms")
     expires_in_ms = _bounded_window(
         expires_in_ms, ceiling=MAX_EXPIRES_IN_MS_CEILING, name="expires_in_ms")
-    identity_pinned = identity is not None
     if identity is None:
         resolution: RuntimeIdentity = UNPINNED_IDENTITY
     elif isinstance(identity, RuntimeIdentity):
         resolution = identity
     else:
         resolution = RuntimeIdentity.model_validate(dict(identity))
+    # 未固定身份**不论以何形态传入**（缺省 None、模块自带哨兵 ``UNPINNED_IDENTITY``、
+    # 等值裸 dict、``model_copy`` 副本）都必须判为未固定：否则 ``identity_pinned=True``
+    # 就是对审计字段的虚假背书，且 ``decision_gate()['ok']`` 会整门放行。
+    identity_pinned = not is_unpinned_identity(resolution)
     identity_hash = resolution.identity_hash()
     snapshot_list = list(snapshots.values()) if isinstance(snapshots, Mapping) else list(snapshots)
     quote_map = dict(quotes or {})
@@ -1371,6 +1423,8 @@ def evaluate_open_intents(
 
         if duplicate_id:
             issues.append(f"{REASON_DUPLICATE_INTENT_ID}:{intent_id}")
+        # 畸形必需源声明（非序列）：过去静默摊成空集合 ⇒ 无门禁，现在结构化拒绝。
+        issues.extend(item.get("required_sources_issues") or ())
         if not identity_pinned and not allow_unpinned:
             # U15 未接线：未固定身份下的开仓一律丢单，不靠调用方约定。
             issues.append(REASON_IDENTITY_UNPINNED)
@@ -1589,6 +1643,7 @@ __all__ = [
     "REASON_RR_CONTRADICTION",
     "REASON_SNAPSHOT_MISSING",
     "REASON_SNAPSHOT_STALE",
+    "REASON_SOURCE_DECLARATION_REJECTED",
     "REASON_SOURCE_FIELD_MISSING",
     "REASON_SOURCE_FIELD_UNKNOWN",
     "REASON_SOURCE_STALE",
@@ -1605,10 +1660,13 @@ __all__ = [
     "evaluate_geometry",
     "evaluate_open_intents",
     "generate_claims",
+    "is_unpinned_identity",
     "merge_claims",
     "model_fact_overrides",
     "normalise_intent",
     "render_fact_summary",
+    "required_sources_or_issues",
     "snapshot_from_records",
     "snapshot_from_tool_result",
+    "UNPINNED_IDENTITY",
 ]
