@@ -417,6 +417,22 @@ def test_reason_code_taxonomy() -> None:
               reason.as_dict())
     check("确实无边际时主因落到 NO_EDGE",
           trace.classify_cycle(intents=[]).primary == "NO_EDGE")
+
+    # 数据适配层的源级错误派生：无错误必须是 None（不能伪造成 NO_EDGE）
+    check("无源级错误 → None（'数据没问题' 不等于 '没有边际'）",
+          trace.reason_from_source_errors([]) is None)
+    degraded = trace.reason_from_source_errors(
+        ["Tavily: ConnectError boom", "SPX: HTTPStatusError 503"],
+        labels=["macro"], degraded=True)
+    check("源级错误 → DATA_UNAVAILABLE 主因",
+          degraded is not None and degraded.primary == "DATA_UNAVAILABLE",
+          None if degraded is None else degraded.as_dict())
+    check("降级取用（缓存/部分源）另附 RESEARCH_INCOMPLETE",
+          degraded is not None and "RESEARCH_INCOMPLETE" in degraded.secondary,
+          None if degraded is None else degraded.as_dict())
+    check("逐源标签留痕（不丢是哪几个源挂了）",
+          degraded is not None and len(degraded.details) == 3,
+          None if degraded is None else degraded.as_dict())
     check("有意图且有兜底信号时不强行判 NO_EDGE",
           trace.classify_cycle(intents=[1], readiness_blockers=["R"]).primary
           == "READINESS_BLOCKED")

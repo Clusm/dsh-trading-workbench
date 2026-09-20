@@ -308,6 +308,30 @@ def classify_evidence_report(report: Any) -> DecisionReason:
     )
 
 
+def reason_from_source_errors(
+    errors: Sequence[Any],
+    *,
+    labels: Sequence[str] = (),
+    degraded: bool = False,
+) -> DecisionReason | None:
+    """由数据适配层收集的**源级错误**派生原因码；无错误时返回 ``None``。
+
+    返回 ``None`` 而不是 ``NO_EDGE``：``NO_EDGE`` 是"数据齐了但没有边际"的结论，
+    只有执行侧能下；数据适配层只能说"我取不到哪些源"。所有错误都给
+    ``DATA_UNAVAILABLE``，并保留逐源标签（不解析自由文本，只做标签留痕）；
+    ``degraded=True``（如回落到缓存/部分源）时附加 ``RESEARCH_INCOMPLETE``，
+    因为"用了陈旧/部分数据"与"完全取不到"是两件不同的事。
+    """
+    items = [str(item) for item in errors if str(item or "").strip()]
+    if not items:
+        return None
+    codes = [REASON_DATA_UNAVAILABLE]
+    if degraded:
+        codes.append(REASON_RESEARCH_INCOMPLETE)
+    details = tuple(items) + tuple(str(item) for item in labels if item)
+    return DecisionReason.from_codes(codes, details=details)
+
+
 def classify_cycle(
     *,
     intents: Sequence[Any] = (),
@@ -1622,6 +1646,7 @@ __all__ = [
     "normalise_reason_codes",
     "owner_alive",
     "percentile_ms",
+    "reason_from_source_errors",
     "run_protection_first",
     "shared_admission_scope",
     "shared_quota_lease",
