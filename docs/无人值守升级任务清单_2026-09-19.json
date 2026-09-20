@@ -543,7 +543,7 @@
       "title": "逐意图可验证研究证据",
       "owner_role": "C",
       "actual_assignee": "U03 作者会话（C 角色）",
-      "status": "READY_FOR_REVIEW",
+      "status": "CHANGES_REQUESTED",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -733,6 +733,23 @@
             "P3 导出的 is_unpinned_identity() 传 Mapping 抛 AttributeError"
           ],
           "unverifiable": "接线补丁未应用/未跑端到端（归 I）"
+        },
+        {
+          "type": "integration_attempt",
+          "merge_commit": null,
+          "patch_commit": "d2bd5ce",
+          "verified_candidate": "c0e14c4",
+          "code_identity_proof": "git diff c0e14c4 HEAD -- <U03 路径> 为空 -> U03 代码与已验证 head 逐字节一致",
+          "patches_applied": [
+            "s01_market_query_adaptation.patch",
+            "u03_orchestrator_integration.patch",
+            "u03_offline_regression_registration.patch"
+          ],
+          "passing": "test_research_evidence / smoke_u03_research_evidence / smoke_market_query_tools / smoke_decision_pipeline(17/0) / smoke_contracts_v3(173/0)；清单门禁 MANIFEST OK included=67",
+          "red": "tests/integration/test_market_evidence_quality.py 与 scripts/smoke_u03_market_evidence_quality.py exit=1: ValueError: patch context mismatch at line 100",
+          "root_cause": "该测试的 load_patched_market_query()(:129-140) 读**现网** src/data/market_query.py 再把补丁打上去，仅在补丁**未应用**时成立；集成把补丁落地后即二次应用 -> 必然失败。混行尾（补丁 77CRLF/60LF；文件 454CRLF/212LF）使报错显示两个看似相同的字符串。",
+          "why_missed": "U03 r3 复验在**作者 head**（补丁未应用）上进行，只把该现象记为 P3「证据卫生」，未暴露集成态失败 -> 印证'验收必须在含适配的候选上跑'",
+          "action": "r4 修复中：让测试在补丁已应用/未应用两态均正确，并让 apply_unified_diff 对行尾归一化"
         }
       ],
       "blockers": [],
@@ -775,7 +792,7 @@
       "contract_commit": "ffdab443cae45c1451b5cc13b24e3e73c22038ff",
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "d2bd5ce",
       "review_assignments": [
         {
           "round": "r1",
