@@ -6,7 +6,10 @@
 本轮 r2 的共享改动不在其中。**二选一**，不要两套都打。）
 
 > **r2 与分支的关系**：本轮共享改动**只以补丁交付**，没有再提交进 `task/U13` 分支。
-> `git diff --name-only 0e522b1..b55c4fb` 里的共享文件来自上一轮（已审核、逐字节一致）；
+> 目录名 `b55c4fb` = **生成这 12 个补丁时的 head**；其后 HEAD 又前进过一个提交
+> （只改独占验收文件 `tests/acceptance/test_supervision.py` 的**两态可跑**修正，
+> 与补丁内容无关）。最终 head 见交付报告。
+> `git diff --name-only 0e522b1..HEAD` 里的共享文件来自上一轮（已审核、逐字节一致）；
 > 本轮的 app.py / service.py / windows_service.py / config_loader.py / entry_readiness.py /
 > windows_service_host.py / smoke_windows_service_plan.py 改动仅存在于本目录的 `.diff`。
 

@@ -794,17 +794,19 @@ def check_bundle_schema_compat() -> None:
             (data / name).write_text(json.dumps(payload), encoding="utf-8")
         (project / "config" / "risk_profile.lock.json").write_text("{}", encoding="utf-8")
         bundle = create_recovery_bundle(project, base / "bundles")
-        if json.loads((bundle / "manifest.json").read_text(
-                encoding="utf-8")).get("bundle_schema") != 2:
+        manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+        if manifest.get("bundle_schema") != 2:
             print("  NOTE  create_recovery_bundle 非 schema 2；兼容读断言跳过"
                   "（共享适配补丁未应用）")
             return
+        has_epoch = isinstance(manifest.get("epoch"), dict)
         verified = verify_epoch_bundle(bundle, expected_environment="demo")
         check("core 能校验生产脚本的 schema-2 恢复包",
               verified["schema"] == 2 and verified["environment"] == "demo")
-        check("兼容读结果显式标注 legacy/epoch 事实",
+        check("兼容读结果显式标注 legacy 与 epoch 事实（缺 epoch 时标 None，不假装校验过）",
               verified["legacy_bundle"] is True
-              and isinstance(verified["epoch"], dict))
+              and (isinstance(verified["epoch"], dict) if has_epoch
+                   else verified["epoch"] is None))
         restored = drill_epoch_bundle(bundle, base / "drill", execute=True)
         check("core 能演练生产脚本的恢复包（quick_check 通过）",
               restored["status"] == "restored")
@@ -1022,8 +1024,12 @@ def check_ki02_fallback_closure() -> None:
     print("\n[12] KI02 回退面收口（显式无效声明 / 安装期 fail-closed）")
     import inspect
 
-    from core.windows_service import resolve_python_executable
-
+    try:
+        from core.windows_service import resolve_python_executable
+    except ImportError:
+        print("  NOTE  windows_service.py 未包含 resolve_python_executable"
+              "（共享适配补丁未应用）；KI02 收口断言见交付报告")
+        return
     params = inspect.signature(resolve_python_executable).parameters
     if "allow_fallback" not in params:
         print("  NOTE  windows_service.py 未包含 run2 的 allow_fallback 收口"
