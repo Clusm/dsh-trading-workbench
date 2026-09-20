@@ -1,0 +1,178 @@
+diff --git a/src/core/service.py b/src/core/service.py
+index 7edf9a4..f4c3cf0 100644
+--- a/src/core/service.py
++++ b/src/core/service.py
+@@ -40,7 +40,15 @@ from core.intel_cache import IntelCache
+ from core.instance_lock import InstanceLock
+ from core.quotas import TradeQuotaManager
+ from core.risk_guard import AccountRiskGuard
++from core.management_authorization import (
++    ManagementAccountDomain,
++    assert_account_domains_consistent,
++    ledger_account_ref,
++    resolve_account_domain,
++)
+ from core.release_manifest import build_release_manifest, write_manifest
++from core.runtime_identity import derive_account_ref, mint_runtime_generation
++from core.strategy_position_manager import StrategyPositionManager
+ from llm.base import LLMClient
+ from llm.mock_client import MockLLMClient
+ from llm.request_coordinator import coordinator_status
+@@ -154,6 +162,24 @@ class TradingService:
+                 event_type="release_manifest_write_error", severity="critical",
+                 details=f"{type(exc).__name__}: {exc}", action_taken="release evidence unavailable",
+             )
++        # U02：把本次运行的"身份域"与"账本域"对齐，并把管理授权/策略仓管理接到
++        # 执行路径上。运行代由环境+账户引用+实例派生；账户引用**只**取账本侧那
++        # 一个值（broker.account_ref / 复核 ``release_manifest`` 的结论），因此
++        # K03 幂等键、生命周期分区与决策身份指向同一个账户域（U15/B_r1 P1-4）。
++        self.account_domain = self._bind_account_domain(
++            broker_environment, broker_account_ref, reconciliation_book)
++        self.strategy_position_manager = StrategyPositionManager(
++            account_ref=self.account_domain.account_ref,
++            environment=self.account_domain.environment,
++        )
++        # Broker 若支持 U02 接入点则注入管理组件；没有该属性的替身/纸面 Broker
++        # 不受影响（``_reserve_exit`` 用 getattr 探测）。**不改写** broker 的
++        # account_ref：账本侧账户引用由 trade_reconciliation/binance_futures 的
++        # 单一派生点持有，这里再造一个值只会制造第二个账户标识。
++        try:
++            self.broker.strategy_position_manager = self.strategy_position_manager
++        except Exception:  # noqa: BLE001 - 替身 Broker 不可写时忽略
++            pass
+         self.paper_broker = self.broker  # 兼容旧名称
+         # 不在构造阶段同步仓位：外部平仓补记会回查多笔 userTrades，网络波动时
+         # 可阻塞数分钟，导致 Uvicorn 尚未监听、资金页面无法打开。后台慢循环会
+@@ -313,6 +339,68 @@ class TradingService:
+         )
+         self._purge_old_logs()
+ 
++    def _plan_position_restart(self) -> dict[str, Any]:
++        """重启时的仓位分类计划；结构上不含任何退出动作（U02 必达要点 2）。"""
++        state = self.broker.state if isinstance(self.broker.state, dict) else {}
++        positions = [dict(item) for item in (state.get("positions") or [])]
++        plan = self.strategy_position_manager.plan_restart(
++            positions, now_ms=int(time.time() * 1000))
++        # 护栏：重启上下文一旦出现批量退出动作即 fail-closed。
++        self.strategy_position_manager.assert_no_implicit_bulk_exit(
++            context="restart", actions=())
++        if plan.legacy:
++            self.db.log_risk_event(
++                event_type="legacy_position_requires_migration", severity="warn",
++                details=(f"{len(plan.legacy)} 个旧仓无策略归属，需人工显式迁移；"
++                         "重启不会自动退出它们"),
++                action_taken="mark for explicit migration")
++        return plan.as_dict()
++
++    @property
++    def hard_exits(self) -> tuple[Any, ...]:
++        """硬退出流水只读视图（保护触发/人工急平），与预期持仓分开。"""
++        return self.strategy_position_manager.hard_exits()
++
++    def _bind_account_domain(
++        self, environment: str, ledger_ref: str | None, reconciliation_book: Any,
++    ) -> ManagementAccountDomain:
++        """把 U15 运行代与账本账户引用对齐；不一致必须**可见**（不是静默）。
++
++        fail-visible 而非 fail-open：不一致时记一条 critical 事件（发布证据里
++        K01 身份与 K03 收入幂等键分区对不上，属于必须人工处置的状态），但**不改**
++        交易风险档、不停机、不阻断已在途的退出——按 U15/B_r1 P1-4 的处置建议，
++        重分区数据属显式迁移，由运营者在本模块之外执行。
++        """
++        declared = str(os.getenv("MTA_ACCOUNT_REF") or "").strip() or None
++        ledger = str(ledger_ref or f"{environment}:local")
++        # 权威账户域：显式声明优先；未声明时沿用账本现值（保持既有分区不漂移）。
++        canonical = derive_account_ref(
++            environment, declared_account_ref=declared or ledger).value
++        generation = mint_runtime_generation(
++            environment=environment, account_ref=canonical,
++            runtime_instance_id=self.runtime_instance_id,
++        )
++        domain = resolve_account_domain(generation)
++        mismatches = assert_account_domains_consistent(generation, ledger)
++        # 单一事件类型：只在 details/severity 上区分"已声明却分叉"（critical，需迁移）
++        # 与"未声明"（warn，建议声明），避免为同一语义新增两个看板映射。
++        if mismatches and declared:
++            # 声明了账户却与账本分区不一致：说明账本侧仍按旧密钥摘要派生
++            # （U15/B_r1 P1-4 的形态），K03 幂等键会与 K01 身份分叉。
++            self.db.log_risk_event(
++                event_type="account_domain_mismatch", severity="critical",
++                details=(f"身份域={ledger_account_ref(generation)} 账本域={ledger}；"
++                         "K03 幂等键分区与 K01 身份不一致，需显式迁移账户引用（U02/U13）"),
++                action_taken="record only; no risk profile change")
++        elif not declared:
++            self.db.log_risk_event(
++                event_type="account_domain_mismatch", severity="warn",
++                details=(f"account_ref={ledger} 未显式声明（依赖密钥摘要或 "
++                         "``<env>:local`` 回退），轮换/多账户下 K03 分区可能切裂；"
++                         "建议声明 MTA_ACCOUNT_REF 以与身份域统一"),
++                action_taken="advisory")
++        return domain
++
+     def _purge_old_logs(self, keep_days: int = 7) -> None:
+         """启动时清理超过 keep_days 的按日 JSONL 日志目录（data/logs/YYYY-MM-DD/）。"""
+         try:
+@@ -780,6 +868,9 @@ class TradingService:
+         # 风险档，系统先补保护并明确阻断，由运营者决定如何处理，绝不在首屏尚未
+         # 就绪时静默 close_all；核验通过后，日常运行仍按原风险档自动执行硬保护。
+         startup_safety = self._verify_startup_safety()
++        # U02：重启/接手只**分类**存量仓位，绝不批量退出。旧仓（无策略归属）
++        # 明确标记为需人工显式迁移，有归属但无预期记录的只重建预期。
++        position_management = self._plan_position_restart()
+         capital_result = self.capital.sync(
+             enforce_actions=bool(startup_safety.get("ready", False)))
+         equity_available = bool(capital_result.get("equity_available", True))
+@@ -959,6 +1050,8 @@ class TradingService:
+             "control_state": self.control.state,
+             "account_risk": account_risk,
+             "startup_safety": startup_safety,
++            "position_management": position_management,
++            "account_domain": self.account_domain.as_dict(),
+             "entry_readiness": readiness.as_dict(),
+             "quota_state": self.quota.status(),
+             "channel_state": channel_status,
+@@ -1101,11 +1194,23 @@ class TradingService:
+             return {"ok": False, "error": "invalid state"}
+         receipts = []
+         if new_state == "emergency":
++            # U02：全平只允许来自"人工 emergency"或"已确证的保护失败"。人工路径
++            # 的语义不变（始终允许），但必须经过同一个判定入口，从而与"健康故障
++            # 不得触发全平"（R11）使用同一条真值路径，不存在绕过口。
++            decision = self.strategy_position_manager.should_flat_close(
++                operator_emergency=True)
+             prices = {}
+             with self._lock:
+                 market = self._latest.get("market")
+                 if market is not None:
+                     prices = dict(market.last_prices)
++            if not decision.allowed:  # pragma: no cover - 人工路径恒定允许
++                # 结构性不可达：``should_flat_close(operator_emergency=True)`` 恒
++                # 返回 allowed=True（并有契约回归锁死）。保留 fail-closed 分支只为
++                # 万一语义被改坏时**不静默平仓**，并显式回报失败而非假装已执行。
++                return {"ok": False, "state": new_state, "receipts": [],
++                        "error": "operator_emergency_flat_close_blocked",
++                        "flat_close": decision.as_dict()}
+             # 循环重试直到无持仓或达到上限：平仓耗时数秒期间新平仓单可能
+             # 未全部成交，只平一轮快照会留下残余仓位继续暴露风险。
+             max_rounds = 5
+@@ -1114,6 +1219,20 @@ class TradingService:
+                 state = self.broker.state if isinstance(self.broker.state, dict) else {}
+                 if not [p for p in (state.get("positions") or []) if abs(float(p.get("qty") or 0)) > 0]:
+                     break
++            # 人工急平同时登记硬退出流水：预期持仓**不被覆盖**（U02 命名空间分离），
++            # 事后复盘能区分"保护触发"与"人工放弃"。
++            for receipt in receipts:
++                lifecycle_key = ":".join((
++                    str(self.account_domain.environment or ""),
++                    str(receipt.get("symbol") or "").upper(), "BOTH"))
++                self.strategy_position_manager.record_hard_exit(
++                    exit_id=str(receipt.get("order_id") or ""),
++                    lifecycle_id=lifecycle_key,
++                    symbol=str(receipt.get("symbol") or ""),
++                    position_side="BOTH", trigger="OPERATOR_EMERGENCY",
++                    evidence_id=f"emergency:{self.runtime_instance_id}",
++                    requested_qty=receipt.get("qty") or 0,
++                    now_ms=int(time.time() * 1000))
+             self.db.log_risk_event(event_type="manual_emergency_close", severity="critical",
+                                    details=f"人工触发紧急平仓，平仓单数={len(receipts)}",
+                                    action_taken="close_all")

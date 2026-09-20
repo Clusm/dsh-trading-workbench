@@ -1,0 +1,154 @@
+diff --git a/src/exchange/binance_futures.py b/src/exchange/binance_futures.py
+index 0f68f19..370d8c4 100644
+--- a/src/exchange/binance_futures.py
++++ b/src/exchange/binance_futures.py
+@@ -43,6 +43,7 @@ from exchange.protection_mirror import ProtectionOrderMirror
+ from exchange.protocol import normalize_algo_orders_payload, parse_iso as _parse_iso, parse_iso_ms
+ from exchange.trade_reconciliation import (
+     TradeReconciliationBook,
++    account_ref_source,
+     account_reference,
+     normalize_execution_fill,
+     select_close_fills,
+@@ -216,8 +217,9 @@ class BinanceFuturesBroker:
+                  base_url: str = "https://demo-fapi.binance.com",
+                  db: AuditDatabase | None = None, environment: str = "demo",
+                  ledger_file: Path | None = None,
+-                 protection_mirror_enabled: bool = False):
+-        self.api_key = api_key
++                 protection_mirror_enabled: bool = False,
++                 declared_account_ref: str | None = None):
++        self.api_key = api_key
+         self.api_secret = api_secret
+         self.base_url = base_url.rstrip("/")
+         self.db = db
+@@ -230,10 +232,17 @@ class BinanceFuturesBroker:
+         self._protection_sync = ProtectionSyncReasons()
+         self.mode = environment
+         self.environment = environment
++        # U02/U15：账户引用**只在这一处派生一次**，账本/生命周期/K03 收入幂等键与
++        # 决策身份共用同一个值。声明了账户时它等于 ``<env>:<declared>`` 且与密钥
++        # 轮换解耦；未声明时仍是旧密钥摘要形态，由 ``account_ref_source`` 标记为
++        # ``legacy-key-digest`` 供启动自检发现（U15/B_r1 P1-4）。
++        self.account_ref = account_reference(
++            api_key, environment, declared_account_ref=declared_account_ref)
++        self.account_ref_source = account_ref_source(
++            api_key, environment, declared_account_ref=declared_account_ref)
+         self.trade_reconciliation = (
+             TradeReconciliationBook(
+-                db, environment=environment,
+-                account_ref=account_reference(api_key, environment),
++                db, environment=environment, account_ref=self.account_ref,
+             ) if db is not None else None
+         )
+         self.ledger_file = Path(ledger_file) if ledger_file is not None else (
+@@ -1418,6 +1427,7 @@ class BinanceFuturesBroker:
+             chunks.append(chunk)
+             remaining -= chunk
+         if not chunks:
++            self._release_exit(reservation_key, reason="NO_CHUNKS")
+             return None
+ 
+         first_cid = None
+@@ -2000,10 +2010,20 @@ class BinanceFuturesBroker:
+                                        details=f"{symbol} 无仓位可平")
+             return None
+         current = abs(float(pos.get("positionAmt") or 0))
+-        close_qty = min(float(intent.qty), current)
+-        pos_side = self._position_side(pos)
++        pos_side = self._position_side(pos)
+         side = "SELL" if pos_side == "LONG" else "BUY"
+-        entry = float(pos.get("entryPrice") or 0.0)
++        # U02：退出先在管理预留账本里原子占量。重复的退出请求返回 duplicate
++        # skipped 而不是再发一次减仓；在途退出已占掉的仓量不会再被本轮读到，
++        # 因此重复退出既不会二次减仓、更不可能被做成反向开仓（R09）。
++        reservation_key = self._reserve_exit(symbol, pos_side, intent, current)
++        if reservation_key is not None and reservation_key.get("skip"):
++            return reservation_key.get("receipt")
++        close_qty = float(
++            reservation_key["submit_qty"] if reservation_key
++            else min(float(intent.qty), current))
++        if close_qty <= 0:
++            return None
++        entry = float(pos.get("entryPrice") or 0.0)
+         ledger_source, ledger_meta = self._ledger_source(symbol)
+         source = str(getattr(intent, "order_source", ledger_source) or ledger_source or "ai")
+         reconciler = getattr(self, "trade_reconciliation", None)
+@@ -2175,10 +2195,77 @@ class BinanceFuturesBroker:
+                 position_side=pos_side,
+             )
+         self._resync_protection(symbol, intent=intent)
++        # U02：结算本轮预留。确认成交则按实际扣减，未确认（可能部分成交/响应丢失）
++        # 则整笔释放，交给下一轮 UNKNOWN 收口重新规划——绝不让一笔在途退出长期
++        # 占着仓量，也绝不重复扣减。
++        if close_unconfirmed:
++            self._release_exit(reservation_key, reason="FILL_UNCONFIRMED")
++        else:
++            self._settle_exit(reservation_key)
+         return {"order_id": first_cid, "action": "close", "symbol": symbol,
+                 "side": pos_side, "qty": float(close_qty), "pnl": total_pnl,
+                 "order_count": order_count, "fill_unconfirmed": close_unconfirmed}
+ 
++    def _reserve_exit(self, symbol: str, pos_side: str, intent: Any,
++                      current: float) -> dict[str, Any] | None:
++        """经 U02 管理预留注册退出；未接入管理组件时保持既有行为。"""
++        manager = getattr(self, "strategy_position_manager", None)
++        if manager is None:
++            return None
++        domain = self._exit_domain_key(symbol, pos_side)
++        exit_key = str(getattr(intent, "client_order_id", None)
++                       or f"exit:{domain}:{uuid.uuid4().hex[:16]}")
++        outcome = manager.request_exit(
++            exit_key=exit_key, lifecycle_id=domain, symbol=symbol,
++            position_side=pos_side, qty=float(intent.qty), current_qty=current)
++        if outcome.duplicate:
++            if self.db:
++                self.db.log_risk_event(
++                    event_type="futures_duplicate_exit_skipped", severity="warn",
++                    details=f"{symbol}: 重复退出请求被幂等忽略（不会反向开仓）",
++                    action_taken="skip duplicate exit")
++            return {"skip": True, "receipt": {
++                "order_id": exit_key, "action": "duplicate_skipped", "symbol": symbol,
++                "side": pos_side, "reason_codes": list(outcome.reason_codes)}}
++        if not outcome.accepted or outcome.submit_qty <= 0:
++            if self.db:
++                # 复用既有事件类型 `futures_close_nopos`：语义相同（无仓量可减），
++                # 避免为一个已存在的语义新增事件类型与看板映射。
++                self.db.log_risk_event(
++                    event_type="futures_close_nopos", severity="warn",
++                    details=f"{symbol}: 退出请求无可减量（在途退出已占量）",
++                    action_taken="skip exit")
++            return {"skip": True, "receipt": {
++                "order_id": exit_key, "action": "exit_noop", "symbol": symbol,
++                "side": pos_side, "reason_codes": list(outcome.reason_codes)}}
++        return {"skip": False, "exit_key": exit_key, "domain": domain,
++                "submit_qty": outcome.submit_qty}
++
++    def _settle_exit(self, reservation: dict[str, Any] | None) -> None:
++        if not reservation or reservation.get("skip"):
++            return
++        manager = getattr(self, "strategy_position_manager", None)
++        if manager is None:
++            return
++        manager.confirm_exit(reservation["exit_key"],
++                             engaged_qty=reservation["submit_qty"])
++
++    def _release_exit(self, reservation: dict[str, Any] | None, *, reason: str) -> None:
++        if not reservation or reservation.get("skip"):
++            return
++        manager = getattr(self, "strategy_position_manager", None)
++        if manager is None:
++            return
++        manager.release_exit(reservation["exit_key"], reason=reason)
++
++    def _exit_domain_key(self, symbol: str, pos_side: str) -> str:
++        """退出的仓位域键：与生命周期唯一索引同口径（环境/账户/标的/持仓侧）。"""
++        return ":".join((
++            str(self.environment or "").lower(),
++            str(getattr(self, "account_ref", "") or ""),
++            str(symbol or "").upper(), str(pos_side or "").upper(),
++        ))
++
+     def _adjust(self, intent: Any) -> dict[str, Any] | None:
+         symbol = intent.symbol
+         pos = self._single_symbol_position(symbol)

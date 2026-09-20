@@ -1,0 +1,21 @@
+INFO A_before=CONSUMED release_accepted=False after=CONSUMED re_reserve_accepted=False
+PASS A_release_is_idempotent_on_consumed 
+INFO B_limit=2000 consumed_record_pruned=True exit_key_count=2000
+PASS B_consumed_record_pruned 
+INFO B_after_prune_same_key={'action': 'NOOP', 'duplicate': True, 'qty': 0, 'reasons': ['DUPLICATE_EXIT_IGNORED']}
+PASS B_consumed_not_reclaimed_when_record_pruned 
+PASS B_no_reclaim_audit_for_consumed 
+INFO B2_record_pruned=True exit_key_count=9
+INFO B2_after_prune_same_key={'action': 'NOOP', 'duplicate': True, 'qty': 0, 'reasons': ['DUPLICATE_EXIT_IGNORED']}
+PASS B2_consumed_not_reclaimed_via_ttl_sweep 
+PASS B2_no_reclaim_audit_for_consumed 
+INFO C_after_key_eviction={'action': 'NOOP', 'duplicate': True, 'accepted': False, 'qty': 0}
+PASS C_consumed_not_resubmitted_when_key_evicted 
+INFO D_released=True retry={'action': 'SUBMIT_REDUCE', 'qty': 1.0}
+PASS D_released_key_can_still_resubmit 
+PASS D_released_key_never_opens_position 
+PASS E_conserved_B 
+PASS E_conserved_C 
+PASS E_conserved_D 
+
+R3_CONSUMED_PROBE tree=_sb_int_r3 FAIL=0 []

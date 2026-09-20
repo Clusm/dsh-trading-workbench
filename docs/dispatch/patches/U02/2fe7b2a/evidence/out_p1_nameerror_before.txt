@@ -1,0 +1,3 @@
+INFO _open qty=0 -> result='unset' error="NameError: name 'reservation_key' is not defined"
+INFO db events=[]
+FAIL no_nameerror_and_graceful_skip False

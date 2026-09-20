@@ -1,0 +1,17 @@
+diff --git a/src/dashboard/app.py b/src/dashboard/app.py
+index 187750b..d6dec19 100644
+--- a/src/dashboard/app.py
++++ b/src/dashboard/app.py
+@@ -299,6 +299,12 @@ def _event_type_cn(value: Any) -> str:
+         "futures_sl_failed": "止损设置失败",
+         "futures_tp_failed": "止盈设置失败",
+         "futures_close_nopos": "合约无持仓平仓",
++        "futures_duplicate_exit_skipped": "重复退出已幂等忽略",
++        "futures_stale_exit_reservation_reclaimed": "超时退出预留已回收",
++        "futures_exit_reservation_released": "退出预留已释放（可重发）",
++        "account_domain_mismatch": "账户引用域不一致",
++        "legacy_position_requires_migration": "旧仓待人工显式迁移",
++        "management_intent_unbound": "管理意图缺授权引用",
+         "futures_adjust_skip": "合约调整跳过",
+         "futures_adjust": "合约自动调整",
+         "futures_adjust_error": "合约调整错误",
