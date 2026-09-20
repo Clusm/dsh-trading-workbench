@@ -1632,6 +1632,61 @@
         {
           "type": "review_workspace_boundary_incident",
           "note": "U15 的 C 审查者曾把 scratch 文件写入 mat-wt/EF 工作区（违反只读边界），随后自行清理；已核实 EF 工作树恢复干净。后续派发已再次强调边界。"
+        },
+        {
+          "type": "author_fix_r2",
+          "head_commit": "38029e2",
+          "commits": [
+            "7117e54",
+            "d35cd76",
+            "3dcc722",
+            "02ea453",
+            "218fb25",
+            "9afc16d",
+            "22e8ab9",
+            "12d24b0",
+            "38029e2"
+          ],
+          "fixed": "14/15（第 15 项属 U02/U13 路径，非本任务可改）",
+          "p0_closures": [
+            "P0-1 authorize_new_entry: 省略 expected 由 allowed=True/200/[] -> allowed=False/409/[IDENTITY_BINDING_UNPROVEN, READINESS_UNPROVEN]",
+            "P0-2 配置漂移: 19 项漂移由 19/19 same -> 19/19 CHANGED；stripped==real True->False；真实 config 六类来源逐类 CHANGED、可回基线、missing_sources=()"
+          ],
+          "p1_closures": [
+            "嵌套键凭据泄漏 4i.2 secret survived True->False",
+            "scope_hash 参与比较 -> SCOPE_HASH_UNBOUND",
+            "mint 传 AccountRef 且 environment 冲突 -> ExecutionModeError（不再静默忽略）",
+            "WorkBuddy live 无凭据 -> 409 PROVIDER_CAPABILITY_UNPROVEN（不再写伪证据）",
+            "fallback_local 可显式关闭 F1 暴露 False->True",
+            "model_route_blockers 在 mode=None 时 -> WORKBUDDY_OUTSIDE_LIVE（不再 fail-open）",
+            "未识别备用 provider -> FALLBACK_PROVIDER_UNRECOGNISED",
+            "artifact_relatives root 边界；非 Mapping raw_settings / 空策略卡 -> MalformedInputError / MissingRuntimeInputError",
+            "diff-7 改为如实登记（不再谎称接口已提供）；decl-7 真修"
+          ],
+          "orchestrator_verified": {
+            "smoke_contracts_v3": "PASS 173/0",
+            "test_runtime_identity": "exit 0 (197 PASS)",
+            "test_control_boundary": "exit 0 (50 PASS)",
+            "patches_apply_check": "4/4 OK",
+            "shared_contract_runner_untouched": true
+          },
+          "u02_interface": "RuntimeGeneration / mint_runtime_generation / verify_account_binding / authorize_new_entry(PermissionDecision) —— 签名与失败码已导出",
+          "known_limits": [
+            "P3-1 fallback provider_env 仍硬编码",
+            "started_at=None 时两进程可同 generation_id",
+            "控制面 P3-1..P3-4（emergency_stop 目标态、unspecified 400、write 校验不验状态、auto 不能 read_status）",
+            "MTA_DRY_RUN/MTA_MARKET 为死白名单项",
+            "模块仍零消费者：'生产真的拒绝'须待 I 合入补丁后验证",
+            "IdentityBundle 未带 RuntimeGeneration（B 可选项）"
+          ],
+          "rollback": "git reset --hard 6dd0d1a"
+        },
+        {
+          "type": "u02_blocker",
+          "title": "账本侧 account_ref 漂移，U02 两条路都不通",
+          "detail": "src/exchange/trade_reconciliation.py:66-69 的 account_ref=sha256(api_key)[:16] 仍随密钥轮换漂移，且与 U15 的 <env>:<declared> 不是同一值（binance_futures.py:198、K03 幂等键同源）。U15 无法改共享文件。",
+          "required_action": "U02/U13 需把账本 account_ref 改为消费 U15 派生值，或让 trade_reconciliation 接受外部 account_ref",
+          "owner": "U02(B线)/U13"
         }
       ],
       "blockers": [
@@ -1700,6 +1755,17 @@
             "B_r1",
             "C_r1"
           ]
+        },
+        {
+          "round": "r2",
+          "stage": "修复复验",
+          "candidate": "38029e2",
+          "sessions": [
+            "Q (reviews/U15/R2/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U15/38029e2/",
+          "note": "为控制预算，E/B/C 三方发现的复验合并为单一独立会话（原独立初审已分别由三方完成）"
         }
       ],
       "qa_runs": []
