@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from core.runtime_identity import authorize_control_request, verify_control_write
 from core.service import TradingService
 from data.market_query import get_live_prices
 from data.price_stream import PriceStream
@@ -2081,16 +2082,42 @@ def create_app(service: TradingService) -> FastAPI:
         return [dict(r) for r in service.db.fetch_all("SELECT review_date, report_path, summary FROM daily_reviews ORDER BY review_date DESC LIMIT 30")]
 
     @app.post("/api/control")
-    def api_control(payload: dict[str, Any]):
+    def api_control(payload: dict[str, Any], request: Request):
         state = str(payload.get("state", ""))
         # emergency 会立即市价平掉全部仓位：要求请求体带 confirm 二次确认参数
         if state == "emergency" and str(payload.get("confirm") or "") != "emergency":
             raise HTTPException(status_code=400,
                                 detail="emergency 需要二次确认：请求体必须包含 confirm='emergency'")
+        # R11：回环来源 / operator-health-risk 权限分离 / 人工禁用优先 / 二次确认，
+        # 全部交由纯策略判定器给出结论；看板不再自己发明闸门，判定不通过时按其
+        # 建议状态码拒绝，绝不降级放行。
+        control_role = os.getenv("MTA_CONTROL_ROLE", "operator")
+        decision = authorize_control_request(
+            role=control_role,
+            action="emergency_stop" if state == "emergency" else "set_control",
+            client_host=(request.client.host if request.client else None),
+            requested_state=state,
+            current_state=service.control.state,
+            actor=control_role,
+            confirm_manual_reenable=bool(payload.get("confirm_manual_reenable")),
+            confirm_secret=str(payload.get("confirm") or ""),
+        )
+        if not decision.allowed:
+            raise HTTPException(status_code=decision.http_status,
+                                detail=";".join(decision.reason_codes))
         result = service.set_control(state)
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("error"))
-        return result
+        # 写后必须回读校验：接口返回 ok 不等于状态真的生效（写丢或被回滚时必须报
+        # 503 让操作者知道“没写进去”，而不是显示成功）。
+        verdict = verify_control_write(
+            requested_state=state,
+            read_back_state=str(getattr(service.control, "state", "") or ""),
+        )
+        if not verdict.ok:
+            raise HTTPException(status_code=503, detail=";".join(verdict.reason_codes))
+        return {**result, "verified": True,
+                "read_back_state": str(getattr(service.control, "state", "") or "")}
 
     @app.post("/api/cycle/run")
     def api_run_cycle():
@@ -2134,6 +2161,16 @@ def create_app(service: TradingService) -> FastAPI:
         mode = str(payload.get("mode", ""))
         if mode not in SWITCHABLE_MODES:
             raise HTTPException(status_code=400, detail=f"未知模式：{mode}")
+        if mode == "live":
+            # 身份证据存在阻断项（依赖锁缺失 / 模型路由 Mock / 身份采集失败等）时
+            # 拒绝把开关拨到实盘：先把身份修好，再切模式。
+            identity_blockers = tuple(
+                (getattr(service, "release_manifest", {}) or {}).get("identity_blockers") or ())
+            if identity_blockers:
+                raise HTTPException(
+                    status_code=409,
+                    detail="身份证据存在阻断项，拒绝切换实盘："
+                           + "；".join(str(item) for item in identity_blockers))
         env_vals = _read_env_file(_env_file(service))
         if mode == "live":
             key = os.environ.get("BINANCE_LIVE_API_KEY", "") or env_vals.get("BINANCE_LIVE_API_KEY", "")

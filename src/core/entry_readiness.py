@@ -60,6 +60,28 @@ def _fact_bool(facts: Mapping[str, Any], key: str) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+def _identity_blocker_reasons(facts: Mapping[str, Any]) -> tuple[str, ...]:
+    """并入调用方提供的 K01 身份阻断原因码（**存在性触发**）。
+
+    只有当调用方显式放入 ``identity_blockers`` 事实时才生效：缺省（键不存在
+    或为空）时完全维持原有判定，不新增任何默认闸门，因此旧调用方语义不变。
+    只接受字符串序列；单个字符串按一个原因码处理，其它类型视为未提供。
+    """
+    raw = facts.get("identity_blockers")
+    if isinstance(raw, str):
+        candidates: tuple[Any, ...] = (raw,)
+    elif isinstance(raw, (list, tuple, set, frozenset)):
+        candidates = tuple(raw)
+    else:
+        return ()
+    reasons: list[str] = []
+    for item in candidates:
+        text = str(item).strip()
+        if text:
+            reasons.append(text)
+    return tuple(dict.fromkeys(reasons))
+
+
 def evaluate_entry_readiness(
     facts: Mapping[str, Any] | None,
     *,
@@ -73,6 +95,12 @@ def evaluate_entry_readiness(
 
     关键布尔事实允许三态：True=已证明、False=明确失败、None=没有证据；后两者
     都会阻断 open。原因码稳定、可供 API、日志和测试直接比较。
+
+    U15 追加两条 **存在性触发** 的事实（不提供即完全维持原行为）：
+
+    - ``identity_blockers``：身份类阻断原因码逐个并入 ``blocking_reasons``；
+    - ``model_route_ok``：仅在键存在时判定，非 ``True`` 产出
+      ``MODEL_ROUTE_UNPROVEN``（没有证据）或 ``MODEL_ROUTE_INVALID``（明确失败）。
     """
     facts = facts or {}
     observed_at = float(time.time() if now is None else now)
@@ -133,6 +161,15 @@ def evaluate_entry_readiness(
         reasons.append("ENVIRONMENT_UNPROVEN")
     if _fact_bool(facts, "persistence_available") is not True:
         reasons.append("PERSISTENCE_UNAVAILABLE")
+
+    # 身份类阻断：仅当调用方显式提供事实时并入（存在性触发）。
+    reasons.extend(_identity_blocker_reasons(facts))
+
+    # 模型路由证明：键不存在时完全不判定，避免给旧调用方新增闸门。
+    if "model_route_ok" in facts:
+        route_ok = _fact_bool(facts, "model_route_ok")
+        if route_ok is not True:
+            reasons.append("MODEL_ROUTE_UNPROVEN" if route_ok is None else "MODEL_ROUTE_INVALID")
 
     unique_reasons = tuple(dict.fromkeys(reasons))
     allowed = not unique_reasons
