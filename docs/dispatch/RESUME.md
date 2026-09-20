@@ -33,11 +33,16 @@
 
 | 线 | 任务 | 分支/base | 状态 | 备注 |
 |---|---|---|---|---|
-| CD | U05 真实耗时/模型降级/决策原因 | `task/U05` | **r2 复验 CHANGES_REQUESTED → r3 修复中** | r2 已闭合 P1-1（`AVG(latency_ms)=1234` 不再被污染）/P1-2/P1-3/P1-4 与全量 delta ∅。**P1-5 未真闭合**：注释/字符串面已合上，但**代码位置的裸明文凭据仍漏报**（`api_key=<64位key>`、.env 内容贴进 .py、顶层 YAML 行）—— 作者"裸值过不了语法解析"的理由不成立。另：**7/15 补丁在集成工作区（`autocrlf=false`）无法应用**（作者口径依赖未声明的 `autocrlf=true`）→ 会阻塞集成；P2-3/P3-3/P3-4/P3-5 **登记文字缺失**。r3 要求：把放宽收紧为"名字在模块符号表中确实被绑定"，并在**两种 git 配置**下补齐可应用性 + 补登记 |
+| CD | U05 真实耗时/模型降级/决策原因 | `task/U05` | **✅ INTEGRATED** | 初审 B P1×5 → r2 闭 4 项 → r2 复验发现 P1-5 残留 + 7/15 补丁不可应用 → r3 修（放宽收紧为"**名字须真被绑定**"，6 类自造绕过全报、`api_key=fallback_key` 不误报；15/15 在集成配置下可应用）→ Q r3 **PASS-with-notes** → 集成 + 登记 4 冒烟。四套 115/63/48/45、delta ∅ |
 | EF | U13 托管/单实例/备份恢复 | `task/U13` | **✅ INTEGRATED** | 初审 P1×3 → r2 修（安装戳 fail-closed、`submit_recovery_reconcile()` 接线、KI02 收口）→ Q r2 **PASS-with-notes** → r3 按集成 HEAD **重生成 7 个补丁**（其余 5 文件零差异，因合并已带入 r1 共享改动）→ 7/7 干净应用 → **跨任务验收全绿**（U15/U01/U04 的套件均 exit 0）→ **KI02 消除：`smoke_windows_service_plan` 24/0**，**官方单命令入口首次端到端成功 `OFFLINE REGRESSION OK scripts=75`** |
 | B | U02 策略仓管理与有界退出 | `task/U02` @ `45ebdff` | **初审 CHANGES_REQUESTED → r2 修复中** | 作者交付 head `5b71db4`（115/0、共享文件 UNCHANGED、无 schema 变更、delta ∅）。A 初审 P0×1/P1×4：**P0 预留泄漏 → 退出永久不可用**（`binance_futures.py:2018` 占量后异常不 release，稳定 guardian key 使其变 `duplicate_skipped` → 仓量永久占死，**正是 F03/R09 场景**）；P1 `_open:1430` 未定义 `reservation_key`（NameError）；P1 纸面回退键使同名标的第二次退出永久被吞。**账本硬结论**：声明 `MTA_ACCOUNT_REF` 后**旧数据不可幂等**（同 trade_id 两域各一行、唯一索引拦不住），且作者 README 的**迁移 SQL 不可执行**（撞 UNIQUE/非原子/不可重入/漏 `trade_reconciliation_jobs`）→ 归入 `U02-LEDGER-PARTITION` |
-| CD | U06a / U08 | — | 待派发 | 线内串行：U05 → U06a → U08 |
-| EF | U14 / U10a | — | 待派发 | 线内串行：U13 → U14 → U10a |
+| CD | U06a 影子最小隔离与口径修正 | `task/U06a` @ `59660b2` | **作者进行中** | 依赖 U00 已满足；新建 `src/intel/shadow_status.py`；F11 首批范围=`FIRST_RELEASE_LABEL_DISCLOSURE_C_UNCONFIGURED_ISOLATION_ONLY`；**v2 标签必须 `DEFERRED`**、影子样本不得计入发布门槛 |
+| EF | U14 外部告警送达与主机失联 | `task/U14` @ `59660b2` | **作者进行中** | 依赖 U00 已满足；新建 `src/core/ops/alert_delivery.py`；三级记录（接收/送达/确认，R14 供应商接受≠送达）、心跳须含交易证据时间（R13）、投递队列独立交易库 |
+| CD | U08 策略漏斗与管理责任展示 | — | 待派发 | 线内串行：U06a → U08 |
+| EF | U10a 可运行发布包与运维说明 | — | 待派发 | 线内串行：U14 → U10a |
+
+**W2 门禁状态：两个 RC 门禁首次同时全绿** —— `OFFLINE REGRESSION OK scripts=79`、`check_quality QUALITY CHECK OK files=261`。
+达成路径：U13 修好 KI02（解释器解析层）→ 官方单命令回归不再中止；KI04 给密钥扫描器加**范围豁免**（仅审查报告与台账，代码/config 照扫）；清理 U04 补丁引入的 4 个 lint；修正扫描器自测的登记数断言。
 
 **W2 派发已内联 W1 的 7 条血教训**（见 §「复验范围经验」与 §「派发新任务时的强制要求」）：两态可跑的测试、迁移版本推进必须带伴随补丁并给 delta、禁止 SKIP/直接注入内部字段、共享适配必须交付 diff 文件、冒烟须登记、增量提交、自证 pristine delta。
 
@@ -90,6 +95,8 @@
 7. **安全控制的放宽必须 AST/tokenize 级**：逐行文本级放宽会把**注释/docstring/内嵌 YAML·JSON** 里的明文凭据静默漏报。U05 patch 13 即因此削弱密钥检测（且该修法方向本是编排者建议的 —— **编排者的建议同样要经独立审查**）。
 8. **共享适配补丁必须针对"将被应用的那棵树"生成**。U13 的 12 个补丁按 base `0e522b1` 生成，而集成 HEAD 已含 U15 对 `config_loader.py`/`app.py` 的改动 → 集成树上 11/12 直接失败、`--3way` 仍在 6 个文件冲突。**正确做法**：作者读集成版本（`git show <integration-HEAD>:<path>`）并在其上叠加自己的改动，再以"集成版本→目标内容"出 diff；且必须证明**没打坏已集成的他人改动**（跑其它任务的关键验收）。**不要**由 I 手工猜冲突解法。
 9. **派发新任务时，task_base_commit 取"当时已审核的集成 HEAD"**，并在提示词里**明确告知该 base 已含哪些任务**，避免作者按陈旧 base 生成适配。
+10. **建分支后必须回读分支名**：`git checkout -b <branch> <commit>` 在 worktree **有未提交改动**时会**静默不切换**（本次 EF 即如此：U13 r3 生成补丁后留下 7 个未提交的共享文件改动，`checkout -b task/U14` 直接 Aborting，而同一批的 CD 却成功了）。若同时已派发该分支的作者会话，作者会落在**错误的旧分支**上。**处置**：先确认那批改动是否等于已交付的补丁产物（用 `git apply -R --check` 逐文件反证），是则丢弃，再建分支，并**回读 `rev-parse --abbrev-ref HEAD` 确认**。
+11. **集成清单必须包含 lint**：U04 集成时我只跑了测试与全量回归、**没跑 ruff**，结果 4 个 lint 错误（3 未用导入 + 1 多余 f 前缀）直到最后跑 `check_quality` 才暴露。**每次集成后都要跑 `check_quality`（含 ruff）**，不能只靠任务自己的套件。
 
 > **判定规则（按序判断，避免重复派发）：**
 > 1. 若 `mat-wt/A|B|CD|EF` 四个 worktree 尚未创建 → 走 §2 步骤 1
