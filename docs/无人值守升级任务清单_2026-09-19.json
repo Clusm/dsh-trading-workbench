@@ -1053,6 +1053,20 @@
             "原 4 条 known_limits 不变"
           ],
           "rollback": "git revert f4e4663 a602211 531d2c8"
+        },
+        {
+          "type": "review_r3_verification",
+          "candidate": "f4e4663",
+          "verdict": "CHANGES_REQUESTED",
+          "archived_path": "docs/dispatch/reviews/U04/f4e4663/Q_r3.md",
+          "n1_closed": "真闭合：自建 r2code vs r3 对照 CANCELED/EXPIRED+迟到成交 由 working=0.0143/terminal=0/WORKING_NONZERO_WHILE_TERMINAL -> working=0/terminal=0.0143/守恒；6 类绕过（超额/负量/未知态 SOMETHING_NEW·''·None·123/model_copy/EXPIRED_IN_MATCH）全被挡，词表不外泄",
+          "n6_blocking": "**N6（P1 未登记，r3 引入的新回归）**：_component_status 把'_update 先写 status=FILLED、成交尚未入账'的中间态认成 FILLED -> working,terminal=0,0 -> 守恒违规 -> **X=FILLED 帧的成交被静默丢弃，行成非法且不可自愈**。命中'部分成交->全成'（filled 0.0105 vs 0.02）与'一笔全成'（filled=0）两条主路径。作者 154/0 未覆盖（套件里**无** X=FILLED 帧）。复验者已给实测过的一行修法（仍 154/0、不回退 N1）",
+          "n7": "known_limits ② 真实可达且**未登记** -> N7(P2)：EXPIRED_IN_MATCH 落库 status 保留别名（词表拒绝->行无法重水化），且不在 _QUANTITY_TERMINAL、_update 不同步分量 -> 无成交情形留下 working=0.02 的终态行。r2code 相同 => 非本轮引入，但按标尺未登记即需处置",
+          "n2_p3": "结构断言对 V1 非空转且真抓到注入的读路径退化；**但可绕过**——注入读侧进程级标量时 [10] 7/7 全过，而并发实测 6~20/20000 次裸仓 => P3 残余（已在 U04 evidence 记录）",
+          "assertions_non_noop": "r3 测试跑未修 r2 树 -> 4/4 真 FAIL(WORKING_NONZERO_WHILE_TERMINAL)，另 8 条 N3 也 FAIL",
+          "delta": "**全量 delta = ∅**：同一 70 条清单 + 同 env 逐脚本跑，pristine 与打补丁树失败集合逐条相同，唯一失败为 KI02 smoke_windows_service_plan.py（两侧报错逐字一致）",
+          "regression": "抽样 6 类 15 项全 PASS",
+          "unfinished": "无真实 USER_STREAM 报文回放（N6 帧序为推演）；EXPIRED_IN_MATCH 触发频率不可离线度量"
         }
       ],
       "blockers": [],
@@ -1120,8 +1134,18 @@
           "sessions": [
             "Q (reviews/U04/R3/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED",
           "reports_dir": "docs/dispatch/reviews/U04/f4e4663/"
+        },
+        {
+          "round": "r4",
+          "stage": "修复复验",
+          "candidate": null,
+          "sessions": [
+            "Q (reviews/U04/R4/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U04/<r4head>/"
         }
       ],
       "qa_runs": []
