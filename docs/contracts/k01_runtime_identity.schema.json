@@ -1,5 +1,41 @@
 {
   "$defs": {
+    "ModelRoute": {
+      "additionalProperties": false,
+      "description": "解析后的有效模型路由；字段缺失/为空由构建方负责声明来源。\n\n``fallback_routes``/``profile_overrides`` 允许显式为空（声明“无备用/\n无覆盖”），但键必须存在；这与 ``IDENTITY_COVERAGE`` 的字段清单一致。",
+      "properties": {
+        "effort": {
+          "minLength": 1,
+          "title": "Effort",
+          "type": "string"
+        },
+        "fallback_routes": {
+          "default": [],
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Fallback Routes",
+          "type": "array"
+        },
+        "model": {
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        },
+        "profile_overrides": {
+          "additionalProperties": true,
+          "title": "Profile Overrides",
+          "type": "object"
+        }
+      },
+      "required": [
+        "model",
+        "effort"
+      ],
+      "title": "ModelRoute",
+      "type": "object"
+    },
     "RuntimeIdentity": {
       "additionalProperties": false,
       "description": "一次运行的不可混淆身份；不得写入原始密钥或完整 .env。",
@@ -64,12 +100,16 @@
   "additionalProperties": false,
   "description": "schema 导出与冒烟校验入口；不是运行期数据结构。",
   "properties": {
+    "model_route": {
+      "$ref": "#/$defs/ModelRoute"
+    },
     "runtime_identity": {
       "$ref": "#/$defs/RuntimeIdentity"
     }
   },
   "required": [
-    "runtime_identity"
+    "runtime_identity",
+    "model_route"
   ],
   "title": "K01SchemaEnvelope",
   "type": "object"

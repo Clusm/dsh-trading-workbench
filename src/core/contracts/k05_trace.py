@@ -21,6 +21,8 @@ REASON_EVIDENCE_FROM_FUTURE = "EVIDENCE_FROM_FUTURE"
 REASON_EVIDENCE_TIMESTAMP_MISSING = "EVIDENCE_TIMESTAMP_MISSING"
 REASON_EVIDENCE_TYPE_INVALID = "EVIDENCE_TYPE_INVALID"
 REASON_EVIDENCE_PREDATES_ACK = "EVIDENCE_PREDATES_ACK"
+REASON_EVIDENCE_NOT_SERIALISABLE = "EVIDENCE_NOT_SERIALISABLE"
+REASON_ACK_REQUIRED = "ACK_REQUIRED"
 REASON_RECOVERY_FALSE = "RECOVERY_PREDICATE_FALSE"
 
 VIOLATION_STATE_MISMATCH = "STATE_MISMATCH"
@@ -235,6 +237,11 @@ def check_recovery(
         if not isinstance(observed, int) or isinstance(observed, bool):
             reasons.append(REASON_EVIDENCE_TYPE_INVALID)
             continue
+        has_value = "value" in entry
+        has_satisfied = "satisfied" in entry
+        if has_value and has_satisfied and entry["value"] != entry["satisfied"]:
+            reasons.append(REASON_EVIDENCE_TYPE_INVALID)
+            continue
         raw_value = entry.get("value", entry.get("satisfied"))
         if not isinstance(raw_value, bool):
             reasons.append(REASON_EVIDENCE_TYPE_INVALID)
@@ -252,6 +259,11 @@ def check_recovery(
 
 
 def acknowledge(incident: Incident, *, now_ms: int) -> Incident:
+    """仅允许 OPEN→ACK；重复 ACK 幂等，已 RESOLVED 不得降级为 ACK。"""
+    if incident.status == "RESOLVED":
+        raise TransitionError("cannot acknowledge resolved incident")
+    if incident.status == "ACK":
+        return incident
     return incident.model_copy(update={"status": "ACK", "ack_at_ms": now_ms})
 
 
@@ -261,14 +273,20 @@ def resolve_incident(
     recovery_evidence: Mapping[str, Any] | None,
     now_ms: int,
 ) -> Incident:
-    """恢复证据满足谓词才允许 RESOLVED，并记录证据哈希。"""
+    """必须先 ACK，再用 ACK 之后新观察到的证据满足谓词才允许 RESOLVED。"""
+    if incident.status != "ACK":
+        raise ResolutionNotAllowedError((REASON_ACK_REQUIRED,))
     check = check_recovery(incident, recovery_evidence, now_ms=now_ms)
     if not check.recovered:
         raise ResolutionNotAllowedError(check.reason_codes)
+    try:
+        evidence_hash = canonical_hash(dict(recovery_evidence or {}))
+    except (TypeError, ValueError):
+        raise ResolutionNotAllowedError((REASON_EVIDENCE_NOT_SERIALISABLE,)) from None
     return incident.model_copy(update={
         "status": "RESOLVED",
         "resolved_at_ms": now_ms,
-        "resolution_evidence_hash": canonical_hash(dict(recovery_evidence or {})),
+        "resolution_evidence_hash": evidence_hash,
     })
 
 
@@ -321,7 +339,9 @@ def delivery_violations(delivery: AlertDelivery) -> tuple[str, ...]:
         found.append(VIOLATION_DELIVERED_WITHOUT_RECEIPT)
     if delivery.state in ("ACCEPTED", "DELIVERED") and not delivery.provider_receipt:
         found.append(VIOLATION_PROVIDER_RECEIPT_MISSING)
-    if delivery.state == "SUBMITTED" and delivery.submitted_at_ms is None:
+    if delivery.submitted_at_ms is None and delivery.state in (
+        "SUBMITTED", "ACCEPTED", "DELIVERED", "ACKNOWLEDGED",
+    ):
         found.append(VIOLATION_SUBMITTED_WITHOUT_TIMESTAMP)
     if delivery.ack_at_ms is not None and delivery.submitted_at_ms is None:
         found.append(VIOLATION_ACK_WITHOUT_SUBMISSION)
@@ -355,6 +375,8 @@ def transition_state(
         updates["submitted_at_ms"] = now_ms
     if target == "ACCEPTED" and not delivery.provider_receipt:
         raise TransitionError("ACCEPTED requires provider_receipt")
+    if target == "DELIVERED" and delivery.submitted_at_ms is None:
+        raise TransitionError("DELIVERED requires prior SUBMITTED fact")
     if target == "DELIVERED" and not delivery.provider_receipt:
         raise TransitionError("DELIVERED requires provider_receipt")
     if target == "DELIVERED" and delivery.delivered_at_ms is None:

@@ -263,6 +263,17 @@
           "title": "Synced At Ms",
           "type": "integer"
         },
+        "termination_proof": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminationProof"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "watermark": {
           "title": "Watermark",
           "type": "integer"
@@ -438,6 +449,7 @@
           "type": "boolean"
         },
         "revision_id": {
+          "default": "",
           "title": "Revision Id",
           "type": "string"
         },
@@ -453,8 +465,7 @@
       },
       "required": [
         "outcome_id",
-        "source_event_id",
-        "revision_id"
+        "source_event_id"
       ],
       "title": "OutcomeRevision",
       "type": "object"
@@ -556,6 +567,43 @@
         "end_ms"
       ],
       "title": "RangeGap",
+      "type": "object"
+    },
+    "TerminationProof": {
+      "additionalProperties": false,
+      "description": "分页终止的结构化证据；自由文本不足以证明“已读完窗口”。",
+      "properties": {
+        "end_ms": {
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "last_page_size": {
+          "minimum": 0,
+          "title": "Last Page Size",
+          "type": "integer"
+        },
+        "page_limit": {
+          "exclusiveMinimum": 0,
+          "title": "Page Limit",
+          "type": "integer"
+        },
+        "start_ms": {
+          "title": "Start Ms",
+          "type": "integer"
+        },
+        "terminated_at_ms": {
+          "title": "Terminated At Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_ms",
+        "end_ms",
+        "page_limit",
+        "last_page_size",
+        "terminated_at_ms"
+      ],
+      "title": "TerminationProof",
       "type": "object"
     },
     "ZeroFeeProof": {

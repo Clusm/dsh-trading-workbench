@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from .common import (
     SCHEMA_VERSION,
@@ -33,7 +33,9 @@ REASON_ACCOUNT_MISMATCH = "ACCOUNT_MISMATCH"
 REASON_LIFECYCLE_MISMATCH = "LIFECYCLE_MISMATCH"
 REASON_SIDE_MISMATCH = "SIDE_MISMATCH"
 REASON_ENVIRONMENT_MISMATCH = "ENVIRONMENT_MISMATCH"
+REASON_ENVIRONMENT_UNBOUND = "ENVIRONMENT_UNBOUND"
 REASON_RUN_GENERATION_MISMATCH = "RUN_GENERATION_MISMATCH"
+REASON_RUN_GENERATION_UNBOUND = "RUN_GENERATION_UNBOUND"
 REASON_NONCE_REPLAY = "NONCE_REPLAY"
 REASON_REDUCE_QTY_MISSING = "REDUCE_QTY_MISSING"
 REASON_REDUCE_QTY_INVALID = "REDUCE_QTY_INVALID"
@@ -62,10 +64,12 @@ VIOLATION_FILLED_WITH_RESIDUAL = "FILLED_STATUS_WITH_RESIDUAL"
 VIOLATION_STATUS_FILL_MISMATCH = "STATUS_FILL_MISMATCH"
 VIOLATION_REJECTED_WITH_ACCEPTED = "REJECTED_WITH_ACCEPTED_QTY"
 VIOLATION_UNCONFIRMED_CANCEL_TERMINAL = "CANCEL_UNCONFIRMED_TERMINAL_COUNTED"
+VIOLATION_FILLED_WITH_CANCEL_CONFIRMED = "FILLED_WITH_CANCEL_CONFIRMED"
 
 MANAGEMENT_ACTIONS = ("CLOSE", "REDUCE", "MAINTAIN_PROTECTION")
 WORKING_STATUSES = frozenset({"NEW", "PARTIALLY_FILLED"})
 TERMINAL_STATUSES = frozenset({"CANCELED", "EXPIRED", "REJECTED"})
+CANCEL_FORBIDDEN_STATUSES = TERMINAL_STATUSES | {"FILLED"}
 
 
 class QuantityError(ValueError):
@@ -94,19 +98,23 @@ class ManagementIntent(BaseModel):
     evidence_id: str = Field(min_length=1)
     trigger_type: str = Field(min_length=1)
     trigger_event_id: str = Field(min_length=1)
+    environment: str | None = None
     schema_version: str = SCHEMA_VERSION
 
     @model_validator(mode="after")
     def _bind_management_id(self) -> "ManagementIntent":
-        expected = derive_management_id(
-            lifecycle_id=self.lifecycle_id,
-            trigger_type=self.trigger_type,
-            policy_version=self.policy_version,
-            trigger_event_id=self.trigger_event_id,
-        )
-        if self.management_id != expected:
+        base_kwargs = {
+            "lifecycle_id": self.lifecycle_id,
+            "trigger_type": self.trigger_type,
+            "policy_version": self.policy_version,
+            "trigger_event_id": self.trigger_event_id,
+        }
+        expected_ids = {derive_management_id(**base_kwargs)}
+        if self.environment is not None:
+            expected_ids.add(derive_management_id(**base_kwargs, environment=self.environment))
+        if self.management_id not in expected_ids:
             raise ValueError(
-                f"management_id must equal derived id {expected}"
+                "management_id must equal derived id (optionally environment-scoped)"
             )
         return self
 
@@ -188,9 +196,14 @@ class AuthorizationVerdict(BaseModel):
 
     authorization_id: str
     allowed: bool
-    submit_allowed: bool
     reconcile_allowed: bool = True
     reason_codes: tuple[str, ...] = ()
+
+    @computed_field
+    @property
+    def submit_allowed(self) -> bool:
+        """新提交许可 = allowed；由 allowed 单一来源派生，避免双字段漂移。"""
+        return self.allowed
 
 
 def _required_decimal(
@@ -223,11 +236,14 @@ def validate_authorization(
     """
     reasons: list[str] = []
     action = str(request.get("action") or "").upper()
-    if str(request.get("account_ref") or "") != authorization.account_ref:
+    account_ok = str(request.get("account_ref") or "") == authorization.account_ref
+    lifecycle_ok = str(request.get("lifecycle_id") or "") == authorization.lifecycle_id
+    side_ok = str(request.get("position_side") or "").upper() == authorization.position_side
+    if not account_ok:
         reasons.append(REASON_ACCOUNT_MISMATCH)
-    if str(request.get("lifecycle_id") or "") != authorization.lifecycle_id:
+    if not lifecycle_ok:
         reasons.append(REASON_LIFECYCLE_MISMATCH)
-    if str(request.get("position_side") or "").upper() != authorization.position_side:
+    if not side_ok:
         reasons.append(REASON_SIDE_MISMATCH)
     if now_ms < authorization.issued_at_ms:
         reasons.append(REASON_AUTHORIZATION_FROM_FUTURE)
@@ -235,15 +251,13 @@ def validate_authorization(
         reasons.append(REASON_AUTHORIZATION_EXPIRED)
     if current_revision != authorization.position_revision:
         reasons.append(REASON_STALE_REVISION)
-    if (
-        authorization.runtime_instance_id is not None
-        and str(request.get("runtime_instance_id") or "") != authorization.runtime_instance_id
-    ):
+    if authorization.runtime_instance_id is None:
+        reasons.append(REASON_RUN_GENERATION_UNBOUND)
+    elif str(request.get("runtime_instance_id") or "") != authorization.runtime_instance_id:
         reasons.append(REASON_RUN_GENERATION_MISMATCH)
-    if (
-        authorization.environment is not None
-        and str(request.get("environment") or "") != authorization.environment
-    ):
+    if authorization.environment is None:
+        reasons.append(REASON_ENVIRONMENT_UNBOUND)
+    elif str(request.get("environment") or "") != authorization.environment:
         reasons.append(REASON_ENVIRONMENT_MISMATCH)
     if authorization.nonce and authorization.nonce in set(consumed_nonces):
         reasons.append(REASON_NONCE_REPLAY)
@@ -316,8 +330,7 @@ def validate_authorization(
     return AuthorizationVerdict(
         authorization_id=authorization.authorization_id,
         allowed=allowed,
-        submit_allowed=allowed,
-        reconcile_allowed=True,
+        reconcile_allowed=account_ok and lifecycle_ok and side_ok,
         reason_codes=tuple(reasons),
     )
 
@@ -384,6 +397,8 @@ class OrderQuantity(BaseModel):
             self.accepted_qty != 0 or self.cumulative_filled_qty != 0
         ):
             found.append(VIOLATION_REJECTED_WITH_ACCEPTED)
+        if self.status == "FILLED" and self.cancel_confirmed:
+            found.append(VIOLATION_FILLED_WITH_CANCEL_CONFIRMED)
         if (
             self.cancel_requested
             and not self.cancel_confirmed
@@ -417,13 +432,17 @@ def apply_fill(
 ) -> OrderQuantity:
     """应用一笔成交；推进 working 状态，终态迟到 fill 只修订事实。
 
-    ``fill_id`` 与 ``applied_fill_ids`` 提供 fill 级幂等：重复 ID 抛
-    ``DuplicateFillError``；REJECTED 订单不得接受 fill。
+    ``fill_id`` 与 ``applied_fill_ids`` 提供 fill 级幂等：空串/非法 ID 与
+    重复 ID 分别抛 ``QuantityError``/``DuplicateFillError``；REJECTED 订单
+    不得接受 fill。
     """
     if quantity.status == "REJECTED":
         raise QuantityError("REJECTED order cannot accept fills")
-    if fill_id and fill_id in set(applied_fill_ids):
-        raise DuplicateFillError(f"fill already applied: {fill_id}")
+    if fill_id is not None:
+        if not isinstance(fill_id, str) or not fill_id.strip():
+            raise QuantityError("fill_id must be a non-empty string")
+        if fill_id in set(applied_fill_ids):
+            raise DuplicateFillError(f"fill already applied: {fill_id}")
     fill = decimal_from_value(fill_qty)
     if fill <= 0:
         raise QuantityError("fill must be positive")
@@ -457,8 +476,8 @@ def apply_fill(
 
 
 def request_cancel(quantity: OrderQuantity) -> OrderQuantity:
-    if quantity.status in TERMINAL_STATUSES:
-        raise QuantityError("cannot request cancel on terminal order")
+    if quantity.status in CANCEL_FORBIDDEN_STATUSES:
+        raise QuantityError("cannot request cancel on filled or terminal order")
     return quantity.model_copy(update={"cancel_requested": True})
 
 
@@ -468,6 +487,8 @@ def confirm_cancel(
     status: Literal["CANCELED", "EXPIRED", "REJECTED"] = "CANCELED",
 ) -> OrderQuantity:
     """撤单确认：working 转入 terminal，确认前不得提前计入。"""
+    if quantity.status == "FILLED":
+        raise QuantityError("filled order cannot be cancel-confirmed")
     if not quantity.cancel_requested:
         raise QuantityError("cancel confirmation without cancel request")
     if quantity.status in WORKING_STATUSES:

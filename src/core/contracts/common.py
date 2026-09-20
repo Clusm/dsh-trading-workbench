@@ -40,9 +40,11 @@ class NumericInputError(ValueError):
 
 def _json_default(value: Any) -> str:
     if isinstance(value, Decimal):
-        if value.is_finite():
-            return format(value.normalize(), "f")
-        return str(value)
+        if not value.is_finite():
+            return str(value)
+        if value == 0:
+            return "0"
+        return format(value.normalize(), "f")
     raise TypeError(f"not JSON serialisable: {type(value).__name__}")
 
 
@@ -176,9 +178,11 @@ def is_finite(value: Decimal) -> bool:
 
 
 def decimal_text(value: Decimal) -> str:
-    """十进制字符串：有限值去掉指数与尾零；NaN/Infinity 原样保留供校验拒绝。"""
+    """十进制字符串：有限值去指数与尾零，带符号零统一为 ``0``。"""
     if not value.is_finite():
         return str(value)
+    if value == 0:
+        return "0"
     return format(value.normalize(), "f")
 
 

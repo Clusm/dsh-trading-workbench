@@ -74,10 +74,40 @@ REASON_MISSING_QUOTE = "MISSING_EXECUTION_QUOTE"
 REASON_QUOTE_SYMBOL = "QUOTE_SYMBOL_MISMATCH"
 REASON_QUOTE_NON_FINITE = "QUOTE_NON_FINITE"
 REASON_QUOTE_EXPIRED = "QUOTE_EXPIRED"
+REASON_NEEDS_AUTH = "NEEDS_AUTH"
+REASON_CLAIM_MALFORMED = "CLAIM_MALFORMED"
+REASON_CLAIM_EXPECTED_INVALID = "CLAIM_EXPECTED_INVALID"
+REASON_CLAIM_KIND_UNKNOWN = "CLAIM_KIND_UNKNOWN"
+REASON_CLAIM_KIND_CONTRADICTION = "CLAIM_KIND_CONTRADICTION"
+REASON_CLAIM_OUTSIDE_BOUND_INPUTS = "CLAIM_OUTSIDE_BOUND_INPUTS"
+REASON_DUPLICATE_FACT_ID = "DUPLICATE_FACT_ID"
+REASON_QUALITY_MISSING_FIELD = "QUALITY_MISSING_FIELD"
+REASON_RULES_MISMATCH = "RULES_MISMATCH"
 
 SUPPORTED_ACTIONS = ("OPEN", "CLOSE", "REDUCE", "ADJUST")
+AUTHORIZED_ACTIONS = ("CLOSE", "REDUCE", "ADJUST")
 SUPPORTED_SIDES = ("LONG", "SHORT")
 FACT_KINDS = ("closed_close", "prior_high", "bar_close_time_ms")
+
+#: 有限结构化 claim 集合：kind -> (操作符, 左操作数语义, 右操作数语义)。
+#: U03 只能从该注册表选择 kind；不得用自由标签冒充必需检查。
+CLAIM_KIND_REGISTRY: dict[str, tuple[str, str, str]] = {
+    "close_above_prior_high": (">", "closed_close", "prior_high"),
+    "close_above_price": (">", "closed_close", "price"),
+    "close_below_price": ("<", "closed_close", "price"),
+}
+QUALITY_REQUIRED_KEYS = (
+    "missing_intervals",
+    "stale_inputs",
+    "dedup_removed",
+    "unclosed_inputs",
+    "undated_inputs",
+    "symbol_mismatch_inputs",
+    "required_intervals",
+    "required_claim_kinds",
+    "max_bar_age_ms",
+    "as_of_ms",
+)
 
 _CLAIM_PATTERN = re.compile(
     r"^\s*(?P<lhs>[^\s<>=!]+)\s*(?P<op>>=|<=|==|!=|>|<)\s*(?P<rhs>[^\s<>=!]+)\s*$"
@@ -270,21 +300,73 @@ def _compare(op: str, lhs: Decimal, rhs: Decimal) -> bool:
 
 
 def _parse_claim(
-    claim: Mapping[str, Any],
-) -> tuple[str, str, bool | None, str, str, str] | None:
+    claim: Any,
+) -> tuple[str, str, Any, str, str, str] | None:
+    """解析 claim 元素；非 Mapping 或缺少合法表达式返回 None（结构化拒绝）。"""
+    if not isinstance(claim, Mapping):
+        return None
     expr = str(claim.get("expr") or "")
     match = _CLAIM_PATTERN.match(expr)
     if not match:
         return None
-    expected = claim.get("expected", True)
     return (
         str(claim.get("claim_id") or ""),
         expr,
-        expected if isinstance(expected, bool) else None,
+        claim.get("expected", True),
         match.group("lhs"),
         match.group("op"),
         match.group("rhs"),
     )
+
+
+def _kind_operand_role(bundle: EvidenceBundle, token: str) -> str | None:
+    """把操作数归类为 closed_close/prior_high/price；其他一律 None。"""
+    if _is_literal(token):
+        return "price"
+    if ":" in token:
+        fact = bundle.fact_by_id(token)
+        return fact.kind if fact is not None else None
+    if "." in token:
+        return None
+    matches = [fact for fact in bundle.derived_facts if fact.kind == token]
+    if len(matches) == 1:
+        return matches[0].kind
+    return None
+
+
+def _kind_interval(bundle: EvidenceBundle, token: str) -> str | None:
+    if ":" in token:
+        fact = bundle.fact_by_id(token)
+        if fact is not None:
+            return fact.fact_id.partition(":")[0]
+        return None
+    matches = [fact for fact in bundle.derived_facts if fact.kind == token]
+    if len(matches) == 1:
+        return matches[0].fact_id.partition(":")[0]
+    return None
+
+
+def claim_kind_consistent(
+    bundle: EvidenceBundle,
+    kind: str,
+    op: str,
+    lhs_token: str,
+    rhs_token: str,
+) -> bool:
+    """校验 claim kind 与实际谓词一致；未知 kind 或语义矛盾返回 False。"""
+    spec = CLAIM_KIND_REGISTRY.get(kind)
+    if spec is None:
+        return False
+    want_op, lhs_role, rhs_role = spec
+    if op != want_op:
+        return False
+    if _kind_operand_role(bundle, lhs_token) != lhs_role:
+        return False
+    if rhs_role == "price":
+        return _is_literal(rhs_token)
+    if _kind_operand_role(bundle, rhs_token) != rhs_role:
+        return False
+    return _kind_interval(bundle, lhs_token) == _kind_interval(bundle, rhs_token)
 
 
 def _referenced_input_issues(
@@ -303,10 +385,13 @@ def _referenced_input_issues(
             continue
         if item.symbol is not None and item.symbol != bundle.symbol:
             codes.append(REASON_INPUT_SYMBOL_MISMATCH)
-        if item.finality == "unknown" and item.bar_close_time_ms is None:
+        if item.finality == "closed" and item.bar_close_time_ms is None:
             codes.append(REASON_UNDATED_BAR)
         elif item.finality != "closed":
-            codes.append(REASON_UNCLOSED_BAR)
+            if item.bar_close_time_ms is None:
+                codes.append(REASON_UNDATED_BAR)
+            else:
+                codes.append(REASON_UNCLOSED_BAR)
         if item.bar_close_time_ms is not None and item.bar_close_time_ms > bundle.as_of_ms:
             codes.append(REASON_FUTURE_BAR)
         if item.event_time_ms > bundle.as_of_ms:
@@ -320,26 +405,102 @@ def _referenced_input_issues(
     return issues
 
 
-def _compute_fact_value(bundle: EvidenceBundle, fact: DerivedFact) -> str | None:
-    """按 kind 从引用输入重算事实值；无法重算返回 None。"""
-    if not fact.inputs:
-        return None
-    item = bundle.input_by_id(fact.inputs[0])
-    if item is None:
-        return None
-    if fact.kind == "closed_close":
-        value = item.values.get("close")
-        return _fact_text(value) if value is not None else None
-    if fact.kind == "prior_high":
-        value = item.values.get("high")
-        if value is None:
-            value = item.values.get("prior_high")
-        return _fact_text(value) if value is not None else None
-    if fact.kind == "bar_close_time_ms":
-        if item.bar_close_time_ms is None:
-            return None
-        return str(item.bar_close_time_ms)
-    return None
+def _closed_inputs_by_interval(bundle: EvidenceBundle) -> dict[str, list[EvidenceInput]]:
+    closed: dict[str, list[EvidenceInput]] = {}
+    for item in bundle.inputs:
+        if (
+            item.interval
+            and item.finality == "closed"
+            and item.symbol == bundle.symbol
+            and item.bar_close_time_ms is not None
+        ):
+            closed.setdefault(item.interval, []).append(item)
+    return closed
+
+
+def _expected_facts(bundle: EvidenceBundle) -> dict[str, DerivedFact]:
+    """按 build_bundle 的选取规则（最新/次新 bar）重建期望事实集合。"""
+    facts: dict[str, DerivedFact] = {}
+    closed = _closed_inputs_by_interval(bundle)
+    for interval in sorted(closed):
+        bars = sorted(
+            closed[interval],
+            key=lambda item: (item.bar_close_time_ms or 0, item.input_id),
+        )
+        latest = bars[-1]
+        close_value = latest.values.get("close")
+        if close_value is not None:
+            facts[f"{interval}:closed_close"] = DerivedFact(
+                fact_id=f"{interval}:closed_close",
+                kind="closed_close",
+                inputs=(latest.input_id,),
+                value=_fact_text(close_value),
+            )
+        if len(bars) >= 2:
+            prior = bars[-2]
+            high = prior.values.get("high")
+            if high is None:
+                high = prior.values.get("prior_high")
+            if high is not None:
+                facts[f"{interval}:prior_high"] = DerivedFact(
+                    fact_id=f"{interval}:prior_high",
+                    kind="prior_high",
+                    inputs=(prior.input_id,),
+                    value=_fact_text(high),
+                )
+        bar_close = int(latest.bar_close_time_ms or latest.event_time_ms)
+        facts[f"{interval}:bar_close_time_ms"] = DerivedFact(
+            fact_id=f"{interval}:bar_close_time_ms",
+            kind="bar_close_time_ms",
+            inputs=(latest.input_id,),
+            value=str(bar_close),
+        )
+    return facts
+
+
+def _expected_quality(
+    bundle: EvidenceBundle,
+    max_bar_age_ms: int | None,
+) -> dict[str, Any]:
+    """从 inputs 与 max_bar_age 重建全部可推导的 quality 字段。"""
+    required_intervals = [
+        str(item) for item in (bundle.quality.get("required_intervals") or [])
+    ]
+    closed = _closed_inputs_by_interval(bundle)
+    missing_intervals = [item for item in required_intervals if item not in closed]
+    stale: list[str] = []
+    undated: list[str] = []
+    unclosed: list[str] = []
+    symbol_mismatch: list[str] = []
+    for item in bundle.inputs:
+        if item.symbol is not None and item.symbol != bundle.symbol:
+            symbol_mismatch.append(item.input_id)
+        if item.bar_close_time_ms is None and item.finality in ("closed", "unknown"):
+            undated.append(item.input_id)
+        if item.finality != "closed":
+            unclosed.append(item.input_id)
+        if (
+            max_bar_age_ms is not None
+            and item.finality == "closed"
+            and item.bar_close_time_ms is not None
+            and bundle.as_of_ms - item.bar_close_time_ms > max_bar_age_ms
+        ):
+            stale.append(item.input_id)
+    bar_times = {
+        interval: int(max((bar.bar_close_time_ms or 0) for bar in bars))
+        for interval, bars in closed.items()
+    }
+    return {
+        "missing_intervals": missing_intervals,
+        "stale_inputs": stale,
+        "unclosed_inputs": unclosed,
+        "undated_inputs": undated,
+        "symbol_mismatch_inputs": symbol_mismatch,
+        "bar_times": bar_times,
+        "finality": _expected_finality(
+            required_intervals, closed, len(bundle.inputs),
+        ),
+    }
 
 
 def _expected_finality(
@@ -358,12 +519,19 @@ def _expected_finality(
 def validate_bundle(
     bundle: EvidenceBundle,
     *,
+    rules: Mapping[str, Any] | None = None,
     identity: RuntimeIdentity | None = None,
 ) -> BundleVerdict:
-    """证据包完整性校验：content_hash、事实溯源、输入时间与质量字段自洽。
+    """证据包完整性校验：content_hash、事实重建、输入时间与 quality 自洽。
 
-    篡改输入值、伪造 DerivedFact.value 或手工删改 quality/finality 都会
-    在此失败；``validate_intent`` 必须先调用本函数。
+    与 ``build_bundle`` 的输出逐项对照：事实集合（id/kind/inputs/value）、
+    missing/stale/unclosed/undated/symbol/dedup 之外的全部可推导 quality 字段、
+    finality 与 bar_times。篡改输入值、换指事实、重复 fact_id 或删改 quality
+    都会在此失败；``validate_intent`` 必须先调用本函数。
+
+    调用方（U03）应显式传入自己持有的 ``rules``：required_intervals /
+    required_claim_kinds / max_bar_age_ms 会与 bundle.quality 逐项比对，
+    从而阻止“改 rules 重哈希即 VALID”的路径。
     """
     reasons: list[str] = []
     expected_hash = model_content_hash(bundle)
@@ -385,15 +553,48 @@ def validate_bundle(
             and item.bar_close_time_ms > item.received_time_ms
         ):
             reasons.append(REASON_BAR_RECEIVED_BEFORE_CLOSE)
+        if item.finality == "closed" and item.bar_close_time_ms is None:
+            reasons.append(REASON_UNDATED_BAR)
 
+    missing_quality = [
+        key for key in QUALITY_REQUIRED_KEYS if key not in bundle.quality
+    ]
+    if missing_quality:
+        reasons.append(REASON_QUALITY_MISSING_FIELD)
+    if bundle.quality.get("as_of_ms") != bundle.as_of_ms:
+        reasons.append(REASON_QUALITY_MISMATCH)
+    max_bar_age = bundle.quality.get("max_bar_age_ms")
+    if max_bar_age is not None and (
+        isinstance(max_bar_age, bool)
+        or not isinstance(max_bar_age, int)
+        or max_bar_age <= 0
+    ):
+        reasons.append(REASON_QUALITY_MISSING_FIELD)
+        max_bar_age = None
+
+    expected_quality = _expected_quality(bundle, max_bar_age)
+    for key in (
+        "missing_intervals",
+        "stale_inputs",
+        "unclosed_inputs",
+        "undated_inputs",
+        "symbol_mismatch_inputs",
+    ):
+        declared = [str(item) for item in (bundle.quality.get(key) or [])]
+        if declared != expected_quality[key]:
+            reasons.append(REASON_QUALITY_MISMATCH)
+    if dict(bundle.bar_times) != expected_quality["bar_times"]:
+        reasons.append(REASON_QUALITY_MISMATCH)
+    if bundle.finality != expected_quality["finality"]:
+        reasons.append(REASON_FINALITY_MISMATCH)
+
+    expected_facts = _expected_facts(bundle)
+    seen_fact_ids: set[str] = set()
     for fact in bundle.derived_facts:
-        if fact.computed_by != "code" or fact.kind not in FACT_KINDS:
-            reasons.append(REASON_DERIVED_FACT_INVALID)
+        if fact.fact_id in seen_fact_ids:
+            reasons.append(REASON_DUPLICATE_FACT_ID)
             continue
-        computed = _compute_fact_value(bundle, fact)
-        if computed is None or computed != fact.value:
-            reasons.append(REASON_DERIVED_FACT_MISMATCH)
-            continue
+        seen_fact_ids.add(fact.fact_id)
         for input_id in fact.inputs:
             item = bundle.input_by_id(input_id)
             if item is None:
@@ -402,43 +603,36 @@ def validate_bundle(
             if item.symbol is not None and item.symbol != bundle.symbol:
                 reasons.append(REASON_CROSS_SYMBOL_FACT)
                 break
-            if item.finality != "closed":
-                reasons.append(REASON_DERIVED_FACT_INVALID)
-                break
-
-    required_intervals = [
-        str(item) for item in (bundle.quality.get("required_intervals") or [])
-    ]
-    closed_by_interval: dict[str, list[EvidenceInput]] = {}
-    for item in bundle.inputs:
+        expected_fact = expected_facts.get(fact.fact_id)
+        if expected_fact is None:
+            reasons.append(REASON_DERIVED_FACT_INVALID)
+            continue
         if (
-            item.interval
-            and item.finality == "closed"
-            and item.symbol == bundle.symbol
-            and item.bar_close_time_ms is not None
+            fact.kind != expected_fact.kind
+            or fact.inputs != expected_fact.inputs
+            or fact.value != expected_fact.value
+            or fact.computed_by != "code"
         ):
-            closed_by_interval.setdefault(item.interval, []).append(item)
-    expected_missing = [
-        item for item in required_intervals if item not in closed_by_interval
-    ]
-    quality_missing = [str(item) for item in (bundle.quality.get("missing_intervals") or [])]
-    if quality_missing != expected_missing:
-        reasons.append(REASON_QUALITY_MISMATCH)
-    expected_finality = _expected_finality(
-        required_intervals, closed_by_interval, len(bundle.inputs),
-    )
-    if bundle.finality != expected_finality:
-        reasons.append(REASON_FINALITY_MISMATCH)
-    expected_bar_times = {
-        interval: int(
-            max(
-                item.bar_close_time_ms or 0 for item in bars
-            )
-        )
-        for interval, bars in closed_by_interval.items()
-    }
-    if expected_bar_times != dict(bundle.bar_times):
-        reasons.append(REASON_QUALITY_MISMATCH)
+            reasons.append(REASON_DERIVED_FACT_MISMATCH)
+    if seen_fact_ids != set(expected_facts):
+        reasons.append(REASON_DERIVED_FACT_MISMATCH)
+
+    if rules is not None:
+        rule_intervals = [str(item) for item in (rules.get("required_intervals") or [])]
+        declared_intervals = [
+            str(item) for item in (bundle.quality.get("required_intervals") or [])
+        ]
+        if rule_intervals != declared_intervals:
+            reasons.append(REASON_RULES_MISMATCH)
+        rule_kinds = [str(item) for item in (rules.get("required_claim_kinds") or [])]
+        declared_kinds = [
+            str(item) for item in (bundle.quality.get("required_claim_kinds") or [])
+        ]
+        if rule_kinds != declared_kinds:
+            reasons.append(REASON_RULES_MISMATCH)
+        if rules.get("max_bar_age_ms") != bundle.quality.get("max_bar_age_ms"):
+            reasons.append(REASON_RULES_MISMATCH)
+
     if identity is not None and identity_mismatches(expected=identity, actual=bundle.identity):
         reasons.append(REASON_IDENTITY_MISMATCH)
 
@@ -647,8 +841,14 @@ def validate_intent(
     execution_quote: Mapping[str, Any] | ExecutionQuote | None = None,
     *,
     now_ms: int | None = None,
+    rules: Mapping[str, Any] | None = None,
 ) -> EvidenceVerdict:
-    """逐 intent 校验：bundle 完整性、action/side 枚举、证据绑定、时效与 claim。"""
+    """逐 intent 校验：bundle 完整性、action/side 枚举、证据绑定、时效与 claim。
+
+    非 OPEN 动作（CLOSE/REDUCE/ADJUST）必须携带 ``management_authorization_id``
+    指向 K04 授权，否则 ``NEEDS_AUTH``；claim kind 必须来自有限注册表并与实际
+    谓词一致；``bound_inputs`` 必须覆盖 claim 实际引用的输入。
+    """
     intent_id = str(intent.get("intent_id") or "")
     if not intent_id:
         raise ValueError("intent requires intent_id")
@@ -664,7 +864,7 @@ def validate_intent(
             reasons.append(code)
         categories.setdefault(status, []).append(code)
 
-    bundle_check = validate_bundle(bundle)
+    bundle_check = validate_bundle(bundle, rules=rules)
     for code in bundle_check.reason_codes:
         note(STATUS_EVIDENCE_INVALID, code)
 
@@ -696,6 +896,10 @@ def validate_intent(
     bound_inputs = [str(item) for item in (intent.get("bound_inputs") or [])]
     if action == "OPEN" and not bound_inputs:
         note(STATUS_EVIDENCE_INVALID, REASON_MISSING_EVIDENCE_BINDING)
+    if action in AUTHORIZED_ACTIONS and not str(
+        intent.get("management_authorization_id") or ""
+    ).strip():
+        note(STATUS_EVIDENCE_INVALID, REASON_NEEDS_AUTH)
 
     missing_intervals = bundle.quality.get("missing_intervals") or []
     if missing_intervals:
@@ -705,9 +909,22 @@ def validate_intent(
     if bundle.expires_at_ms and now >= bundle.expires_at_ms:
         note(STATUS_EXPIRED, REASON_BUNDLE_EXPIRED)
 
-    claims = list(intent.get("claims") or [])
+    raw_claims = intent.get("claims")
+    malformed_claims: set[int] = set()
+    claims: list[Any] = []
+    if raw_claims is None:
+        claims = []
+    elif isinstance(raw_claims, (list, tuple)):
+        claims = list(raw_claims)
+    else:
+        note(STATUS_EVIDENCE_INVALID, REASON_CLAIM_MALFORMED)
     parsed_claims = []
-    for claim in claims:
+    for index, claim in enumerate(claims):
+        if not isinstance(claim, Mapping):
+            malformed_claims.add(index)
+            note(STATUS_EVIDENCE_INVALID, REASON_CLAIM_MALFORMED)
+            parsed_claims.append(None)
+            continue
         parsed = _parse_claim(claim)
         if parsed is None:
             note(STATUS_EVIDENCE_INVALID, REASON_CLAIM_UNRESOLVED)
@@ -717,6 +934,7 @@ def validate_intent(
     for input_id in bound_inputs:
         referenced[input_id] = None
     literal_only: set[int] = set()
+    claim_refs: list[str] = []
     for index, parsed in enumerate(parsed_claims):
         if parsed is None:
             continue
@@ -729,6 +947,11 @@ def validate_intent(
             _, refs, _ = resolve_operand(token, bundle)
             for ref in refs:
                 referenced[ref] = None
+                claim_refs.append(ref)
+    if bound_inputs:
+        bound_set = set(bound_inputs)
+        if any(ref not in bound_set for ref in claim_refs):
+            note(STATUS_EVIDENCE_INVALID, REASON_CLAIM_OUTSIDE_BOUND_INPUTS)
     input_issues = _referenced_input_issues(list(referenced), bundle, now)
     for codes in input_issues.values():
         for code in codes:
@@ -739,34 +962,68 @@ def validate_intent(
         str(item) for item in (bundle.quality.get("required_claim_kinds") or [])
     ]
     declared_claim_kinds = {
-        str(claim.get("kind")) for claim in claims if claim.get("kind")
+        str(claim.get("kind"))
+        for claim in claims
+        if isinstance(claim, Mapping) and claim.get("kind")
     }
     for required in required_claim_kinds:
+        if required not in CLAIM_KIND_REGISTRY:
+            note(STATUS_EVIDENCE_INVALID, REASON_CLAIM_KIND_UNKNOWN)
         if required not in declared_claim_kinds:
             note(STATUS_EVIDENCE_INVALID, REASON_MISSING_REQUIRED_CLAIM)
 
     claim_results: list[ClaimResult] = []
     for index, claim in enumerate(claims):
+        claim_id = str(claim.get("claim_id") or "") if isinstance(claim, Mapping) else ""
+        expr = str(claim.get("expr") or "") if isinstance(claim, Mapping) else ""
+        if index in malformed_claims:
+            claim_results.append(ClaimResult(
+                claim_id=claim_id, expr=expr, actual=None,
+                status="UNRESOLVED", reason_code=REASON_CLAIM_MALFORMED,
+            ))
+            continue
         parsed = parsed_claims[index]
         if parsed is None:
             claim_results.append(ClaimResult(
-                claim_id=str(claim.get("claim_id") or ""),
-                expr=str(claim.get("expr") or ""),
-                actual=None,
-                status="UNRESOLVED",
-                reason_code=REASON_CLAIM_UNRESOLVED,
+                claim_id=claim_id, expr=expr, actual=None,
+                status="UNRESOLVED", reason_code=REASON_CLAIM_UNRESOLVED,
             ))
             continue
+        _, _, raw_expected, lhs_token, op, rhs_token = parsed
+        if not isinstance(raw_expected, bool):
+            note(STATUS_EVIDENCE_INVALID, REASON_CLAIM_EXPECTED_INVALID)
+            claim_results.append(ClaimResult(
+                claim_id=claim_id, expr=expr, actual=None,
+                status="UNRESOLVED", reason_code=REASON_CLAIM_EXPECTED_INVALID,
+            ))
+            continue
+        expected = raw_expected
+        kind = (
+            str(claim.get("kind"))
+            if isinstance(claim, Mapping) and claim.get("kind")
+            else ""
+        )
+        if kind:
+            if kind not in CLAIM_KIND_REGISTRY:
+                note(STATUS_EVIDENCE_INVALID, REASON_CLAIM_KIND_UNKNOWN)
+                claim_results.append(ClaimResult(
+                    claim_id=claim_id, expr=expr, expected=expected, actual=None,
+                    status="UNRESOLVED", reason_code=REASON_CLAIM_KIND_UNKNOWN,
+                ))
+                continue
+            if not claim_kind_consistent(bundle, kind, op, lhs_token, rhs_token):
+                note(STATUS_EVIDENCE_INVALID, REASON_CLAIM_KIND_CONTRADICTION)
+                claim_results.append(ClaimResult(
+                    claim_id=claim_id, expr=expr, expected=expected, actual=None,
+                    status="UNRESOLVED", reason_code=REASON_CLAIM_KIND_CONTRADICTION,
+                ))
+                continue
         if index in literal_only:
             claim_results.append(ClaimResult(
-                claim_id=str(claim.get("claim_id") or ""),
-                expr=str(claim.get("expr") or ""),
-                actual=None,
-                status="UNRESOLVED",
-                reason_code=REASON_CLAIM_WITHOUT_EVIDENCE,
+                claim_id=claim_id, expr=expr, expected=expected, actual=None,
+                status="UNRESOLVED", reason_code=REASON_CLAIM_WITHOUT_EVIDENCE,
             ))
             continue
-        claim_id, expr, expected, lhs_token, op, rhs_token = parsed
         lhs, lhs_refs, lhs_error = resolve_operand(lhs_token, bundle)
         rhs, rhs_refs, rhs_error = resolve_operand(rhs_token, bundle)
         refs = tuple(dict.fromkeys(lhs_refs + rhs_refs))
@@ -788,7 +1045,7 @@ def validate_intent(
             note(STATUS_EVIDENCE_INVALID, error)
             continue
         actual = bool(_compare(op, lhs, rhs))
-        passed = actual == expected if expected is not None else actual
+        passed = actual == expected
         claim_results.append(ClaimResult(
             claim_id=claim_id, expr=expr, expected=expected, actual=actual,
             status="PASS" if passed else "FAIL",

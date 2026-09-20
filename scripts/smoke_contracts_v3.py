@@ -30,6 +30,7 @@ from core.contracts import (  # noqa: E402
     K06SchemaEnvelope,
     ManagementAuthorization,
     ManagementIntent,
+    ModelRoute,
     OrderQuantity,
     QuantityError,
     RELEASE_GROUPS,
@@ -90,6 +91,19 @@ SCHEMA_MODELS = {
     "k04_management_intent.schema.json": K04SchemaEnvelope,
     "k05_decision_trace.schema.json": K05SchemaEnvelope,
     "k06_release_evidence.schema.json": K06SchemaEnvelope,
+}
+
+SYNTH_IDENTITY = {
+    "schema_version": "3.1",
+    "environment": "demo",
+    "account_ref": "demo:SYNTH_ACCT",
+    "artifact_hash": "artifact-synth-hash",
+    "git_commit": "0123456789abcdef0123456789abcdef01234567",
+    "dependency_hash": "dependency-synth-hash",
+    "effective_config_hash": "effective-config-synth-hash",
+    "strategy_hash": "strategy-synth-hash",
+    "model_route_hash": "model-route-synth-hash",
+    "runtime_instance_id": "inst-synth-r1",
 }
 
 passed = 0
@@ -173,6 +187,16 @@ def op_k01_build_identity_coverage(inputs: dict[str, Any]) -> dict[str, Any]:
     return {"errors": errors}
 
 
+def op_k01_model_route(inputs: dict[str, Any]) -> dict[str, Any]:
+    route = ModelRoute.model_validate(inputs["route"])
+    identity = build_identity(**{**inputs["base"], "model_route": route})
+    return {
+        "ok": True,
+        "model_route_hash_present": bool(identity.model_route_hash),
+        "accepts_empty_fallbacks": route.fallback_routes == (),
+    }
+
+
 def op_k01_identity_diff(inputs: dict[str, Any]) -> dict[str, Any]:
     base = build_identity(**inputs["base"])
     variant = build_identity(**inputs["variant"])
@@ -202,7 +226,9 @@ def _bundle_from(inputs: dict[str, Any], spec: dict[str, Any]):
         )
         if key in spec
     }
-    snapshot["identity"] = inputs["identity"]
+    snapshot["identity"] = (
+        SYNTH_IDENTITY if inputs.get("identity") == "SYNTH" else inputs["identity"]
+    )
     return build_bundle(snapshot, spec.get("bars") or [], spec.get("rules") or {})
 
 
@@ -228,7 +254,8 @@ def op_k02_validate(inputs: dict[str, Any]) -> dict[str, Any]:
             )
         quote = (inputs.get("quotes") or {}).get(name)
         verdict = validate_intent(
-            _intent_from(intent_spec), bundle, quote, now_ms=inputs["now_ms"],
+            _intent_from(intent_spec), bundle, quote,
+            now_ms=inputs["now_ms"], rules=inputs.get("rules"),
         )
         verdict_ids.append(verdict.verdict_id)
         results[name] = {
@@ -261,6 +288,21 @@ def op_k02_bundle_tamper(inputs: dict[str, Any]) -> dict[str, Any]:
             for item in bundle.inputs
         )
         bundle = bundle.model_copy(update={"inputs": new_inputs})
+    elif kind == "add_undated_input":
+        extra = bundle.inputs[0].model_copy(update={
+            "input_id": tamper["input_id"],
+            "bar_close_time_ms": None,
+            "finality": "closed",
+            "interval": "1h",
+            "values": {"close": "744.13"},
+        })
+        bundle = bundle.model_copy(update={"inputs": bundle.inputs + (extra,)})
+        bundle = bundle.model_copy(update={"content_hash": model_content_hash(bundle)})
+    elif kind == "quality_field":
+        bundle = bundle.model_copy(update={
+            "quality": {**bundle.quality, tamper["key"]: tamper["value"]},
+        })
+        bundle = bundle.model_copy(update={"content_hash": model_content_hash(bundle)})
     elif kind in ("fact_value", "fact_value_rehash"):
         new_facts = tuple(
             fact.model_copy(update={"value": tamper["value"]})
@@ -272,13 +314,34 @@ def op_k02_bundle_tamper(inputs: dict[str, Any]) -> dict[str, Any]:
             bundle = bundle.model_copy(
                 update={"content_hash": model_content_hash(bundle)}
             )
+    elif kind == "duplicate_fact":
+        target = bundle.fact_by_id(tamper["fact_id"])
+        bundle = bundle.model_copy(update={
+            "derived_facts": bundle.derived_facts + (target,),
+        })
+        bundle = bundle.model_copy(update={"content_hash": model_content_hash(bundle)})
+    elif kind == "repoint_fact":
+        target = bundle.fact_by_id(tamper["fact_id"])
+        source = bundle.input_by_id(tamper["input_id"])
+        new_fact = target.model_copy(update={
+            "inputs": (tamper["input_id"],),
+            "value": str(source.values.get(tamper.get("key", "close"))),
+        })
+        new_facts = tuple(
+            new_fact if fact.fact_id == tamper["fact_id"] else fact
+            for fact in bundle.derived_facts
+        )
+        bundle = bundle.model_copy(update={"derived_facts": new_facts})
+        bundle = bundle.model_copy(update={"content_hash": model_content_hash(bundle)})
     elif kind == "hash_only":
         bundle = bundle.model_copy(update={"content_hash": tamper["value"]})
     expected_identity = inputs.get("expected_identity")
     identity_model = (
         RuntimeIdentity.model_validate(expected_identity) if expected_identity else None
     )
-    check = validate_bundle(bundle, identity=identity_model)
+    check = validate_bundle(
+        bundle, rules=inputs.get("rules"), identity=identity_model,
+    )
     output: dict[str, Any] = {
         "bundle_valid": check.valid,
         "bundle_reasons": list(check.reason_codes),
@@ -289,6 +352,7 @@ def op_k02_bundle_tamper(inputs: dict[str, Any]) -> dict[str, Any]:
             bundle,
             inputs.get("quote"),
             now_ms=inputs["now_ms"],
+            rules=inputs.get("rules"),
         )
         output["status"] = verdict.status
         output["reason_codes"] = list(verdict.reason_codes)
@@ -437,7 +501,7 @@ def op_k03_finalize(inputs: dict[str, Any]) -> dict[str, Any]:
         inputs["lifecycle_id"],
         coverage=coverage,
         attribution=attribution,
-        zero_fee_provable=bool(inputs.get("zero_fee_provable")),
+        zero_fee=inputs.get("zero_fee"),
     )
     return {
         "cost_status": result.cost_status,
@@ -547,12 +611,15 @@ def op_k04_cancel(inputs: dict[str, Any]) -> dict[str, Any]:
 
 def op_k04_intent(inputs: dict[str, Any]) -> dict[str, Any]:
     spec = dict(inputs["intent"])
-    derived = derive_management_id(
-        lifecycle_id=spec["lifecycle_id"],
-        trigger_type=spec["trigger_type"],
-        policy_version=spec["policy_version"],
-        trigger_event_id=spec["trigger_event_id"],
-    )
+    derive_kwargs = {
+        "lifecycle_id": spec["lifecycle_id"],
+        "trigger_type": spec["trigger_type"],
+        "policy_version": spec["policy_version"],
+        "trigger_event_id": spec["trigger_event_id"],
+    }
+    if spec.get("environment") is not None:
+        derive_kwargs["environment"] = spec["environment"]
+    derived = derive_management_id(**derive_kwargs)
     if inputs.get("rebind"):
         spec["management_id"] = derived
     try:
@@ -563,6 +630,19 @@ def op_k04_intent(inputs: dict[str, Any]) -> dict[str, Any]:
         "error": None,
         "rebound_ok": intent.management_id == derived,
         "management_id": intent.management_id,
+    }
+
+
+def op_k05_ack(inputs: dict[str, Any]) -> dict[str, Any]:
+    incident = Incident.model_validate(inputs["incident"])
+    try:
+        updated = acknowledge(incident, now_ms=inputs["now_ms"])
+    except TransitionError as error:
+        return {"error": type(error).__name__, "status": incident.status}
+    return {
+        "error": None,
+        "status": updated.status,
+        "ack_at_ms_present": updated.ack_at_ms is not None,
     }
 
 
@@ -588,6 +668,14 @@ def op_k05_incident_recovery(inputs: dict[str, Any]) -> dict[str, Any]:
     if inputs.get("ack"):
         incident = acknowledge(incident, now_ms=inputs["now_ms"])
     evidence = inputs.get("evidence")
+    if inputs.get("circular_evidence"):
+        circular: dict[str, Any] = {}
+        circular["fresh_account_snapshot"] = {
+            "observed_at_ms": inputs["now_ms"],
+            "value": True,
+            "self": circular,
+        }
+        evidence = circular
     check = check_recovery(incident, evidence, now_ms=inputs["now_ms"])
     output: dict[str, Any] = {
         "recovered": check.recovered,
@@ -600,8 +688,9 @@ def op_k05_incident_recovery(inputs: dict[str, Any]) -> dict[str, Any]:
         resolved = resolve_incident(
             incident, recovery_evidence=evidence, now_ms=inputs["now_ms"],
         )
-    except ResolutionNotAllowedError:
+    except ResolutionNotAllowedError as error:
         output["resolve_error"] = "ResolutionNotAllowedError"
+        output["resolve_reason_codes"] = list(error.reason_codes)
     else:
         output["status"] = resolved.status
         output["evidence_hash_present"] = bool(resolved.resolution_evidence_hash)
@@ -691,6 +780,7 @@ OPERATIONS = {
     "k01_identity_diff": op_k01_identity_diff,
     "k01_coverage": op_k01_coverage,
     "k01_build_identity_coverage": op_k01_build_identity_coverage,
+    "k01_model_route": op_k01_model_route,
     "k02_validate": op_k02_validate,
     "k02_bundle_tamper": op_k02_bundle_tamper,
     "k03_ingest": op_k03_ingest,
@@ -714,6 +804,7 @@ OPERATIONS = {
     "k05_delivery": op_k05_delivery,
     "k05_counters": op_k05_counters,
     "k05_incident_key": op_k05_incident_key,
+    "k05_ack": op_k05_ack,
     "k06_groups": op_k06_groups,
 }
 

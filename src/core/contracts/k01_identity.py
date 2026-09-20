@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .common import (
     SCHEMA_VERSION,
@@ -41,6 +41,29 @@ IDENTITY_COVERAGE: dict[str, tuple[str, ...]] = {
 }
 
 IDENTITY_MISMATCH_IGNORED_FIELDS = ("runtime_instance_id",)
+
+
+class ModelRoute(BaseModel):
+    """解析后的有效模型路由；字段缺失/为空由构建方负责声明来源。
+
+    ``fallback_routes``/``profile_overrides`` 允许显式为空（声明“无备用/
+    无覆盖”），但键必须存在；这与 ``IDENTITY_COVERAGE`` 的字段清单一致。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model: str = Field(min_length=1)
+    effort: str = Field(min_length=1)
+    fallback_routes: tuple[Mapping[str, Any], ...] = ()
+    profile_overrides: Mapping[str, Any] = Field(default_factory=dict)
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "effort": self.effort,
+            "fallback_routes": [dict(item) for item in self.fallback_routes],
+            "profile_overrides": dict(self.profile_overrides),
+        }
 
 
 class IdentityCoverageError(ValueError):
@@ -117,9 +140,43 @@ def hash_strategy(strategy_cards: Any) -> str:
     raise IdentityCoverageError(["strategy"])
 
 
-def hash_model_route(route: Mapping[str, Any]) -> str:
+def hash_model_route(route: ModelRoute | Mapping[str, Any]) -> str:
     """模型名/推理档/备用路由/profile 覆盖值哈希。"""
+    if isinstance(route, ModelRoute):
+        return canonical_hash(route.as_payload())
     return canonical_hash(_structured_mapping(route, name="model_route"))
+
+
+def _coverage_gaps(
+    *,
+    dependency_lock_files: Mapping[str, str],
+    strategy_cards: Any,
+    model_route: ModelRoute | Mapping[str, Any],
+    effective_config: Mapping[str, Any],
+) -> list[str]:
+    """字段级覆盖缺口；空组是合法声明，但字段缺失/空值一律报告。"""
+    gaps: list[str] = []
+    lock_names = {DEPENDENCY_SOURCE_FILES[0]}
+    if not any(str(key).replace("\\", "/").split("/")[-1] in lock_names
+               for key in dependency_lock_files):
+        gaps.append("dependency.requirements_lock")
+    if strategy_cards is None or (
+        isinstance(strategy_cards, (Mapping, Sequence))
+        and not isinstance(strategy_cards, str)
+        and len(strategy_cards) == 0
+    ):
+        gaps.append("strategy.strategy_cards")
+    if isinstance(model_route, ModelRoute):
+        route_payload: Mapping[str, Any] = model_route.as_payload()
+    else:
+        route_payload = model_route
+    for field in IDENTITY_COVERAGE["model_route"]:
+        if field not in route_payload or route_payload.get(field) is None:
+            gaps.append(f"model_route.{field}")
+    for field in IDENTITY_COVERAGE["effective_config"]:
+        if field not in effective_config or effective_config.get(field) is None:
+            gaps.append(f"effective_config.{field}")
+    return gaps
 
 
 def build_identity(
@@ -131,32 +188,27 @@ def build_identity(
     artifact_files: Mapping[str, str],
     dependency_lock_files: Mapping[str, str],
     strategy_cards: Any,
-    model_route: Mapping[str, Any],
+    model_route: ModelRoute | Mapping[str, Any],
     effective_config: Mapping[str, Any],
     schema_version: str = SCHEMA_VERSION,
     enforce_coverage: bool = True,
 ) -> RuntimeIdentity:
     """由显式有效值构造身份；本函数不读取任何文件或环境变量。
 
-    ``enforce_coverage=True``（默认）时，dependency/strategy/model_route/
-    effective_config 四组任一缺失即抛 ``IdentityCoverageError``。
+    ``enforce_coverage=True``（默认）时执行字段级覆盖校验：依赖锁文件、
+    策略卡、模型路由四字段（model/effort/fallback_routes/profile_overrides）
+    与有效配置三字段（settings/profile_overrides/environment_overrides）
+    缺失即抛 ``IdentityCoverageError``。
     """
     if enforce_coverage:
-        missing: list[str] = []
-        if not dependency_lock_files:
-            missing.append(f"dependency({DEPENDENCY_SOURCE_FILES[0]})")
-        if strategy_cards is None or (
-            isinstance(strategy_cards, (Mapping, Sequence))
-            and not isinstance(strategy_cards, str)
-            and len(strategy_cards) == 0
-        ):
-            missing.append(f"strategy({STRATEGY_SOURCE_FILES[0]})")
-        if not model_route:
-            missing.append("model_route")
-        if not effective_config:
-            missing.append("effective_config")
-        if missing:
-            raise IdentityCoverageError(missing)
+        gaps = _coverage_gaps(
+            dependency_lock_files=dependency_lock_files,
+            strategy_cards=strategy_cards,
+            model_route=model_route,
+            effective_config=effective_config,
+        )
+        if gaps:
+            raise IdentityCoverageError(gaps)
     return RuntimeIdentity(
         schema_version=schema_version,
         environment=environment,
@@ -223,3 +275,4 @@ class K01SchemaEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     runtime_identity: RuntimeIdentity
+    model_route: ModelRoute

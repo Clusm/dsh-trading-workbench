@@ -54,6 +54,9 @@ REASON_SAME_MS_BOUNDARY = "SAME_MS_BOUNDARY"
 REASON_WINDOW_EXHAUSTED = "WINDOW_EXHAUSTED"
 REASON_PAGE_NOT_SORTED = "PAGE_NOT_SORTED"
 REASON_PAGINATION_STALLED = "PAGINATION_STALLED"
+REASON_TERMINATION_PROOF_MISSING = "TERMINATION_PROOF_MISSING"
+REASON_TERMINATION_PROOF_MISMATCH = "TERMINATION_PROOF_MISMATCH"
+REASON_TERMINATION_PROOF_INVALID = "TERMINATION_PROOF_INVALID"
 
 
 class AllocationError(ValueError):
@@ -191,6 +194,18 @@ class RangeGap(BaseModel):
     reason: str = ""
 
 
+class TerminationProof(BaseModel):
+    """分页终止的结构化证据；自由文本不足以证明“已读完窗口”。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    start_ms: int
+    end_ms: int
+    page_limit: int = Field(gt=0)
+    last_page_size: int = Field(ge=0)
+    terminated_at_ms: int
+
+
 class IncomeCoverage(BaseModel):
     """一个 income_type 的同步覆盖证据；[start, end) 内部语义。"""
 
@@ -202,6 +217,7 @@ class IncomeCoverage(BaseModel):
     watermark: int
     page_limit: int = Field(gt=0)
     pagination_terminated_evidence: str | None = None
+    termination_proof: TerminationProof | None = None
     coverage_status: Literal["PENDING", "COMPLETE", "GAP"] = "PENDING"
     gaps: tuple[RangeGap, ...] = ()
     synced_at_ms: int = 0
@@ -221,8 +237,12 @@ def coverage_problems(coverage: IncomeCoverage | Mapping[str, Any] | None) -> li
             problems.append(REASON_GAP_INVALID_RANGE)
     if coverage_model.watermark < coverage_model.start_ms:
         problems.append(REASON_WATERMARK_BEFORE_END)
+    if coverage_model.coverage_status == "PENDING":
+        problems.append(REASON_COVERAGE_NOT_COMPLETE)
     if coverage_model.coverage_status == "COMPLETE":
-        if not coverage_model.pagination_terminated_evidence:
+        if coverage_model.termination_proof is None and not (
+            coverage_model.pagination_terminated_evidence
+        ):
             problems.append(REASON_COMPLETE_WITHOUT_PAGINATION_EVIDENCE)
         if coverage_model.watermark < coverage_model.end_ms:
             problems.append(REASON_COMPLETE_WITHOUT_COVERAGE)
@@ -262,8 +282,20 @@ def zero_fee_proof(
                 reasons.append(REASON_COVERAGE_GAPS_DECLARED)
             elif REASON_COVERAGE_GAP not in reasons:
                 reasons.append(REASON_COVERAGE_GAP)
-        if not coverage_model.pagination_terminated_evidence:
-            reasons.append(REASON_PAGINATION_NOT_TERMINATED)
+        proof = coverage_model.termination_proof
+        if proof is None:
+            reasons.append(REASON_TERMINATION_PROOF_MISSING)
+        else:
+            if (
+                proof.start_ms != coverage_model.start_ms
+                or proof.end_ms != coverage_model.end_ms
+            ):
+                reasons.append(REASON_TERMINATION_PROOF_MISMATCH)
+            if (
+                proof.last_page_size >= proof.page_limit
+                or proof.terminated_at_ms < proof.end_ms
+            ):
+                reasons.append(REASON_TERMINATION_PROOF_INVALID)
         if coverage_model.watermark < coverage_model.end_ms:
             reasons.append(REASON_WATERMARK_BEFORE_END)
         reasons.extend(
@@ -303,7 +335,11 @@ def plan_next_page(
     满页必须单调非降序，且新起点必须大于当前 start。无进展或乱序一律不得
     返回 CONTINUE：前者会死循环，后者会静默跳过窗口内未读收入。
     """
-    if page_limit <= 0:
+    if (
+        isinstance(page_limit, bool)
+        or not isinstance(page_limit, int)
+        or page_limit <= 0
+    ):
         return PaginationDecision(
             status="INVALID_PAGE_LIMIT",
             reason_codes=(REASON_INVALID_RANGE,),
@@ -388,6 +424,8 @@ def attribute_income(
         blocked_code = REASON_NO_COVERAGE
     elif coverage_model.coverage_status != "COMPLETE":
         blocked_code = REASON_COVERAGE_NOT_COMPLETE
+    elif coverage_model.gaps:
+        blocked_code = REASON_COVERAGE_GAPS_DECLARED
     else:
         blocked_code = None
     for raw in events:
@@ -552,12 +590,22 @@ def finalize_costs(
     *,
     coverage: IncomeCoverage | Mapping[str, Any] | None = None,
     attribution: AttributionResult | None = None,
-    zero_fee_provable: bool = False,
+    zero_fee: ZeroFeeProof | Mapping[str, Any] | None = None,
 ) -> CostFinalization:
-    """成本完成判定独立于归因判定；空窗口不等于零费用。"""
+    """成本完成判定独立于归因判定；空窗口不等于零费用。
+
+    无事件时必须传入 ``zero_fee_proof`` 的结果对象（``ZeroFeeProof``）：
+    不得用调用方自报布尔跳过零费用证明条件。
+    """
     coverage_model = _coverage_model(coverage)
     coverage_status = coverage_model.coverage_status if coverage_model else None
     attribution_status = attribution.allocation_status if attribution else "UNKNOWN"
+    if isinstance(zero_fee, ZeroFeeProof):
+        proof: ZeroFeeProof | None = zero_fee
+    elif isinstance(zero_fee, Mapping):
+        proof = ZeroFeeProof.model_validate(zero_fee)
+    else:
+        proof = None
     reasons: list[str] = []
     if coverage_model is None:
         return CostFinalization(
@@ -583,7 +631,7 @@ def finalize_costs(
             reason_codes=tuple(reasons),
         )
     if attribution is None or not attribution.decisions:
-        if zero_fee_provable:
+        if proof is not None and proof.provable:
             return CostFinalization(
                 lifecycle_id=lifecycle_id,
                 cost_status="COMPLETE",
@@ -591,12 +639,13 @@ def finalize_costs(
                 attribution_status="ATTRIBUTED",
                 reason_codes=(REASON_COST_COMPLETE,),
             )
+        zero_fee_reasons = tuple(proof.reason_codes) if proof is not None else ()
         return CostFinalization(
             lifecycle_id=lifecycle_id,
             cost_status="INCOMPLETE",
             coverage_status=coverage_status,
             attribution_status="UNKNOWN",
-            reason_codes=(REASON_ZERO_FEE_NOT_PROVABLE,),
+            reason_codes=zero_fee_reasons or (REASON_ZERO_FEE_NOT_PROVABLE,),
         )
     if attribution.allocation_status == "UNKNOWN":
         return CostFinalization(
@@ -630,7 +679,7 @@ class OutcomeRevision(BaseModel):
 
     outcome_id: str
     source_event_id: str
-    revision_id: str
+    revision_id: str = ""
     previous_revision_id: str | None = None
     reason_code: str = "LATE_INCOME"
     requires_recalculation: bool = True

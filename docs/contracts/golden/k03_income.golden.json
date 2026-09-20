@@ -135,6 +135,7 @@
           "watermark": 1789866000000,
           "page_limit": 1000,
           "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "termination_proof": {"start_ms": 1789858800000, "end_ms": 1789866000000, "page_limit": 1000, "last_page_size": 3, "terminated_at_ms": 1789866100000},
           "coverage_status": "COMPLETE",
           "gaps": [],
           "synced_at_ms": 1789866100000
@@ -160,12 +161,13 @@
           "watermark": 1789866000000,
           "page_limit": 1000,
           "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "termination_proof": {"start_ms": 1789858800000, "end_ms": 1789866000000, "page_limit": 1000, "last_page_size": 3, "terminated_at_ms": 1789866100000},
           "coverage_status": "COMPLETE",
           "gaps": [],
           "synced_at_ms": 1789866100000
         },
         "events": null,
-        "zero_fee_provable": true
+        "zero_fee": {"provable": true, "reason_codes": []}
       },
       "expect": {
         "cost_status": "COMPLETE",
@@ -248,6 +250,7 @@
           "watermark": 1789866000000,
           "page_limit": 1000,
           "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "termination_proof": {"start_ms": 1789858800000, "end_ms": 1789866000000, "page_limit": 1000, "last_page_size": 3, "terminated_at_ms": 1789866100000},
           "coverage_status": "COMPLETE",
           "gaps": [],
           "synced_at_ms": 1789866100000
@@ -288,7 +291,7 @@
         "provable": false,
         "reason_codes": [
           "COVERAGE_NOT_COMPLETE",
-          "PAGINATION_NOT_TERMINATED",
+          "TERMINATION_PROOF_MISSING",
           "WATERMARK_BEFORE_WINDOW_END"
         ]
       }
@@ -307,6 +310,7 @@
           "watermark": 1789866000000,
           "page_limit": 1000,
           "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "termination_proof": {"start_ms": 1789858800000, "end_ms": 1789866000000, "page_limit": 1000, "last_page_size": 3, "terminated_at_ms": 1789866100000},
           "coverage_status": "GAP",
           "gaps": [
             {"start_ms": 1789860600000, "end_ms": 1789861200000, "reason": "source_gap"}
@@ -340,6 +344,7 @@
           "watermark": 1789866000000,
           "page_limit": 1000,
           "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "termination_proof": {"start_ms": 1789858800000, "end_ms": 1789866000000, "page_limit": 1000, "last_page_size": 3, "terminated_at_ms": 1789866100000},
           "coverage_status": "COMPLETE",
           "gaps": [],
           "synced_at_ms": 1789866100000
@@ -483,6 +488,7 @@
           "watermark": 1789866000000,
           "page_limit": 1000,
           "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "termination_proof": {"start_ms": 1789858800000, "end_ms": 1789866000000, "page_limit": 1000, "last_page_size": 3, "terminated_at_ms": 1789866100000},
           "coverage_status": "COMPLETE",
           "gaps": [{"start_ms": 1789860600000, "end_ms": 1789861200000, "reason": "source_gap"}],
           "synced_at_ms": 1789866100000
@@ -504,6 +510,7 @@
           "watermark": 1789866000000,
           "page_limit": 1000,
           "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "termination_proof": {"start_ms": 1789858800000, "end_ms": 1789866000000, "page_limit": 1000, "last_page_size": 3, "terminated_at_ms": 1789866100000},
           "coverage_status": "COMPLETE",
           "gaps": [{"start_ms": 1789860600000, "end_ms": 1789861200000, "reason": "source_gap"}],
           "synced_at_ms": 1789866100000
@@ -529,12 +536,13 @@
           "watermark": 1789866000000,
           "page_limit": 1000,
           "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "termination_proof": {"start_ms": 1789858800000, "end_ms": 1789866000000, "page_limit": 1000, "last_page_size": 3, "terminated_at_ms": 1789866100000},
           "coverage_status": "COMPLETE",
           "gaps": [{"start_ms": 1789860600000, "end_ms": 1789861200000, "reason": "source_gap"}],
           "synced_at_ms": 1789866100000
         },
         "events": null,
-        "zero_fee_provable": true
+        "zero_fee": {"provable": true, "reason_codes": []}
       },
       "expect": {
         "cost_status": "INCOMPLETE",
@@ -669,6 +677,126 @@
         ]
       },
       "expect": {"error": "LookupError"}
+    },
+    {
+      "case_id": "K03-N14",
+      "kind": "negative",
+      "title": "COMPLETE+已声明缺口时归因也 fail-closed",
+      "operation": "k03_attribution",
+      "derivation": "B 审查 N6：同一覆盖证据下曾出现 ATTRIBUTED 与 cost INCOMPLETE 并存。缺口意味着结算时点可能落在未读区间；归因必须与成本/零费用判定一致 → UNKNOWN + COVERAGE_GAPS_DECLARED。",
+      "inputs": {
+        "events": [{"event_id": "ev-1", "symbol": "ZZZUSDT", "event_time_ms": 1789862400000}],
+        "position_history": [{"lifecycle_id": "lc-1", "symbol": "ZZZUSDT", "position_side": "LONG", "opened_at_ms": 1789850000000, "closed_at_ms": null}],
+        "coverage": {
+          "income_type": "FUNDING_FEE", "start_ms": 1789858800000, "end_ms": 1789866000000,
+          "watermark": 1789866000000, "page_limit": 1000,
+          "pagination_terminated_evidence": "short-page:3<1000@2026-09-20T12:00:00Z",
+          "termination_proof": {"start_ms": 1789858800000, "end_ms": 1789866000000, "page_limit": 1000, "last_page_size": 3, "terminated_at_ms": 1789866100000},
+          "coverage_status": "COMPLETE",
+          "gaps": [{"start_ms": 1789860600000, "end_ms": 1789861200000, "reason": "source_gap"}],
+          "synced_at_ms": 1789866100000
+        }
+      },
+      "expect": {
+        "allocation_status": "UNKNOWN",
+        "coverage_status": "COMPLETE",
+        "reason_codes": ["COVERAGE_GAPS_DECLARED"],
+        "decisions": [
+          {"event_id": "ev-1", "status": "UNKNOWN", "lifecycle_id": null, "reason_codes": ["COVERAGE_GAPS_DECLARED"]}
+        ]
+      }
+    },
+    {
+      "case_id": "K03-N15",
+      "kind": "negative",
+      "title": "自由文本终止证据不足以证明零费用",
+      "operation": "k03_zero_fee",
+      "derivation": "B 审查 N7：pagination_terminated_evidence=\"x\" + 三布尔 true 曾 provable=true。终止证据必须是结构化 TerminationProof 且与窗口绑定；仅有自由文本 → TERMINATION_PROOF_MISSING。",
+      "inputs": {
+        "coverage": {
+          "income_type": "FUNDING_FEE", "start_ms": 1789858800000, "end_ms": 1789866000000,
+          "watermark": 1789866000000, "page_limit": 1000,
+          "pagination_terminated_evidence": "x",
+          "coverage_status": "COMPLETE", "gaps": [], "synced_at_ms": 1789866100000
+        },
+        "source_available": true,
+        "pages_complete": true,
+        "late_recheck_done": true
+      },
+      "expect": {"provable": false, "reason_codes": ["TERMINATION_PROOF_MISSING"]}
+    },
+    {
+      "case_id": "K03-N16",
+      "kind": "negative",
+      "title": "page_limit 类型混淆不得崩溃",
+      "operation": "k03_pagination",
+      "derivation": "Q NEW-P2-9：page_limit=\"3\" 曾抛 TypeError。参数必须是正整数；非 int/布尔/≤0 → INVALID_PAGE_LIMIT（结构化拒绝）。",
+      "inputs": {
+        "start_ms": 1789858800000, "end_ms": 1789866000000, "page_limit": "3",
+        "page": []
+      },
+      "expect": {"status": "INVALID_PAGE_LIMIT", "next_start_ms": null, "reason_codes": ["INVALID_RANGE"]}
+    },
+    {
+      "case_id": "K03-N17",
+      "kind": "negative",
+      "title": "带符号零与零视为同一内容",
+      "operation": "k03_ingest",
+      "derivation": "B 审查 N8：amount=\"-0\" 与 \"0\" 指纹不同会误隔离。decimal_text 统一 signed zero 后二者相等 → duplicates。",
+      "inputs": {
+        "existing": [
+          {"environment": "demo", "account_ref": "SYNTH_ACCT", "income_type": "FUNDING_FEE", "tran_id": "t-1701", "symbol": "ZZZUSDT", "asset": "USDT", "amount": "-0", "event_time_ms": 1789862400000, "received_at_ms": 1789862401000, "source_hash": "src-synth-page-1"}
+        ],
+        "page": [
+          {"environment": "demo", "account_ref": "SYNTH_ACCT", "income_type": "FUNDING_FEE", "tran_id": "t-1701", "symbol": "ZZZUSDT", "asset": "USDT", "amount": "0", "event_time_ms": 1789862400000, "received_at_ms": 1789862500000, "source_hash": "src-synth-page-2"}
+        ]
+      },
+      "expect": {
+        "inserted": [],
+        "duplicates": ["demo|synth_acct|funding_fee|t-1701"],
+        "quarantined": [],
+        "reason_codes": []
+      }
+    },
+    {
+      "case_id": "K03-N18",
+      "kind": "negative",
+      "title": "终止证据窗口与覆盖窗口不符",
+      "operation": "k03_zero_fee",
+      "derivation": "终止证据必须绑定同一窗口；proof.end_ms 与 coverage.end_ms 不符时不能证明该窗口已读完 → TERMINATION_PROOF_MISMATCH。",
+      "inputs": {
+        "coverage": {
+          "income_type": "FUNDING_FEE", "start_ms": 1789858800000, "end_ms": 1789866000000,
+          "watermark": 1789866000000, "page_limit": 1000,
+          "pagination_terminated_evidence": "short-page",
+          "termination_proof": {"start_ms": 1789858800000, "end_ms": 1789865999000, "page_limit": 1000, "last_page_size": 3, "terminated_at_ms": 1789866100000},
+          "coverage_status": "COMPLETE", "gaps": [], "synced_at_ms": 1789866100000
+        },
+        "source_available": true,
+        "pages_complete": true,
+        "late_recheck_done": true
+      },
+      "expect": {"provable": false, "reason_codes": ["TERMINATION_PROOF_MISMATCH"]}
+    },
+    {
+      "case_id": "K03-N19",
+      "kind": "negative",
+      "title": "终止证据页大小未短于上限",
+      "operation": "k03_zero_fee",
+      "derivation": "短页是终止的前提；last_page_size >= page_limit 说明该页并未读完 → TERMINATION_PROOF_INVALID。",
+      "inputs": {
+        "coverage": {
+          "income_type": "FUNDING_FEE", "start_ms": 1789858800000, "end_ms": 1789866000000,
+          "watermark": 1789866000000, "page_limit": 1000,
+          "pagination_terminated_evidence": "full-page",
+          "termination_proof": {"start_ms": 1789858800000, "end_ms": 1789866000000, "page_limit": 1000, "last_page_size": 1000, "terminated_at_ms": 1789866100000},
+          "coverage_status": "COMPLETE", "gaps": [], "synced_at_ms": 1789866100000
+        },
+        "source_available": true,
+        "pages_complete": true,
+        "late_recheck_done": true
+      },
+      "expect": {"provable": false, "reason_codes": ["TERMINATION_PROOF_INVALID"]}
     }
   ]
 }

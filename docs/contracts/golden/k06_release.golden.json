@@ -215,6 +215,31 @@
         "blocking_codes": [{"group": "engineering", "code": "DECLARED_STATUS_UNKNOWN"}],
         "extra_top_level_fields": []
       }
+    },
+    {
+      "case_id": "K06-N7",
+      "kind": "negative",
+      "title": "JSON 溢出数值窗口不得崩溃",
+      "operation": "k06_groups",
+      "derivation": "Q NEW-P1-1：JSON 1e400 经 json.loads 得到 inf，int(inf) 曾抛 OverflowError 使整份报告构建失败。窗口必须是有限 int64 毫秒；非有限/超界 → FAIL + WINDOW_INVALID 阻断项（fail-closed 且结构化）。",
+      "inputs": {
+        "identity_ref": "demo:rel-synth-1",
+        "focus_groups": ["engineering"],
+        "groups": {
+          "engineering": {
+            "status": "PASS",
+            "evidence_hash": "hash-eng-synth",
+            "window_start_ms": 1789776000000,
+            "window_end_ms": 1e400,
+            "identity_ref": "demo:rel-synth-1"
+          }
+        }
+      },
+      "expect": {
+        "statuses": {"engineering": "FAIL"},
+        "blocking_codes": [{"group": "engineering", "code": "WINDOW_INVALID"}],
+        "extra_top_level_fields": []
+      }
     }
   ]
 }

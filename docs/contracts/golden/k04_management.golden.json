@@ -86,7 +86,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "REDUCE",
@@ -96,6 +98,8 @@
           "reduce_qty": "0.005",
           "current_position_qty": "0.01",
           "requested_net_delta": "0",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": false
         },
         "now_ms": 1789862401000,
@@ -120,7 +124,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "REDUCE",
@@ -130,6 +136,8 @@
           "reduce_qty": "0.005",
           "current_position_qty": "0.01",
           "requested_net_delta": "0",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": false
         },
         "now_ms": 1789862401000,
@@ -154,13 +162,17 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "OPEN",
           "account_ref": "demo:SYNTH_ACCT",
           "lifecycle_id": "lc-1",
           "position_side": "LONG",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "requested_net_delta": "0"
         },
         "now_ms": 1789862401000,
@@ -185,7 +197,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "CLOSE",
@@ -195,6 +209,8 @@
           "close_qty": "0.01",
           "current_position_qty": "0.01",
           "requested_net_delta": "-0.01",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": true,
           "target_client_id": "sl-synth-1"
         },
@@ -233,7 +249,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "REDUCE",
@@ -243,6 +261,8 @@
           "reduce_qty": "0.005",
           "current_position_qty": "0.01",
           "requested_net_delta": "0.5",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": false
         },
         "now_ms": 1789862401000,
@@ -267,7 +287,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "REDUCE",
@@ -277,6 +299,8 @@
           "reduce_qty": "0.02",
           "current_position_qty": "0.01",
           "requested_net_delta": "-0.02",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": false
         },
         "now_ms": 1789862401000,
@@ -304,7 +328,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "REDUCE",
@@ -314,6 +340,8 @@
           "reduce_qty": "0.005",
           "current_position_qty": "0.01",
           "requested_net_delta": "0",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": false
         },
         "now_ms": 1789866000000,
@@ -350,9 +378,9 @@
           "reduce_qty": "0.005",
           "current_position_qty": "0.01",
           "requested_net_delta": "0",
-          "remove_protection": false,
           "runtime_instance_id": "inst-synth-r1",
-          "environment": "demo"
+          "environment": "demo",
+          "remove_protection": false
         },
         "now_ms": 1789862401000,
         "current_revision": 3,
@@ -457,7 +485,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "CLOSE",
@@ -467,6 +497,8 @@
           "close_qty": "100",
           "current_position_qty": "0.01",
           "requested_net_delta": "-100",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": false
         },
         "now_ms": 1789862401000,
@@ -494,7 +526,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "CLOSE",
@@ -504,6 +538,8 @@
           "close_qty": "0.01",
           "current_position_qty": "0",
           "requested_net_delta": "0",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": false
         },
         "now_ms": 1789862401000,
@@ -528,7 +564,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "REDUCE",
@@ -537,6 +575,8 @@
           "position_side": "LONG",
           "current_position_qty": "0.01",
           "requested_net_delta": "0",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": false
         },
         "now_ms": 1789862401000,
@@ -561,7 +601,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "REDUCE",
@@ -571,6 +613,8 @@
           "reduce_qty": "-0.005",
           "current_position_qty": "0.01",
           "requested_net_delta": "0",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": false
         },
         "now_ms": 1789862401000,
@@ -595,7 +639,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "REDUCE",
@@ -604,6 +650,8 @@
           "position_side": "LONG",
           "reduce_qty": "0.005",
           "current_position_qty": "0.01",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": false
         },
         "now_ms": 1789862401000,
@@ -628,7 +676,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "REDUCE",
@@ -638,6 +688,8 @@
           "reduce_qty": "0.005",
           "current_position_qty": "0.01",
           "requested_net_delta": "huge-buy",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": false
         },
         "now_ms": 1789862401000,
@@ -662,7 +714,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "REDUCE",
@@ -672,6 +726,8 @@
           "reduce_qty": "0.005",
           "current_position_qty": "0.01",
           "requested_net_delta": "0",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": false
         },
         "now_ms": 1789862401000,
@@ -709,9 +765,9 @@
           "reduce_qty": "0.005",
           "current_position_qty": "0.01",
           "requested_net_delta": "0",
-          "remove_protection": false,
           "runtime_instance_id": "inst-synth-r2",
-          "environment": "demo"
+          "environment": "demo",
+          "remove_protection": false
         },
         "now_ms": 1789862401000,
         "current_revision": 3,
@@ -736,7 +792,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "MAINTAIN_PROTECTION",
@@ -745,6 +803,8 @@
           "position_side": "LONG",
           "current_position_qty": "0.01",
           "requested_net_delta": "0",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": true,
           "target_client_id": "sl-OTHER"
         },
@@ -770,7 +830,9 @@
           "position_revision": 3,
           "nonce": "nonce-synth-1",
           "issued_at_ms": 1789862300000,
-          "expires_at_ms": 1789866000000
+          "expires_at_ms": 1789866000000,
+          "environment": "demo",
+          "runtime_instance_id": "inst-synth-r1"
         },
         "request": {
           "action": "MAINTAIN_PROTECTION",
@@ -779,6 +841,8 @@
           "position_side": "LONG",
           "current_position_qty": "0.01",
           "requested_net_delta": "0",
+          "runtime_instance_id": "inst-synth-r1",
+          "environment": "demo",
           "remove_protection": true
         },
         "now_ms": 1789862401000,
@@ -861,6 +925,139 @@
         "rebind": false
       },
       "expect": {"error": "ValidationError"}
+    },
+    {
+      "case_id": "K04-P9",
+      "kind": "positive",
+      "title": "环境域派生的 management_id 被接受",
+      "operation": "k04_intent",
+      "derivation": "B 审查 N5：函数支持 environment 域但 validator 只认四组件，两条派生路径互斥。ManagementIntent 增 environment 字段并接受带域派生 id；demo/live 同生命周期不再碰撞。",
+      "inputs": {
+        "intent": {
+          "management_id": "placeholder",
+          "identity": {
+            "schema_version": "3.1", "environment": "demo", "account_ref": "demo:SYNTH_ACCT",
+            "artifact_hash": "artifact-synth-hash", "git_commit": "0123456789abcdef0123456789abcdef01234567",
+            "dependency_hash": "dependency-synth-hash", "effective_config_hash": "effective-config-synth-hash",
+            "strategy_hash": "strategy-synth-hash", "model_route_hash": "model-route-synth-hash",
+            "runtime_instance_id": "inst-synth-r1"
+          },
+          "lifecycle_id": "lc-1", "position_side": "LONG", "action": "CLOSE", "max_reduce_qty": "0.01",
+          "position_revision": 3, "reason_code": "TIME_STOP", "policy_version": "policy-v3",
+          "expires_at_ms": 1789866000000, "evidence_id": "eb-A", "trigger_type": "time_stop",
+          "trigger_event_id": "evt-1", "environment": "demo"
+        },
+        "rebind": true
+      },
+      "expect": {"error": null, "rebound_ok": true}
+    },
+    {
+      "case_id": "K04-N22",
+      "kind": "negative",
+      "title": "满成交订单不得再发起撤单",
+      "operation": "k04_cancel",
+      "derivation": "B 审查 N2：FILLED 未入终态，曾可 request_cancel。满成交是终局事实，撤单请求必须 QuantityError（与 CANCELED/EXPIRED/REJECTED 同列）。",
+      "inputs": {
+        "action": "request",
+        "quantity": {"order_id": "ord-synth-6", "accepted_qty": "1", "cumulative_filled_qty": "1", "working_leaves_qty": "0", "terminal_unfilled_qty": "0", "status": "FILLED", "revision": 6, "cancel_requested": false, "cancel_confirmed": false}
+      },
+      "expect": {"error": "QuantityError"}
+    },
+    {
+      "case_id": "K04-N23",
+      "kind": "negative",
+      "title": "满成交订单带撤销确认是自相矛盾事实",
+      "operation": "k04_quantity",
+      "derivation": "B 审查 N2：FILLED + cancel_confirmed 曾 violations=[]。已完全成交与“撤单已确认”互斥；必须 FILLED_WITH_CANCEL_CONFIRMED。",
+      "inputs": {
+        "quantities": [
+          {"order_id": "ord-synth-7", "accepted_qty": "1", "cumulative_filled_qty": "1", "working_leaves_qty": "0", "terminal_unfilled_qty": "0", "status": "FILLED", "revision": 7, "cancel_requested": true, "cancel_confirmed": true}
+        ]
+      },
+      "expect": {"violations": [["FILLED_WITH_CANCEL_CONFIRMED"]]}
+    },
+    {
+      "case_id": "K04-N24",
+      "kind": "negative",
+      "title": "空串 fill_id 不得短路幂等",
+      "operation": "k04_apply_fills",
+      "derivation": "B 审查 N3：fill_id=\"\" 时 `if fill_id` 为假，重复应用双计。fill_id 必须是非空字符串；空串抛 QuantityError，不允许以空 ID 绕过幂等。",
+      "inputs": {
+        "quantity": {"order_id": "ord-synth-8", "accepted_qty": "1", "cumulative_filled_qty": "0", "working_leaves_qty": "1", "terminal_unfilled_qty": "0", "status": "NEW", "revision": 0, "cancel_requested": false, "cancel_confirmed": false},
+        "fills": [{"fill_id": "", "qty": "0.4"}]
+      },
+      "expect": {"error": "QuantityError"}
+    },
+    {
+      "case_id": "K04-N25",
+      "kind": "negative",
+      "title": "授权未绑定运行代/环境一律拒绝",
+      "operation": "k04_authorization",
+      "derivation": "B 审查 N1：runtime_instance_id/environment 为可选，未绑定的授权在新进程代/其他环境仍 allowed。绑定缺失即 RUN_GENERATION_UNBOUND + ENVIRONMENT_UNBOUND，不得默认放行。",
+      "inputs": {
+        "authorization": {
+          "authorization_id": "auth-synth-1", "account_ref": "demo:SYNTH_ACCT", "lifecycle_id": "lc-1",
+          "position_side": "LONG", "max_reduce_qty": "0.01",
+          "target_protection": {"sl_client_id": "sl-synth-1", "tp_client_id": "tp-synth-1", "is_last_protection": false},
+          "position_revision": 3, "nonce": "nonce-synth-1", "issued_at_ms": 1789862300000, "expires_at_ms": 1789866000000
+        },
+        "request": {
+          "action": "REDUCE", "account_ref": "demo:SYNTH_ACCT", "lifecycle_id": "lc-1", "position_side": "LONG",
+          "reduce_qty": "0.005", "current_position_qty": "0.01", "requested_net_delta": "0",
+          "runtime_instance_id": "inst-synth-r1", "environment": "demo", "remove_protection": false
+        },
+        "now_ms": 1789862401000,
+        "current_revision": 3
+      },
+      "expect": {"allowed": false, "reason_codes": ["RUN_GENERATION_UNBOUND", "ENVIRONMENT_UNBOUND"]}
+    },
+    {
+      "case_id": "K04-N26",
+      "kind": "negative",
+      "title": "跨环境请求被拒绝",
+      "operation": "k04_authorization",
+      "derivation": "B 审查 A10b：无 environment 的授权接受 live 请求。授权绑定 environment=demo，请求 environment=live（运行代一致）→ ENVIRONMENT_MISMATCH。",
+      "inputs": {
+        "authorization": {
+          "authorization_id": "auth-synth-1", "account_ref": "demo:SYNTH_ACCT", "lifecycle_id": "lc-1",
+          "position_side": "LONG", "max_reduce_qty": "0.01",
+          "target_protection": {"sl_client_id": "sl-synth-1", "tp_client_id": "tp-synth-1", "is_last_protection": false},
+          "position_revision": 3, "nonce": "nonce-synth-1", "issued_at_ms": 1789862300000, "expires_at_ms": 1789866000000,
+          "environment": "demo", "runtime_instance_id": "inst-synth-r1"
+        },
+        "request": {
+          "action": "REDUCE", "account_ref": "demo:SYNTH_ACCT", "lifecycle_id": "lc-1", "position_side": "LONG",
+          "reduce_qty": "0.005", "current_position_qty": "0.01", "requested_net_delta": "0",
+          "runtime_instance_id": "inst-synth-r1", "environment": "live", "remove_protection": false
+        },
+        "now_ms": 1789862401000,
+        "current_revision": 3
+      },
+      "expect": {"allowed": false, "reason_codes": ["ENVIRONMENT_MISMATCH"]}
+    },
+    {
+      "case_id": "K04-N27",
+      "kind": "negative",
+      "title": "账户不符时查单许可也不成立",
+      "operation": "k04_authorization",
+      "derivation": "B 审查 N10：reconcile_allowed 曾恒为 True，可能被误读为“本请求对应订单可查”。账户域不匹配时读单许可不成立；其余字段合法 → allowed=false、reconcile_allowed=false、仅 ACCOUNT_MISMATCH。",
+      "inputs": {
+        "authorization": {
+          "authorization_id": "auth-synth-1", "account_ref": "demo:SYNTH_ACCT", "lifecycle_id": "lc-1",
+          "position_side": "LONG", "max_reduce_qty": "0.01",
+          "target_protection": {"sl_client_id": "sl-synth-1", "tp_client_id": "tp-synth-1", "is_last_protection": false},
+          "position_revision": 3, "nonce": "nonce-synth-1", "issued_at_ms": 1789862300000, "expires_at_ms": 1789866000000,
+          "environment": "demo", "runtime_instance_id": "inst-synth-r1"
+        },
+        "request": {
+          "action": "REDUCE", "account_ref": "demo:OTHER_ACCT", "lifecycle_id": "lc-1", "position_side": "LONG",
+          "reduce_qty": "0.005", "current_position_qty": "0.01", "requested_net_delta": "0",
+          "runtime_instance_id": "inst-synth-r1", "environment": "demo", "remove_protection": false
+        },
+        "now_ms": 1789862401000,
+        "current_revision": 3
+      },
+      "expect": {"allowed": false, "reconcile_allowed": false, "reason_codes": ["ACCOUNT_MISMATCH"]}
     }
   ]
 }

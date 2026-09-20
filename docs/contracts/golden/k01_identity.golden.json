@@ -135,7 +135,7 @@
           "artifact_files": {"src/core/service.py": "def run(): pass\n"},
           "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
           "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
-          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh", "fallback_routes": [], "profile_overrides": {}},
           "effective_config": {
             "settings": {"channels": {"ai": 1.0, "strategy": 1.0}},
             "profile_overrides": {"live": {"channels": {"ai": 0.0, "strategy": 0.0}}},
@@ -146,7 +146,7 @@
           "artifact_files": {"src/core/service.py": "def run(): pass\n"},
           "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
           "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
-          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh", "fallback_routes": [], "profile_overrides": {}},
           "effective_config": {
             "settings": {"channels": {"ai": 1.0, "strategy": 1.0}},
             "profile_overrides": {"live": {"channels": {"ai": 0.5, "strategy": 0.5}}},
@@ -179,8 +179,8 @@
           "artifact_files": {"src/core/service.py": "def run(): pass\n"},
           "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
           "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
-          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
-          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}}
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh", "fallback_routes": [], "profile_overrides": {}},
+          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}, "profile_overrides": {}, "environment_overrides": {}}
         },
         "variant": {
           "environment": "demo",
@@ -190,8 +190,8 @@
           "artifact_files": {"src/core/service.py": "def run(): pass\n"},
           "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
           "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
-          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
-          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}}
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh", "fallback_routes": [], "profile_overrides": {}},
+          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}, "profile_overrides": {}, "environment_overrides": {}}
         }
       },
       "expect": {
@@ -212,15 +212,15 @@
           "artifact_files": {"src/core/service.py": "def run(): pass\n"},
           "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
           "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
-          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
-          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}}
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh", "fallback_routes": [], "profile_overrides": {}},
+          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}, "profile_overrides": {}, "environment_overrides": {}}
         },
         "variant": {
           "artifact_files": {"src/core/service.py": "def run(): pass\n"},
           "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
           "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
-          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
-          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}}
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh", "fallback_routes": [], "profile_overrides": {}},
+          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}, "profile_overrides": {}, "environment_overrides": {}}
         }
       },
       "expect": {
@@ -327,8 +327,8 @@
           "artifact_files": {"src/core/service.py": "def run(): pass\n"},
           "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
           "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
-          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh"},
-          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}}
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh", "fallback_routes": [], "profile_overrides": {}},
+          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}, "profile_overrides": {}, "environment_overrides": {}}
         },
         "cases": [
           {"name": "empty_model_route", "overrides": {"model_route": {}}},
@@ -340,10 +340,10 @@
       },
       "expect": {
         "errors": {
-          "empty_model_route": ["model_route"],
-          "empty_effective_config": ["effective_config"],
-          "empty_dependency": ["dependency(requirements-lock.txt)"],
-          "empty_strategy": ["strategy(knowledge/strategy_cards.json)"],
+          "empty_model_route": ["model_route.model", "model_route.effort", "model_route.fallback_routes", "model_route.profile_overrides"],
+          "empty_effective_config": ["effective_config.settings", "effective_config.profile_overrides", "effective_config.environment_overrides"],
+          "empty_dependency": ["dependency.requirements_lock"],
+          "empty_strategy": ["strategy.strategy_cards"],
           "control_partial_but_present": []
         }
       }
@@ -369,6 +369,64 @@
           "artifact_raw_text": true
         },
         "control_rejected": false
+      }
+    },
+    {
+      "case_id": "K01-P7",
+      "kind": "positive",
+      "title": "ModelRoute 结构化输入被接受",
+      "operation": "k01_model_route",
+      "derivation": "C 审查 P1-3 残余：解析路由需要类型化结构。ModelRoute 明确模型名/推理档/备用路由/profile 覆盖；空备用与空覆盖是合法声明。构造身份成功且模型路由哈希非空。",
+      "inputs": {
+        "base": {
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "runtime_instance_id": "inst-synth-r1",
+          "artifact_files": {"src/core/service.py": "def run(): pass\n"},
+          "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
+          "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
+          "model_route": {"model": "placeholder", "effort": "placeholder", "fallback_routes": [], "profile_overrides": {}},
+          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}, "profile_overrides": {}, "environment_overrides": {}}
+        },
+        "route": {"model": "deepseek-v4.1-flash", "effort": "max", "fallback_routes": [], "profile_overrides": {}}
+      },
+      "expect": {
+        "ok": true,
+        "model_route_hash_present": true,
+        "accepts_empty_fallbacks": true
+      }
+    },
+    {
+      "case_id": "K01-N5",
+      "kind": "negative",
+      "title": "字段级覆盖缺口逐项拒绝",
+      "operation": "k01_build_identity_coverage",
+      "derivation": "C 审查 P1-3 残余：空组曾是合法声明但字段不齐仍可通过。字段级校验要求 model_route 的 model/effort/fallback_routes/profile_overrides 与 effective_config 的 settings/profile_overrides/environment_overrides 全部存在（可为空集合）；缺失逐项报告。",
+      "inputs": {
+        "base": {
+          "environment": "demo",
+          "account_ref": "demo:SYNTH_ACCT",
+          "git_commit": "0123456789abcdef0123456789abcdef01234567",
+          "runtime_instance_id": "inst-synth-r1",
+          "artifact_files": {"src/core/service.py": "def run(): pass\n"},
+          "dependency_lock_files": {"requirements-lock.txt": "pydantic==2.13.5\n"},
+          "strategy_cards": {"cards": [{"strategy_id": "S_SYNTH_1"}]},
+          "model_route": {"model": "deepseek-v4-flash", "effort": "xhigh", "fallback_routes": [], "profile_overrides": {}},
+          "effective_config": {"settings": {"execution": {"default_mode": "demo"}}, "profile_overrides": {}, "environment_overrides": {}}
+        },
+        "cases": [
+          {"name": "model_route_missing_fields", "overrides": {"model_route": {"model": "deepseek-v4-flash"}}},
+          {"name": "effective_config_missing_fields", "overrides": {"effective_config": {"settings": "config/settings.yaml"}}},
+          {"name": "lock_key_missing", "overrides": {"dependency_lock_files": {"requirements.txt": "pydantic>=2"}}}
+        ]
+      },
+      "expect": {
+        "errors": {
+          "model_route_missing_fields": ["model_route.effort", "model_route.fallback_routes", "model_route.profile_overrides"],
+          "effective_config_missing_fields": ["effective_config.profile_overrides", "effective_config.environment_overrides"],
+          "lock_key_missing": ["dependency.requirements_lock"]
+        }
       }
     }
   ]

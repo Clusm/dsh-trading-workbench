@@ -7,6 +7,7 @@ NO_DATA 绝不等于 PASS；缺证据必须列出具体阻断项。
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -57,16 +58,24 @@ class ReleaseGroupEvidence(BaseModel):
     reason_codes: tuple[str, ...] = ()
 
 
+_INT64_LIMIT = 2 ** 63
+
+
 def _as_int(value: Any) -> tuple[int | None, bool]:
-    """宽松解析窗口字段；返回 (值, 是否合法)。非法类型不得让报告崩溃。"""
+    """宽松解析窗口字段；返回 (值, 是否合法)。非法/非有限/超界不得让报告崩溃。"""
     if value is None:
         return None, False
     if isinstance(value, bool) or not isinstance(value, (int, str, float)):
         return None, False
-    try:
-        return int(value), True
-    except (TypeError, ValueError):
+    if isinstance(value, float) and not math.isfinite(value):
         return None, False
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None, False
+    if not -_INT64_LIMIT <= parsed < _INT64_LIMIT:
+        return None, False
+    return parsed, True
 
 
 def evaluate_group(

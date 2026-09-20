@@ -421,6 +421,133 @@
         "transition_error": "TransitionError",
         "state": "SUBMITTED"
       }
+    },
+    {
+      "case_id": "K05-N11",
+      "kind": "negative",
+      "title": "未 ACK 的 Incident 不得直接 RESOLVED",
+      "operation": "k05_incident_recovery",
+      "derivation": "C 审查 N5 / Q NEW-P2-1：OPEN（从未 ACK）曾可直接 RESOLVED，使“ACK 之后新观察”的约束整体消失。resolve_incident 要求 status=ACK，否则 ACK_REQUIRED。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "ack": false,
+        "incident": {
+          "incident_key": "demo|account_snapshot|EVIDENCE_STALE",
+          "first_seen_ms": 1789860000000, "last_seen_ms": 1789860300000,
+          "severity": "WARNING", "status": "OPEN",
+          "recovery_predicate": {"required_evidence": ["fresh_account_snapshot"], "max_age_ms": 90000},
+          "profile": "demo", "object_ref": "account_snapshot"
+        },
+        "evidence": {
+          "fresh_account_snapshot": {"observed_at_ms": 1789862401000, "value": true}
+        }
+      },
+      "expect": {
+        "recovered": true,
+        "resolve_error": "ResolutionNotAllowedError",
+        "resolve_reason_codes": ["ACK_REQUIRED"],
+        "status": "OPEN",
+        "evidence_hash_present": false
+      }
+    },
+    {
+      "case_id": "K05-N12",
+      "kind": "negative",
+      "title": "已 RESOLVED 不得被降级为 ACK",
+      "operation": "k05_ack",
+      "derivation": "Q NEW-P2-3：acknowledge 曾把 RESOLVED 降级为 ACK 并留下矛盾的 resolved_at_ms。仅允许 OPEN→ACK；RESOLVED → TransitionError（ACK 幂等）。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "incident": {
+          "incident_key": "demo|account_snapshot|EVIDENCE_STALE",
+          "first_seen_ms": 1789860000000, "last_seen_ms": 1789860300000,
+          "severity": "WARNING", "status": "RESOLVED",
+          "recovery_predicate": {"required_evidence": ["fresh_account_snapshot"], "max_age_ms": 90000},
+          "profile": "demo", "object_ref": "account_snapshot",
+          "ack_at_ms": 1789862400000, "resolved_at_ms": 1789862400500,
+          "resolution_evidence_hash": "hash-synth"
+        }
+      },
+      "expect": {"error": "TransitionError", "status": "RESOLVED"}
+    },
+    {
+      "case_id": "K05-N13",
+      "kind": "negative",
+      "title": "value 与 satisfied 矛盾时拒绝恢复",
+      "operation": "k05_incident_recovery",
+      "derivation": "Q NEW-P2-5：{\"value\": true, \"satisfied\": false} 曾静默取 value。两字段同时存在且不等是自相矛盾输入 → EVIDENCE_TYPE_INVALID。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "ack": true,
+        "incident": {
+          "incident_key": "demo|account_snapshot|EVIDENCE_STALE",
+          "first_seen_ms": 1789860000000, "last_seen_ms": 1789860300000,
+          "severity": "WARNING", "status": "OPEN",
+          "recovery_predicate": {"required_evidence": ["fresh_account_snapshot"], "max_age_ms": 90000},
+          "profile": "demo", "object_ref": "account_snapshot"
+        },
+        "evidence": {
+          "fresh_account_snapshot": {"observed_at_ms": 1789862401000, "value": true, "satisfied": false}
+        }
+      },
+      "expect": {
+        "recovered": false,
+        "reason_codes": ["EVIDENCE_TYPE_INVALID"],
+        "resolve_error": "ResolutionNotAllowedError",
+        "status": "ACK",
+        "evidence_hash_present": false
+      }
+    },
+    {
+      "case_id": "K05-N14",
+      "kind": "negative",
+      "title": "循环引用证据不得崩溃",
+      "operation": "k05_incident_recovery",
+      "derivation": "Q NEW-P2-2：谓词内条目合法、额外键自引用时 canonical_hash 曾抛裸 ValueError。证据不可序列化 → 结构化 ResolutionNotAllowedError(EVIDENCE_NOT_SERIALISABLE)。",
+      "inputs": {
+        "now_ms": 1789862401000,
+        "ack": true,
+        "circular_evidence": true,
+        "incident": {
+          "incident_key": "demo|account_snapshot|EVIDENCE_STALE",
+          "first_seen_ms": 1789860000000, "last_seen_ms": 1789860300000,
+          "severity": "WARNING", "status": "OPEN",
+          "recovery_predicate": {"required_evidence": ["fresh_account_snapshot"], "max_age_ms": 90000},
+          "profile": "demo", "object_ref": "account_snapshot"
+        }
+      },
+      "expect": {
+        "recovered": true,
+        "resolve_error": "ResolutionNotAllowedError",
+        "resolve_reason_codes": ["EVIDENCE_NOT_SERIALISABLE"],
+        "status": "ACK",
+        "evidence_hash_present": false
+      }
+    },
+    {
+      "case_id": "K05-N15",
+      "kind": "negative",
+      "title": "缺 SUBMITTED 事实不得直达 DELIVERED",
+      "operation": "k05_delivery",
+      "derivation": "Q NEW-P2-4：有回执与送达时间但无 submitted_at 时曾 UNKNOWN→DELIVERED 且无违规码。阶梯不允许跳过 SUBMITTED：delivery_violations 报 SUBMITTED_WITHOUT_TIMESTAMP，transition 抛 TransitionError。",
+      "inputs": {
+        "delivery": {
+          "incident_key": "demo|account_snapshot|EVIDENCE_STALE",
+          "attempt": 1, "receiver_ref": "ops-fake-sink",
+          "provider_receipt": "receipt-synth-3",
+          "submitted_at_ms": null,
+          "delivered_at_ms": 1789860320000,
+          "ack_at_ms": null,
+          "state": "DELIVERED"
+        },
+        "transition": "DELIVERED"
+      },
+      "expect": {
+        "derived_state": "DELIVERED",
+        "violations": ["SUBMITTED_WITHOUT_TIMESTAMP"],
+        "transition_error": "TransitionError",
+        "state": "DELIVERED"
+      }
     }
   ]
 }

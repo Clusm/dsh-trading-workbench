@@ -23,16 +23,11 @@
           "default": true,
           "title": "Reconcile Allowed",
           "type": "boolean"
-        },
-        "submit_allowed": {
-          "title": "Submit Allowed",
-          "type": "boolean"
         }
       },
       "required": [
         "authorization_id",
-        "allowed",
-        "submit_allowed"
+        "allowed"
       ],
       "title": "AuthorizationVerdict",
       "type": "object"
@@ -145,6 +140,18 @@
           ],
           "title": "Action",
           "type": "string"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Environment"
         },
         "evidence_id": {
           "minLength": 1,
