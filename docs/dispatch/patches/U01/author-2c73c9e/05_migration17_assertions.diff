@@ -1,0 +1,168 @@
+diff --git a/scripts/smoke_account_mirror.py b/scripts/smoke_account_mirror.py
+index 1ba4702..8d130e0 100644
+--- a/scripts/smoke_account_mirror.py
++++ b/scripts/smoke_account_mirror.py
+@@ -100,6 +100,6 @@ check("镜像状态保持shadow_only", restarted.status()["shadow_only"] is True
+ 
+ versions = [r["version"] for r in db.fetch_all(
+     "SELECT version FROM schema_migrations ORDER BY version")]
+-check("数据库迁移版本1到16完整", versions == list(range(1, 17)))
++check("数据库迁移版本1到17完整", versions == list(range(1, 18)))
+ db.close()
+ print("\n结果: 14 通过 / 0 失败")
+diff --git a/scripts/smoke_db_migrations.py b/scripts/smoke_db_migrations.py
+index 7c33ed6..b3dd294 100644
+--- a/scripts/smoke_db_migrations.py
++++ b/scripts/smoke_db_migrations.py
+@@ -34,7 +34,7 @@ columns = {row["name"] for row in db.fetch_all("PRAGMA table_info(orders)")}
+ versions = db.fetch_all("SELECT version, name FROM schema_migrations ORDER BY version")
+ check("补齐order_source列", "order_source" in columns)
+ check("补齐margin_mode列", "margin_mode" in columns)
+-check("记录迁移版本1到16", [row["version"] for row in versions] == list(range(1, 17)))
++check("记录迁移版本1到17", [row["version"] for row in versions] == list(range(1, 18)))
+ check("新增成交/生命周期/补账表", all(
+     db.fetch_one("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+     is not None
+@@ -75,7 +75,7 @@ db.close()
+ print("\n[2] 重启后迁移不重复")
+ again = AuditDatabase(db_path)
+ versions_again = again.fetch_all("SELECT version FROM schema_migrations")
+-check("版本记录保持唯一", [row["version"] for row in versions_again] == list(range(1, 17)))
++check("版本记录保持唯一", [row["version"] for row in versions_again] == list(range(1, 18)))
+ check("旧B组名称已归一", again.fetch_one(
+     "SELECT source FROM shadow_decisions WHERE decision_id='legacy-b'")["source"] == "B_contract_market")
+ again.close()
+diff --git a/scripts/smoke_exchange_event_inbox.py b/scripts/smoke_exchange_event_inbox.py
+index 1274f64..b31759c 100644
+--- a/scripts/smoke_exchange_event_inbox.py
++++ b/scripts/smoke_exchange_event_inbox.py
+@@ -58,7 +58,7 @@ inbox.mark(event.event_key, "APPLIED")
+ applied = db.fetch_one("SELECT status, processed_at FROM exchange_events WHERE event_key=?", (event.event_key,))
+ check("事件可标记已应用", applied["status"] == "APPLIED" and bool(applied["processed_at"]))
+ versions = [row["version"] for row in db.fetch_all("SELECT version FROM schema_migrations ORDER BY version")]
+-check("数据库已记录迁移1到16", versions == list(range(1, 17)))
++check("数据库已记录迁移1到17", versions == list(range(1, 18)))
+ 
+ db.close()
+ print("\n结果: 10 通过 / 0 失败")
+diff --git a/scripts/smoke_exchange_safety_monitor.py b/scripts/smoke_exchange_safety_monitor.py
+index 885ef3b..1d968fa 100644
+--- a/scripts/smoke_exchange_safety_monitor.py
++++ b/scripts/smoke_exchange_safety_monitor.py
+@@ -92,6 +92,6 @@ check("状态接口保持只观察", restarted.status()["observe_only"] is True)
+ 
+ versions = [r["version"] for r in db.fetch_all(
+     "SELECT version FROM schema_migrations ORDER BY version")]
+-check("数据库迁移版本1到16完整", versions == list(range(1, 17)))
++check("数据库迁移版本1到17完整", versions == list(range(1, 18)))
+ db.close()
+ print("\n结果: 13 通过 / 0 失败")
+diff --git a/scripts/smoke_fault_matrix.py b/scripts/smoke_fault_matrix.py
+index 7e5613a..086e56f 100644
+--- a/scripts/smoke_fault_matrix.py
++++ b/scripts/smoke_fault_matrix.py
+@@ -556,7 +556,7 @@ client_module.httpx.Client = old_http
+ 
+ # ---------------------------------------------------------------------------
+ # 场景 10：恢复旧代码配新 schema
+-# 注入点：用恢复包模拟「旧代码(期望schema=16) 配 新schema(=17)」。期望：明确拒绝
++# 注入点：用恢复包模拟「旧代码(期望schema=17) 配 新schema(=18)」。期望：明确拒绝
+ # 不兼容启动（fail-closed），而非吞异常默认 paper。
+ # ---------------------------------------------------------------------------
+ print("\n[场景10] 恢复旧代码配新schema")
+@@ -564,13 +564,13 @@ proj10 = WORK / "proj10"
+ data10 = proj10 / "data"
+ (proj10 / "config").mkdir(parents=True)
+ data10.mkdir()
+-db10 = AuditDatabase(data10 / "agent_trader.sqlite")  # 当前代码：迁移到 16
++db10 = AuditDatabase(data10 / "agent_trader.sqlite")  # 当前代码：迁移到 17
+ # 模拟「新代码产生的更高 schema 版本」
+ db10.conn.execute(
+     "INSERT INTO schema_migrations(version,name,applied_at) "
+-    "VALUES(17,'future_column','2026-09-16T00:00:00+00:00')")
++    "VALUES(18,'future_column','2026-09-16T00:00:00+00:00')")
+ db10.conn.commit()
+-check("新schema版本被数据库记录", db10.current_schema_version() == 17)
++check("新schema版本被数据库记录", db10.current_schema_version() == 18)
+ db10.close()
+ (proj10 / "config" / "risk_profile.lock.json").write_text("{}", encoding="utf-8")
+ for name, payload in {
+@@ -586,18 +586,18 @@ for name, payload in {
+ 
+ bundle10 = create_recovery_bundle(proj10, WORK / "bundles10")
+ manifest10 = __import__("json").loads((bundle10 / "manifest.json").read_text(encoding="utf-8"))
+-check("恢复包含数据库且记录schema=17", manifest10["files"]["database"]["schema_version"] == 17)
++check("恢复包含数据库且记录schema=18", manifest10["files"]["database"]["schema_version"] == 18)
+ # 正控：旧代码环境（demo）且 manifest 与 DB 一致时可验证通过
+ ok_verify = verify_recovery_bundle(bundle10, expected_environment="demo")
+-check("同版本恢复包通过校验", ok_verify["database_schema"] == 17)
+-
+-# 负向：恢复包被旧代码读取，旧代码只认识 schema=16（manifest 被改写为 16），
+-# 而 DB 实际是 17 —— 必须 fail-closed 拒绝，而非默认 paper。
+-manifest16 = dict(manifest10)
+-manifest16["files"] = dict(manifest10["files"])
+-manifest16["files"]["database"] = dict(manifest10["files"]["database"])
+-manifest16["files"]["database"]["schema_version"] = 16  # 模拟旧代码期望
+-(bundle10 / "manifest.json").write_text(__import__("json").dumps(manifest16), encoding="utf-8")
++check("同版本恢复包通过校验", ok_verify["database_schema"] == 18)
++
++# 负向：恢复包被旧代码读取，旧代码只认识 schema=17（manifest 被改写为 17），
++# 而 DB 实际是 18 —— 必须 fail-closed 拒绝，而非默认 paper。
++manifest_legacy = dict(manifest10)
++manifest_legacy["files"] = dict(manifest10["files"])
++manifest_legacy["files"]["database"] = dict(manifest10["files"]["database"])
++manifest_legacy["files"]["database"]["schema_version"] = 17  # 模拟旧代码期望
++(bundle10 / "manifest.json").write_text(__import__("json").dumps(manifest_legacy), encoding="utf-8")
+ mismatch_rejected = False
+ try:
+     verify_recovery_bundle(bundle10, expected_environment="demo")
+diff --git a/scripts/smoke_order_mirror.py b/scripts/smoke_order_mirror.py
+index 62c5972..ecd80c9 100644
+--- a/scripts/smoke_order_mirror.py
++++ b/scripts/smoke_order_mirror.py
+@@ -185,6 +185,6 @@ recovery_db.close()
+ 
+ versions = [r["version"] for r in db.fetch_all(
+     "SELECT version FROM schema_migrations ORDER BY version")]
+-check("数据库迁移版本1到16完整", versions == list(range(1, 17)))
++check("数据库迁移版本1到17完整", versions == list(range(1, 18)))
+ db.close()
+ print("\n结果: 26 通过 / 0 失败")
+diff --git a/scripts/smoke_order_outbox.py b/scripts/smoke_order_outbox.py
+index 733c3ea..c74d641 100644
+--- a/scripts/smoke_order_outbox.py
++++ b/scripts/smoke_order_outbox.py
+@@ -209,6 +209,6 @@ status = outbox.status()
+ check("健康状态暴露UNKNOWN数量", status["unknown_orders"] == 0)
+ versions = [r["version"] for r in db.fetch_all(
+     "SELECT version FROM schema_migrations ORDER BY version")]
+-check("数据库迁移版本1到16完整", versions == list(range(1, 17)))
++check("数据库迁移版本1到17完整", versions == list(range(1, 18)))
+ db.close()
+ print(f"\n结果: {passed} 通过 / 0 失败")
+diff --git a/scripts/smoke_protection_mirror.py b/scripts/smoke_protection_mirror.py
+index 59da16c..4131006 100644
+--- a/scripts/smoke_protection_mirror.py
++++ b/scripts/smoke_protection_mirror.py
+@@ -116,7 +116,7 @@ check("Hedge closePosition保护无需quantity/reduceOnly也算完整覆盖",
+       hedge_result["ok"] is True)
+ versions = [r["version"] for r in db.fetch_all(
+     "SELECT version FROM schema_migrations ORDER BY version")]
+-check("数据库迁移版本1到16完整", versions == list(range(1, 17)))
++check("数据库迁移版本1到17完整", versions == list(range(1, 18)))
+ db.close()
+ 
+ print("\n[4] 仓位归零后自动收口残留Algo保护单")
+diff --git a/scripts/smoke_release_acceptance.py b/scripts/smoke_release_acceptance.py
+index 7335468..0bd2395 100644
+--- a/scripts/smoke_release_acceptance.py
++++ b/scripts/smoke_release_acceptance.py
+@@ -109,7 +109,7 @@ def build_fixture() -> tuple[Path, dict[str, object], datetime, datetime]:
+     db.close()
+     manifest = {
+         "manifest_schema": 1, "release_id": "rel-fixture", "environment": "demo",
+-        "account_ref": "demo:test-account", "schema_version": 16,
++        "account_ref": "demo:test-account", "schema_version": 17,
+         "content_hash": "fixture", "dependency_hash": "fixture",
+     }
+     return db_path, manifest, start, end

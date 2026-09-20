@@ -95,39 +95,114 @@ def _build_trade_stats(db: AuditDatabase, start: str, end: str) -> dict:
     }
 
 
+#: 只有这些事件才算「原论点被证伪」；invalidation 文本只是**预设条件**，
+#: 它的存在本身不构成证伪（RV02：失效需触发事件）。
+INVALIDATION_TRIGGER_EVENTS = ("guardian_invalidation",)
+INVALIDATION_TRIGGER_REASON = "THESIS_INVALIDATED"
+
+
+def inspect_invalidation_triggers(db: AuditDatabase, start: str, end: str) -> list[dict]:
+    """读取区间内真实发生过的原点证伪事件（Guardian 收盘确认），供归因匹配。"""
+    placeholders = ",".join("?" for _ in INVALIDATION_TRIGGER_EVENTS)
+    rows = _q(
+        db,
+        f"""SELECT created_at, event_type, raw_json FROM risk_events
+            WHERE event_type IN ({placeholders}) AND created_at >= ? AND created_at <= ?
+            ORDER BY created_at ASC""",
+        tuple(INVALIDATION_TRIGGER_EVENTS) + (start, end),
+    )
+    triggers: list[dict] = []
+    for r in rows:
+        payload = _parse_raw(r["raw_json"])
+        reason = str(payload.get("reason_code") or "")
+        state = str(payload.get("state") or "")
+        if reason and reason != INVALIDATION_TRIGGER_REASON:
+            continue
+        if not reason and state != "INVALIDATED":
+            continue
+        triggers.append({
+            "symbol": str(payload.get("symbol") or "").upper(),
+            "at": str(r["created_at"]),
+        })
+    return triggers
+
+
+def invalidation_triggered(triggers: list[dict], *, symbol: str,
+                           opened_at: str | None, closed_at: str) -> bool:
+    """是否存在落在此仓位生命周期内的证伪触发事件。"""
+    symbol = str(symbol or "").upper()
+    for item in triggers:
+        # 触发事件缺 symbol 时**不得**回退成「匹配所有仓位」（P3-3 fail-open）：
+        # 无法归因到具体标的的证伪事件一律不匹配，宁可少算不可串算。
+        if not item["symbol"] or item["symbol"] != symbol:
+            continue
+        if opened_at and item["at"] < opened_at:
+            continue
+        if closed_at and item["at"] > closed_at:
+            continue
+        return True
+    return False
+
+
 def _build_outcome_stats(db: AuditDatabase, start: str, end: str) -> dict:
-    """平仓归因：从 trade_outcomes 看盈亏 + thesis 证伪情况。"""
+    """平仓归因：从 trade_outcomes 看盈亏 + thesis 证伪情况。
+
+    * ``pnl IS NULL`` 的平仓结果盈亏未知：**既不算赢也不算输**，也不进入胜率分母
+      （RV01：NULL 不计赢）。
+    * ``invalidated_losses`` 只统计存在真实证伪触发事件的亏损单；仅有 invalidation
+      文本（预设证伪条件）不算证伪（RV02）。
+    """
     rows = _q(
         db,
         """SELECT symbol, side, source, pnl, pnl_pct, invalidation, exit_reason,
-                  holding_minutes, expected_holding_minutes
+                  holding_minutes, expected_holding_minutes,
+                  opened_at, closed_at
            FROM trade_outcomes WHERE closed_at >= ? AND closed_at <= ?""",
         (start, end),
     )
+    outcome_symbols = {str(r["symbol"] or "").upper() for r in rows}
+    triggers = inspect_invalidation_triggers(db, start, end)
+    triggers = [t for t in triggers if not t["symbol"] or t["symbol"] in outcome_symbols]
+
     wins = losses = 0
+    unknown_pnl = 0
     total = 0.0
     invalidated_losses = 0
+    invalidation_text_only = 0
     over_hold_losses = 0
     for r in rows:
-        pnl = float(r["pnl"] or 0.0)
+        if r["pnl"] is None:
+            unknown_pnl += 1
+            continue
+        pnl = float(r["pnl"])
         total += pnl
         if pnl >= 0:
             wins += 1
-        else:
-            losses += 1
-            if r["invalidation"]:
-                invalidated_losses += 1
-            hm = r["holding_minutes"]
-            em = r["expected_holding_minutes"]
-            if hm is not None and em is not None and hm > em * 2:
-                over_hold_losses += 1
+            continue
+        losses += 1
+        triggered = invalidation_triggered(
+            triggers, symbol=r["symbol"], opened_at=r["opened_at"],
+            closed_at=str(r["closed_at"] or ""),
+        )
+        if triggered:
+            invalidated_losses += 1
+        elif r["invalidation"]:
+            invalidation_text_only += 1
+        hm = r["holding_minutes"]
+        em = r["expected_holding_minutes"]
+        if hm is not None and em is not None and hm > em * 2:
+            over_hold_losses += 1
+    decided = wins + losses
     return {
         "n": len(rows),
+        "decided": decided,
         "wins": wins,
         "losses": losses,
+        "unknown_pnl": unknown_pnl,
         "total": total,
-        "win_rate": (wins / len(rows)) if rows else None,
+        "win_rate": (wins / decided) if decided else None,
         "invalidated_losses": invalidated_losses,
+        "invalidation_text_only": invalidation_text_only,
         "over_hold_losses": over_hold_losses,
     }
 
@@ -222,13 +297,26 @@ def run_review_agent(db: AuditDatabase, reviews_dir: Path,
 
     lines += ["", "## 平仓归因（Outcome）"]
     if outcome["n"] > 0:
-        wr = outcome["win_rate"]
-        lines.append(
-            f"- 平仓 {outcome['n']} 笔：盈利 {outcome['wins']} / 亏损 {outcome['losses']}"
-            f"，胜率 {wr:.0%}，净盈亏 {outcome['total']:+.2f} U"
-        )
+        if outcome["decided"]:
+            lines.append(
+                f"- 平仓 {outcome['n']} 笔（可判盈亏 {outcome['decided']} 笔）："
+                f"盈利 {outcome['wins']} / 亏损 {outcome['losses']}"
+                f"，胜率 {outcome['win_rate']:.0%}，净盈亏 {outcome['total']:+.2f} U"
+            )
+        else:
+            lines.append(
+                f"- 平仓 {outcome['n']} 笔，但全部盈亏未知（pnl 为 NULL），不给出胜率。"
+            )
+        if outcome["unknown_pnl"]:
+            lines.append(f"- 盈亏未知（pnl 为 NULL，不计入胜率）：{outcome['unknown_pnl']} 笔")
         lines.append(f"- thesis 被证伪的亏损单：{outcome['invalidated_losses']} 笔"
-                     f"（这类单是『行情判错』而不是『没按计划执行』）")
+                     f"（这类单是『行情判错』而不是『没按计划执行』；"
+                     f"以真实证伪触发事件为准）")
+        if outcome["invalidation_text_only"]:
+            lines.append(
+                f"- 仅写了证伪条件、但没有证伪触发事件的亏损单："
+                f"{outcome['invalidation_text_only']} 笔（不计入「行情判错」）"
+            )
         if outcome["over_hold_losses"]:
             lines.append(f"- 持有时间超过预期 2 倍以上的亏损单：{outcome['over_hold_losses']} 笔"
                          f"（该止损不止损，是『扛单』信号）")

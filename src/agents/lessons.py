@@ -28,8 +28,9 @@ def _lesson_text(item: dict[str, Any]) -> str:
     return "；".join(lessons)
 
 
-def build_review_library(db: AuditDatabase, limit: int = 8, min_loss: float = 0.30) -> dict[str, Any]:
-    """扫描最近亏损平仓订单，生成复盘库文件并返回内容。"""
+def scan_review_cases(db: AuditDatabase, limit: int = 8,
+                      min_loss: float = 0.30) -> dict[str, Any]:
+    """纯扫描：只读数据库，**不写任何文件**（RV：query_review_library 无写入副作用）。"""
     rows = db.fetch_all("SELECT * FROM orders WHERE status='FILLED' ORDER BY id ASC")
     orders: list[dict[str, Any]] = []
     for r in rows:
@@ -103,20 +104,38 @@ def build_review_library(db: AuditDatabase, limit: int = 8, min_loss: float = 0.
     # 最近优先
     cases.sort(key=lambda x: x["ts"], reverse=True)
     cases = cases[:limit]
+    return {"count": len(cases), "cases": cases}
+
+
+def build_review_library(db: AuditDatabase, limit: int = 8,
+                         min_loss: float = 0.30) -> dict[str, Any]:
+    """扫描最近亏损平仓订单，生成复盘库**文件**并返回内容（唯一的写入路径）。"""
+    scanned = scan_review_cases(db, limit=limit, min_loss=min_loss)
+    cases = scanned["cases"]
+    updated_at = time.time()
     LESSONS_FILE.parent.mkdir(parents=True, exist_ok=True)
     LESSONS_FILE.write_text(json.dumps({
-        "updated_at": time.time(),
+        "updated_at": updated_at,
         "count": len(cases),
         "cases": cases,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     return {
         "count": len(cases),
-        "updated_at": time.time(),
+        "updated_at": updated_at,
         "cases": cases,
         "library_file": str(LESSONS_FILE),
     }
 
 
-def query_review_library(db: AuditDatabase, limit: int = 8, min_loss: float = 0.30) -> dict[str, Any]:
-    """工具入口：Agent 按需调用。"""
-    return build_review_library(db, limit=limit, min_loss=min_loss)
+def query_review_library(db: AuditDatabase, limit: int = 8,
+                         min_loss: float = 0.30) -> dict[str, Any]:
+    """工具入口：Agent 按需调用。**纯只读**——不写文件、不改数据库。
+
+    返回值与 :func:`build_review_library` 相同（除 ``library_file``）。
+    """
+    scanned = scan_review_cases(db, limit=limit, min_loss=min_loss)
+    return {
+        "count": scanned["count"],
+        "cases": scanned["cases"],
+        "read_only": True,
+    }
