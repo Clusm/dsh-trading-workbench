@@ -1,5 +1,28 @@
 {
   "$defs": {
+    "BundleVerdict": {
+      "additionalProperties": false,
+      "description": "证据包完整性结论；content_hash 与事实溯源的可校验入口。",
+      "properties": {
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "valid": {
+          "title": "Valid",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "valid"
+      ],
+      "title": "BundleVerdict",
+      "type": "object"
+    },
     "ClaimResult": {
       "additionalProperties": false,
       "properties": {
@@ -432,7 +455,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": "3.0",
+          "default": "3.1",
           "title": "Schema Version",
           "type": "string"
         },
@@ -462,6 +485,9 @@
     "bundle": {
       "$ref": "#/$defs/EvidenceBundle"
     },
+    "bundle_verdict": {
+      "$ref": "#/$defs/BundleVerdict"
+    },
     "claim_result": {
       "$ref": "#/$defs/ClaimResult"
     },
@@ -475,6 +501,7 @@
   "required": [
     "bundle",
     "verdict",
+    "bundle_verdict",
     "claim_result",
     "execution_quote"
   ],

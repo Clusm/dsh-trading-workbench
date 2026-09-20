@@ -1,8 +1,9 @@
 """K05 决策轨迹、事件与告警投递契约。
 
-计数器把总轮次、API 尝试与决策分别计数，未知 purpose 显式报错而不是
-静默混算。Incident 的 ACK 只是确认看到，RESOLVED 必须携带恢复证据。
-告警状态阶梯把 HTTP 成功、供应商接收、设备送达与人确认分开记录。
+计数器把总轮次、API 尝试与决策分别计数并按 cycle 去重；span 不合法直接
+拒绝。Incident 的 ACK 只是确认看到，RESOLVED 必须由 ACK 之后新观察到的、
+带时间戳且类型明确的证据满足。告警状态阶梯把 HTTP 成功、供应商接收、
+设备送达与人确认分开记录，缺前置事实的跃迁直接拒绝。
 """
 from __future__ import annotations
 
@@ -17,6 +18,9 @@ from .common import SCHEMA_VERSION, canonical_hash
 REASON_EVIDENCE_MISSING = "EVIDENCE_MISSING"
 REASON_EVIDENCE_STALE = "EVIDENCE_STALE"
 REASON_EVIDENCE_FROM_FUTURE = "EVIDENCE_FROM_FUTURE"
+REASON_EVIDENCE_TIMESTAMP_MISSING = "EVIDENCE_TIMESTAMP_MISSING"
+REASON_EVIDENCE_TYPE_INVALID = "EVIDENCE_TYPE_INVALID"
+REASON_EVIDENCE_PREDATES_ACK = "EVIDENCE_PREDATES_ACK"
 REASON_RECOVERY_FALSE = "RECOVERY_PREDICATE_FALSE"
 
 VIOLATION_STATE_MISMATCH = "STATE_MISMATCH"
@@ -31,6 +35,14 @@ ALERT_STATE_ORDER = ("UNKNOWN", "SUBMITTED", "ACCEPTED", "DELIVERED", "ACKNOWLED
 
 class UnclassifiedPurposeError(ValueError):
     """purpose 不在计数映射内；禁止猜测归类。"""
+
+
+class SpanValidationError(ValueError):
+    """span 时间/期限自相矛盾；tally 拒绝计数。"""
+
+    def __init__(self, reason_codes: Sequence[str]) -> None:
+        self.reason_codes = tuple(reason_codes)
+        super().__init__("invalid span: " + ", ".join(self.reason_codes))
 
 
 class TransitionError(ValueError):
@@ -131,13 +143,28 @@ def increment(
 
 
 def tally(spans: Sequence[DecisionTraceSpan]) -> DecisionCounters:
-    counters = DecisionCounters()
+    """按 span 计数：违规 span 拒绝，轮次按 cycle_id 去重，API/决策不混。"""
+    seen_cycles: set[str] = set()
+    api_attempts = 0
+    decisions = 0
     for span in spans:
+        violations = span_violations(span)
+        if violations:
+            raise SpanValidationError(violations)
         kind = purpose_kind(span.purpose)
         if kind is None:
             continue
-        counters = increment(counters, kind)
-    return counters
+        if kind == CounterKind.CYCLE:
+            seen_cycles.add(span.cycle_id)
+        elif kind == CounterKind.API_ATTEMPT:
+            api_attempts += 1
+        else:
+            decisions += 1
+    return DecisionCounters(
+        cycles_total=len(seen_cycles),
+        api_attempts_total=api_attempts,
+        decisions_total=decisions,
+    )
 
 
 class RecoveryPredicate(BaseModel):
@@ -178,34 +205,47 @@ class RecoveryCheck(BaseModel):
     reason_codes: tuple[str, ...] = ()
 
 
-def _evidence_entry(entry: Any) -> tuple[int | None, bool]:
-    if isinstance(entry, Mapping):
-        observed = entry.get("observed_at_ms")
-        value = entry.get("value", entry.get("satisfied", True))
-        return (int(observed) if observed is not None else None), bool(value)
-    return None, bool(entry)
-
-
 def check_recovery(
     incident: Incident,
     recovery_evidence: Mapping[str, Any] | None,
     *,
     now_ms: int,
 ) -> RecoveryCheck:
-    """逐项核验恢复谓词；缺失、陈旧、来自未来或为假都不得恢复。"""
+    """逐项核验恢复谓词；无时间戳、类型混淆、陈旧或为假都不得恢复。
+
+    证据必须是显式 Mapping：``{"observed_at_ms": <int>, "value": <bool>}``
+    （或 ``satisfied``）。裸布尔、字符串真值（``"false"``/``"0"``）与
+    缺少时间戳的字典一律拒绝。
+    """
     reasons: list[str] = []
     evidence = dict(recovery_evidence or {})
+    ack_at = incident.ack_at_ms if incident.status == "ACK" else None
     for key in incident.recovery_predicate.required_evidence:
         if key not in evidence:
             reasons.append(REASON_EVIDENCE_MISSING)
             continue
-        observed, satisfied = _evidence_entry(evidence[key])
-        if observed is not None:
-            if observed > now_ms:
-                reasons.append(REASON_EVIDENCE_FROM_FUTURE)
-            elif now_ms - observed > incident.recovery_predicate.max_age_ms:
-                reasons.append(REASON_EVIDENCE_STALE)
-        if not satisfied:
+        entry = evidence[key]
+        if not isinstance(entry, Mapping):
+            reasons.append(REASON_EVIDENCE_TYPE_INVALID)
+            continue
+        observed = entry.get("observed_at_ms")
+        if observed is None:
+            reasons.append(REASON_EVIDENCE_TIMESTAMP_MISSING)
+            continue
+        if not isinstance(observed, int) or isinstance(observed, bool):
+            reasons.append(REASON_EVIDENCE_TYPE_INVALID)
+            continue
+        raw_value = entry.get("value", entry.get("satisfied"))
+        if not isinstance(raw_value, bool):
+            reasons.append(REASON_EVIDENCE_TYPE_INVALID)
+            continue
+        if observed > now_ms:
+            reasons.append(REASON_EVIDENCE_FROM_FUTURE)
+        elif now_ms - observed > incident.recovery_predicate.max_age_ms:
+            reasons.append(REASON_EVIDENCE_STALE)
+        if ack_at is not None and observed < ack_at:
+            reasons.append(REASON_EVIDENCE_PREDATES_ACK)
+        if not raw_value:
             reasons.append(REASON_RECOVERY_FALSE)
     unique = list(dict.fromkeys(reasons))
     return RecoveryCheck(recovered=not unique, reason_codes=tuple(unique))
@@ -303,22 +343,28 @@ def transition_state(
     *,
     now_ms: int,
 ) -> AlertDelivery:
-    """按阶梯提升状态；不允许伪造未发生的事实。"""
+    """按阶梯提升状态；前置事实缺失时直接拒绝，不允许“先提升后补证”。"""
     if target not in ALERT_STATE_ORDER:
         raise TransitionError(f"unknown alert state: {target}")
     current = ALERT_STATE_ORDER.index(delivery.state)
     target_index = ALERT_STATE_ORDER.index(target)
-    if target_index < current and target != "ACKNOWLEDGED":
+    if target_index < current:
         raise TransitionError(f"cannot move backward: {delivery.state} -> {target}")
     updates: dict[str, Any] = {"state": target}
     if target == "SUBMITTED" and delivery.submitted_at_ms is None:
         updates["submitted_at_ms"] = now_ms
     if target == "ACCEPTED" and not delivery.provider_receipt:
         raise TransitionError("ACCEPTED requires provider_receipt")
+    if target == "DELIVERED" and not delivery.provider_receipt:
+        raise TransitionError("DELIVERED requires provider_receipt")
     if target == "DELIVERED" and delivery.delivered_at_ms is None:
         raise TransitionError("DELIVERED requires delivered_at_ms")
-    if target == "ACKNOWLEDGED" and delivery.ack_at_ms is None:
-        updates["ack_at_ms"] = now_ms
+    if target == "ACKNOWLEDGED":
+        submitted = updates.get("submitted_at_ms", delivery.submitted_at_ms)
+        if submitted is None:
+            raise TransitionError("ACKNOWLEDGED requires prior SUBMITTED fact")
+        if delivery.ack_at_ms is None:
+            updates["ack_at_ms"] = now_ms
     return delivery.model_copy(update=updates)
 
 

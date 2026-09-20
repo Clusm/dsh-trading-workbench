@@ -57,13 +57,29 @@ class ReleaseGroupEvidence(BaseModel):
     reason_codes: tuple[str, ...] = ()
 
 
+def _as_int(value: Any) -> tuple[int | None, bool]:
+    """宽松解析窗口字段；返回 (值, 是否合法)。非法类型不得让报告崩溃。"""
+    if value is None:
+        return None, False
+    if isinstance(value, bool) or not isinstance(value, (int, str, float)):
+        return None, False
+    try:
+        return int(value), True
+    except (TypeError, ValueError):
+        return None, False
+
+
 def evaluate_group(
     group: str,
     evidence: Mapping[str, Any] | None,
     *,
     identity_ref: str | None = None,
 ) -> tuple[ReleaseGroupEvidence, tuple[BlockingItem, ...]]:
-    """评估单组；PASS 必须同时具备证据 hash、有效窗口与身份引用。"""
+    """评估单组；PASS 必须同时具备证据 hash、有效窗口与身份引用。
+
+    畸形窗口字段（如字符串 ``"not-a-number"``）转为 FAIL + ``WINDOW_INVALID``
+    阻断项，而不是让整份报告构建抛异常。
+    """
     if group not in RELEASE_GROUPS:
         raise ValueError(f"unknown release group: {group}")
     if evidence is None:
@@ -76,16 +92,18 @@ def evaluate_group(
             ),),
         )
     payload = dict(evidence)
-    declared = str(payload.get("status") or "NO_DATA").upper()
+    declared = str(payload.get("status") or "NO_DATA").strip().upper()
     evidence_hash = payload.get("evidence_hash")
-    window_start = payload.get("window_start_ms")
-    window_end = payload.get("window_end_ms")
+    window_start_raw = payload.get("window_start_ms")
+    window_end_raw = payload.get("window_end_ms")
+    window_start, start_ok = _as_int(window_start_raw)
+    window_end, end_ok = _as_int(window_end_raw)
     group_identity = payload.get("identity_ref")
     if declared == "PASS":
         missing: list[str] = []
         if not evidence_hash:
             missing.append(CODE_EVIDENCE_HASH_MISSING)
-        if window_start is None or window_end is None:
+        if window_start_raw is None or window_end_raw is None:
             missing.append(CODE_WINDOW_MISSING)
         if not group_identity:
             missing.append(CODE_IDENTITY_REF_MISSING)
@@ -104,15 +122,15 @@ def evaluate_group(
                     group=group,
                     status="FAIL",
                     evidence_hash=str(evidence_hash) if evidence_hash else None,
-                    window_start_ms=int(window_start) if window_start is not None else None,
-                    window_end_ms=int(window_end) if window_end is not None else None,
+                    window_start_ms=window_start,
+                    window_end_ms=window_end,
                     identity_ref=str(group_identity) if group_identity else None,
                     reason_codes=tuple([CODE_PASS_WITHOUT_EVIDENCE, *missing]),
                 ),
                 tuple(blockers),
             )
         reasons: list[str] = []
-        if int(window_end) <= int(window_start):
+        if not start_ok or not end_ok or window_end <= window_start:
             reasons.append(CODE_WINDOW_INVALID)
         if identity_ref and str(group_identity) != identity_ref:
             reasons.append(CODE_IDENTITY_MISMATCH)
@@ -126,8 +144,8 @@ def evaluate_group(
                     group=group,
                     status="FAIL",
                     evidence_hash=str(evidence_hash),
-                    window_start_ms=int(window_start),
-                    window_end_ms=int(window_end),
+                    window_start_ms=window_start,
+                    window_end_ms=window_end,
                     identity_ref=str(group_identity),
                     reason_codes=tuple(reasons),
                 ),
@@ -138,8 +156,8 @@ def evaluate_group(
                 group=group,
                 status="PASS",
                 evidence_hash=str(evidence_hash),
-                window_start_ms=int(window_start),
-                window_end_ms=int(window_end),
+                window_start_ms=window_start,
+                window_end_ms=window_end,
                 identity_ref=str(group_identity),
             ),
             (),
@@ -150,8 +168,8 @@ def evaluate_group(
                 group=group,
                 status="FAIL",
                 evidence_hash=str(evidence_hash) if evidence_hash else None,
-                window_start_ms=int(window_start) if window_start is not None else None,
-                window_end_ms=int(window_end) if window_end is not None else None,
+                window_start_ms=window_start,
+                window_end_ms=window_end,
                 identity_ref=str(group_identity) if group_identity else None,
                 reason_codes=(CODE_GROUP_FAILED,),
             ),
@@ -167,8 +185,8 @@ def evaluate_group(
                 group=group,
                 status="NO_DATA",
                 evidence_hash=str(evidence_hash) if evidence_hash else None,
-                window_start_ms=int(window_start) if window_start is not None else None,
-                window_end_ms=int(window_end) if window_end is not None else None,
+                window_start_ms=window_start,
+                window_end_ms=window_end,
                 identity_ref=str(group_identity) if group_identity else None,
                 reason_codes=(CODE_GROUP_NO_DATA,),
             ),

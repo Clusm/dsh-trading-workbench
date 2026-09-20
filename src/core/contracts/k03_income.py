@@ -1,9 +1,10 @@
 """K03 收入事件、覆盖证明与成本归因契约。
 
-金额一律用 ``Decimal`` 十进制字符串；内部区间语义 ``[start, end)``。
-幂等键 ``(environment, account_ref, income_type, tran_id)``；同键不同内容
-进入隔离。空窗口不等于零费用：只有来源正常、分页完整、区间覆盖且完成
-迟到复查时才可证明。成本状态与归因状态是两组独立枚举。
+金额一律用 ``Decimal`` 十进制字符串并在指纹前归一化；内部区间语义
+``[start, end)``。幂等键 ``(environment, account_ref, income_type, tran_id)``
+经去空白/大小写归一化并转义分隔符；同键不同内容进入隔离。空窗口不等于
+零费用：只有来源正常、分页完整、区间覆盖（无任何已声明缺口）且完成迟到
+复查时才可证明。成本状态与归因状态是两组独立枚举。
 """
 from __future__ import annotations
 
@@ -18,14 +19,19 @@ from .common import (
     MoneyDecimal,
     canonical_hash,
     decimal_from_value,
+    decimal_text,
     half_open_contains,
     half_open_problems,
+    join_key_parts,
+    normalize_key_part,
 )
 
 REASON_ID_CONFLICT = "INCOME_ID_CONFLICT"
 REASON_INVALID_RANGE = "INVALID_RANGE"
+REASON_GAP_INVALID_RANGE = "GAP_INVALID_RANGE"
 REASON_COMPLETE_WITHOUT_PAGINATION_EVIDENCE = "COMPLETE_WITHOUT_PAGINATION_EVIDENCE"
 REASON_COMPLETE_WITHOUT_COVERAGE = "COMPLETE_WITHOUT_COVERAGE"
+REASON_COVERAGE_GAPS_DECLARED = "COVERAGE_GAPS_DECLARED"
 REASON_NO_COVERAGE = "NO_COVERAGE"
 REASON_COVERAGE_NOT_COMPLETE = "COVERAGE_NOT_COMPLETE"
 REASON_COVERAGE_GAP = "COVERAGE_GAP"
@@ -46,6 +52,12 @@ REASON_PAGE_SHORT = "PAGE_SHORT"
 REASON_FULL_PAGE = "FULL_PAGE"
 REASON_SAME_MS_BOUNDARY = "SAME_MS_BOUNDARY"
 REASON_WINDOW_EXHAUSTED = "WINDOW_EXHAUSTED"
+REASON_PAGE_NOT_SORTED = "PAGE_NOT_SORTED"
+REASON_PAGINATION_STALLED = "PAGINATION_STALLED"
+
+
+class AllocationError(ValueError):
+    """分摊结果出现与源金额符号矛盾的分量（含负权重放大）。"""
 
 
 class IncomeEvent(BaseModel):
@@ -73,26 +85,38 @@ def _as_event(raw: IncomeEvent | Mapping[str, Any]) -> IncomeEvent:
 
 
 def idempotency_key(event: IncomeEvent | Mapping[str, Any]) -> tuple[str, str, str, str]:
-    """幂等主键；symbol/asset 属于被校验内容，不进键。"""
+    """幂等主键（归一化后）；symbol/asset 属于被校验内容，不进键。"""
     item = _as_event(event)
-    return (item.environment, item.account_ref, item.income_type, item.tran_id)
+    return (
+        normalize_key_part(item.environment),
+        normalize_key_part(item.account_ref),
+        normalize_key_part(item.income_type),
+        normalize_key_part(item.tran_id),
+    )
 
 
 def idempotency_key_text(event: IncomeEvent | Mapping[str, Any]) -> str:
-    return "|".join(idempotency_key(event))
+    return join_key_parts(*idempotency_key(event))
+
+
+def _canonical_existing_key(key: Any) -> str:
+    """existing 映射键规范化：元组/列表按组件归一化，文本键去空白折叠大小写。"""
+    if isinstance(key, (tuple, list)):
+        return join_key_parts(*(normalize_key_part(part) for part in key))
+    return normalize_key_part(key)
 
 
 def income_content_hash(event: IncomeEvent | Mapping[str, Any]) -> str:
-    """业务内容指纹；不含接收时间与来源分页信息，供冲突检测。"""
+    """业务内容指纹；金额先归一化，不含接收时间与来源分页信息。"""
     item = _as_event(event)
     return canonical_hash({
-        "environment": item.environment,
-        "account_ref": item.account_ref,
-        "income_type": item.income_type,
-        "tran_id": item.tran_id,
+        "environment": normalize_key_part(item.environment),
+        "account_ref": normalize_key_part(item.account_ref),
+        "income_type": normalize_key_part(item.income_type),
+        "tran_id": normalize_key_part(item.tran_id),
         "symbol": item.symbol,
         "asset": item.asset,
-        "amount": str(item.amount),
+        "amount": decimal_text(item.amount),
         "event_time_ms": item.event_time_ms,
     })
 
@@ -117,14 +141,14 @@ class InsertResult(BaseModel):
 
 def ingest_income(
     page: Sequence[IncomeEvent | Mapping[str, Any]],
-    existing: Mapping[str, IncomeEvent | str] | Sequence[IncomeEvent | Mapping[str, Any]] | None = None,
+    existing: Mapping[Any, IncomeEvent | str] | Sequence[IncomeEvent | Mapping[str, Any]] | None = None,
 ) -> InsertResult:
     """幂等吸收一页收入；同键同内容只记重复，同键异内容隔离。"""
     known: dict[str, str] = {}
     if isinstance(existing, Mapping):
         for key, value in existing.items():
             digest = value if isinstance(value, str) else income_content_hash(value)
-            known[str(key)] = digest
+            known[_canonical_existing_key(key)] = digest
     elif existing is not None:
         for item in existing:
             event = _as_event(item)
@@ -184,19 +208,27 @@ class IncomeCoverage(BaseModel):
     schema_version: str = SCHEMA_VERSION
 
 
-def coverage_problems(coverage: IncomeCoverage | None) -> list[str]:
+def coverage_problems(coverage: IncomeCoverage | Mapping[str, Any] | None) -> list[str]:
     """覆盖自洽性缺口；不检查来源可用性（由调用方提供）。"""
-    if coverage is None:
+    coverage_model = _coverage_model(coverage)
+    if coverage_model is None:
         return [REASON_NO_COVERAGE]
-    problems: list[str] = list(half_open_problems(coverage.start_ms, coverage.end_ms))
-    if coverage.watermark < coverage.start_ms:
+    problems: list[str] = list(
+        half_open_problems(coverage_model.start_ms, coverage_model.end_ms)
+    )
+    for gap in coverage_model.gaps:
+        if gap.end_ms <= gap.start_ms:
+            problems.append(REASON_GAP_INVALID_RANGE)
+    if coverage_model.watermark < coverage_model.start_ms:
         problems.append(REASON_WATERMARK_BEFORE_END)
-    if coverage.coverage_status == "COMPLETE":
-        if not coverage.pagination_terminated_evidence:
+    if coverage_model.coverage_status == "COMPLETE":
+        if not coverage_model.pagination_terminated_evidence:
             problems.append(REASON_COMPLETE_WITHOUT_PAGINATION_EVIDENCE)
-        if coverage.watermark < coverage.end_ms:
+        if coverage_model.watermark < coverage_model.end_ms:
             problems.append(REASON_COMPLETE_WITHOUT_COVERAGE)
-    if coverage.coverage_status == "GAP":
+        if coverage_model.gaps:
+            problems.append(REASON_COVERAGE_GAPS_DECLARED)
+    if coverage_model.coverage_status == "GAP":
         problems.append(REASON_COVERAGE_GAP)
     return list(dict.fromkeys(problems))
 
@@ -215,7 +247,7 @@ def zero_fee_proof(
     pages_complete: bool,
     late_recheck_done: bool,
 ) -> ZeroFeeProof:
-    """空窗口“零费用”可证明条件：来源正常 + 完整分页 + 区间覆盖 + 迟到复查。"""
+    """空窗口“零费用”可证明条件：来源正常 + 完整分页 + 区间覆盖 + 无缺口 + 迟到复查。"""
     coverage_model = _coverage_model(coverage)
     reasons: list[str] = []
     if coverage_model is None:
@@ -225,6 +257,11 @@ def zero_fee_proof(
             reasons.append(REASON_COVERAGE_GAP)
         elif coverage_model.coverage_status != "COMPLETE":
             reasons.append(REASON_COVERAGE_NOT_COMPLETE)
+        if coverage_model.gaps:
+            if coverage_model.coverage_status == "COMPLETE":
+                reasons.append(REASON_COVERAGE_GAPS_DECLARED)
+            elif REASON_COVERAGE_GAP not in reasons:
+                reasons.append(REASON_COVERAGE_GAP)
         if not coverage_model.pagination_terminated_evidence:
             reasons.append(REASON_PAGINATION_NOT_TERMINATED)
         if coverage_model.watermark < coverage_model.end_ms:
@@ -245,7 +282,10 @@ def zero_fee_proof(
 class PaginationDecision(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    status: Literal["CONTINUE", "TERMINATED", "INVALID_PAGE_LIMIT"]
+    status: Literal[
+        "CONTINUE", "TERMINATED", "INVALID_PAGE_LIMIT", "PAGE_NOT_SORTED",
+        "PAGINATION_STALLED",
+    ]
     next_start_ms: int | None = None
     overlap_recheck: bool = False
     reason_codes: tuple[str, ...] = ()
@@ -258,7 +298,11 @@ def plan_next_page(
     end_ms: int,
     page_limit: int,
 ) -> PaginationDecision:
-    """决定是否继续翻页；同毫秒满页时以该毫秒为新起点（不加 1ms）。"""
+    """决定是否继续翻页；同毫秒满页时以该毫秒为新起点（不加 1ms）。
+
+    满页必须单调非降序，且新起点必须大于当前 start。无进展或乱序一律不得
+    返回 CONTINUE：前者会死循环，后者会静默跳过窗口内未读收入。
+    """
     if page_limit <= 0:
         return PaginationDecision(
             status="INVALID_PAGE_LIMIT",
@@ -267,12 +311,24 @@ def plan_next_page(
     events = [_as_event(item) for item in page]
     if len(events) < page_limit:
         return PaginationDecision(status="TERMINATED", reason_codes=(REASON_PAGE_SHORT,))
-    boundary = max(item.event_time_ms for item in events)
-    same_ms_count = sum(1 for item in events if item.event_time_ms == boundary)
+    times = [item.event_time_ms for item in events]
+    if any(times[index] < times[index - 1] for index in range(1, len(times))):
+        return PaginationDecision(
+            status="PAGE_NOT_SORTED",
+            overlap_recheck=True,
+            reason_codes=(REASON_PAGE_NOT_SORTED,),
+        )
+    boundary = max(times)
     if boundary >= end_ms:
         return PaginationDecision(
-            status="TERMINATED", reason_codes=(REASON_PAGE_SHORT, REASON_WINDOW_EXHAUSTED),
+            status="TERMINATED", reason_codes=(REASON_WINDOW_EXHAUSTED,),
         )
+    if boundary <= start_ms:
+        return PaginationDecision(
+            status="PAGINATION_STALLED",
+            reason_codes=(REASON_FULL_PAGE, REASON_PAGINATION_STALLED),
+        )
+    same_ms_count = sum(1 for item in times if item == boundary)
     reasons = [REASON_FULL_PAGE]
     if same_ms_count > 1:
         reasons.append(REASON_SAME_MS_BOUNDARY)
@@ -324,20 +380,23 @@ def attribute_income(
     position_history: Sequence[Mapping[str, Any]],
     coverage: IncomeCoverage | Mapping[str, Any] | None = None,
 ) -> AttributionResult:
-    """按事件时点的可证明仓位归因；双向仓不凭符号硬分摊。"""
+    """按事件时点的可证明仓位归因；双向仓不凭符号硬分摊，缺覆盖 fail-closed。"""
     coverage_model = _coverage_model(coverage)
     positions = [dict(item) for item in position_history]
     decisions: list[AttributionDecision] = []
-    coverage_blocked = (
-        coverage_model is not None and coverage_model.coverage_status != "COMPLETE"
-    )
+    if coverage_model is None:
+        blocked_code = REASON_NO_COVERAGE
+    elif coverage_model.coverage_status != "COMPLETE":
+        blocked_code = REASON_COVERAGE_NOT_COMPLETE
+    else:
+        blocked_code = None
     for raw in events:
         event_id, symbol, event_time = _event_ref(raw)
-        if coverage_blocked:
+        if blocked_code is not None:
             decisions.append(AttributionDecision(
                 event_id=event_id,
                 status="UNKNOWN",
-                reason_codes=(REASON_COVERAGE_NOT_COMPLETE,),
+                reason_codes=(blocked_code,),
             ))
             continue
         matching = [
@@ -440,11 +499,17 @@ def allocate_weighted(
     evidence: str,
     event_id: str,
 ) -> tuple[CostAttribution, ...]:
-    """按明示权重分摊；末腿承接余数，保证 Σallocated 精确等于源金额。"""
+    """按明示权重分摊；末腿承接余数，保证 Σallocated 精确等于源金额。
+
+    权重必须非负；任何与源金额符号矛盾的分量（含量化取整导致的负末腿）
+    抛 ``AllocationError``，不允许“总量守恒但单腿为负”。
+    """
     amount = decimal_from_value(source_amount)
     if not weights:
         raise ValueError("weights must not be empty")
     ordered = sorted((str(key), decimal_from_value(value)) for key, value in weights.items())
+    if any(weight < 0 for _, weight in ordered):
+        raise ValueError("weights must be non-negative")
     weight_sum = sum((value for _, value in ordered), Decimal(0))
     if weight_sum <= 0:
         raise ValueError("weights must sum to a positive value")
@@ -457,6 +522,10 @@ def allocate_weighted(
         else:
             share = (amount * weight / weight_sum).quantize(quantum, rounding=ROUND_HALF_UP)
             remaining -= share
+        if amount >= 0 and share < 0:
+            raise AllocationError("negative share for non-negative source amount")
+        if amount < 0 and share > 0:
+            raise AllocationError("positive share for negative source amount")
         allocated.append(CostAttribution(
             lifecycle_id=lifecycle_id,
             event_id=event_id,
@@ -488,23 +557,24 @@ def finalize_costs(
     """成本完成判定独立于归因判定；空窗口不等于零费用。"""
     coverage_model = _coverage_model(coverage)
     coverage_status = coverage_model.coverage_status if coverage_model else None
+    attribution_status = attribution.allocation_status if attribution else "UNKNOWN"
     reasons: list[str] = []
     if coverage_model is None:
-        cost_status = "UNKNOWN"
-        reasons.append(REASON_NO_COVERAGE)
         return CostFinalization(
             lifecycle_id=lifecycle_id,
-            cost_status=cost_status,
+            cost_status="UNKNOWN",
             coverage_status=coverage_status,
-            attribution_status="UNKNOWN",
-            reason_codes=tuple(reasons),
+            attribution_status=attribution_status,
+            reason_codes=(REASON_NO_COVERAGE,),
         )
+    gaps_declared = bool(coverage_model.gaps)
     if coverage_model.coverage_status == "GAP":
         reasons.append(REASON_COVERAGE_GAP)
     elif coverage_model.coverage_status != "COMPLETE":
         reasons.append(REASON_COVERAGE_NOT_COMPLETE)
+    elif gaps_declared:
+        reasons.append(REASON_COVERAGE_GAPS_DECLARED)
     if reasons:
-        attribution_status = attribution.allocation_status if attribution else "UNKNOWN"
         return CostFinalization(
             lifecycle_id=lifecycle_id,
             cost_status="INCOMPLETE",
@@ -560,6 +630,8 @@ class OutcomeRevision(BaseModel):
 
     outcome_id: str
     source_event_id: str
+    revision_id: str
+    previous_revision_id: str | None = None
     reason_code: str = "LATE_INCOME"
     requires_recalculation: bool = True
     new_closed_outcome_created: bool = False
@@ -572,21 +644,34 @@ def apply_late_income(
     closed_outcomes: Sequence[Mapping[str, Any]],
     *,
     lifecycle_id: str,
+    previous_revision_id: str | None = None,
 ) -> OutcomeRevision:
-    """把迟到收入绑定到已闭合 outcome；没有匹配闭合时明确报错。"""
+    """把迟到收入绑定到唯一已闭合 outcome；缺失或多义时明确报错。"""
     event_model = _as_event(event)
-    for outcome in closed_outcomes:
-        if str(outcome.get("lifecycle_id")) != lifecycle_id:
-            continue
-        if not bool(outcome.get("closed")):
-            continue
-        closed_at = outcome.get("closed_at_ms")
-        return OutcomeRevision(
-            outcome_id=str(outcome.get("outcome_id")),
-            source_event_id=idempotency_key_text(event_model),
-            original_closed_at_ms=int(closed_at) if closed_at is not None else None,
-        )
-    raise LookupError(f"no closed outcome for lifecycle {lifecycle_id}")
+    matches = [
+        outcome for outcome in closed_outcomes
+        if str(outcome.get("lifecycle_id")) == lifecycle_id
+        and bool(outcome.get("closed"))
+    ]
+    if not matches:
+        raise LookupError(f"no closed outcome for lifecycle {lifecycle_id}")
+    if len(matches) > 1:
+        raise LookupError(f"multiple closed outcomes for lifecycle {lifecycle_id}")
+    outcome = matches[0]
+    closed_at = outcome.get("closed_at_ms")
+    source_event_id = idempotency_key_text(event_model)
+    revision_id = "rev-" + canonical_hash({
+        "outcome_id": str(outcome.get("outcome_id")),
+        "source_event_id": source_event_id,
+        "closed_at_ms": closed_at,
+    })[:16]
+    return OutcomeRevision(
+        outcome_id=str(outcome.get("outcome_id")),
+        source_event_id=source_event_id,
+        revision_id=revision_id,
+        previous_revision_id=previous_revision_id,
+        original_closed_at_ms=int(closed_at) if closed_at is not None else None,
+    )
 
 
 def window_contains(coverage: IncomeCoverage, point_ms: int) -> bool:
@@ -608,3 +693,5 @@ class K03SchemaEnvelope(BaseModel):
     cost_finalization: CostFinalization
     outcome_revision: OutcomeRevision
     range_gap: RangeGap
+    zero_fee_proof: ZeroFeeProof
+    pagination_decision: PaginationDecision

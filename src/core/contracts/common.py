@@ -14,7 +14,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator
 
-SCHEMA_VERSION = "3.0"
+SCHEMA_VERSION = "3.1"
 
 SENSITIVE_KEY_MARKERS = (
     "key",
@@ -40,6 +40,8 @@ class NumericInputError(ValueError):
 
 def _json_default(value: Any) -> str:
     if isinstance(value, Decimal):
+        if value.is_finite():
+            return format(value.normalize(), "f")
         return str(value)
     raise TypeError(f"not JSON serialisable: {type(value).__name__}")
 
@@ -87,6 +89,40 @@ def ensure_no_sensitive_fields(value: Any) -> None:
     paths = sensitive_paths(value)
     if paths:
         raise SensitiveInputError("sensitive keys rejected: " + ", ".join(paths))
+
+
+def ensure_structured_payload(value: Any, *, name: str) -> None:
+    """拒绝原始文本/行列表载荷（保守守卫）。
+
+    哈希输入必须是结构化 JSON（Mapping，或由 Mapping 组成的序列）。字符串
+    （如 ``.env`` 原文）与字符串列表（如 ``KEY=value`` 行）一律拒绝；值内容
+    本身不做敏感扫描，该边界在 README「已知限制」登记。
+    """
+    if isinstance(value, str) or isinstance(value, (bytes, bytearray)):
+        raise SensitiveInputError(
+            f"{name} must be a structured mapping, not raw text"
+        )
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            if not isinstance(item, Mapping):
+                raise SensitiveInputError(
+                    f"{name}[{index}] must be a mapping, not raw text"
+                )
+
+
+def normalize_key_part(value: Any) -> str:
+    """幂等键组件归一化：去除首尾空白并折叠大小写。"""
+    return str(value).strip().casefold()
+
+
+def escape_key_part(part: str) -> str:
+    """转义分隔符，避免组件内含 ``|`` 时发生键碰撞。"""
+    return part.replace("\\", "\\\\").replace("|", "\\|")
+
+
+def join_key_parts(*parts: str) -> str:
+    """以转义后的 ``|`` 连接键组件，保证拼接无歧义。"""
+    return "|".join(escape_key_part(part) for part in parts)
 
 
 def decimal_from_value(value: Any) -> Decimal:

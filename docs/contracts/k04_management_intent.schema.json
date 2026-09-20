@@ -18,18 +18,28 @@
           },
           "title": "Reason Codes",
           "type": "array"
+        },
+        "reconcile_allowed": {
+          "default": true,
+          "title": "Reconcile Allowed",
+          "type": "boolean"
+        },
+        "submit_allowed": {
+          "title": "Submit Allowed",
+          "type": "boolean"
         }
       },
       "required": [
         "authorization_id",
-        "allowed"
+        "allowed",
+        "submit_allowed"
       ],
       "title": "AuthorizationVerdict",
       "type": "object"
     },
     "ManagementAuthorization": {
       "additionalProperties": false,
-      "description": "管理能力凭证；绑定账户、仓位、数量、保护目标与时效。",
+      "description": "管理能力凭证；绑定账户、仓位的运行代、数量、保护目标与时效。",
       "properties": {
         "account_ref": {
           "title": "Account Ref",
@@ -38,6 +48,18 @@
         "authorization_id": {
           "title": "Authorization Id",
           "type": "string"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Environment"
         },
         "expires_at_ms": {
           "title": "Expires At Ms",
@@ -80,6 +102,18 @@
           "title": "Position Side",
           "type": "string"
         },
+        "runtime_instance_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runtime Instance Id"
+        },
         "target_protection": {
           "$ref": "#/$defs/ProtectionTarget"
         }
@@ -113,10 +147,12 @@
           "type": "string"
         },
         "evidence_id": {
+          "minLength": 1,
           "title": "Evidence Id",
           "type": "string"
         },
         "expires_at_ms": {
+          "exclusiveMinimum": 0,
           "title": "Expires At Ms",
           "type": "integer"
         },
@@ -124,16 +160,19 @@
           "$ref": "#/$defs/RuntimeIdentity"
         },
         "lifecycle_id": {
+          "minLength": 1,
           "title": "Lifecycle Id",
           "type": "string"
         },
         "management_id": {
+          "minLength": 1,
           "title": "Management Id",
           "type": "string"
         },
         "max_reduce_qty": {
           "anyOf": [
             {
+              "exclusiveMinimum": 0.0,
               "type": "number"
             },
             {
@@ -144,6 +183,7 @@
           "title": "Max Reduce Qty"
         },
         "policy_version": {
+          "minLength": 1,
           "title": "Policy Version",
           "type": "string"
         },
@@ -161,19 +201,22 @@
           "type": "string"
         },
         "reason_code": {
+          "minLength": 1,
           "title": "Reason Code",
           "type": "string"
         },
         "schema_version": {
-          "default": "3.0",
+          "default": "3.1",
           "title": "Schema Version",
           "type": "string"
         },
         "trigger_event_id": {
+          "minLength": 1,
           "title": "Trigger Event Id",
           "type": "string"
         },
         "trigger_type": {
+          "minLength": 1,
           "title": "Trigger Type",
           "type": "string"
         }
@@ -237,6 +280,22 @@
         "order_id": {
           "title": "Order Id",
           "type": "string"
+        },
+        "requested_qty": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requested Qty"
         },
         "revision": {
           "default": 0,
@@ -366,7 +425,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": "3.0",
+          "default": "3.1",
           "title": "Schema Version",
           "type": "string"
         },

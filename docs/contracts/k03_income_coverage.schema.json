@@ -250,7 +250,7 @@
           "title": "Pagination Terminated Evidence"
         },
         "schema_version": {
-          "default": "3.0",
+          "default": "3.1",
           "title": "Schema Version",
           "type": "string"
         },
@@ -319,7 +319,7 @@
           "type": "integer"
         },
         "schema_version": {
-          "default": "3.0",
+          "default": "3.1",
           "title": "Schema Version",
           "type": "string"
         },
@@ -415,6 +415,18 @@
           "title": "Outcome Id",
           "type": "string"
         },
+        "previous_revision_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Previous Revision Id"
+        },
         "reason_code": {
           "default": "LATE_INCOME",
           "title": "Reason Code",
@@ -425,8 +437,12 @@
           "title": "Requires Recalculation",
           "type": "boolean"
         },
+        "revision_id": {
+          "title": "Revision Id",
+          "type": "string"
+        },
         "revision_version": {
-          "default": "3.0",
+          "default": "3.1",
           "title": "Revision Version",
           "type": "string"
         },
@@ -437,9 +453,56 @@
       },
       "required": [
         "outcome_id",
-        "source_event_id"
+        "source_event_id",
+        "revision_id"
       ],
       "title": "OutcomeRevision",
+      "type": "object"
+    },
+    "PaginationDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "next_start_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Start Ms"
+        },
+        "overlap_recheck": {
+          "default": false,
+          "title": "Overlap Recheck",
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "CONTINUE",
+            "TERMINATED",
+            "INVALID_PAGE_LIMIT",
+            "PAGE_NOT_SORTED",
+            "PAGINATION_STALLED"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "PaginationDecision",
       "type": "object"
     },
     "QuarantineRecord": {
@@ -494,6 +557,28 @@
       ],
       "title": "RangeGap",
       "type": "object"
+    },
+    "ZeroFeeProof": {
+      "additionalProperties": false,
+      "properties": {
+        "provable": {
+          "title": "Provable",
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Codes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "provable"
+      ],
+      "title": "ZeroFeeProof",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -523,8 +608,14 @@
     "outcome_revision": {
       "$ref": "#/$defs/OutcomeRevision"
     },
+    "pagination_decision": {
+      "$ref": "#/$defs/PaginationDecision"
+    },
     "range_gap": {
       "$ref": "#/$defs/RangeGap"
+    },
+    "zero_fee_proof": {
+      "$ref": "#/$defs/ZeroFeeProof"
     }
   },
   "required": [
@@ -536,7 +627,9 @@
     "cost_attribution",
     "cost_finalization",
     "outcome_revision",
-    "range_gap"
+    "range_gap",
+    "zero_fee_proof",
+    "pagination_decision"
   ],
   "title": "K03SchemaEnvelope",
   "type": "object"
