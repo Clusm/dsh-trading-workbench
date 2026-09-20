@@ -22,10 +22,12 @@
 
 | 线 | 任务 | 作者 head | 状态 | 备注 |
 |---|---|---|---|---|
-| EF | U15 | `a136cb5` | **READY_FOR_REVIEW** | 初审 E/B/C 已派发（`reviews/U15/{E,B,C}/r1`）；共享适配补丁文件补交中；`service.py` 接线未做 |
-| A | U01 | — | 作者进行中 | 已有 2 提交 + 未提交改动；含 `docs/dispatch/patches/U01/...`、`scripts/smoke_u01_*.py` |
+| EF | U15 | `a136cb5`(+`6dd0d1a` 补丁) | **CHANGES_REQUESTED → r2 修复中** | 初审 E/B/C 三份一致 CHANGES_REQUESTED：**P0×2**（`authorize_new_entry` 省略 `expected` 即 fail-open；配置漂移失明——风险参数改动不变身份哈希）+ P1×17（含嵌套键凭据泄漏、`scope_hash` 从不比较、WorkBuddy live 写伪证据）。报告已归档 `docs/dispatch/reviews/U15/a136cb5/{E,B,C}_r1.md` |
+| A | U01 | `c290c50` | **READY_FOR_REVIEW** | 初审 B 已派发；4 提交、测试 78/0 与 44/0、契约 173/0、无越界；**注意补丁 04（`binance_request_policy.py`）超出作者授权路径未应用**，不应用则真实调用抛 `UnknownBinanceEndpoint`（需 I 决断） |
+| CD | U03 | `3f49e03` | **READY_FOR_REVIEW** | 初审 D/B 已派发；5 提交、两测试 exit 0、契约 173/0、共享零改动 |
 | B | U04 | — | 作者进行中 | 已有 4 提交 |
-| CD | U03 | — | 作者进行中 | 已有 1 提交；含 `s01_market_query_adaptation.patch` |
+
+**已知基线缺陷（非本批次引入，勿重复排查）**：`scripts/smoke_windows_service_plan.py` 在部分 worktree 失败 —— `config/windows_service.json` 指向 worktree 内 `.venv`，而该 worktree 无 `.venv`（A 线作者实测发现）。
 
 **派发新任务时的强制要求（吸取 U15 首轮中断教训）**：提示词内联约束，只让它读契约实现与目标源文件；**必须**要求作者交付"完整 unified diff 文件"到 `docs/dispatch/patches/<ID>/<head>/`，而不是只在报告里文字描述。
 
