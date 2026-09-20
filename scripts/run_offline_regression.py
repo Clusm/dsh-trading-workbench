@@ -88,6 +88,8 @@ SCRIPTS = (
     # 两者全程离线，只读 tests/fixtures/income/ 下的合成夹具。
     "scripts/smoke_u01_income.py",
     "scripts/smoke_u01_review_statistics.py",
+    # U04（B 持仓与执行）：部分成交/保护/重放故障验收。全程离线，只写临时目录。
+    "scripts/smoke_u04_execution_faults.py",
 )
 EXCLUDED_SMOKE_SCRIPTS = {
     # 第[6]节直接调用 query_symbol_detail/query_symbol_cards 打公共行情接口，
