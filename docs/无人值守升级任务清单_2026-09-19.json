@@ -1678,7 +1678,7 @@
       "title": "运行身份、有效配置和控制权限",
       "owner_role": "F",
       "actual_assignee": "U15 作者会话（claude-opus；首次会话 2.6 分钟异常中断未产出，精简提示词重派后完成）",
-      "status": "READY_FOR_REVIEW",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -1922,6 +1922,23 @@
           "regression": "11 组全成立（settings 漂移 11/11、来源 6/6 CHANGED，注释/空白/键序 5/5 SAME）；补丁 4/4 apply --check OK 且逐字节未改",
           "new_findings": "7 条全为 P3 且已登记；无未登记 P2 fail-open、无崩溃",
           "unverifiable": "模块仍零消费者、补丁未落地 -> 看板/启动期/HTTP/清单侧行为不可验（归 I）"
+        },
+        {
+          "type": "integration",
+          "merge_commit": "5ffa54d",
+          "patch_commit": "2954dce",
+          "verified_candidate": "abf2eda",
+          "code_identity_proof": "git diff abf2eda HEAD -- <U15 路径> 为空 -> 集成的 U15 代码与 Q r3 验证过的 head 逐字节一致（合并仅带入 dispatch 文档）",
+          "patches_applied": [
+            "01_release_manifest.diff",
+            "02_config_loader.diff",
+            "03_dashboard_app.diff",
+            "04_entry_readiness.diff"
+          ],
+          "tests": "test_runtime_identity PASS / test_control_boundary PASS / smoke_entry_readiness PASS / smoke_release_package 6/0 / smoke_contracts_v3 PASS 173/0",
+          "offline_regression": "run_offline_regression 在 scripts/smoke_windows_service_plan.py 处中止（**既有基线缺陷**，非本任务引入）；其前 49 个脚本全 PASS；中止点之后的 20 个脚本（含 smoke_ui / smoke_profile_isolation / smoke_detached_profiles / smoke_takeover_compatibility）用同一 harness 清单与 env 单独补跑，**20/20 PASS** -> 合计 69/69 非基线脚本 PASS",
+          "baseline_defect_verified": "在 5ffa54d（U15 补丁之前）复现同一失败：ValueError: python_executable 不存在: <worktree>/.venv/Scripts/python.exe；U15 未触碰 config/windows_service.json 或 windows_service.py",
+          "note": "VERIFIED 留待 U12 部署证据（同 U00 口径）"
         }
       ],
       "blockers": [
@@ -1971,7 +1988,7 @@
       "contract_commit": "ffdab443cae45c1451b5cc13b24e3e73c22038ff",
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "2954dce",
       "review_assignments": [
         {
           "round": "r1",
@@ -2620,6 +2637,14 @@
         "owner": "I",
         "blocks": "无",
         "note": "U01 作者请求把其「未修项登记」表落入 docs/contracts/README.md §12，但该文件属 contract-v3.0 冻结产物（tag ffdab44）；改动它即构成契约变更，须升版并重跑相关复验。I 决定：**本轮不写**，U01 残余限制记录在本台账 known_limits；若确需进入契约，作为 contract-v3.1 候选在 U12 RC 前统一评估。"
+      },
+      {
+        "id": "KI02",
+        "title": "run_offline_regression 在任意 worktree 中必然中止（config/windows_service.json 硬编码 worktree 本地 .venv）",
+        "status": "OPEN",
+        "owner": "U13(E线)/U10a 或 I",
+        "blocks": "完整 run_offline_regression / check_quality / U12 RC 门禁",
+        "note": "scripts/smoke_windows_service_plan.py 读 config/windows_service.json，其 python_executable 指向 <project_root>/.venv/Scripts/python.exe；worktree 内无 .venv 故 ValueError。运行目录（存在 .venv）不受影响。已确认与 U15/U01 无关的既有缺陷。**不得静默忽略**；建议由 U13 的 RuntimePaths 口径统一（或测试环境注入 python 路径）。"
       }
     ],
     "contract_candidate": "71f8109",
