@@ -893,6 +893,153 @@ def model_route_blockers(
 # --------------------------------------------------------------------------
 
 
+#: K01 ``EFFECTIVE_CONFIG_SOURCES`` 的六类来源落地映射。
+#: 顺序即文档顺序：settings / decision_policy / agents / risk_learning /
+#: risk_profile.lock / windows_service。每一项都必须真实进入
+#: ``effective_config_hash``：改风险档、止损线、执行端点、白名单或服务定义
+#: 都必须改变身份（U15 r2 P0-2）。
+#: ``settings.yaml`` 既按 ``SETTINGS_WHITELIST`` 显式取值，也整份非敏感落盘，
+#: 因为白名单之外的键（``channels.ai_daily_loss_stop`` / ``capital.*`` /
+#: ``execution.base_url_map`` / ``market_universe.*`` / ``stability.*`` 等）
+#: 同样是风险有效值。
+CONFIG_SOURCE_FILES: tuple[tuple[str, str], ...] = (
+    ("settings", "config/settings.yaml"),
+    ("decision_policy", "config/decision_policy.yaml"),
+    ("agents", "config/agents.yaml"),
+    ("risk_learning", "config/risk_learning.yaml"),
+    ("risk_profile.lock", "config/risk_profile.lock.json"),
+    ("windows_service", "config/windows_service.json"),
+)
+
+#: 六类来源在 ``settings`` 里的保留命名空间（不会与点分白名单键冲突）。
+CONFIG_SOURCES_KEY = "config_sources"
+
+#: 递归遍历的安全上限（防止深嵌套/自引用载荷触发 RecursionError）。
+_MAX_SOURCE_DEPTH = 24
+
+
+class MalformedInputError(RuntimeIdentityError):
+    """入参形状或载荷类型不合法（非 Mapping 的配置、非法 JSON/YAML 等）。
+
+    结构化拒绝而不是把畸形输入静默当成空配置（U15 r2 P1-3）。
+    """
+
+    def __init__(self, items: Sequence[str]) -> None:
+        self.items = tuple(items)
+        super().__init__("malformed runtime identity input: " + ", ".join(self.items))
+
+
+def _json_scalar(value: Any) -> Any:
+    """把 YAML 标量收敛成 ``canonical_json`` 可序列化的类型。
+
+    ``yaml.safe_load`` 会把 ISO 日期解析成 ``datetime.date``，直接进
+    ``canonical_hash`` 会抛 ``TypeError``；这里统一转文本。
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def _sanitise_source_payload(
+    value: Any, *, prefix: str, dropped: list[str], dropped_payloads: list[str],
+    depth: int = 0,
+) -> Any:
+    """递归复制配置载荷，丢弃命中敏感标记的键与疑似 ``.env`` 文本值。
+
+    只登记键路径/计数值，绝不把值写进任何输出。返回的对象可安全进入
+    ``hash_effective_config``（无敏感键名、无非 JSON 标量、无原始 env 文本）。
+    """
+    if depth > _MAX_SOURCE_DEPTH:
+        dropped_payloads.append(f"{prefix or '<root>'} (max depth exceeded)")
+        return None
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            name = str(key)
+            path = f"{prefix}.{name}" if prefix else name
+            if is_sensitive_name(name):
+                dropped.append(path)
+                continue
+            result[name] = _sanitise_source_payload(
+                item, prefix=path, dropped=dropped, dropped_payloads=dropped_payloads,
+                depth=depth + 1,
+            )
+        return result
+    if isinstance(value, (list, tuple, set)):
+        return [
+            _sanitise_source_payload(item, prefix=f"{prefix}[{index}]", dropped=dropped,
+                                     dropped_payloads=dropped_payloads, depth=depth + 1)
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, str) and _looks_like_env_text(value):
+        dropped_payloads.append(f"{prefix} (raw env text)")
+        return None
+    return _json_scalar(value)
+
+
+def _load_structured_file(path: Path) -> Any:
+    """读取 YAML/JSON 配置文件（``.json`` 直接 json，其余走 yaml）。"""
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise MalformedInputError([f"{path.name} (invalid json: {exc.msg})"]) from exc
+    try:
+        import yaml  # noqa: PLC0415 - 延迟导入：本模块的纯函数面不依赖 yaml
+    except ImportError as exc:  # pragma: no cover - 运行环境已装 pyyaml
+        raise MalformedInputError([f"{path.name} (yaml reader unavailable)"]) from exc
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise MalformedInputError([f"{path.name} (invalid yaml: {exc.__class__.__name__})"]) from exc
+
+
+def collect_source_config_files(
+    root: Path | str, *, sources: Sequence[tuple[str, str]] = CONFIG_SOURCE_FILES,
+    include_settings: bool = False,
+) -> tuple[dict[str, Any], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """采集 K01 ``EFFECTIVE_CONFIG_SOURCES`` 的来源文件非敏感有效值。
+
+    返回 ``(dumps, dropped_sensitive, dropped_payloads, missing)``：
+
+    - ``dumps``：``来源标签 -> 脱敏后的结构化载荷``；文件缺失记
+      ``{"__missing__": <相对路径>}``——**缺失本身也改变哈希**，不会被静默忽略；
+    - ``dropped_sensitive``：被丢弃的敏感键路径（只记路径，不记值）；
+    - ``dropped_payloads``：被丢弃的整份 ``.env`` 形态文本 / 超深节点；
+    - ``missing``：确实不存在的来源文件相对路径。
+
+    ``include_settings=False``（默认）时跳过 ``config/settings.yaml``：该来源的
+    **有效值**由调用方实际使用的 ``raw_settings`` 直接采集（见
+    :func:`collect_effective_config`），避免磁盘文件与内存值两份“有效值”互相
+    矛盾。其余五类来源（decision_policy / agents / risk_learning /
+    risk_profile.lock / windows_service）只能从文件采集。
+
+    本函数只读 ``root`` 下的受信配置文件，不读 ``.env``/``data``/密钥。
+    """
+    base = Path(root)
+    dumps: dict[str, Any] = {}
+    dropped: list[str] = []
+    dropped_payloads: list[str] = []
+    missing: list[str] = []
+    for label, relative in sources:
+        if label == "settings" and not include_settings:
+            continue
+        target = base / relative
+        if not target.is_file():
+            missing.append(relative)
+            dumps[label] = {"__missing__": relative}
+            continue
+        payload = _load_structured_file(target)
+        dumps[label] = _sanitise_source_payload(
+            payload, prefix=label, dropped=dropped, dropped_payloads=dropped_payloads)
+    return (dumps, tuple(sorted(set(dropped))), tuple(sorted(set(dropped_payloads))),
+            tuple(missing))
+
+
+
+
+
 def _flatten_into(
     target: dict[str, Any], prefix: str, value: Mapping[str, Any],
     dropped: list[str], *, origin: str = "",
@@ -924,6 +1071,8 @@ class EffectiveConfig:
     environment_overrides: Mapping[str, Any]
     dropped_sensitive: tuple[str, ...] = ()
     sources: Mapping[str, str] = field(default_factory=dict)
+    dropped_payloads: tuple[str, ...] = ()
+    missing_sources: tuple[str, ...] = ()
 
     def as_payload(self) -> dict[str, Any]:
         return {
@@ -936,6 +1085,8 @@ class EffectiveConfig:
         return {
             **self.as_payload(),
             "dropped_sensitive": list(self.dropped_sensitive),
+            "dropped_payloads": list(self.dropped_payloads),
+            "missing_sources": list(self.missing_sources),
             "sources": dict(self.sources),
         }
 
@@ -964,14 +1115,27 @@ def collect_effective_config(
     profile: str | None = None,
     env: Mapping[str, str] | None = None,
     extra_profile_overrides: Mapping[str, Any] | None = None,
+    source_configs: Mapping[str, Any] | None = None,
+    source_dropped_sensitive: Sequence[str] = (),
+    source_dropped_payloads: Sequence[str] = (),
+    source_missing: Sequence[str] = (),
 ) -> EffectiveConfig:
     """采集 settings + profile 覆盖 + 环境覆盖的有效非敏感值。
 
     - ``settings`` 只取白名单点分路径 **且实际存在** 的值；
     - 命中敏感标记的键（如 ``llm.api_key_env``）被丢弃并计入 ``dropped_sensitive``；
     - ``profile_overrides`` 只有显式选择了 demo/live profile 时才收录该段的实际覆盖值；
-    - ``environment_overrides`` 只收录白名单内确实设置的非空变量。
+    - ``environment_overrides`` 只收录白名单内确实设置的非空变量；
+    - ``source_configs``（来自 :func:`collect_source_config_files`）是 K01
+      ``EFFECTIVE_CONFIG_SOURCES`` 六类来源的脱敏载荷，嵌入
+      ``settings[CONFIG_SOURCES_KEY]``；**白名单之外的键因此也进入身份哈希**
+      （U15 r2 P0-2：风险档/止损线/执行端点/服务定义漂移必须改变身份）。
+
+    ``raw_settings`` 必须是 Mapping；传入其它类型（如列表）**结构化拒绝**而不是
+    静默当成空配置。
     """
+    if raw_settings is not None and not isinstance(raw_settings, Mapping):
+        raise MalformedInputError(["raw_settings must be a mapping"])
     settings = raw_settings or {}
     dropped: list[str] = []
     effective: dict[str, Any] = {}
@@ -996,6 +1160,10 @@ def collect_effective_config(
         section = _dig(settings, f"profiles.{profile}")
         if isinstance(section, Mapping):
             _flatten_into(overrides, "", section, dropped, origin=f"profiles.{profile}")
+    if env is not None and not isinstance(env, Mapping):
+        raise MalformedInputError(["env must be a mapping"])
+    if extra_profile_overrides is not None and not isinstance(extra_profile_overrides, Mapping):
+        raise MalformedInputError(["extra_profile_overrides must be a mapping"])
     for key, value in dict(extra_profile_overrides or {}).items():
         if is_sensitive_name(key):
             dropped.append(f"extra_profile_overrides.{key}")
@@ -1007,16 +1175,40 @@ def collect_effective_config(
             raise CredentialLeakError([f"effective_config.profile_overrides.{key} (non-scalar)"])
         overrides[str(key)] = value
 
+    # K01 EFFECTIVE_CONFIG_SOURCES 六类来源都必须进入有效配置哈希。
+    # 每个来源都显式落一个条目：已采集=脱敏载荷 / 缺失=__missing__ /
+    # 未采集=__not_collected__。三种状态互相可区分，且都改变哈希，
+    # 不存在“来源消失而身份不变”的静默路径（U15 r2 P0-2）。
+    source_dumps: dict[str, Any] = {
+        label: {"__not_collected__": relative}
+        for label, relative in CONFIG_SOURCE_FILES if label != "settings"
+    }
+    source_dumps.update({
+        str(label): payload for label, payload in dict(source_configs or {}).items()
+    })
+    # settings.yaml：以调用方实际使用的 raw_settings 为准（有效值而非磁盘副本）。
+    effective_source_dropped: list[str] = list(source_dropped_payloads)
+    source_dumps["settings"] = _sanitise_source_payload(
+        settings, prefix="settings", dropped=dropped,
+        dropped_payloads=effective_source_dropped,
+    )
+    effective[CONFIG_SOURCES_KEY] = source_dumps
     return EffectiveConfig(
         settings=effective,
         profile_overrides=overrides,
         environment_overrides=environment_override_values(env),
-        dropped_sensitive=tuple(sorted(set(dropped))),
+        dropped_sensitive=tuple(sorted(set(dropped) | set(source_dropped_sensitive))),
         sources={
             "settings": "config/settings.yaml (whitelisted, actually present)",
             "profile_overrides": f"config/settings.yaml profiles.{profile}" if profile else "no profile selected",
             "environment_overrides": "allowlist, set-and-non-empty only",
+            "source_configs": (
+                ", ".join(label for label, _ in CONFIG_SOURCE_FILES)
+                if source_configs is not None else "not collected"
+            ),
         },
+        dropped_payloads=tuple(sorted(set(effective_source_dropped))),
+        missing_sources=tuple(source_missing),
     )
 
 
@@ -1278,14 +1470,29 @@ def collect_runtime_identity(
     extra_profile_overrides: Mapping[str, Any] | None = None,
     artifact_relatives: Sequence[str] | None = None,
     require_lock_file: bool = True,
+    require_source_configs: bool = False,
 ) -> IdentityBundle:
     """从仓库事实装配 K01 身份（release_manifest / service 的单一入口）。
 
     ``environment`` 取实际执行作用域（profile 优先），``account_ref`` 与密钥
     轮换无关。所有覆盖组齐全才返回；缺失时 ``build_identity`` 抛
     ``IdentityCoverageError``（禁止静默生成不完整身份）。
+
+    K01 ``EFFECTIVE_CONFIG_SOURCES`` 六类来源（settings / decision_policy /
+    agents / risk_learning / risk_profile.lock / windows_service）的非敏感值
+    始终进入 ``effective_config_hash``；来源文件缺失会改变哈希并记入
+    ``effective_config.missing_sources`` 与 advisory。生产入口应传
+    ``require_source_configs=True`` 把“六类来源必须齐备”升级为结构化拒绝
+    （U15 r2 P0-2）。
     """
     root = Path(project_root)
+    if not isinstance(env, Mapping) and env is not None:
+        raise MalformedInputError(["env must be a mapping"])
+    if credentials_present is not None and not isinstance(credentials_present, Mapping):
+        raise MalformedInputError(["credentials_present must be a mapping"])
+    if not isinstance(runtime_instance_id, str) or not runtime_instance_id.strip():
+        # 与 mint_runtime_generation 同口径：运行代必须有值（空值会让身份退化为常量）
+        raise MissingRuntimeInputError(["runtime_instance_id"])
     env_map = {str(k): str(v) for k, v in (env if env is not None else {}).items()}
     scope = resolve_execution_scope(
         profile=profile if profile is not None else env_map.get("MTA_PROFILE"),
@@ -1303,9 +1510,17 @@ def collect_runtime_identity(
     lock_files = collect_dependency_lock_files(root, require_lock=require_lock_file)
     strategy = load_strategy_cards(root)
     verify_strategy_cards_source(strategy, root)
+    source_dumps, source_dropped, source_dropped_payloads, source_missing = \
+        collect_source_config_files(root)
+    if require_source_configs and source_missing:
+        raise MissingRuntimeInputError([f"{name} (config source)" for name in source_missing])
     effective = collect_effective_config(
         raw_settings=raw_settings, profile=scope.profile, env=env_map,
         extra_profile_overrides=extra_profile_overrides,
+        source_configs=source_dumps,
+        source_dropped_sensitive=source_dropped,
+        source_dropped_payloads=source_dropped_payloads,
+        source_missing=source_missing,
     )
     guard_no_raw_env_payload(effective.as_payload(), name="effective_config")
     route = resolve_model_route(
@@ -1335,7 +1550,12 @@ def collect_runtime_identity(
     blockers = tuple(dict.fromkeys((
         *route.blockers, *scope_blockers, *git_state.hard_reasons(expected_git_commit),
     )))
-    advisories = tuple(dict.fromkeys((*git_state.advisory_reasons(), *scope.warnings)))
+    missing_advisories = tuple(
+        f"{CONFIG_SOURCE_MISSING}:{name}" for name in source_missing
+    )
+    advisories = tuple(dict.fromkeys((
+        *git_state.advisory_reasons(), *scope.warnings, *missing_advisories,
+    )))
     return IdentityBundle(
         identity=identity, model_route=route, execution_scope=scope,
         effective_config=effective, strategy_source=strategy,
@@ -1608,6 +1828,11 @@ __all__.extend([
     "SCOPE_HASH_MISMATCH",
     "EXECUTION_PROFILE_NOT_DECLARED",
     "EXECUTION_SCOPE_UNLOCKED",
+    "CONFIG_SOURCE_FILES",
+    "CONFIG_SOURCES_KEY",
+    "CONFIG_SOURCE_MISSING",
+    "MalformedInputError",
+    "collect_source_config_files",
     "fingerprint_disposition",
     "identity_mismatch_reasons",
     "available_environment_snapshot",

@@ -26,6 +26,9 @@ from core.contracts import (  # noqa: E402
 )
 from core.contracts.common import sensitive_paths  # noqa: E402
 from core.runtime_identity import (  # noqa: E402
+    CONFIG_SOURCE_FILES,
+    CONFIG_SOURCES_KEY,
+    CONFIG_SOURCE_MISSING,
     ENVIRONMENT_OVERRIDE_WHITELIST,
     EXECUTION_PROFILE_NOT_DECLARED,
     EXECUTION_SCOPE_UNLOCKED,
@@ -244,6 +247,141 @@ def check_identity_inputs_change_hash() -> None:
               and other_instance.identity.identity_hash() != base.identity.identity_hash())
 
 
+# --------------------------------------------------------------------------
+# 1b. K01 EFFECTIVE_CONFIG_SOURCES 六类来源必须真正进入有效配置哈希（r2 P0-2）
+# --------------------------------------------------------------------------
+
+SOURCE_FILES: dict[str, str] = {
+    "config/settings.yaml": "",  # 由 SETTINGS 写入，这里只占位
+    "config/decision_policy.yaml": "version: 1\nposition_guardian:\n  mode: shadow\n",
+    "config/agents.yaml": "",
+    "config/risk_learning.yaml": (
+        "profile: learning_adventurous\nmax_leverage: 20\ndaily_loss_stop: 0.15\n"
+        "always_enforced:\n  reconcile_before_reopen: true\n"
+    ),
+    "config/risk_profile.lock.json": json.dumps(
+        {"version": 1, "expected": {"risk.max_leverage": 20, "risk.daily_loss_stop": 0.15}},
+        ensure_ascii=False),
+    "config/windows_service.json": json.dumps(
+        {"service_name": "MultiAgentTrader", "port": 8000, "entrypoint": "scripts/run_web.py"},
+        ensure_ascii=False),
+}
+
+
+def make_source_root(tmp: Path) -> Path:
+    """fixture 仓库补齐 K01 六类来源文件。"""
+    make_root(tmp)
+    for relative, text in SOURCE_FILES.items():
+        if not text:
+            continue
+        (tmp / relative).write_text(text, encoding="utf-8")
+    return tmp
+
+
+def _drift_source(tmp: Path, relative: str, old: str, new: str) -> None:
+    path = tmp / relative
+    text = path.read_text(encoding="utf-8")
+    assert old in text, f"{relative} does not contain {old!r}"
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+def _restore_source(tmp: Path, relative: str, text: str) -> None:
+    (tmp / relative).write_text(text, encoding="utf-8")
+
+
+def check_config_sources_enter_identity() -> None:
+    """六类来源逐类漂移都必须改变身份；缺失/敏感值不得静默。"""
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = make_source_root(Path(raw))
+        base = build(tmp, env={})
+        base_deploy = base.identity.deployment_hash()
+        base_eff = base.identity.effective_config_hash
+
+        # ① settings.yaml 白名单之外的风险项（E/C 的实测漂移样本）
+        drifted = json.loads(json.dumps(SETTINGS))
+        drifted["channels"] = {**drifted.get("channels", {}), "ai_daily_loss_stop": 0.99,
+                               "require_initial_sl_tp": False}
+        drifted["capital"] = {"initial_equity": 100000}
+        drifted["execution"] = {**drifted["execution"],
+                                "base_url_map": {"live": "https://evil.example.com"}}
+        check("settings-risk-drift-changes-identity",
+              build(tmp, settings=drifted, env={}).identity.deployment_hash() != base_deploy)
+
+        # ② decision_policy.yaml
+        _drift_source(tmp, "config/decision_policy.yaml", "mode: shadow", "mode: enforce")
+        check("decision-policy-drift-changes-identity",
+              build(tmp, env={}).identity.deployment_hash() != base_deploy)
+        _restore_source(tmp, "config/decision_policy.yaml", SOURCE_FILES["config/decision_policy.yaml"])
+
+        # ③ agencies.yaml（模型覆盖）
+        agents = {"agents": [{"name": "ai_trader", "model": "deepseek-v4.1-flash",
+                              "reasoning_effort": "high"}]}
+        check("agents-file-drift-changes-identity",
+              build(tmp, agents=agents, env={}).identity.deployment_hash() != base_deploy)
+
+        # ④ risk_learning.yaml
+        _drift_source(tmp, "config/risk_learning.yaml", "max_leverage: 20", "max_leverage: 100")
+        check("risk-learning-drift-changes-identity",
+              build(tmp, env={}).identity.deployment_hash() != base_deploy)
+        _restore_source(tmp, "config/risk_learning.yaml", SOURCE_FILES["config/risk_learning.yaml"])
+
+        # ⑤ risk_profile.lock.json
+        _drift_source(tmp, "config/risk_profile.lock.json", '"risk.max_leverage": 20',
+                      '"risk.max_leverage": 100')
+        check("risk-profile-lock-drift-changes-identity",
+              build(tmp, env={}).identity.deployment_hash() != base_deploy)
+        _restore_source(tmp, "config/risk_profile.lock.json",
+                        SOURCE_FILES["config/risk_profile.lock.json"])
+
+        # ⑥ windows_service.json
+        _drift_source(tmp, "config/windows_service.json", '"port": 8000', '"port": 8001')
+        check("windows-service-drift-changes-identity",
+              build(tmp, env={}).identity.deployment_hash() != base_deploy)
+        _restore_source(tmp, "config/windows_service.json", SOURCE_FILES["config/windows_service.json"])
+
+        # 逐类漂移后身份必须回到基线（确定性与可复现）
+        check("identity-restored-after-source-restore",
+              build(tmp, env={}).identity.deployment_hash() == base_deploy)
+
+        # 来源文件缺失：哈希必须改变 + advisory + 可要求结构化拒绝
+        (tmp / "config/risk_profile.lock.json").unlink()
+        missing = build(tmp, env={})
+        check("missing-source-changes-identity",
+              missing.identity.deployment_hash() != base_deploy
+              and "config/risk_profile.lock.json" in missing.effective_config.missing_sources)
+        check("missing-source-is-visible-as-advisory",
+              any(code.startswith(CONFIG_SOURCE_MISSING)
+                  for code in missing.advisories), str(missing.advisories))
+        expect_raises("missing-source-rejected-when-required", (MissingRuntimeInputError,),
+                      collect_runtime_identity, tmp, environment="demo",
+                      runtime_instance_id="rt-test", execution_mode="demo", env={},
+                      credentials_present={"SENSENOVA_API_KEY": True},
+                      raw_settings=SETTINGS, raw_agents=AGENTS,
+                      require_source_configs=True)
+        (tmp / "config/risk_profile.lock.json").write_text(
+            SOURCE_FILES["config/risk_profile.lock.json"], encoding="utf-8")
+
+        # 来源文件里的凭据键：只丢键、不入哈希、值不外泄，但被计数
+        leaky = json.dumps({"version": 1, "max_leverage": 20,
+                            "api_key": "SK-SOURCE-LEAK-0001",
+                            "nested": {"secret_token": "tok-123"}}, ensure_ascii=False)
+        _restore_source(tmp, "config/risk_learning.yaml", leaky)
+        leaky_bundle = build(tmp, env={})
+        blob = json.dumps(leaky_bundle.as_dict(), ensure_ascii=False, sort_keys=True)
+        check("source-file-credentials-not-hashed",
+              "SK-SOURCE-LEAK-0001" not in blob and "tok-123" not in blob)
+        check("source-file-credentials-counted",
+              any(path.startswith("risk_learning.api_key")
+                  for path in leaky_bundle.effective_config.dropped_sensitive)
+              and any(path.startswith("risk_learning.nested.secret_token")
+                      for path in leaky_bundle.effective_config.dropped_sensitive),
+              str(leaky_bundle.effective_config.dropped_sensitive))
+        check("source-file-sensitive-drop-changes-hash",
+              leaky_bundle.identity.deployment_hash() != base_deploy)
+        check("source-config-hash-reflects-effective-config",
+              leaky_bundle.identity.effective_config_hash != base_eff)
+
+
 def check_lock_file_required() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = make_root(Path(raw))
@@ -348,11 +486,20 @@ def check_defaults_are_not_effective_values() -> None:
         bundle = build(tmp, env={})
         check("empty-env-yields-empty-overrides",
               dict(bundle.effective_config.environment_overrides) == {})
-        # 未出现在配置里的白名单键不得被默认值填充
+        # 未出现在配置里的白名单键不得被默认值填充。
+        # r2 起 settings 里恒有 CONFIG_SOURCES_KEY 命名空间（六类来源），
+        # 断言先把它剔除再比较白名单点分键集合。
         empty_settings = {"execution": {"default_mode": "demo"}}
         cfg = collect_effective_config(raw_settings=empty_settings, profile=None, env={})
+        whitelisted = {k: v for k, v in cfg.settings.items() if k != CONFIG_SOURCES_KEY}
         check("absent-settings-keys-not-filled",
-              "llm.default_model" not in cfg.settings and cfg.settings == {"execution.default_mode": "demo"})
+              "llm.default_model" not in cfg.settings
+              and whitelisted == {"execution.default_mode": "demo"},
+              str(whitelisted))
+        check("settings-carries-all-six-config-sources",
+              set(cfg.settings[CONFIG_SOURCES_KEY]) ==
+              {label for label, _ in CONFIG_SOURCE_FILES},
+              str(sorted(cfg.settings[CONFIG_SOURCES_KEY])))
         # profile=None 时不产生 profile 覆盖
         check("no-profile-means-no-overrides", dict(cfg.profile_overrides) == {})
         # profile 选中时只取该段真实存在值
@@ -823,6 +970,7 @@ def check_fingerprint_disposition_registered() -> None:
 
 def main() -> int:
     check_identity_inputs_change_hash()
+    check_config_sources_enter_identity()
     check_lock_file_required()
     check_strategy_source_is_file_level()
     check_no_credential_leak()
