@@ -85,6 +85,141 @@ def filter_unauthorized_opens(decision: Any, verdict: Any, db: Any,
             verdict.model_copy(update={"adjusted_intents": kept_adjusted}))
 
 
+# --------------------------------------------------------------------------- #
+# U02：管理动作（DL03）——管理优先队列与非 OPEN 意图的授权引用
+# --------------------------------------------------------------------------- #
+#: 非 OPEN 意图缺少已绑定管理授权引用时的原因码（K04 §6）。
+NEEDS_AUTH = "NEEDS_AUTH"
+
+
+class ManagementEnforcementError(RuntimeError):
+    """``enforce=True`` 在没有可绑定字段的意图模型上被启用（fail-closed）。"""
+
+    def __init__(self, reason_codes: Any) -> None:
+        self.reason_codes = tuple(str(item) for item in reason_codes)
+        super().__init__("; ".join(self.reason_codes))
+
+#: 管理动作集合：退出/减仓/调整保护；它们只减不增，不属于新开仓。
+MANAGEMENT_ACTIONS = frozenset({"close", "reduce", "adjust"})
+
+
+def management_intents(intents: Any) -> list[Any]:
+    """从意图集合中挑出管理动作（退出/减仓/调整）。"""
+    return [item for item in (intents or ())
+            if str(getattr(item, "action", "") or "") in MANAGEMENT_ACTIONS]
+
+
+def priority_order(intents: Any) -> list[Any]:
+    """管理动作优先于新开仓进入执行队列。
+
+    DL03 的可执行含义：模型/宏观卡死只应推迟新仓研究，不应推迟已授权的退出。
+    排序稳定，两类内部各自保持原相对顺序，因此只改提交次序、不改语义。
+    """
+    return sorted(
+        list(intents or ()),
+        key=lambda item: (0 if str(getattr(item, "action", "") or "")
+                          in MANAGEMENT_ACTIONS else 1),
+    )
+
+
+def intent_authorization_ref(intent: Any) -> str | None:
+    """读取意图携带的管理授权引用（兼容两种字段名，均不存在时为 None）。"""
+    for name in ("management_authorization_id", "management_id"):
+        value = getattr(intent, name, None)
+        if value:
+            return str(value)
+    return None
+
+
+#: 意图模型无法携带管理授权引用时，``enforce=True`` 一律拒绝启用。
+ENFORCEMENT_UNSUPPORTED = "MANAGEMENT_ENFORCEMENT_UNSUPPORTED"
+
+
+def authorization_ref_supported(intents: Any) -> bool:
+    """意图模型是否真的能携带管理授权引用（而不是被 pydantic 静默丢弃）。
+
+    ``TradeIntent`` 目前**没有** ``management_authorization_id`` 字段，且没有
+    ``model_config``（extra 默认 ``ignore``）——调用方即使传了也会被静默扔掉。
+    因此 ``filter_unbound_management(enforce=True)`` 会把**所有**管理意图判为
+    未绑定并全部摘除，等价于"翻一个布尔就关掉全部退出"（U02/A_r1 P2-6）。
+    """
+    for item in (intents or ()):
+        model_fields = getattr(type(item), "model_fields", None)
+        if model_fields is not None and any(
+                name in model_fields
+                for name in ("management_authorization_id", "management_id")):
+            return True
+        if hasattr(item, "management_authorization_id") or hasattr(item, "management_id"):
+            return True
+    return False
+
+
+def filter_unbound_management(
+    decision: Any, verdict: Any, db: Any, *,
+    bound_authorization_ids: Any = (), enforce: bool = False,
+) -> tuple[Any, Any, list[str]]:
+    """非 OPEN 意图必须携带**已绑定**的管理授权引用，否则 ``NEEDS_AUTH``。
+
+    ``enforce=False``（默认）只做可观测：把未绑定的管理意图记入风险事件与返回
+    值，但**不改变执行集合**——未接入 U02 授权服务的既有调用方行为完全不变。
+    ``enforce=True`` 时把未绑定的管理意图从原始与风控调整集合中一并摘除，关键点
+    是**摘除而不是降级**：被摘除的意图绝不会被重新解释成开仓（摘除后若已无任何
+    意图，决策降级为 ``no_trade`` 而非 ``open``）。
+
+    **fail-closed 前置条件**：意图模型必须真的能携带授权引用
+    （:func:`authorization_ref_supported`）。否则 ``enforce=True`` 会把全部退出
+    静默摘掉——那是"一开就全停"的雷，而不是安全开关，因此在摘除任何意图之前
+    直接抛 :class:`ManagementEnforcementError`。
+
+    本函数当前**没有生产调用方**（属 U02 的接入面，交由后续任务接线）：默认
+    ``enforce=False`` 不改变任何既有行为。
+    """
+    bound = {str(item) for item in (bound_authorization_ids or ())}
+    raw = list(decision.intents)
+    adjusted = list(verdict.adjusted_intents)
+    if enforce and not authorization_ref_supported(raw + adjusted):
+        raise ManagementEnforcementError([ENFORCEMENT_UNSUPPORTED])
+
+    def _unbound(items: list[Any]) -> list[str]:
+        return [
+            str(getattr(item, "symbol", "") or "")
+            for item in items
+            if str(getattr(item, "action", "") or "") in MANAGEMENT_ACTIONS
+            and intent_authorization_ref(item) not in bound
+        ]
+
+    unbound = list(dict.fromkeys(_unbound(raw) + _unbound(adjusted)))
+    if not unbound:
+        return decision, verdict, []
+    if db is not None:
+        db.log_risk_event(
+            event_type="management_intent_unbound", severity="warn",
+            details=f"非 OPEN 意图缺管理授权引用（{NEEDS_AUTH}）: {','.join(unbound)}",
+            action_taken="record only" if not enforce else "drop management intents",
+        )
+    if not enforce:
+        return decision, verdict, unbound
+
+    def _keep(items: list[Any]) -> list[Any]:
+        return [
+            item for item in items
+            if not (str(getattr(item, "action", "") or "") in MANAGEMENT_ACTIONS
+                    and intent_authorization_ref(item) not in bound)
+        ]
+
+    kept_raw = _keep(raw)
+    kept_adjusted = _keep(adjusted)
+    effective = kept_adjusted or kept_raw
+    if any(str(getattr(item, "action", "")) == "open" for item in effective):
+        action = "open"
+    elif effective:
+        action = "adjust"
+    else:
+        action = "no_trade"
+    return (decision.model_copy(update={"intents": kept_raw, "decision": action}),
+            verdict.model_copy(update={"adjusted_intents": kept_adjusted}), unbound)
+
+
 VALID_STATUSES = {"PASS", "WARN", "BLOCK", "NOT_EVALUATED"}
 VALID_MODES = {"off", "shadow", "enforce"}
 OPEN_CHECK_IDS = {

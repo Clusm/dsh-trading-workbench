@@ -17,14 +17,21 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import hashlib
 import json
+import os
 import time
 from typing import Any, Iterable, Mapping, TYPE_CHECKING
+
+from core.runtime_identity import derive_account_ref
 
 if TYPE_CHECKING:
     from audit.database import AuditDatabase
 
 
 ZERO = Decimal("0")
+
+#: 账户引用来源：显式声明（U15 派生值）或旧密钥摘要回退。
+ACCOUNT_REF_SOURCE_DECLARED = "declared"
+ACCOUNT_REF_SOURCE_LEGACY_KEY = "legacy-key-digest"
 
 
 class InvalidExecutionFill(ValueError):
@@ -63,8 +70,47 @@ def _text(value: Any) -> str | None:
     return text or None
 
 
-def account_reference(api_key: str, environment: str) -> str:
-    """生成不含凭据原文的账户引用，供审计表分区使用。"""
+def _declared_account_ref(declared_account_ref: str | None) -> str:
+    """账户声明来源：显式入参优先，其次 ``MTA_ACCOUNT_REF``（U15 登记项）。"""
+    if declared_account_ref is not None:
+        return str(declared_account_ref).strip()
+    return str(os.getenv("MTA_ACCOUNT_REF") or "").strip()
+
+
+def account_ref_source(
+    api_key: str, environment: str, *, declared_account_ref: str | None = None,
+) -> str:
+    """账户引用的来源标记，供启动自检区分"已解耦"与"仍在用密钥摘要"。
+
+    这不是"已解耦"的证明，而是一个**可观测**状态：``legacy-key-digest`` 表示该
+    账户尚未被显式声明，账本 account_ref 仍会随密钥轮换漂移（U15/B_r1 P1-4）。
+    """
+    if _declared_account_ref(declared_account_ref):
+        return ACCOUNT_REF_SOURCE_DECLARED
+    return ACCOUNT_REF_SOURCE_LEGACY_KEY
+
+
+def account_reference(
+    api_key: str, environment: str, *, declared_account_ref: str | None = None,
+) -> str:
+    """生成不含凭据原文的账户引用，供审计/生命周期/收入幂等键分区使用。
+
+    **优先消费 U15 的派生值**：声明了账户（``declared_account_ref`` 入参或
+    ``MTA_ACCOUNT_REF``）时返回 ``<env>:<declared>``——与
+    :func:`core.runtime_identity.derive_account_ref`、K01 ``RuntimeIdentity.account_ref``
+    逐字一致，且**与密钥轮换解耦**，因此 K03 幂等键
+    ``(environment, account_ref, income_type, tran_id)`` 的分区不会在轮换时被切裂
+    （规格 §12 L9 / U15/B_r1 P1-4）。
+
+    **未声明账户时保留旧的密钥摘要形态**（``<env>:sha256(api_key)[:16]``）：旧库
+    的收入/生命周期/成交行本就按这个值分区，静默切换会把同一账户的历史数据切成
+    两个域。因此这里刻意 fail-visible 而非 fail-open：调用方用
+    :func:`account_ref_source` 得到 ``legacy-key-digest`` 即知需要迁移，重分区按
+    U02 交付报告的迁移建议显式执行（归属 U13）。
+    """
+    declared = _declared_account_ref(declared_account_ref)
+    if declared:
+        return derive_account_ref(environment, declared_account_ref=declared).value
     digest = hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:16]
     return f"{str(environment or 'unknown').lower()}:{digest}"
 

@@ -98,6 +98,8 @@ SCRIPTS = (
     "scripts/smoke_u04_execution_faults.py",
     # U13（E 托管/恢复）：恢复门禁/单实例锁/RuntimePaths/同 epoch 恢复包离线冒烟。
     "scripts/smoke_u13_supervision.py",
+    # U02（B 持仓与执行）：策略仓管理/有界退出授权/并发退出预留。全程离线。
+    "scripts/smoke_u02_strategy_position_manager.py",
 )
 EXCLUDED_SMOKE_SCRIPTS = {
     # 第[6]节直接调用 query_symbol_detail/query_symbol_cards 打公共行情接口，
