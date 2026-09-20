@@ -459,6 +459,114 @@ def test_exit_idempotency_memory_is_bounded() -> None:
               [m.ledger(domain)] if ledger is not None))
 
 
+def test_consumed_exit_cannot_be_reopened_or_reclaimed() -> None:
+    """已成交的退出是**不可回收的事实**：记录被淘汰后也不得重发/释放。
+
+    U02/A_r2 NEW-1/NEW-2：账本按 ``MAX_TERMINAL_RESERVATIONS`` 淘汰终结预留，
+    若"是否已成交"只看**当前记录**，被淘汰的 CONSUMED 键就会落进
+    "预留已不在账本里"分支、在 TTL 到期后被回收并**再次提交**（二次减仓）；
+    同理 ``release()`` 对 CONSUMED 不幂等就等于"撤销一笔已确认的成交"并让它
+    重新可重发。两条都在这里按"记录在位 / 记录被淘汰"两个场景钉住。
+    """
+    print("\n[4d] 已成交的退出不可重开、不可回收（含记录被淘汰后）")
+    t0 = _NOW
+
+    # (1) 账本层：CONSUMED 拒绝释放、拒绝重开，且状态不被改写。
+    led = ManagementReservationLedger(position_qty="1.0", lifecycle_id="lc-x")
+    led.reserve(reservation_id="r1", qty="1.0", now_ms=t0)
+    led.consume("r1", engaged_qty="1.0")
+    released = led.release("r1", reason="probe")
+    reopened = led.reserve(reservation_id="r1", qty="1.0", now_ms=t0 + 1)
+    check("CONSUMED 预留拒绝释放且状态不变",
+          released.accepted is False
+          and led.reservation("r1").status == "CONSUMED"
+          and REASON_RESERVATION_ALREADY_CLOSED in released.reason_codes,
+          released.as_dict())
+    check("CONSUMED 预留不可重新预留",
+          reopened.accepted is False
+          and REASON_RESERVATION_ALREADY_CLOSED in reopened.reason_codes,
+          reopened.as_dict())
+    check("账本留下成交事实", led.is_consumed("r1") is True)
+
+    # (2) 记录被淘汰后事实仍在：is_consumed / reserve / release 都按事实拒绝。
+    led2 = ManagementReservationLedger(position_qty="1.0", lifecycle_id="lc-y")
+    led2.reserve(reservation_id="keep", qty="1.0", now_ms=t0)
+    led2.consume("keep", engaged_qty="1.0")
+    saved = ManagementReservationLedger.MAX_TERMINAL_RESERVATIONS
+    ManagementReservationLedger.MAX_TERMINAL_RESERVATIONS = 2
+    try:
+        for index in range(5):
+            key = f"junk-{index}"
+            led2.reserve(reservation_id=key, qty="1.0", now_ms=t0 + index)
+            led2.consume(key, engaged_qty="1.0")
+    finally:
+        ManagementReservationLedger.MAX_TERMINAL_RESERVATIONS = saved
+    check("CONSUMED 记录确实会被淘汰（内存有界）",
+          led2.reservation("keep") is None, led2.as_dict()["reservations"])
+    check("淘汰后成交事实仍在", led2.is_consumed("keep") is True)
+    check("淘汰后同 id 仍不可重新预留",
+          led2.reserve(reservation_id="keep", qty="1.0", now_ms=t0 + 9).accepted
+          is False)
+    check("淘汰后同 id 仍不可释放",
+          led2.release("keep", reason="probe").accepted is False)
+
+    # (3) 管理器层：账本记录被淘汰 + TTL 到期，巡检不得把它当"陈旧 ACTIVE"回收。
+    m = _manager()
+    domain = "lc-ttl"
+    m.request_exit(exit_key="g-cons", lifecycle_id=domain, symbol="BTCUSDT",
+                   position_side="LONG", qty="1.0", current_qty="1.0", now_ms=t0)
+    check("成交确认成功", m.confirm_exit("g-cons", engaged_qty="1.0") is True)
+    ledger = m.ledger(domain)
+    ManagementReservationLedger.MAX_TERMINAL_RESERVATIONS = 3
+    try:
+        for index in range(8):
+            key = f"fill-{index}"
+            m.request_exit(exit_key=key, lifecycle_id=domain, symbol="BTCUSDT",
+                           position_side="LONG", qty="0.1", current_qty="1.0",
+                           now_ms=t0 + index)
+            m.confirm_exit(key, engaged_qty="0.1")
+    finally:
+        ManagementReservationLedger.MAX_TERMINAL_RESERVATIONS = saved
+    check("成交预留记录被淘汰", ledger.reservation("g-cons") is None,
+          ledger.as_dict()["reservations"])
+    rescanned = m.request_exit(exit_key="g-cons", lifecycle_id=domain,
+                               symbol="BTCUSDT", position_side="LONG", qty="1.0",
+                               current_qty="1.0", now_ms=t0 + 10 ** 9,
+                               in_flight_ttl_ms=1)
+    check("记录被淘汰 + TTL 到期后同键仍判重复（不重发）",
+          rescanned.duplicate is True and rescanned.submit_qty == Decimal(0)
+          and rescanned.opens_position is False, rescanned.as_dict())
+    check("巡检回收审计里没有这个键",
+          all(item["exit_key"] != "g-cons" for item in m.as_dict()["released_exits"]),
+          m.as_dict()["released_exits"])
+    check("已成交键拒绝释放（保留幂等记忆）",
+          m.release_exit("g-cons", reason="probe") is False)
+    check("拒绝释放后同键仍是重复",
+          m.request_exit(exit_key="g-cons", lifecycle_id=domain, symbol="BTCUSDT",
+                         position_side="LONG", qty="1.0", current_qty="1.0",
+                         now_ms=t0 + 10 ** 9).duplicate is True)
+
+    # (3b) 幂等记忆（_exit_keys）自身被淘汰后，仍须回到成交事实上判重复。
+    m2 = _manager()
+    domain2 = "lc-ttl2"
+    m2.request_exit(exit_key="g2", lifecycle_id=domain2, symbol="ETHUSDT",
+                    position_side="SHORT", qty="1.0", current_qty="1.0", now_ms=t0)
+    m2.confirm_exit("g2", engaged_qty="1.0")
+    m2.MAX_EXIT_KEYS = 0      # 强制淘汰已终结键（含 g2）
+    for index in range(3):
+        key = f"prune-{index}"
+        m2.request_exit(exit_key=key, lifecycle_id=domain2, symbol="ETHUSDT",
+                        position_side="SHORT", qty="0.1", current_qty="1.0",
+                        now_ms=t0 + index)
+        m2.confirm_exit(key, engaged_qty="0.1")
+    retry = m2.request_exit(exit_key="g2", lifecycle_id=domain2, symbol="ETHUSDT",
+                            position_side="SHORT", qty="1.0", current_qty="1.0",
+                            now_ms=t0 + 10 ** 9, in_flight_ttl_ms=1)
+    check("幂等记忆被淘汰后同键仍判重复（不重发）",
+          retry.duplicate is True and retry.submit_qty == Decimal(0),
+          retry.as_dict())
+
+
 def test_expired_authorization_does_not_block_unknown_reconcile() -> None:
     print("\n[5] 过期授权不阻断 UNKNOWN 查单/收口")
     generation = _generation()
@@ -702,6 +810,7 @@ def main() -> int:
     test_reservation_conserves_under_concurrent_exits()
     test_leaked_exit_reservation_is_reclaimable()
     test_exit_idempotency_memory_is_bounded()
+    test_consumed_exit_cannot_be_reopened_or_reclaimed()
     test_expired_authorization_does_not_block_unknown_reconcile()
     test_flat_close_preserves_manual_semantics_and_blocks_health_faults()
     test_k04_contract_binding_only_reduces()

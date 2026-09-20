@@ -22,7 +22,10 @@ Broker、不改风险档与 pause/emergency 语义。它把四件在竞态下容
    （提交失败/成交未确认/异常路径），或 :meth:`reclaim_stale_exits` 回收了超过
    TTL 仍未结算的在途预留，该 ``exit_key`` 就**恢复可重发**——否则一次异常就会
    让该标的的退出通道被永久占死（U02/A_r1 P0-1）。已 ``CONSUMED``（成交已确认）
-   的键永远保持幂等。
+   的键永远保持幂等：**成交事实**记在账本的独立集合里
+   （``ManagementReservationLedger.is_consumed``），不随预留记录被
+   ``MAX_TERMINAL_RESERVATIONS`` 淘汰而丢失，因此"永不回收"对
+   **记录已被淘汰**的键同样成立（U02/A_r2 NEW-1）。
 
 R11：:meth:`should_flat_close` 复用 U04 的故障分类，健康/传输/未知故障一律不得
 触发全平；只有"已确证的保护失败"与**人工 emergency** 可以。人工 pause/emergency
@@ -333,7 +336,9 @@ class StrategyPositionManager:
     #: 退出幂等记忆的上限：只淘汰**已终结**（成交/释放过）的旧键，防止长进程
     #: 无界增长。淘汰一个已终结的键只影响"极端老键上的重复抑制"——即使因此重发，
     #: 也只会走 request_exit 的"只减 + 可减量夹逼"，不可能被做成反向开仓。
-    #: ACTIVE（在途）的键永不淘汰。
+    #: ACTIVE（在途）的键永不淘汰。注意：**已成交**的键即使在*这里*被淘汰，也
+    #: 不会被重新占量——:meth:`request_exit` 会回到账本的成交事实
+    #: （``is_consumed``）上把它判为重复。
     MAX_EXIT_KEYS = 2000
     #: 释放审计环形缓冲的上限。
     MAX_RELEASED_EXIT_AUDIT = 200
@@ -614,6 +619,14 @@ class StrategyPositionManager:
                         side=duplicate.side, submit_qty=Decimal(0), reduce_only=True,
                         reason_codes=(REASON_DUPLICATE_EXIT_IGNORED,))
             ledger = self._ledgers.get(str(lifecycle_id))
+            if ledger is not None and ledger.is_consumed(key):
+                # 幂等键可能已被 MAX_EXIT_KEYS 淘汰（`duplicate` 取不到），但
+                # "这次退出已经成交"是不可回收的事实：必须仍然判为重复而不是
+                # 重新占量提交（U02/A_r2 NEW-1 的另一条入口）。
+                return ExitRequestOutcome(
+                    exit_key=key, accepted=False, duplicate=True, action="NOOP",
+                    side=side, submit_qty=Decimal(0), reduce_only=True,
+                    reason_codes=(REASON_DUPLICATE_EXIT_IGNORED,))
             authoritative = decimal_from_value(current_qty)
             if authoritative < 0:
                 authoritative = Decimal(0)
@@ -690,11 +703,17 @@ class StrategyPositionManager:
 
         只在调用方显式给出 TTL 时生效：没有 TTL 就没有"多旧算泄漏"的依据，
         严格幂等语义保持不变。**已 CONSUMED 的键永不回收**（那次退出确实成交了，
-        重发就是二次减仓）。
+        重发就是二次减仓）——判据是账本里的**成交事实**
+        （:meth:`ManagementReservationLedger.is_consumed`），不是"当前是否还有
+        那条预留记录"：记录会被 ``MAX_TERMINAL_RESERVATIONS`` 淘汰，只看记录会
+        让被淘汰的 CONSUMED 键落进下面的 "预留已不在账本里" 分支，在 TTL 到期
+        后被回收并重发（U02/A_r2 NEW-1）。
         """
         if not ttl_ms or int(ttl_ms) <= 0 or int(now_ms) <= 0:
             return ()
         ledger = self._ledgers.get(self._exit_ledgers.get(exit_key, ""))
+        if ledger is not None and ledger.is_consumed(exit_key):
+            return ()
         reservation = ledger.reservation(exit_key) if ledger is not None else None
         registered = self._exit_registered_at.get(exit_key, 0)
         if reservation is not None and reservation.status == "CONSUMED":
@@ -745,7 +764,10 @@ class StrategyPositionManager:
         "释放"的语义是"该退出未执行/未确认"，如果继续把该键当作已受理，
         下一轮同一稳定 key（guardian 的 ``mta-g-<sha24>``）会被判为 ``duplicate``
         而永不重发——这正是"异常路径漏释放 -> 该标的永久不可退出"的第二半。
-        已 CONSUMED（成交回执已到）的键不在释放路径上，永远保持幂等。
+        已 CONSUMED（成交回执已到）的键**不在释放路径上**：账本会拒绝释放
+        （``REASON_RESERVATION_ALREADY_CLOSED``），本方法随之返回 ``False`` 并
+        **保留**该键的幂等记忆——"释放一笔已成交的退出"等于让它重新可重发
+        （U02/A_r2 NEW-2）。
         """
         key = str(exit_key)
         ledger = self._ledger_for_exit(key)

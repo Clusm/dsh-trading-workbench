@@ -442,6 +442,16 @@ class ManagementReservationLedger:
                 [REASON_RESERVATION_NON_POSITIVE], "position_qty must be >= 0")
         self.lifecycle_id = str(lifecycle_id or "")
         self._reservations = {}
+        #: **成交事实**：曾经被 ``consume`` 确认成交的 reservation id。
+        #:
+        #: 它必须与 ``_reservations`` 分开存放，因为后者会被
+        #: :meth:`_prune_locked` 淘汰（内存有界），而"这笔退出已经成交"是不可
+        #: 回收的事实：一旦随记录一起丢失，同一个退出键就能被再次 ``reserve``
+        #: 并重新提交——那是**二次减仓**（U02/A_r2 NEW-1/NEW-2）。所以这里用
+        #: 一个只增不淘汰的 id 集合保存事实：单个 id 只是一个短字符串，比整条
+        #: ``ManagementReservation`` 记录轻得多；这是"已成交的退出永不可重开"
+        #: 这条硬不变量的代价（见 :meth:`is_consumed`）。
+        self._consumed_ids: set[str] = set()
         self._lock = lock or threading.Lock()
 
     def _prune_locked(self) -> None:
@@ -485,6 +495,22 @@ class ManagementReservationLedger:
         with self._lock:
             return self._reservations.get(str(reservation_id))
 
+    def is_consumed(self, reservation_id: str) -> bool:
+        """该 ID 是否**曾经**被确认成交（即使它的预留记录已被淘汰）。
+
+        这是"已 CONSUMED 的退出永不回收/永不重开"的权威依据：调用方必须查
+        **成交事实**而不是"当前是否还有那条记录"——记录会被
+        :meth:`_prune_locked` 淘汰，事实不会。
+        """
+        with self._lock:
+            return str(reservation_id or "") in self._consumed_ids
+
+    @property
+    def consumed_id_count(self) -> int:
+        """已成交 id 的基数（运维可见性：它只增不淘汰，需要能被观测）。"""
+        with self._lock:
+            return len(self._consumed_ids)
+
     def as_dict(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -492,6 +518,8 @@ class ManagementReservationLedger:
                 "position_qty": str(self.position_qty),
                 "reserved_qty": str(self._reserved_qty_locked()),
                 "available_qty": str(self._available_locked()),
+                # 成交事实只增不淘汰，单独暴露基数供运维观测（它不参与守恒式）。
+                "consumed_id_count": len(self._consumed_ids),
                 "reservations": [item.as_dict() for item in self._reservations.values()],
             }
 
@@ -537,11 +565,22 @@ class ManagementReservationLedger:
         """预留退出量；重复 ID 幂等（不二次占用），超额即拒绝且不改变任何状态。
 
         **已 RELEASED 的 ID 可以重新预留**（释放的语义是"这次退出没有发生"，
-        因此同一个退出键必须能重发）；已 CONSUMED 的 ID 永远不可重开。
+        因此同一个退出键必须能重发）；已 CONSUMED 的 ID 永远不可重开——这条
+        依据的是 :attr:`_consumed_ids` 里的**成交事实**，因此**预留记录被淘汰
+        之后依然成立**（U02/A_r2 NEW-1：只看当前记录会让同键在 TTL 后被回收并
+        重发，等于二次减仓）。
         """
         rid = str(reservation_id or "")
         with self._lock:
             existing = self._reservations.get(rid)
+            if rid in self._consumed_ids:
+                return ReservationOutcome(
+                    accepted=False, duplicate=True, reservation_id=rid,
+                    reserved_qty=self._reserved_qty_locked(),
+                    consumed_qty=existing.consumed_qty if existing else Decimal(0),
+                    available_qty=self._available_locked(),
+                    reason_codes=(REASON_RESERVATION_ALREADY_CLOSED,),
+                )
             if existing is not None and existing.status != "RELEASED":
                 return ReservationOutcome(
                     accepted=False, duplicate=True, reservation_id=rid,
@@ -640,9 +679,14 @@ class ManagementReservationLedger:
                     reason_codes=(REASON_RESERVATION_CONSUME_EXCEEDS,),
                 )
             consumed = item.consumed_qty + take
+            status = "CONSUMED" if consumed >= item.qty else "ACTIVE"
+            if status == "CONSUMED":
+                # 先落"成交事实"，再落记录：即使随后 _prune_locked 把这条记录
+                # 淘汰掉，该 ID 也不可能被重新 reserve / 被 TTL 回收重发。
+                self._consumed_ids.add(rid)
             self._reservations[rid] = ManagementReservation(
                 reservation_id=item.reservation_id, qty=item.qty, consumed_qty=consumed,
-                status="CONSUMED" if consumed >= item.qty else "ACTIVE",
+                status=status,
                 created_at_ms=item.created_at_ms,
             )
             self._prune_locked()
@@ -653,13 +697,27 @@ class ManagementReservationLedger:
             )
 
     def release(self, reservation_id: str, *, reason: str = "") -> ReservationOutcome:
-        """释放预留（退出未执行/被拒）；对已终结预留幂等。"""
+        """释放预留（退出未执行/被拒）；对已终结预留幂等。
+
+        **已 CONSUMED 的预留不可被释放**：那笔退出已经成交，"释放"等于撤销一笔
+        已确认的成交，并让同一个退出键重新变成可重发（U02/A_r2 NEW-2）。因此这里
+        返回 ``REASON_RESERVATION_ALREADY_CLOSED`` 且**不改变任何状态**；记录已被
+        淘汰时同样按 :attr:`_consumed_ids` 里的成交事实拒绝。
+        """
         rid = str(reservation_id or "")
         with self._lock:
             item = self._reservations.get(rid)
             if item is None:
+                if rid in self._consumed_ids:
+                    return ReservationOutcome(
+                        accepted=False, duplicate=True, reservation_id=rid,
+                        reserved_qty=self._reserved_qty_locked(),
+                        consumed_qty=Decimal(0),
+                        available_qty=self._available_locked(),
+                        reason_codes=(REASON_RESERVATION_ALREADY_CLOSED,),
+                    )
                 return self._rejected(rid, REASON_RESERVATION_UNKNOWN, existing=None)
-            if item.status == "RELEASED":
+            if item.status in ("RELEASED", "CONSUMED"):
                 return ReservationOutcome(
                     accepted=False, duplicate=True, reservation_id=rid,
                     reserved_qty=self._reserved_qty_locked(),
