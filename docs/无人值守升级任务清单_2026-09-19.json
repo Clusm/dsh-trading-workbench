@@ -1067,6 +1067,27 @@
           "delta": "**全量 delta = ∅**：同一 70 条清单 + 同 env 逐脚本跑，pristine 与打补丁树失败集合逐条相同，唯一失败为 KI02 smoke_windows_service_plan.py（两侧报错逐字一致）",
           "regression": "抽样 6 类 15 项全 PASS",
           "unfinished": "无真实 USER_STREAM 报文回放（N6 帧序为推演）；EXPIRED_IN_MATCH 触发频率不可离线度量"
+        },
+        {
+          "type": "author_fix_r4",
+          "head_commit": "8660c55",
+          "commits": [
+            "33bbb43",
+            "8660c55"
+          ],
+          "n6_fix": "_component_status: if stored in _QUANTITY_TERMINAL and not (stored=='FILLED' and filled<accepted): return stored —— FILLED 必须由分量背书，否则退回推导，由 apply_fill 入账后推进",
+          "n6_before_after": "BEFORE 部分成交->全成 status=FILLED filled=0.0105 terminal=0.0095 viol=FILLED_STATUS_WITH_RESIDUAL + risk THREE_COMPONENT_CONSERVATION_VIOLATION；一笔全成 filled=0（整笔丢失）\nAFTER 两条路径 status=FILLED filled=0.02 working=0 terminal=0.00 viol=() 无 risk 事件",
+          "x_filled_coverage": "test_execution_faults §[11] 新增 N6-a/b/c + 重复投递幂等；计数 154 -> **167 通过/0 失败**；同一测试跑未修树 **155/12 失败**（非空转）",
+          "n1_not_regressed": "bypass C1/C2/C3/C4/C6 全 PASS；CANCELED/EXPIRED 迟到成交 filled=0.0057 working=0 terminal=0.0143 viol=()；REJECTED 清零后 viol=()",
+          "n7_fixed": "选择修（非登记）：_update 内 status=_STATUS_ALIASES.get(status.upper(), status)，previous 同步归一；B1 由 EXPIRED_IN_MATCH+working=0.02+ValidationError -> status=EXPIRED working=0 terminal=0.02 重水化=()；B2/迟到成交/历史遗留行自愈均重水化=()",
+          "n2_residual_registered": "测试内结构断言处写明：该断言只查对象存了什么，不查读路径是否按标的取值；复验者受控反例实测读路径退回进程级标量时本节 7 条全过而并发 6~20/20000 裸仓。不得据此声称跨标的窗口缺陷已完全覆盖",
+          "delta": "全量 delta = ∅（70 条清单，唯一失败为既有 KI02）；补丁应用结果与验证树逐字节相同；smoke_u04 exit 0、契约 173/0",
+          "known_limits": [
+            "物理不可能的序列'X=FILLED 帧不带 l'下状态列仍停在未背书 FILLED（r3 同样非法，非本轮引入，已注释登记）",
+            "结构断言对读路径退化无区分力",
+            "无真实报文回放"
+          ],
+          "rollback": "git revert 33bbb43 8660c55"
         }
       ],
       "blockers": [],
@@ -1140,12 +1161,12 @@
         {
           "round": "r4",
           "stage": "修复复验",
-          "candidate": null,
+          "candidate": "8660c55",
           "sessions": [
             "Q (reviews/U04/R4/r1)"
           ],
           "verdict": "PENDING",
-          "reports_dir": "docs/dispatch/reviews/U04/<r4head>/"
+          "reports_dir": "docs/dispatch/reviews/U04/8660c55/"
         }
       ],
       "qa_runs": []
@@ -1745,8 +1766,8 @@
       "id": "U13",
       "title": "托管、单实例及备份恢复",
       "owner_role": "E",
-      "actual_assignee": null,
-      "status": "PLANNED",
+      "actual_assignee": "U13 作者会话（E 角色）",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -1776,7 +1797,34 @@
         "F19",
         "F20"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "bf4c0cc",
+          "commits": [
+            "ef28b2b",
+            "22e1529",
+            "0c0f701",
+            "cc023d5",
+            "a27fc17",
+            "bf4c0cc"
+          ],
+          "orchestrator_verified": {
+            "test_supervision": "131 PASS / 0 FAIL",
+            "shared_patches": "11 个 unified diff 在 docs/dispatch/patches/U13/a27fc17/，apply --check 于 pristine 11/11 OK（须 -c core.autocrlf=false -c core.eol=lf）",
+            "byte_identity": "应用后与 EF HEAD 逐字节相同"
+          },
+          "ki02_fix": "resolve_python_executable（argument -> MTA_PYTHON -> 配置相对路径 -> 项目 venv -> VIRTUAL_ENV -> sys.executable；配置值仍受根边界校验；strict_python 可关回退）。worktree 内 smoke_windows_service_plan 结果 19 通过/0 失败；修复前必 ValueError 并中止回归（第 49/73 脚本），修复后不再中止。**config/windows_service.json 无需改动**（缺陷在解析层，改配置只会在部署根制造漂移）",
+          "regression_delta": "pristine 中止于第 49；补丁未应用态 头部 49 个 0 新失败、尾部失败集 {KI02}；补丁已应用态 OFFLINE REGRESSION OK scripts=74 **0 失败**",
+          "deviation": "**作者把共享文件改动提交进了自己的分支（11 个共享文件）**，同时交付了补丁；违反'作者只写 owned_paths、共享文件只交补丁'。不影响正确性（补丁与 EF HEAD 逐字节相同），但记录在案",
+          "known_limits": [
+            "check_quality 在集成 HEAD 为红（见 KI03）",
+            "state_root 未纳入 K01 effective_config_hash（白名单在 U15 独占路径）-> 需 U15/I 小版本追加",
+            "validate_windows_service_plan --require-files 未暴露 python_executable_source",
+            "真实双 profile SCM 注册/宿主托管/真实告警演练 = U12 OPS（需 D01/D02）"
+          ]
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "F",
@@ -1814,12 +1862,23 @@
       "dl_work_packages": [
         "DL10"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "0e522b13472cdff3757547752089f5a8d97ca8f8",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r1",
+          "stage": "初审",
+          "candidate": "bf4c0cc",
+          "sessions": [
+            "F (reviews/U13/F/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U13/bf4c0cc/"
+        }
+      ],
       "qa_runs": []
     },
     {
@@ -2873,6 +2932,14 @@
         "owner": "U10a/U10b 或 I",
         "blocks": "无（不参与 smoke 执行，故 delta 为空）",
         "note": "docs/双进程双账本改造设计_2026-09-15.md:222,224 与 docs/实盘账户并行接入评估与上线整改清单_2026-09-15.md:202,363,472。属文档准确性缺陷（fail-closed 方向），补丁 05 未覆盖（05 只动 9 个可执行脚本）。不得静默忽略。"
+      },
+      {
+        "id": "KI03",
+        "title": "check_quality 在集成 HEAD 为红：scan_tracked_secrets 4 处误报",
+        "status": "OPEN",
+        "owner": "I（含 KI01，原派 U05）",
+        "blocks": "check_quality / U12 RC",
+        "note": "4 处均为误报：① docs/dispatch/reviews/U00/0b85bef/C_w0r1_r2.md:31（审查报告正文引用 {\"note\":\"API_KEY=...\"} 文档片段）② tests/acceptance/test_runtime_identity.py:523 SECRET=\"sk-live-DEADBEEF-should-never-appear\"（故意夹具）③ 同文件:707 NESTED_SECRET=\"sk-nested-NEVER-LEAK-0002\"（故意夹具）④ src/llm/factory.py:111 api_key=fallback_key（变量引用，= KI01）。**根因**：_is_placeholder 只用于 secret-assignment 分支，**provider-token 分支无占位符过滤**；且 _is_placeholder 不识别裸小写标识符（变量名）。②③ 由本波集成 U15 引入、①由归档审查报告引入、④为既有 KI01。修复方向：给 provider-token 分支加占位符过滤 + 识别裸标识符；或把这 4 处登记为显式例外。**不得静默忽略**。"
       }
     ],
     "contract_candidate": "71f8109",
