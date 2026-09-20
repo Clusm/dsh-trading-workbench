@@ -1,0 +1,60 @@
+### MUST FIX 1/2 修复前（HEAD 8eb0480 模块）
+=== module src: C:\Users\Tao\Desktop\币安\mat-wt\B\_scratch_B\v1src\src ===
+[M1] positionAmt='0.0'            flat_confirmed=False 仅剩一张保护 -> (True, 'FLAT_CONFIRMED_CLEANUP')
+[M1] positionAmt='0.00000000'     flat_confirmed=False 仅剩一张保护 -> (True, 'FLAT_CONFIRMED_CLEANUP')
+[M1] positionAmt='2.0'（有仓）        flat_confirmed=False 仅剩一张保护 -> (False, 'CANNOT_REMOVE_LAST_PROTECTION')
+[M1] 同情形 plan_protection_refresh -> blocked='FLAT_NOT_CONFIRMED' cancels=0  # 旧模块两处口径互相矛盾
+[M2] guard_fault_action('HEALTH_DEGRADED', 'CLOSE_ALL') -> BLOCKED (HEALTH_DEGRADED 属 HEALTH，不得触发全平动作 CLOSE_ALL（HEALTH_FAULT_MUST_NOT_TRIGGER_FLAT_CLOSE）)
+[M2] guard_fault_action('WS_DISCONNECT', 'CLOSE_ALL') -> BLOCKED (WS_DISCONNECT 属 TRANSPORT，不得触发全平动作 CLOSE_ALL（HEALTH_FAULT_MUST_NOT_TRIGGER_FLAT_CLOSE）)
+[M2] guard_fault_action('QUERY_FAILED', 'CLOSE_ALL') -> BLOCKED (QUERY_FAILED 属 QUERY_UNCERTAIN，不得触发全平动作 CLOSE_ALL（HEALTH_FAULT_MUST_NOT_TRIGGER_FLAT_CLOSE）)
+[M2] guard_fault_action('RATE_LIMITED', 'CLOSE_ALL') -> BLOCKED (RATE_LIMITED 属 RATE_LIMIT，不得触发全平动作 CLOSE_ALL（HEALTH_FAULT_MUST_NOT_TRIGGER_FLAT_CLOSE）)
+[M2] guard_fault_action('PROTECTION_MIRROR_STALE', 'CLOSE_ALL') -> ALLOWED class=UNKNOWN triggers_flat_close=False
+[M2] guard_fault_action('ALGO_ORDER_QUERY_FAILED', 'CLOSE_ALL') -> ALLOWED class=UNKNOWN triggers_flat_close=False
+[M2] guard_fault_action('ProtectionOrderHealthCheck', 'CLOSE_ALL') -> ALLOWED class=UNKNOWN triggers_flat_close=False
+[M2] guard_fault_action('SOMETHING_NEW', 'CLOSE_ALL') -> ALLOWED class=UNKNOWN triggers_flat_close=False
+[M2] guard_fault_action('HTTP_503', 'CLOSE_ALL') -> ALLOWED class=SUBMIT_UNCERTAIN triggers_flat_close=False
+[M2] guard_fault_action('TIMEOUT', 'CLOSE_ALL') -> ALLOWED class=SUBMIT_UNCERTAIN triggers_flat_close=False
+[M2] guard_fault_action('INSUFFICIENT_MARGIN', 'CLOSE_ALL') -> ALLOWED class=REJECTION triggers_flat_close=False
+[M2] guard_fault_action('PROTECTION_FAILED', 'CLOSE_ALL') -> ALLOWED class=PROTECTION triggers_flat_close=False
+
+### MUST FIX 1/2 修复后
+=== module src: C:\Users\Tao\Desktop\币安\mat-wt\B\src ===
+[M1] positionAmt='0.0'            flat_confirmed=False 仅剩一张保护 -> (False, 'FLAT_NOT_CONFIRMED')
+[M1] positionAmt='0.00000000'     flat_confirmed=False 仅剩一张保护 -> (False, 'FLAT_NOT_CONFIRMED')
+[M1] positionAmt='2.0'（有仓）        flat_confirmed=False 仅剩一张保护 -> (False, 'CANNOT_REMOVE_LAST_PROTECTION')
+[M1] 同情形 plan_protection_refresh -> blocked='FLAT_NOT_CONFIRMED' cancels=0  # 旧模块两处口径互相矛盾
+[M2] guard_fault_action('HEALTH_DEGRADED', 'CLOSE_ALL') -> BLOCKED (HEALTH_DEGRADED 属 HEALTH，不得触发全平动作 CLOSE_ALL（HEALTH_FAULT_MUST_NOT_TRIGGER_FLAT_CLOSE）)
+[M2] guard_fault_action('WS_DISCONNECT', 'CLOSE_ALL') -> BLOCKED (WS_DISCONNECT 属 TRANSPORT，不得触发全平动作 CLOSE_ALL（HEALTH_FAULT_MUST_NOT_TRIGGER_FLAT_CLOSE）)
+[M2] guard_fault_action('QUERY_FAILED', 'CLOSE_ALL') -> BLOCKED (QUERY_FAILED 属 QUERY_UNCERTAIN，不得触发全平动作 CLOSE_ALL（HEALTH_FAULT_MUST_NOT_TRIGGER_FLAT_CLOSE）)
+[M2] guard_fault_action('RATE_LIMITED', 'CLOSE_ALL') -> BLOCKED (RATE_LIMITED 属 RATE_LIMIT，不得触发全平动作 CLOSE_ALL（HEALTH_FAULT_MUST_NOT_TRIGGER_FLAT_CLOSE）)
+[M2] guard_fault_action('PROTECTION_MIRROR_STALE', 'CLOSE_ALL') -> BLOCKED (PROTECTION_MIRROR_STALE 属 UNKNOWN，不得触发全平动作 CLOSE_ALL（FLAT_CLOSE_REQUIRES_CONFIRMED_PROTECTION_FAILURE）)
+[M2] guard_fault_action('ALGO_ORDER_QUERY_FAILED', 'CLOSE_ALL') -> BLOCKED (ALGO_ORDER_QUERY_FAILED 属 UNKNOWN，不得触发全平动作 CLOSE_ALL（FLAT_CLOSE_REQUIRES_CONFIRMED_PROTECTION_FAILURE）)
+[M2] guard_fault_action('ProtectionOrderHealthCheck', 'CLOSE_ALL') -> BLOCKED (PROTECTIONORDERHEALTHCHECK 属 UNKNOWN，不得触发全平动作 CLOSE_ALL（FLAT_CLOSE_REQUIRES_CONFIRMED_PROTECTION_FAILURE）)
+[M2] guard_fault_action('SOMETHING_NEW', 'CLOSE_ALL') -> BLOCKED (SOMETHING_NEW 属 UNKNOWN，不得触发全平动作 CLOSE_ALL（FLAT_CLOSE_REQUIRES_CONFIRMED_PROTECTION_FAILURE）)
+[M2] guard_fault_action('HTTP_503', 'CLOSE_ALL') -> BLOCKED (HTTP_503 属 SUBMIT_UNCERTAIN，不得触发全平动作 CLOSE_ALL（FLAT_CLOSE_REQUIRES_CONFIRMED_PROTECTION_FAILURE）)
+[M2] guard_fault_action('TIMEOUT', 'CLOSE_ALL') -> BLOCKED (TIMEOUT 属 SUBMIT_UNCERTAIN，不得触发全平动作 CLOSE_ALL（FLAT_CLOSE_REQUIRES_CONFIRMED_PROTECTION_FAILURE）)
+[M2] guard_fault_action('INSUFFICIENT_MARGIN', 'CLOSE_ALL') -> BLOCKED (INSUFFICIENT_MARGIN 属 REJECTION，不得触发全平动作 CLOSE_ALL（FLAT_CLOSE_REQUIRES_CONFIRMED_PROTECTION_FAILURE）)
+[M2] guard_fault_action('PROTECTION_FAILED', 'CLOSE_ALL') -> ALLOWED class=PROTECTION triggers_flat_close=True
+
+### MUST FIX 3 修复前（V1 标量状态）
+=== tree: C:\Users\Tao\Desktop\币安\mat-wt\B\_scratch_B\tree_v1 ===
+[A 顺序场景] N/N+1 之后真实保护失败 -> closes=1 ['CLOSE ZZZUSDT']
+   => 顺序残余未抑制兜底平仓
+[同一实例跨标的] 本标的保护确证失败 -> closes=0 []
+   => 另一标的的残余抑制了本标的的兜底平仓
+
+### MUST FIX 3 修复后（按标的+每轮复位）
+=== tree: C:\Users\Tao\Desktop\币安\mat-wt\B\_scratch_B\tree ===
+[A 顺序场景] N/N+1 之后真实保护失败 -> closes=1 ['CLOSE ZZZUSDT']
+   => 顺序残余未抑制兜底平仓
+[同一实例跨标的] 本标的保护确证失败 -> closes=1 ['CLOSE ZZZUSDT']
+   => 另一标的的残余未抑制本标的的兜底平仓
+
+### MUST FIX 4 修复前（V1 兜底）
+=== tree_v4 : 落库后 status=SUBMITTING
+apply_fill_revision(第一笔 0.0047) -> RAISED QuantityError: STATUS_FILL_MISMATCH
+
+### MUST FIX 4 修复后（由分量推导）
+=== tree : 落库后 status=SUBMITTING
+apply_fill_revision(第一笔 0.0047) -> OK {'client_order_id': 'probe-fill-1', 'status': 'PARTIALLY_FILLED', 'fill_id': '55501', 'revision_only': False, 'cumulative_filled_qty': '0.0047', 'terminal_unfilled_qty': '0'}
+  cumulative_filled=0.0047 working=0.0153 status=PARTIALLY_FILLED applied=["55501"]

@@ -1,0 +1,71 @@
+U04 修复轮 r4 —— N6（P1 回归）/ N7（P2 未登记）处置证据
+作者会话（B 角色），基线 ffdab44，r3 head f4e4663。
+解释器 C:/Users/Tao/Desktop/币安/multi-agent-trader/.venv/Scripts/python.exe，PYTHONUTF8=1，无 pytest。
+所有产物落在 mat-wt/B；未读 .env/data/密钥；未联网；未下单撤单；未动风险档/live；未 push/合并/打 tag/切分支。
+
+== 沙箱树（git archive <commit> + git apply --directory） ==
+tree_pristine = f4e4663 源，4 补丁未应用
+tree_r3       = f4e4663 源 + r3 版 4 补丁（修复前）
+tree_r4       = tree_r3 + 本轮的 order_outbox.patch 修复（修复后；另经 tree_check 验证：
+                ffdab44 源 + 新补丁 == tree_r4 的 order_outbox.py，逐字节相同）
+（树为临时产物，未入库；重建命令见本文件末尾）
+
+== 原始输出对照 ==
+n6_before.txt / n6_after.txt   N6：X=FILLED 帧两条主路径 + N1 不回退
+n7_before.txt / n7_after.txt   N7：EXPIRED_IN_MATCH 落库
+bypass_r3.txt / bypass_r4.txt  C1-C6 绕过矩阵（修复前/后）
+acc_r4tests_on_r3.txt          新验收跑未修树（非空转：151 通过 / 9 失败，exit 1）
+acc_unfixed.txt                同上（最终版测试文件，155 通过 / 12 失败，exit 1）
+acc_fixed.txt                  新验收跑修复树（167 通过 / 0 失败，exit 0）
+smoke_u04.txt                   scripts/smoke_u04_execution_faults.py -> exit 0
+smoke_contracts.txt             scripts/smoke_contracts_v3.py -> PASS 173 / FAIL 0
+delta_r4.json / delta_pristine.json  全量离线 delta（同一份 70 条清单）
+
+== N6 修复（一行判据 + 文档） ==
+tests/fixtures/execution/patches/order_outbox.patch, _component_status():
+  -    if stored in _QUANTITY_TERMINAL:
+  +    if stored in _QUANTITY_TERMINAL and not (stored == "FILLED" and filled < accepted):
+原因：apply_event 的帧序是"先 _update(status=X) 再 apply_fill_revision(l)"，
+处理 X="FILLED" 帧时落库 status 已是 FILLED 而本帧成交尚未入账（中间态）；
+照搬"终态保留原状态"会走 working,terminal = 0,0 -> 守恒违规 -> QuantityError 被吞
+-> 成交静默丢弃、行永久非法。判据只能是分量：FILLED 而 filled < accepted 不是终态事实。
+
+修复前（n6_before.txt，tree_r3）：
+  S1 部分成交->全成：status=FILLED filled=0.0105 working=0 terminal=0.0095
+     viol=QuantityError: FILLED_STATUS_WITH_RESIDUAL; STATUS_FILL_MISMATCH
+     risk[warn] "私有流成交未能落库 QuantityError THREE_COMPONENT_CONSERVATION_VIOLATION;
+                STATUS_FILL_MISMATCH" action=fill revision skipped   last_error=None
+  S3 一笔全成：status=FILLED filled=0 working=0 terminal=0.02  viol=同上（整笔丢失）
+
+修复后（n6_after.txt，tree_r4）：
+  S1 status=FILLED filled=0.02 working=0 terminal=0.00 viol=()  无 risk 事件
+  S3 status=FILLED filled=0.02 working=0 terminal=0.00 viol=()
+  N1 CANCELED filled=0.0057 working=0 terminal=0.015 viol=() / EXPIRED filled=0.0057
+     working=0 terminal=0.0143 viol=()   （不回退）
+
+== N7 修复（落库 status 走别名归一 + 分量同步） ==
+tests/fixtures/execution/patches/order_outbox.patch, _update():
+  + alias = _STATUS_ALIASES.get(str(status).upper());  if alias: status = alias
+  + previous_status = _STATUS_ALIASES.get(previous_raw.upper(), previous_raw)
+修复前（n7_before.txt，tree_r3）：
+  B1 无成交 status='EXPIRED_IN_MATCH' accepted=0.02 filled=0 working=0.02 terminal=0
+     重水化 -> ValidationError（status 不在 Literal 内）；B2/B3 同
+修复后（n7_after.txt，tree_r4）：
+  B1 status='EXPIRED' working=0 terminal=0.02 重水化 -> ()
+  B2 status='EXPIRED' filled=0.0047 working=0 terminal=0.0153 重水化 -> ()
+  迟到成交后 status='EXPIRED' filled=0.0057 terminal=0.0143 重水化 -> ()
+  B3 历史遗留别名行在下一个事件到达时自愈为 EXPIRED 且分量同步
+
+== 绕过矩阵 ==
+tree_r3: FAIL = C5、C6-FILLED、N6 x2、N7；C1/C2/C3/C4/C6-CANCELED/EXPIRED/REJECTED 全 PASS
+tree_r4: ALL_BLOCKED（exit 0），C6-CANCELED/EXPIRED/REJECTED 仍 PASS（N1 不回退）
+
+== 全量 delta（同一份 70 条清单 + 同一 env，逐脚本记录 rc） ==
+tree_r4       failed = {scripts/smoke_windows_service_plan.py}
+tree_pristine failed = {scripts/smoke_windows_service_plan.py}
+差集 = 空（既有 KI02，本机缺 Windows 服务配置文件）
+
+== 重建沙箱树 ==
+git archive f4e4663 | tar -x -C <tree>
+git apply --directory=<tree> tests/fixtures/execution/patches/{binance_futures.u04_adaptation,order_outbox,protection_mirror.decimal_text,run_offline_regression.register_u04}.patch
+python _scratch_B/r4/delta.py <tree> <out.json> [_scratch_B/r4/tree_r4]

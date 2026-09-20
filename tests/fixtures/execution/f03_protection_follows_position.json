@@ -1,0 +1,149 @@
+{
+  "case_id": "F03-U04",
+  "fault_refs": [
+    "F02",
+    "F03"
+  ],
+  "scenario": "LONG 5.0 仓位已挂一张 closePosition 型 STOP_MARKET（最后一道保护）与一张数量 5.0 的 TAKE_PROFIT_MARKET。仓位先减到 2.0（rev 43）需要保护随真实仓位更新：必须先挂新保护再撤旧保护；请求单独撤销最后一道保护时必须拒绝；仓位归零但未确认归零前不得清理保护，确认归零后才允许清理遗留保护。",
+  "fixture_version": "u04-execution-v1",
+  "synthetic_data": true,
+  "synthetic_notice": "生命周期、Algo 单号、价格与时间戳均为虚构合成值，不对应任何真实账户或交易所 UID。",
+  "inputs": {
+    "environment": "demo",
+    "account_ref": "SYNTH_ACCT_PLACEHOLDER",
+    "symbol": "YYYUSDT",
+    "market_mode": "one_way",
+    "position_after_partial_reduce": {
+      "symbol": "YYYUSDT",
+      "positionAmt": "2.0",
+      "position_side": "LONG",
+      "revision": 43
+    },
+    "position_flat_unconfirmed": {
+      "symbol": "YYYUSDT",
+      "positionAmt": "0.0",
+      "position_side": "LONG",
+      "revision": 44,
+      "flat_confirmed": false
+    },
+    "position_flat_confirmed": {
+      "symbol": "YYYUSDT",
+      "positionAmt": "0.0",
+      "position_side": "LONG",
+      "revision": 45,
+      "flat_confirmed": true
+    },
+    "protective_orders": [
+      {
+        "clientAlgoId": "SYNTH_SL_03",
+        "algoId": "8001",
+        "symbol": "YYYUSDT",
+        "side": "SELL",
+        "orderType": "STOP_MARKET",
+        "positionSide": "LONG",
+        "closePosition": true,
+        "quantity": null,
+        "triggerPrice": "190.00",
+        "reduceOnly": false,
+        "is_last_protection": true
+      },
+      {
+        "clientAlgoId": "SYNTH_TP_03",
+        "algoId": "8002",
+        "symbol": "YYYUSDT",
+        "side": "SELL",
+        "orderType": "TAKE_PROFIT_MARKET",
+        "positionSide": "LONG",
+        "closePosition": false,
+        "quantity": "5.0",
+        "triggerPrice": "220.00",
+        "reduceOnly": true
+      }
+    ],
+    "desired_after_partial_reduce": {
+      "desired_sl": "190.00",
+      "desired_tp": "220.00"
+    },
+    "removal_request": {
+      "action": "MAINTAIN_PROTECTION",
+      "remove_protection": true,
+      "target_client_id": "SYNTH_SL_03"
+    },
+    "place_failure_injection": {
+      "fail_order_type": "TAKE_PROFIT_MARKET",
+      "effect": "新保护挂单失败时不得继续撤销旧保护"
+    },
+    "position_flat_unconfirmed_zero_text": {
+      "symbol": "YYYUSDT",
+      "positionAmt": "0.00000000",
+      "position_side": "LONG",
+      "revision": 46,
+      "flat_confirmed": false
+    }
+  },
+  "derived_golden": {
+    "after_partial_reduce_to_2_0": {
+      "target_qty": "2.0",
+      "keep": [
+        "SYNTH_SL_03"
+      ],
+      "place": [
+        "TAKE_PROFIT_MARKET"
+      ],
+      "cancel": [
+        "SYNTH_TP_03"
+      ],
+      "required_order": "PLACE 必须排在 CANCEL 之前",
+      "reason": "closePosition 型 SL 在触发时自动覆盖当前全部数量，数量 5.0 的 TP 与真实仓位 2.0 不一致，必须被替换"
+    },
+    "remove_last_protection": {
+      "allowed": false,
+      "reason_code": "CANNOT_REMOVE_LAST_PROTECTION",
+      "rule": "剩余保护集合为空时禁止撤销，必须先确认仓位归零"
+    },
+    "flat_unconfirmed": {
+      "cancel_actions": 0,
+      "blocked_reason": "FLAT_NOT_CONFIRMED",
+      "rule": "仓位归零未确认前不清理保护单"
+    },
+    "flat_unconfirmed_zero_text": {
+      "cancel_actions": 0,
+      "blocked_reason": "FLAT_NOT_CONFIRMED",
+      "can_cancel_last_protection": false,
+      "reason_code": "FLAT_NOT_CONFIRMED",
+      "rule": "positionAmt 是十进制文本 0.00000000 也只代表快照为零，未确认归零不得清理最后一道保护"
+    },
+    "flat_confirmed": {
+      "cancel_actions": 2,
+      "rule": "归零确认后才允许清理由本系统证明归属的遗留保护"
+    },
+    "place_failure": {
+      "cancel_skipped": true,
+      "canceled": 0,
+      "rule": "新保护没挂上时宁可留重复保护，也不留裸仓"
+    }
+  },
+  "expected_invariants": [
+    "保护数量随真实仓位更新：仓位 5.0 减到 2.0 后 TP 目标数量必须为 2.0，不得继续用 5.0 冒充覆盖",
+    "替换路径必须先挂新后撤旧，任一时刻至少存在一道有效保护",
+    "仓位未确认归零前不得撤销任何保护单",
+    "撤销最后一道保护（剩余保护集合为空）必须被拒绝",
+    "新保护挂单失败时不得继续撤销旧保护（cancel_skipped）",
+    "不得把 SL 与 TP 数量相加冒充双倍覆盖"
+  ],
+  "forbidden_outcomes": [
+    "先撤 SL/TP 再挂新保护，造成瞬时裸仓",
+    "在仓位 2.0 时保留数量 5.0 的 TP 并声明覆盖一致",
+    "在仓位仍为 2.0 时允许撤销最后一道保护",
+    "仓位归零未经确认就清理保护单",
+    "新保护挂单失败后仍然撤销旧保护"
+  ],
+  "derivation": "由 K04 授权语义、保护替换要求与交易所订单语义独立推导：(1) 规格要求保护替换采用先建新后撤旧的可验证路径，且不得撤销最后一道保护，因此动作顺序与「剩余保护非空」是硬约束；(2) Binance USD-M 的 closePosition=true 保护单在触发时按 positionSide 关闭该侧全部当前数量，天然跟随仓位变化，而数量型 reduceOnly 保护单只覆盖挂单时的数量，仓位减少后必须重挂才能覆盖新数量；(3) 数量一致性：TP 数量 5.0 与真实仓位 2.0 之差 3.0 远超容差，故该单被判定为过期；(4) 归零清理需要二次确认：仓位查询与保护清理之间存在竞态，未确认归零时撤销保护会制造裸仓风险；(5) 失败注入：若新保护挂单失败仍继续撤旧，撤旧后该仓位将没有任何保护，违反「不撤销最后保护」的实质要求。",
+  "source_refs": [
+    "规格 §6 F03（TP 与时间退出同时触发 → 一次净减仓，不先撤最后保护）",
+    "规格 §6 F02（部分成交后保护随成交更新）",
+    "规格 §10.2 保护替换与遗留保护清理",
+    "K04 ProtectionTarget.is_last_protection 与 CANNOT_REMOVE_LAST_PROTECTION",
+    "Binance USD-M closePosition / reduceOnly / positionSide 语义（官方接口文档）"
+  ]
+}

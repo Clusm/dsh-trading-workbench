@@ -1,0 +1,290 @@
+diff --git a/src/exchange/binance_futures.py b/src/exchange/binance_futures.py
+index 3c0b9db..726f6d4 100644
+--- a/src/exchange/binance_futures.py
++++ b/src/exchange/binance_futures.py
+@@ -18,6 +18,7 @@ import httpx
+ 
+ from agents.models import RiskVerdict, TradeDecision, TradeIntent
+ from audit.database import AuditDatabase, utc_now
++from core.contracts import decimal_from_float
+ from data.binance_transport import endpoint_group
+ from data.binance_request_policy import parse_retry_after, policy_for
+ from data.rate_limit import (
+@@ -30,6 +31,14 @@ from data.rate_limit import (
+     reserve_request,
+ )
+ from exchange.order_outbox import OrderOutbox
++from exchange.protection_commands import (
++    ProtectionSyncReasons,
++    defers_flat_close,
++    execute_protection_plan,
++    plan_protection_refresh,
++    protection_view_from_algo,
++    real_position_from_snapshot,
++)
+ from exchange.protection_mirror import ProtectionOrderMirror
+ from exchange.protocol import normalize_algo_orders_payload, parse_iso as _parse_iso, parse_iso_ms
+ from exchange.trade_reconciliation import (
+@@ -78,6 +87,28 @@ def _exchange_bool(value: Any) -> bool:
+     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+ 
+ 
++def _decimal_text(value: Any) -> str | None:
++    """把数量/价格转成十进制文本；非有限值返回 None（绝不写脏文本列）。"""
++    try:
++        parsed = decimal_from_float(value)
++    except Exception:  # noqa: BLE001 - 文本列只是尽力精确，不能因此中断下单
++        return None
++    if not parsed.is_finite():
++        return None
++    return format(parsed.normalize(), "f") if parsed != 0 else "0"
++
++
++def _exchange_decimal(value: Any) -> Any:
++    """交易所来源字段 -> Decimal；字符串/整数直接解析，浮点显式转换。
++
++    ``normalize_algo_orders_payload`` 原样透传 JSON 值，所以 ``quantity``/
++    ``positionAmt``/``triggerPrice`` 可能是 JSON 数字。``protection_view_from_algo``
++    与 ``real_position_from_snapshot`` 对浮点一律硬拒，若不在这里显式转换，只要
++    交易所返回数字型字段就会让**整轮保护刷新**抛错（V1 的回归点）。
++    """
++    return decimal_from_float(value) if isinstance(value, float) else value
++
++
+ def assess_takeover_compatibility(
+     position_mode: Mapping[str, Any] | None,
+     positions: list[dict[str, Any]],
+@@ -190,6 +221,10 @@ class BinanceFuturesBroker:
+         self.order_outbox = OrderOutbox(db, environment=environment) if db is not None else None
+         if self.order_outbox is not None:
+             self.order_outbox.recover_stale_submitting()
++        # U04：最近一轮保护同步的失败类别。必须**按标的**保存、并在每轮同步入口复位
++        # （``ProtectionSyncReasons.begin``）：否则某一标的/某一轮的 QUERY_FAILED 会
++        # 残留下来，把之后真实的保护缺口误判成观测故障而抑制兜底平仓（保留裸仓）。
++        self._protection_sync = ProtectionSyncReasons()
+         self.mode = environment
+         self.environment = environment
+         self.trade_reconciliation = (
+@@ -385,6 +420,20 @@ class BinanceFuturesBroker:
+                     time.sleep(1.0)
+         raise last_err if last_err else RuntimeError("request failed")
+ 
++    @property
++    def protection_sync(self) -> ProtectionSyncReasons:
++        """按标的保存的保护同步失败类别；惰性创建。
++
++        惰性而不是只在 ``__init__`` 里赋值：单元测试与离线回放会用 ``__new__``
++        构造实例（绕开真实客户端/网络），此时该属性必须**依然由生产代码自己产生**
++        失败类别，而不是让测试注入一个"本轮新鲜"的内部字段。
++        """
++        reasons = self.__dict__.get("_protection_sync")
++        if reasons is None:
++            reasons = ProtectionSyncReasons()
++            self.__dict__["_protection_sync"] = reasons
++        return reasons
++
+     def _load_exchange_info(self) -> None:
+         try:
+             data = self._request(
+@@ -599,6 +648,11 @@ class BinanceFuturesBroker:
+                     request.get("reduceOnly", request.get("reduceonly", False)))
+                 or _exchange_bool(request.get("closePosition")),
+                 endpoint="/fapi/v1/algoOrder", request=request,
++                command_kind="ALGO",
++                # 文本列从十进制转换而来，不用 str(float)：str(0.1+0.2) 的尾差会
++                # 直接写进"精确"列，勾稽结果不再可复核（U04/DC04）。
++                qty_text=(_decimal_text(request["quantity"])
++                          if request.get("quantity") is not None else None),
+             )
+         try:
+             data = self._signed("POST", "/fapi/v1/algoOrder", request)
+@@ -647,6 +701,9 @@ class BinanceFuturesBroker:
+                 price=float(request["price"]) if request.get("price") is not None else None,
+                 reduce_only=str(request.get("reduceOnly", "false")).lower() == "true",
+                 endpoint="/fapi/v1/order", request=request,
++                command_kind="STANDARD",
++                qty_text=(_decimal_text(request["quantity"])
++                          if request.get("quantity") is not None else None),
+             )
+         try:
+             data = self._signed("POST", "/fapi/v1/order", request)
+@@ -1112,9 +1169,25 @@ class BinanceFuturesBroker:
+         )
+         if ok:
+             return
++        symbol = str(order["symbol"])
++        # 关键：失败类别从**本次**同步的结果里取（``_resync_protection_impl`` 在入口
++        # 先 ``begin(symbol)`` 复位、失败时 ``mark(symbol, ...)``），不再读进程级标量
++        # 的残余值。只有"已确证的观测故障"才推迟平仓；未归类/保护确证失败仍按 P0
++        # 兜底立即平仓（绝不允许裸仓）。
++        if defers_flat_close(self.protection_sync.get(symbol)):
++            fault = self.protection_sync.get(symbol)
++            if self.db:
++                # 复用已登记的事件类型（dashboard 事件映射表无需新增键）；
++                # 语义由 action_taken 明确表达：只告警，不因观测故障平仓。
++                self.db.log_risk_event(
++                    event_type="futures_sync_error", severity="critical",
++                    details=(f"{symbol}: 保护状态无法核验（{fault}），"
++                             f"本轮不平仓，等待下轮重试"),
++                    action_taken="alert_only_no_flat_close")
++            return
+         try:
+             close_intent = TradeIntent(
+-                symbol=str(order["symbol"]), action="close",
++                symbol=symbol, action="close",
+                 side=str(order.get("side") or "LONG"),
+                 qty=float(order.get("qty") or 0.0),
+                 leverage=int(order.get("leverage") or 1),
+@@ -1666,12 +1739,16 @@ class BinanceFuturesBroker:
+                                 stop_loss: float | None = None,
+                                 take_profit: float | None = None) -> bool:
+         """统一同步止损/止盈：只在数量或价格变化时重挂，避免每轮刷大量重复 Algo 单。"""
++        # 本轮开始：复位该标的的失败类别。任何提前 return（含下面"保护已匹配"
++        # 的成功路径）都不会留下上一轮的残余类别。
++        self.protection_sync.begin(symbol)
+         existing = self._open_algos(symbol)
+         if existing is None:
+             # 交易所查询失败：无法确认当前保护单状态，绝不能当作"无保护"处理。
+             # 带明确 intent 的主动挂单路径除外（调用方明确要求挂新保护，即使
+             # 查询失败也应尝试撤旧挂新，由 -2011 等错误码兜底）。
+             if intent is None and stop_loss is None and take_profit is None:
++                self.protection_sync.mark(symbol, "QUERY_FAILED")
+                 if self.db:
+                     self.db.log_risk_event(
+                         event_type="futures_sync_error", severity="warn",
+@@ -1759,27 +1836,118 @@ class BinanceFuturesBroker:
+         if stop_ok and take_ok:
+             return True
+ 
+-        # 有变化/重复单：全部取消后按当前仓位重挂
+-        self._cancel_symbol_algos(symbol)
+-        failed = False
+-        if sl:
++        # 有变化/重复单：交由 U04 保护规划按“先挂新、后撤旧”执行；任一 PLACE 失败即
++        # 停止，绝不先把旧保护撤掉留下裸仓，也不撤销最后一道保护。
++        #
++        # 交易所来源字段逐条容错：``normalize_algo_orders_payload`` 原样透传 JSON，
++        # 某一行的数量/触发价若是浮点或畸形，只跳过该行并计数，绝不让整轮保护刷新
++        # 抛错（那样等于该轮完全没有保护对账）。浮点走 ``_exchange_decimal`` 显式
++        # 转成 Decimal，与 ``desired_sl/tp`` 的口径一致。
++        protection_views = []
++        skipped_rows = 0
++        for item in existing:
+             try:
+-                self._place_algo_protection(symbol, close_side, qty, "STOP_MARKET", sl, "sl", "STOP")
+-            except Exception as e:
+-                failed = True
+-                if self.db:
+-                    self.db.log_risk_event(event_type="futures_sl_failed", severity="critical",
+-                                           details=f"{symbol}: {type(e).__name__} {e}",
+-                                           action_taken="protection_failed")
+-        if tp:
++                protection_views.append(protection_view_from_algo({
++                    "clientAlgoId": item.get("clientAlgoId"),
++                    "algoId": item.get("algoId"),
++                    "orderType": item.get("orderType"),
++                    "quantity": _exchange_decimal(item.get("quantity")),
++                    "triggerPrice": _exchange_decimal(item.get("triggerPrice")),
++                    "reduceOnly": item.get("reduceOnly"),
++                    "closePosition": item.get("closePosition"),
++                }))
++            except Exception:  # noqa: BLE001 - 单行畸形不拖垮整轮对账
++                skipped_rows += 1
++        if skipped_rows and self.db:
++            self.db.log_risk_event(
++                event_type="futures_adjust_error", severity="warn",
++                details=f"{symbol}: {skipped_rows} 行保护单字段畸形已跳过（本轮仍继续对账）",
++                action_taken="skip malformed protection rows")
++
++        try:
++            position_snapshot = real_position_from_snapshot({
++                "symbol": symbol,
++                "positionAmt": _exchange_decimal(pos.get("positionAmt")),
++                "positionSide": pos.get("positionSide"),
++            })
++        except Exception as exc:  # noqa: BLE001 - 仓位字段畸形：按未确证处理，不平仓
++            self.protection_sync.mark(symbol, "QUERY_FAILED")
++            if self.db:
++                self.db.log_risk_event(
++                    event_type="futures_sync_error", severity="critical",
++                    details=(f"{symbol}: 仓位快照字段无法精确解析"
++                             f"（{type(exc).__name__}），本轮不平仓"),
++                    action_taken="alert_only_no_flat_close")
++            return False
++
++        plan = plan_protection_refresh(
++            position=position_snapshot,
++            protections=protection_views,
++            desired_sl=(decimal_from_float(sl) if sl is not None else None),
++            desired_tp=(decimal_from_float(tp) if tp is not None else None),
++            flat_confirmed=False,
++        )
++
++        def _place_action(action: Any) -> str:
++            is_stop = action.order_type == "STOP_MARKET"
++            self._place_algo_protection(
++                symbol, close_side, qty, action.order_type,
++                float(action.trigger_price), "sl" if is_stop else "tp",
++                "STOP" if is_stop else "TAKE")
++            return action.order_type
++
++        def _cancel_action(action: Any) -> bool:
++            target = None
++            for item in existing:
++                if str(item.get("clientAlgoId") or "") == str(action.client_id):
++                    target = item
++                    break
++            algo_id = str((target or {}).get("algoId") or "") or None
++            if algo_id is None:
++                # 只知 clientAlgoId、匹配不到交易所 algoId -> 发不出 DELETE。
++                # 必须返回 False：调用方会记入 cancel_failed 而不是 canceled，
++                # 否则账本会宣称"旧保护已撤"而交易所侧旧保护仍在。
++                return False
+             try:
+-                self._place_algo_protection(symbol, close_side, qty, "TAKE_PROFIT_MARKET", tp, "tp", "TAKE")
++                self._signed("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
+             except Exception as e:
+-                failed = True
++                # 撤旧失败不致命：新保护已挂上，旧保护留在交易所不构成裸仓。
+                 if self.db:
+-                    self.db.log_risk_event(event_type="futures_tp_failed", severity="critical",
+-                                           details=f"{symbol}: {type(e).__name__} {e}",
+-                                           action_taken="protection_failed")
++                    self.db.log_risk_event(
++                        event_type="futures_adjust_error", severity="warn",
++                        details=f"{symbol}: 撤销被替换保护 {algo_id} 失败: "
++                                f"{type(e).__name__} {e}",
++                        action_taken="保留旧保护")
++                return False
++            if self.db:
++                self.db.cancel_order_by_exchange_id(exchange_order_id=algo_id)
++            if action.client_id and getattr(self, "order_outbox", None) is not None:
++                self.order_outbox.acknowledge(str(action.client_id), {
++                    "algoId": algo_id, "algoStatus": "CANCELED",
++                })
++            return True
++
++        execution = execute_protection_plan(plan, place=_place_action,
++                                            cancel=_cancel_action)
++        failed = bool(execution.failed_place)
++        if failed and self.db:
++            self.db.log_risk_event(
++                event_type=("futures_sl_failed"
++                            if execution.failed_place == "STOP_MARKET"
++                            else "futures_tp_failed"),
++                severity="critical",
++                details=(f"{symbol}: {execution.failed_place} 挂新保护失败，"
++                         f"已按计划保留旧保护（cancel_skipped={execution.cancel_skipped}）"),
++                action_taken="protection_failed")
++        if execution.cancel_failed and self.db:
++            self.db.log_risk_event(
++                event_type="futures_adjust_error", severity="warn",
++                details=(f"{symbol}: 保护单撤销回调未执行 "
++                         f"{list(execution.cancel_failed)}（{execution.cancel_unexecuted_reason}），"
++                         f"交易所侧旧保护可能仍在"),
++                action_taken="取消未生效已记录")
++        # 只写"已确证的保护失败"，成功即复位（begin 已在入口清过，这里显式置空）。
++        self.protection_sync.mark(symbol, "PROTECTION_FAILED" if failed else "")
+         return not failed
+ 
+     def _place_protection(self, symbol: str, intent: Any) -> bool:

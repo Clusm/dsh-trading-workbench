@@ -1,0 +1,11 @@
+--- a/scripts/run_offline_regression.py
++++ b/scripts/run_offline_regression.py
+@@ -80,6 +80,8 @@
+     "scripts/smoke_takeover_compatibility.py",
+     "scripts/smoke_llm_failover.py",
+     "scripts/smoke_contracts_v3.py",
++    # U04：执行故障验收（部分成交守恒、UNKNOWN 有界升级、保护随真实仓位）。
++    "scripts/smoke_u04_execution_faults.py",
+ )
+ EXCLUDED_SMOKE_SCRIPTS = {
+     # 第[6]节直接调用 query_symbol_detail/query_symbol_cards 打公共行情接口，

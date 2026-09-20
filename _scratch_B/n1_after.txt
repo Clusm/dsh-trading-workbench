@@ -1,0 +1,46 @@
+### TREE = C:\Users\Tao\Desktop\币安\mat-wt\B\_scratch_B\final\src\exchange\order_outbox.py
+### LABEL = AFTER(r3-final)
+
+--- [AFTER(r3-final)] CANCELED ---
+  after 首笔部分成交                       status=PARTIALLY_FILLED accepted=0.02 filled=0.0047 working=0.0153 terminal=0
+  after 转终态                          status=CANCELED         accepted=0.02 filled=0.0047 working=0 terminal=0.0153
+  after 迟到成交(l=0.001,t=55502)        status=CANCELED         accepted=0.02 filled=0.0057 working=0 terminal=0.0143
+  last_error(apply_event 吞掉了吗) = None
+  K04 终态不变量 working==0 ? True   (working=0)
+  余量进 terminal 期望 0.0143 实际 0.0143 -> OK
+  守恒 accepted == filled+working+terminal ? True
+  OrderQuantity.checked(该行) -> ACCEPTED
+  VERDICT = CORRECT_TERMINAL
+
+--- [AFTER(r3-final)] EXPIRED ---
+  after 首笔部分成交                       status=PARTIALLY_FILLED accepted=0.02 filled=0.0047 working=0.0153 terminal=0
+  after 转终态                          status=EXPIRED          accepted=0.02 filled=0.0047 working=0 terminal=0.0153
+  after 迟到成交(l=0.001,t=55502)        status=EXPIRED          accepted=0.02 filled=0.0057 working=0 terminal=0.0143
+  last_error(apply_event 吞掉了吗) = None
+  K04 终态不变量 working==0 ? True   (working=0)
+  余量进 terminal 期望 0.0143 实际 0.0143 -> OK
+  守恒 accepted == filled+working+terminal ? True
+  OrderQuantity.checked(该行) -> ACCEPTED
+  VERDICT = CORRECT_TERMINAL
+
+--- [alias] EXPIRED_IN_MATCH 迟到成交 ---
+  status=EXPIRED_IN_MATCH filled=0.0057 working=0 terminal=0.0143
+  分量口径正确（working=0, 余量进 terminal）? True（status 列按设计原样保留交易所别名 EXPIRED_IN_MATCH）
+
+--- 兜底语义矩阵 _component_status(accepted=0.02, filled=0.0047, stored_status=x) ---
+  'SUBMITTING'           -> PARTIALLY_FILLED
+  'ACKNOWLEDGED'         -> PARTIALLY_FILLED
+  'UNKNOWN'              -> PARTIALLY_FILLED
+  'NEW'                  -> PARTIALLY_FILLED
+  'PARTIALLY_FILLED'     -> PARTIALLY_FILLED
+  'CANCELED'             -> CANCELED
+  'EXPIRED'              -> EXPIRED
+  'REJECTED'             -> REJECTED
+  'EXPIRED_IN_MATCH'     -> EXPIRED
+  'SOMETHING_NEW'        -> PARTIALLY_FILLED
+  'PARTIALLY_FILLEDX'    -> PARTIALLY_FILLED
+  ''                     -> PARTIALLY_FILLED
+  'CANCELED '            -> PARTIALLY_FILLED
+  未知状态不外泄、按分量 fail-safe 推导 ? True
+
+### SUMMARY AFTER(r3-final): ALL_CORRECT

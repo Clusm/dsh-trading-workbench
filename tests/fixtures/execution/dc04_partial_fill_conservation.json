@@ -1,0 +1,94 @@
+{
+  "case_id": "DC04-U04",
+  "fault_refs": ["F02", "F21"],
+  "scenario": "BTCUSDT 普通订单请求 0.01，交易所只成交 0.0047 后剩余被撤销，随后撤销已确认但交易所又迟到补报一笔 0.0047 成交，且同一笔成交被重复投递。必须用 Decimal 精确校验三分量守恒，终态订单的迟到成交只能修订事实、不得复活订单、不得重复计成交。",
+  "fixture_version": "u04-execution-v1",
+  "synthetic_data": true,
+  "synthetic_notice": "全部订单号、成交号、价格与时间戳均为虚构合成值；account_ref 为占位符，不对应任何真实账户、交易所 UID、密钥或签名。",
+  "inputs": {
+    "environment": "demo",
+    "account_ref": "SYNTH_ACCT_PLACEHOLDER",
+    "symbol": "ZZZUSDT",
+    "client_order_id": "synth-u04-pf-0001",
+    "order_id": "SYNTH_ORDER_PF1",
+    "requested_qty": "0.01",
+    "fills": [
+      {"fill_id": "SYNTH_FILL_PF_A", "qty": "0.0047", "price": "100.00", "at_ms": 1789862401000}
+    ],
+    "lifecycle_events": [
+      {"type": "cancel_request", "at_ms": 1789862402000},
+      {"type": "cancel_confirmed", "status": "CANCELED", "at_ms": 1789862404000},
+      {
+        "type": "late_fill",
+        "fill": {"fill_id": "SYNTH_FILL_PF_B", "qty": "0.0047", "price": "100.10"},
+        "at_ms": 1789862410000,
+        "note": "订单已 CANCELED 之后交易所才补报的成交；本地不得丢弃该事实"
+      }
+    ],
+    "replayed_fill": {"fill_id": "SYNTH_FILL_PF_A", "qty": "0.0047", "price": "100.00"},
+    "float_trap": {
+      "expr": "0.01 - 0.0047 - 0.0047",
+      "binary_float_result": 0.0005999999999999998,
+      "expected_exact": "0.0006",
+      "note": "二进制浮点累减得不到精确的 0.0006（尾差 0.0000000000000002）；用 float 勾稽会污染终态余量判断"
+    }
+  },
+  "derived_golden": {
+    "after_first_fill": {
+      "status": "PARTIALLY_FILLED",
+      "accepted": "0.01",
+      "filled": "0.0047",
+      "working_leaves": "0.0053",
+      "terminal_unfilled": "0",
+      "conservation": "0.0047 + 0.0053 + 0 = 0.01"
+    },
+    "after_cancel_request": {
+      "status": "PARTIALLY_FILLED",
+      "terminal_unfilled": "0",
+      "working_leaves": "0.0053",
+      "rule": "撤单确认前 remaining 不得计入 terminal"
+    },
+    "after_cancel_confirmed": {
+      "status": "CANCELED",
+      "working_leaves": "0",
+      "terminal_unfilled": "0.0053",
+      "conservation": "0.0047 + 0 + 0.0053 = 0.01"
+    },
+    "after_late_fill": {
+      "status": "CANCELED",
+      "filled": "0.0094",
+      "working_leaves": "0",
+      "terminal_unfilled": "0.0006",
+      "conservation": "0.0094 + 0 + 0.0006 = 0.01",
+      "revision_only": true
+    },
+    "after_replay_first_fill": {
+      "filled": "0.0094",
+      "terminal_unfilled": "0.0006",
+      "rule": "同一 fill_id 重复投递必须被幂等拒绝，不得把成交累计翻倍"
+    },
+    "rounded_values": {"accepted": 0.01, "first_fill": 0.0047, "late_fill": 0.0047, "total_filled": 0.0094}
+  },
+  "expected_invariants": [
+    "三分量守恒在每一步都精确成立：accepted = cumulative_filled + working_leaves + terminal_unfilled",
+    "部分成交数量用 Decimal 精确勾稽，0.01 与 0.0047 的差值必须等于 0.0053，不接受浮点近似",
+    "撤单确认之前 terminal_unfilled 恒为 0；确认之后未成交余量一次性转入 terminal_unfilled",
+    "CANCELED 之后迟到的 fill 仍要修订累计成交（终态可修正），但订单状态保持 CANCELED",
+    "同一 fill_id 重复投递被幂等拒绝，累计成交不翻倍",
+    "任何一步都不得因本地终态判断而丢弃迟到的成交事实"
+  ],
+  "forbidden_outcomes": [
+    "用 float 做数量勾稽并把尾差当成真实数量差或据此报守恒失败",
+    "在撤单确认前把 0.0053 提前计入 terminal_unfilled",
+    "把 CANCELED 后的迟到成交丢弃，或把订单状态从 CANCELED 改回 PARTIALLY_FILLED",
+    "把同一 fill_id 重复计入累计成交",
+    "把 0.0047 成交四舍五入成 0.00 或 0.01"
+  ],
+  "derivation": "由 K04 三分量定义与交易所成交语义独立推导，不引用被测实现输出：(1) 守恒式 accepted = cumulative_filled + working_leaves + terminal_unfilled 是 K04 冻结语义，且在 NEW/PARTIALLY_FILLED 时 terminal_unfilled 必须为 0；(2) 撤单语义：请求撤销只表示意图，未收到交易所确认前剩余量仍在 working，只有确认后才转入 terminal，否则会把可成交的数量当成已终止；(3) 算术：0.0047 与 0.0053 之和恰为 0.01，终态余量 0.01-0.0047-0.0047 应精确等于 0.0006，而 IEEE754 双精度累减得到 0.0005999999999999998，说明该场景必须使用十进制精确算术；(4) 迟到成交：交易所先成交后回报，本地状态机不能反向改变交易所事实，只能向上修订累计成交，故终态后 cumulative_filled 增加、terminal_unfilled 相应减少，两者之和保持 accepted；(5) fill 级幂等：同一 fill_id 代表同一笔交易所成交事实，重复投递不得重复累计。",
+  "source_refs": [
+    "规格 §6 F02（0.01 仅成交 0.0047，随后撤单/迟到成交 → 真实数量守恒）",
+    "规格 §6 F21（普通单已 CANCELED 但迟到部分 fill → 事实能修订）",
+    "K04 OrderQuantity 三分量与 apply_fill 的终态修订语义",
+    "Binance USD-M Query Order 的 executedQty / origQty 与 UserTrades 成交标识语义（官方接口文档）"
+  ]
+}

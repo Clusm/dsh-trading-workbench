@@ -1,0 +1,48 @@
+### TREE = C:\Users\Tao\Desktop\币安\mat-wt\B\_scratch_B\r4\tree_r3\src\exchange\order_outbox.py
+
+[C1] 终态 + 超额成交
+  PASS  C1 超额成交不改变终态、行仍合法  [filled=0.0047 viol=()]
+  PASS  C1b 超过受理量的成交被契约拒绝  [fill exceeds accepted quantity]
+
+[C2] 终态 + 负数量
+  PASS  C2 负成交被 fail-closed 吞掉、行不变且合法  [filled=0.0047]
+
+[C3] 脏 status 后投成交
+  PASS  C3 脏 status 'SOMETHING_NEW' 不外泄词表外值  [落库='PARTIALLY_FILLED' 推导=PARTIALLY_FILLED]
+  PASS  C3 脏 status '' 不外泄词表外值  [落库='PARTIALLY_FILLED' 推导=PARTIALLY_FILLED]
+  PASS  C3 脏 status '   ' 不外泄词表外值  [落库='PARTIALLY_FILLED' 推导=PARTIALLY_FILLED]
+  PASS  C3 脏 status 123 不外泄词表外值  [落库='PARTIALLY_FILLED' 推导=PARTIALLY_FILLED]
+
+[C4] 篡改后契约自检
+  PASS  C4 篡改 working 后立刻被契约判违规  [got=QuantityError: THREE_COMPONENT_CONSERVATION_VIOLATION; WORKING_NONZERO_WHILE_TERMINAL]
+  PASS  C4b model_copy 篡改立刻被 violations 抓到  [got=('THREE_COMPONENT_CONSERVATION_VIOLATION', 'WORKING_NONZERO_WHILE_TERMINAL')]
+
+[C5] 兜底语义矩阵 _component_status(accepted=0.02, filled=0.0047, x)
+      'SUBMITTING'         -> PARTIALLY_FILLED
+      'ACKNOWLEDGED'       -> PARTIALLY_FILLED
+      'UNKNOWN'            -> PARTIALLY_FILLED
+      'NEW'                -> PARTIALLY_FILLED
+      'EXPIRED_IN_MATCH'   -> EXPIRED
+      'SOMETHING_NEW'      -> PARTIALLY_FILLED
+      ''                   -> PARTIALLY_FILLED
+      'CANCELED '          -> PARTIALLY_FILLED
+      'cancelled'          -> PARTIALLY_FILLED
+  FAIL  C5 词表外状态不外泄 + FILLED 由分量背书（N6 判据）
+
+[C6] 终态矩阵 + 迟到成交（私有流真实路径）
+      CANCELED  status=CANCELED           filled=0.0057 working=0 terminal=0.0143 viol=()
+  PASS  C6 CANCELED 迟到成交保留终态且行合法  [viol=()]
+      EXPIRED   status=EXPIRED            filled=0.0057 working=0 terminal=0.0143 viol=()
+  PASS  C6 EXPIRED 迟到成交保留终态且行合法  [viol=()]
+      REJECTED  status=REJECTED           filled=0 working=0 terminal=0 viol=()
+  PASS  C6 REJECTED 迟到成交保留终态且行合法  [viol=()]
+      FILLED    status=FILLED             filled=0.0047 working=0 terminal=0.0153 viol=QuantityError: FILLED_STATUS_WITH_RESIDUAL; STATUS_FILL_MISMATCH
+  FAIL  C6 FILLED 帧不带成交（物理不可能序列）：成交不再被静默丢弃  [filled=0.0047]
+  PASS  C6b [既有、非阻断、已登记] 该不可能序列下状态列仍为未背书的 FILLED  [viol=QuantityError: FILLED_STATUS_WITH_RESIDUAL; STATUS_FILL_MISMATCH]
+
+[N6/N7] 复核
+  FAIL  N6 部分成交->全成：末档成交入账  [filled=0.0105]
+  FAIL  N6 一笔全成：整笔成交入账  [filled=0]
+  FAIL  N7 EXPIRED_IN_MATCH 落库为词表内终态且分量同步  [status=EXPIRED_IN_MATCH]
+
+### SUMMARY: FAILED=['C5 词表外状态不外泄 + FILLED 由分量背书（N6 判据）', 'C6 FILLED 帧不带成交（物理不可能序列）：成交不再被静默丢弃', 'N6 部分成交->全成：末档成交入账', 'N6 一笔全成：整笔成交入账', 'N7 EXPIRED_IN_MATCH 落库为词表内终态且分量同步']
