@@ -145,6 +145,33 @@
             "9d7a100",
             "0b85bef"
           ]
+        },
+        {
+          "type": "contract_reviews_r3",
+          "candidate": "b36d8a9",
+          "verdict": "P0/P1 全部CLOSED；残余P2 修复/登记",
+          "archived_commit": "59c19ba",
+          "reports": [
+            "Q_w0r1_r3",
+            "C_w0r1_r3",
+            "B_w0r1_r3"
+          ]
+        },
+        {
+          "type": "contract_fixes_r4",
+          "commit": "5ee082b",
+          "note": "I恢复提交（工具中止）；r3残余P2修复+golden changelog补登+k02/k03 schema重生成；smoke PASS 173/0"
+        },
+        {
+          "type": "handover",
+          "date": "2026-09-21",
+          "path": "docs/dispatch/交接说明_2026-09-21.md",
+          "pending": [
+            "U00 r4 verification",
+            "contract-v3.0 freeze",
+            "implementation worktrees",
+            "W1 dispatch"
+          ]
         }
       ],
       "blockers": [],
@@ -185,7 +212,48 @@
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r1",
+          "candidate": "db7e0d7",
+          "sessions": [
+            "Q-w0r1",
+            "C-w0r1",
+            "B-w0r1"
+          ],
+          "verdict": "CHANGES_REQUESTED",
+          "reports_dir": "docs/dispatch/reviews/U00/db7e0d7/"
+        },
+        {
+          "round": "r2",
+          "candidate": "0b85bef",
+          "sessions": [
+            "Q-w0r1",
+            "C-w0r1",
+            "B-w0r1"
+          ],
+          "verdict": "Q/C CHANGES_REQUESTED；B 有条件GO",
+          "reports_dir": "docs/dispatch/reviews/U00/0b85bef/"
+        },
+        {
+          "round": "r3",
+          "candidate": "b36d8a9",
+          "sessions": [
+            "Q-w0r1",
+            "C-w0r1",
+            "B-w0r1"
+          ],
+          "verdict": "P0/P1 CLOSED；残余P2",
+          "reports_dir": "docs/dispatch/reviews/U00/b36d8a9/"
+        },
+        {
+          "round": "r4",
+          "candidate": "5ee082b",
+          "sessions": [],
+          "verdict": "NOT_RUN_HANDOVER",
+          "reports_dir": "docs/dispatch/reviews/U00/5ee082b/（待创建）"
+        }
+      ],
       "qa_runs": [
         {
           "session": "Q-w0r1",
@@ -1492,7 +1560,7 @@
       "development_blocked": false
     }
   ],
-  "updated_date": "2026-09-20",
+  "updated_date": "2026-09-21",
   "updated_by": "I",
   "increment_registration": {
     "date": "2026-09-20",
@@ -1846,7 +1914,9 @@
         "blocks": "check_quality / RC",
         "note": "U00 不越权；在 U05 S02 或 I 集成时修复；不得静默忽略"
       }
-    ]
+    ],
+    "contract_candidate": "5ee082b",
+    "handover": "docs/dispatch/交接说明_2026-09-21.md"
   },
   "dispatch_version": "v1.1",
   "increment_scope": [
