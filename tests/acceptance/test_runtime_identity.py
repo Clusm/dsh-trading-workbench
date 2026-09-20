@@ -52,6 +52,7 @@ from core.runtime_identity import (  # noqa: E402
     ExecutionModeError,
     FallbackRouteError,
     MalformedInputError,
+    ModelRouteConfigError,
     MissingRuntimeInputError,
     StrategySourceMismatchError,
     authorize_new_entry,
@@ -638,6 +639,12 @@ def check_model_route_priority() -> None:
                                          credentials_present={"SENSENOVA_API_KEY": True},
                                          agent_name="market_analyst", execution_mode="live")
         check("workbuddy-only-ai-trader", other_agent.provider == "sensenova")
+        # 空模型：本模块结构化拒绝（不再抛 pydantic ValidationError）
+        expect_raises("empty-model-is-structured-rejection", (ModelRouteConfigError,),
+                      resolve_model_route, raw_settings={"llm": {}},
+                      raw_agents={"agents": [{"name": "ai_trader"}]}, env={},
+                      credentials_present={"SENSENOVA_API_KEY": True},
+                      execution_mode="demo")
         # probe 结果本身可进身份哈希
         check("route-hashable", len(agent_wins.identity_hash()) == 64)
         check("route-hash-changes-with-model",
