@@ -360,7 +360,27 @@
         "F23",
         "F25"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "review_r1_B",
+          "candidate": "c290c50",
+          "verdict": "CHANGES_REQUESTED",
+          "archived_path": "docs/dispatch/reviews/U01/c290c50/B_r1.md",
+          "key_findings": [
+            "P0-A 两个 smoke_u01_* 未登记 -> run_offline_regression 在 head 上直接 raise（同 U03；属 I 的原子登记，非作者缺陷）",
+            "P0-B 真实存储幂等链断: sync_income_window(existing=book.load_existing()) 崩溃（income_reconciliation.py:301-304 把 key->hash 的 hash 当事件）；且补丁 01 自造 content_hash 与 K03 口径不符，修好前者后重放会被判 ID 冲突并抹掉已入账事件。作者测试 [9] 为 SKIP，故 PASS=78 未覆盖此路径",
+            "P1 coverage 用 self.environment 写、事件用 event.environment -> 跨 profile 覆盖（任务卡明列风险）",
+            "P1 fetch_income_coverage 只能取最新窗口 -> '缺失当零'"
+          ],
+          "patch_opinions": {
+            "01": "需改 5 处",
+            "02": "必须与 04 同批应用（只上 02 会让 check_binance_request_policy.py 失败，已复现）",
+            "03": "接受",
+            "04": "应由 I 应用（1 行；demo-fapi.binance.com 也 strict=True）"
+          },
+          "positives": "三状态独立、资金费守恒、Decimal、空窗!=零、query_review_library 只读 经独立复现成立"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "B",
@@ -405,7 +425,19 @@
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r1",
+          "stage": "初审",
+          "candidate": "c290c50",
+          "sessions": [
+            "B (reviews/U01/B/r1)"
+          ],
+          "verdict": "CHANGES_REQUESTED",
+          "reports_dir": "docs/dispatch/reviews/U01/c290c50/",
+          "counts": "P0 x2 / P1 x9 / P2 x8 / P3 x8"
+        }
+      ],
       "qa_runs": []
     },
     {
@@ -2212,6 +2244,14 @@
         "owner": "I",
         "blocks": "无（集成时原子解决）",
         "note": "U01/U03 作者按项目约定把入口命名为 scripts/smoke_*.py，触发 _validate_smoke_manifest() 强制登记；而 run_offline_regression.py 属 I 独占。登记必须与冒烟脚本同批落地，否则会从'未登记'翻转为'清单引用不存在'。已据此把 4 个脚本路径补入 U01/U03 owned_paths。**这是 I 的集成动作，不是作者缺陷；不得因此要求作者返工。** U15 用 tests/acceptance/*.py 命名，未触发该门禁。"
+      },
+      {
+        "id": "W1-PATCH-BATCHING",
+        "title": "U01 补丁 02 与 04 必须同批应用",
+        "status": "OPEN",
+        "owner": "I",
+        "blocks": "集成 U01 时必须遵守",
+        "note": "只应用 02 会使 scripts/check_binance_request_policy.py 失败（审查者已复现）；04 应用后 demo-fapi.binance.com 也 strict=True。03 可直接接受。01 需先按审查意见改 5 处。"
       }
     ],
     "contract_candidate": "71f8109",
