@@ -80,7 +80,8 @@
       "owned_paths": [
         "docs/contracts/",
         "scripts/run_offline_regression.py",
-        "src/core/contracts/"
+        "src/core/contracts/",
+        "scripts/smoke_contracts_v3.py"
       ],
       "contracts": [
         "K01",
@@ -123,6 +124,27 @@
           "type": "fingerprint_analysis",
           "path": "docs/dispatch/reviews/U00/w0/F_fingerprint_r1.md",
           "session": "ses_f40a4b1e1ffevvkMGfimxKGoLK"
+        },
+        {
+          "type": "contract_candidate_r1",
+          "commit": "db7e0d7",
+          "verdict": "CHANGES_REQUESTED",
+          "reviews": [
+            "Q_w0r1_r1",
+            "C_w0r1_r1",
+            "B_w0r1_r1"
+          ],
+          "archived_commit": "c752f89"
+        },
+        {
+          "type": "contract_candidate_r2",
+          "commit": "0b85bef",
+          "smoke": "PASS 126 / FAIL 0；golden 113 (40+/73-)",
+          "manifest": "SMOKE MANIFEST OK 65/1",
+          "fix_commits": [
+            "9d7a100",
+            "0b85bef"
+          ]
         }
       ],
       "blockers": [],
@@ -1814,7 +1836,17 @@
       "mat-wt/reviews/U00/B/w0r1",
       "mat-wt/reviews/U00/F/w0r1"
     ],
-    "qa_worktree": "mat-wt/Q (branch qa/U00/w0-fixtures)"
+    "qa_worktree": "mat-wt/Q (branch qa/U00/w0-fixtures)",
+    "known_issues": [
+      {
+        "id": "KI01",
+        "title": "scan_tracked_secrets 对 src/llm/factory.py:111 误报（HEAD 既存）",
+        "status": "OPEN",
+        "owner": "I/U05",
+        "blocks": "check_quality / RC",
+        "note": "U00 不越权；在 U05 S02 或 I 集成时修复；不得静默忽略"
+      }
+    ]
   },
   "dispatch_version": "v1.1",
   "increment_scope": [
