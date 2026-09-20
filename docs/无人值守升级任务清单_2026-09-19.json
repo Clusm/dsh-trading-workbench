@@ -2507,6 +2507,17 @@
             "未做队列并发写压力模型"
           ],
           "i_side_done": "已按建议在 run_offline_regression.py 补 env.pop(MTA_STATE_ROOT)/env.pop(MTA_DATA_ROOT)"
+        },
+        {
+          "type": "review_r3_verification",
+          "candidate": "6ef116b",
+          "verdict": "CHANGES_REQUESTED",
+          "archived_path": "docs/dispatch/reviews/U14/6ef116b/Q_r3.md",
+          "closed": "P1-2、P1-3 **真闭合**（前后对照 + 反例独立复现）；其余 P2/P3 抽验 **8/8 通过**；P2-2/P2-3 登记文字属实（仅一处行号引用不准，P3）",
+          "p1_1_half": "**P1-1 只闭合了一半 -> 新增 P1-4**：F 点名的 AlertLadderViolation 路径确实被单条隔离；但隔离的 except **只收 (AlertLadderViolation, AlertReceiptRejected) 两个类型，捕获集合小于它需要防的异常集合**",
+          "p1_4": "**P1-4（P1）**两种逃逸向量，后果与 F 原报 P1-1 **逐条相同**：① **transport.submit() 自身抛出的任何异常**（TimeoutError/OSError/RuntimeError…）直接穿出 dispatch_due -> 整批中断 + 该行无退避 + **每轮复发**；真实网关接线（U12）后一次网络抖动即可让整条告警通路**永久停摆**。② 本模块**自己**为'空白回执'抛的**裸 ValueError**（非 AlertReceiptRejected），以及 int(outcome.delivered_at_ms) 对非数值抛的 ValueError/TypeError，同样漏网。向量 1 在 sb/68903f8 上结果完全一致 => **属 r2 未触及的残留，非新引入回归**",
+          "new_p3": "P3-6 `_record_failure` 对阶梯拒绝写 TRANSPORT_FAILED 审计标签（语义不符）；P3-7 README §5.2 与 §2 的两处引用/适用范围问题",
+          "env_note": "该复验会话的 Bash 无法把命令行里字面写出的中文路径透传给子进程（ls/python -c 均报 No such file or directory），改用 $(cd <glob>/mat-wt && pwd) 动态取值；不影响结论。**另：其工作区并非 git worktree 而是普通目录（I 未建成功该 worktree），复验者用 git archive 沙箱自行实现 detached 语义** —— 结果可用，但暴露了 I 的一个流程缺口（建 worktree 后须回读确认）"
         }
       ],
       "blockers": [],
@@ -2562,8 +2573,18 @@
           "sessions": [
             "Q (reviews/U14/R3/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED",
           "reports_dir": "docs/dispatch/reviews/U14/6ef116b/"
+        },
+        {
+          "round": "r4",
+          "stage": "修复复验",
+          "candidate": null,
+          "sessions": [
+            "U14 author (r3)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U14/<r3head>/"
         }
       ],
       "qa_runs": []
