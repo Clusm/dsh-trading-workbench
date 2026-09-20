@@ -1747,6 +1747,26 @@
           "detail": "src/exchange/trade_reconciliation.py:66-69 的 account_ref=sha256(api_key)[:16] 仍随密钥轮换漂移，且与 U15 的 <env>:<declared> 不是同一值（binance_futures.py:198、K03 幂等键同源）。U15 无法改共享文件。",
           "required_action": "U02/U13 需把账本 account_ref 改为消费 U15 派生值，或让 trade_reconciliation 接受外部 account_ref",
           "owner": "U02(B线)/U13"
+        },
+        {
+          "type": "review_r2_verification",
+          "candidate": "38029e2",
+          "verdict": "CHANGES_REQUESTED",
+          "result": "12 项中 11 CLOSED / 1 PARTIAL",
+          "p0_reconfirmed": "两个 P0 真闭合（13 条新绕过 + 225 格网格）；配置漂移 11/11 settings、6/6 来源文件、5 项删除全部 CHANGED；注释/空白/键序/JSON 缩进 5/5 不改变哈希 -> 敏感度倒挂消除",
+          "blocking": "NEW-A (P2 未登记 fail-open): authorize_new_entry 不交叉校验 bundle.identity 与 generation -> demo bundle + live 异账户 generation（expected/environment/account_ref/instance/scope_hash 全显式）得 allowed=True/200/reasons=()；反向同样 200。建议比 environment/account_ref 并给 IDENTITY_GENERATION_MISMATCH，或登记为调用方契约",
+          "new_findings": [
+            "NEW-A P2 未登记（阻断项）",
+            "NEW-B 全角同形字键泄漏（L1 已登记）",
+            "NEW-C 单行 NAME=VALUE 值（L1 已登记）",
+            "NEW-D credential_epoch='3' 裸 TypeError（崩溃，须结构化拒绝）",
+            "NEW-E E P2-7 comparison_status 仍未产出、diff-2 仍标 fixed（登记不实）",
+            "NEW-F provider_env 被忽略",
+            "NEW-G E P3-1/2/3/4 未修",
+            "NEW-H 0:0:0:0:0:ffff:127.0.0.1 仍 False"
+          ],
+          "regression": "11/11 全过；4 补丁 apply --check 4/4 OK；无 P0/P1 回归",
+          "archived_path": "docs/dispatch/reviews/U15/38029e2/Q_r2.md"
         }
       ],
       "blockers": [
@@ -1823,7 +1843,7 @@
           "sessions": [
             "Q (reviews/U15/R2/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED（单一阻断项 NEW-A）",
           "reports_dir": "docs/dispatch/reviews/U15/38029e2/",
           "note": "为控制预算，E/B/C 三方发现的复验合并为单一独立会话（原独立初审已分别由三方完成）"
         }
