@@ -431,6 +431,18 @@
             "P3-N4 测试模式串硬编码「已应用」"
           ],
           "unfinished": "真实 Binance 翻页/改额（未联网）；run_offline_regression 全绿基线（smoke_windows_service_plan 在本环境 pristine 即失败=KI02，故只报增量）"
+        },
+        {
+          "type": "review_r3_verification",
+          "candidate": "fb12a38",
+          "verdict": "PASS-with-notes",
+          "archived_path": "docs/dispatch/reviews/U01/fb12a38/Q_r3.md",
+          "patch05": "必需且正确：168 行/9 文件逐条核对一致，无漏改多改；独立全仓扫描确认无其它脚本依赖版本 16（smoke_recovery_bundle.py:54 的 ==15 为自建 raw sqlite fixture，无关）；01->05、05->01 均 clean apply",
+          "delta": "**全量 delta 为空（独立确认）**：同一 harness 69 项 x 同 env，pristine 与 01..04+05 两态失败集合均恰为 smoke_windows_service_plan.py（KI02），NEW=0 GONE=0；四态逐位吻合 pristine 0 / 仅01 1 / 01+05 0 / 01..04+05 0",
+          "p3_rationale_holds": "N1 基线 c290c50:757 确为同一外层循环 -> 非本批回归；N2 _income_row 在 HEAD src 零命中、仅存于补丁 01（fail-loud）；N3 已修并在真提前 return 分支实证；N4 已修（垃圾补丁仍 FAIL=1 exit=1 SKIP=0）",
+          "regression": "抽样 6 项全过（[9] 真跑 SKIP=0 PASS=140；content_hash 对 K03 4/4；重放不抹账 rows 4->4 Σ-2.80 不变；PASS 140/44/44/173 一致）",
+          "new_p3": "docs/双进程双账本…:222,224 与 docs/实盘账户并行接入…:202,363,472 仍写死 current_schema_version()==16 作验收断言（补丁后 DB=17，fail-closed，未登记）；_patched_database_dir 的 else '未应用' 为死分支",
+          "uncovered": "真实 Binance/账户/联网行为；I 侧原子登记是否已执行"
         }
       ],
       "blockers": [],
@@ -2777,6 +2789,14 @@
         "owner": "I (U12 BUILD)",
         "blocks": "开通开仓路径",
         "note": "单独启用 U03 接线会让管线缺身份时 fail-closed 拒绝全部开仓（既有冒烟红）。须与 U15 身份接入同批，并按手册 S05 在 U12 BUILD 联合候选验收（缺 key 阻断新仓而保留管理）。"
+      },
+      {
+        "id": "U01-R3-FU1",
+        "title": "4 处文档内嵌验收断言仍写死 current_schema_version()==16（迁移 17 后应为 17）",
+        "status": "OPEN",
+        "owner": "U10a/U10b 或 I",
+        "blocks": "无（不参与 smoke 执行，故 delta 为空）",
+        "note": "docs/双进程双账本改造设计_2026-09-15.md:222,224 与 docs/实盘账户并行接入评估与上线整改清单_2026-09-15.md:202,363,472。属文档准确性缺陷（fail-closed 方向），补丁 05 未覆盖（05 只动 9 个可执行脚本）。不得静默忽略。"
       }
     ],
     "contract_candidate": "71f8109",
