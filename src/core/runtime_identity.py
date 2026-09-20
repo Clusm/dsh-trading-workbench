@@ -408,11 +408,40 @@ def collect_dependency_lock_files(
     return payload
 
 
+#: 单个工件文件的大小上限（源文件级别足够）；超出即拒绝，避免把数据文件卷进身份。
+_MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
+
+
+def _safe_artifact_name(base: Path, name: Any) -> str:
+    """工件相对路径必须落在 ``project_root`` 内，且不是凭据/环境文件。
+
+    U15 r2 P1-2：此前绝对路径（或足够深的 ``../``）能把 root 之外的任意文件
+    ——包括 ``.env``——读进 ``artifact_hash``。现在三类都结构化拒绝：
+    绝对路径 / 逃逸到 root 之外 / 键名或文件名命中凭据或 ``.env`` 标记。
+    """
+    raw = str(name).replace("\\", "/")
+    parts = [part for part in raw.split("/") if part not in ("", ".")]
+    if raw.startswith("/") or (len(raw) > 1 and raw[1] == ":") or ".." in parts:
+        raise MalformedInputError([f"artifact_relatives[{name}] (absolute or escaping path)"])
+    if not parts:
+        raise MalformedInputError([f"artifact_relatives[{name}] (empty path)"])
+    for part in parts:
+        if is_sensitive_name(part) or any(
+                marker in part.lower() for marker in _RAW_ENV_KEY_MARKERS):
+            raise CredentialLeakError([f"artifacts.{raw}"])
+    if not (base / raw).resolve().is_relative_to(base.resolve()):
+        raise MalformedInputError([f"artifact_relatives[{name}] (outside project_root)"])
+    return raw
+
+
 def collect_artifact_files(root: Path | str, *, relatives: Sequence[str] | None = None) -> dict[str, str]:
     """收集不可变代码工件内容（``相对路径 -> 内容``）。
 
     ``relatives`` 缺省为 ``src/**/*.py``；脚本等入口文件由调用方显式传入，
     避免把临时诊断文件卷进身份。内容为 UTF-8 文本；读取失败按缺失处理。
+
+    每个路径都过 :func:`_safe_artifact_name`（root 边界 + 凭据/``.env`` 名拒绝），
+    单文件超过 ``_MAX_ARTIFACT_BYTES`` 也结构化拒绝。
     """
     base = Path(root)
     if relatives is None:
@@ -422,12 +451,18 @@ def collect_artifact_files(root: Path | str, *, relatives: Sequence[str] | None 
         )
         names = [path.relative_to(base).as_posix() for path in files]
     else:
-        names = [Path(name).as_posix() for name in relatives]
+        names = [Path(str(name)).as_posix() for name in relatives]
     payload: dict[str, str] = {}
     for name in names:
-        text = _read_text(base, name)
+        safe = _safe_artifact_name(base, name)
+        target = base / safe
+        if target.is_file() and target.stat().st_size > _MAX_ARTIFACT_BYTES:
+            raise MalformedInputError([
+                f"artifact_relatives[{safe}] (file larger than {_MAX_ARTIFACT_BYTES} bytes)"
+            ])
+        text = _read_text(base, safe)
         if text is not None:
-            payload[name] = text
+            payload[safe] = text
     return payload
 
 
@@ -466,6 +501,9 @@ def load_strategy_cards(
 
     缺失文件或非法 JSON 一律结构化拒绝：身份宁可不可用，也不接受“无策略卡”
     的静默降级（改卡即改身份，``strategy_hash`` 必须覆盖实际卡片）。
+
+    U15 r2 P1-3：``{"cards": []}``（以及被截断成 ``{"version": 3}`` 的文件）
+    同样拒绝——零卡不是“已声明且非空”的策略集，删光卡片不得成为可发布身份。
     """
     base = Path(root)
     text = _read_text(base, source_file)
@@ -479,7 +517,12 @@ def load_strategy_cards(
         raise MissingRuntimeInputError([f"{source_file} (payload must be mapping or list)"])
     if len(payload) == 0:
         raise MissingRuntimeInputError([f"{source_file} (empty payload)"])
-    return StrategyCardSource(source_file, payload, text, _count_cards(payload))
+    card_count = _count_cards(payload)
+    if card_count <= 0:
+        raise MissingRuntimeInputError([
+            f"{source_file} (no strategy cards: expected a non-empty 'cards' list)"
+        ])
+    return StrategyCardSource(source_file, payload, text, card_count)
 
 
 def verify_strategy_cards_source(source: StrategyCardSource, root: Path | str) -> str:

@@ -48,6 +48,7 @@ from core.runtime_identity import (  # noqa: E402
     CredentialLeakError,
     ExecutionModeError,
     FallbackRouteError,
+    MalformedInputError,
     MissingRuntimeInputError,
     StrategySourceMismatchError,
     authorize_new_entry,
@@ -65,6 +66,7 @@ from core.runtime_identity import (  # noqa: E402
     resolve_execution_scope,
     resolve_model_route,
     rotate_credential,
+    collect_artifact_files,
     validate_fallback_route,
     verify_account_binding,
     verify_strategy_cards_source,
@@ -393,6 +395,72 @@ def check_config_sources_enter_identity() -> None:
               leaky_bundle.identity.deployment_hash() != base_deploy)
         check("source-config-hash-reflects-effective-config",
               leaky_bundle.identity.effective_config_hash != base_eff)
+
+
+def check_input_shape_and_path_bounds() -> None:
+    """r2 P1-2/P1-3/P1-4：工件路径 root 边界、畸形载荷、零卡策略卡。"""
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = make_root(Path(raw))
+        outside = Path(raw).parent / "outside_secret.txt"
+        outside.write_text("SK-FAKE-OUTSIDE-0003\n", encoding="utf-8")
+        # ① 绝对路径 / 逃逸 / .env 名一律拒绝
+        expect_raises("artifact-absolute-path-rejected", (MalformedInputError,),
+                      collect_artifact_files, tmp, relatives=[str(outside)])
+        expect_raises("artifact-escaping-path-rejected", (MalformedInputError,),
+                      collect_artifact_files, tmp, relatives=["../outside_secret.txt"])
+        expect_raises("artifact-env-file-name-rejected", (CredentialLeakError,),
+                      collect_artifact_files, tmp, relatives=[".env"])
+        expect_raises("artifact-credential-name-rejected", (CredentialLeakError,),
+                      collect_artifact_files, tmp, relatives=["src/api_key_store.py"])
+        ok_artifacts = collect_artifact_files(tmp, relatives=["src/app.py"])
+        check("artifact-relative-path-accepted", list(ok_artifacts) == ["src/app.py"])
+        expect_raises("artifact-path-bounds-in-identity", (MalformedInputError,),
+                      collect_runtime_identity, tmp, environment="demo",
+                      runtime_instance_id="rt-test", execution_mode="demo", env={},
+                      credentials_present={"SENSENOVA_API_KEY": True},
+                      raw_settings=SETTINGS, raw_agents=AGENTS,
+                      artifact_relatives=[str(outside)])
+        check("artifact-outside-content-not-in-identity",
+              "SK-FAKE-OUTSIDE-0003" not in json.dumps(build(tmp).as_dict()))
+
+        # ② 畸形载荷结构化拒绝（不再静默当空配置）
+        base_kwargs = {"environment": "demo", "runtime_instance_id": "rt-test",
+                       "execution_mode": "demo",
+                       "credentials_present": {"SENSENOVA_API_KEY": True},
+                       "raw_settings": SETTINGS, "raw_agents": AGENTS}
+        for label, bad in (("raw_settings", [1, 2]), ("raw_agents", ["ai_trader"]),
+                           ("env", ["EXECUTION_MODE"])):
+            expect_raises(f"malformed-{label}-rejected", (MalformedInputError,),
+                          collect_runtime_identity, tmp,
+                          **{**base_kwargs, label: bad})
+        expect_raises("malformed-profile-overrides-rejected", (MalformedInputError,),
+                      resolve_model_route, raw_settings=SETTINGS, raw_agents=AGENTS,
+                      profile_overrides=["llm"])
+        expect_raises("malformed-credentials-rejected", (MalformedInputError,),
+                      resolve_model_route, raw_settings=SETTINGS, raw_agents=AGENTS,
+                      credentials_present=["SENSENOVA_API_KEY"])
+        expect_raises("empty-runtime-instance-rejected", (MissingRuntimeInputError,),
+                      collect_runtime_identity, tmp, environment="demo",
+                      runtime_instance_id="", execution_mode="demo", env={},
+                      credentials_present={"SENSENOVA_API_KEY": True},
+                      raw_settings=SETTINGS, raw_agents=AGENTS)
+
+        # ③ 零卡 / 截断策略卡：不得建出可放行身份
+        cards_path = tmp / "knowledge" / "strategy_cards.json"
+        cards_path.write_text('{"cards": []}', encoding="utf-8")
+        expect_raises("zero-card-strategy-rejected", (MissingRuntimeInputError,),
+                      load_strategy_cards, tmp)
+        expect_raises("zero-card-strategy-rejected-in-identity",
+                      (MissingRuntimeInputError,), collect_runtime_identity, tmp,
+                      environment="demo", runtime_instance_id="rt-test",
+                      execution_mode="demo", env={},
+                      credentials_present={"SENSENOVA_API_KEY": True},
+                      raw_settings=SETTINGS, raw_agents=AGENTS)
+        cards_path.write_text('{"version": 3}', encoding="utf-8")
+        expect_raises("cardless-strategy-file-rejected", (MissingRuntimeInputError,),
+                      load_strategy_cards, tmp)
+        cards_path.write_text(json.dumps(CARDS), encoding="utf-8")
+        check("valid-cards-still-accepted", load_strategy_cards(tmp).card_count == 2)
 
 
 def check_lock_file_required() -> None:
@@ -1148,6 +1216,7 @@ def check_fingerprint_disposition_registered() -> None:
 def main() -> int:
     check_identity_inputs_change_hash()
     check_config_sources_enter_identity()
+    check_input_shape_and_path_bounds()
     check_lock_file_required()
     check_strategy_source_is_file_level()
     check_no_credential_leak()
