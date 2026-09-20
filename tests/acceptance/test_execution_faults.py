@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from audit.database import AuditDatabase  # noqa: E402
-from core.contracts import DuplicateFillError  # noqa: E402
+from core.contracts import DuplicateFillError, OrderQuantity, QuantityError  # noqa: E402
 from core.contracts.k04_management import REASON_LAST_PROTECTION  # noqa: E402
 from exchange.binance_futures import BinanceFuturesBroker  # noqa: E402
 from exchange.event_models import ExchangeEvent  # noqa: E402
@@ -101,6 +101,29 @@ def _is_raised(exc_type: type[BaseException], fn: Any) -> bool:
     except Exception:  # noqa: BLE001 - 其它异常也算未命中期望类型
         return False
     return False
+
+
+def row_quantity_violations(row: Any) -> tuple[str, ...] | str:
+    """把 ``order_outbox`` 行重水化成 ``OrderQuantity`` 并返回违规项。
+
+    落库的行必须**永远**能被契约自身接受（DC04/K04）。返回 ``()`` 表示合法；
+    返回字符串表示连构造都失败（如状态词表外的原样交易所状态）。
+    """
+    try:
+        quantity = OrderQuantity.checked(
+            order_id=str(row["exchange_order_id"] or row["client_order_id"]),
+            accepted_qty=Decimal(str(row["accepted_qty_text"])),
+            cumulative_filled_qty=Decimal(str(row["cumulative_filled_qty_text"])),
+            working_leaves_qty=Decimal(str(row["working_leaves_qty_text"])),
+            terminal_unfilled_qty=Decimal(str(row["terminal_unfilled_qty_text"] or "0")),
+            status=str(row["status"]),
+            revision=int(row["quantity_revision"] or 0),
+        )
+    except QuantityError as exc:
+        return f"QuantityError: {exc}"
+    except Exception as exc:  # noqa: BLE001 - pydantic 校验失败也要如实报出
+        return f"{type(exc).__name__}: {exc}"
+    return quantity.violations()
 
 
 class RecordingBroker:
@@ -480,6 +503,22 @@ def section_f03_protection(tmpdir: Path) -> None:
         check(f"确认归零（{probe_key}）才允许清理且 reason 如实标注",
               confirmed_allowed and confirmed_reason == "FLAT_CONFIRMED_CLEANUP",
               f"allowed={confirmed_allowed} reason={confirmed_reason}")
+
+    # N3：``flat_confirmed`` 只能是**严格布尔** ``True``。"已确认归零"会直接授权清理
+    # 最后一道保护，不允许靠 Python 真值转换蒙对；非布尔真值（'false'/'true'/1/[0]/…）
+    # 一律按"未确认"fail-closed，且不得谎报 FLAT_CONFIRMED_CLEANUP。
+    for bogus in ("false", "true", "0", 1, 1.0, [0], (0,), {"a": 0}):
+        bogus_allowed, bogus_reason = can_cancel_protection(
+            position=flat_unconfirmed, protections=[protections[0]],
+            target_client_id="SYNTH_SL_03", flat_confirmed=bogus)
+        bogus_plan = plan_protection_refresh(
+            position=flat_unconfirmed, protections=protections, flat_confirmed=bogus)
+        check(f"非布尔 flat_confirmed={bogus!r} 不得授权清理（fail-closed）",
+              not bogus_allowed and bogus_reason != "FLAT_CONFIRMED_CLEANUP"
+              and bogus_plan.blocked_reason == REASON_FLAT_NOT_CONFIRMED
+              and not bogus_plan.cancels,
+              f"allowed={bogus_allowed} reason={bogus_reason} "
+              f"blocked={bogus_plan.blocked_reason} cancels={bogus_plan.cancels}")
 
     # A/P3-5：镜像写出的十进制文本列必须有真实读取方，否则"精确勾稽"是空承诺。
     text_view = protection_view_from_algo({
@@ -950,6 +989,11 @@ def section_schema_and_guard(tmpdir: Path) -> None:
     fixture = load_fixture("f21_algo_standard_separation.json")
     inputs21 = fixture["inputs"]
     symbol = inputs21["symbol"]
+    # N2：夹具里 ``ledger_rows[*].symbol`` 与 ``inputs.symbol`` **同为 ZZZUSDT**，
+    # 直接拿它当"另一标的"会让"按标的隔离"退化成"同标的"——等于没测（已实测：
+    # 修复树上也是 get(Z)=QUERY_FAILED）。这里显式用一个不同的标的。
+    other_symbol = "YYYUSDT"
+    assert other_symbol != symbol, "跨标的回归必须使用不同标的，否则护栏空转"
     db2 = AuditDatabase(tmpdir / "guard.sqlite")
     close_calls: list[Any] = []
 
@@ -1009,7 +1053,36 @@ def section_schema_and_guard(tmpdir: Path) -> None:
         check("修复前基线：保护挂单失败仍兜底全平（对照用）",
               len(close_calls) - baseline == 1, f"close_calls={len(close_calls)}")
     else:
-        make_broker(algos=None)._ensure_protection_from_order(dict(query_fail_order))
+        # A/N2：以下三条回归断言必须跑在**同一个 broker 实例**上，否则是空转护栏。
+        # ``ProtectionSyncReasons`` 是每实例惰性新建的（``self.__dict__.get``），
+        # 每次 ``make_broker()`` 都得到一颗全新实例的话，状态天然不跨调用共享——
+        # "成功即复位"与"按标的隔离"在**有缺陷的 V1 树上也全过**（复验者实测）。
+        # 这里改成单个实例 + 可变状态单元，让失败类别真的存活到下一轮。
+        sync_state: dict[str, Any] = {
+            "algos": None, "position": dict(flat_position), "place_raises": False}
+        shared = make_broker()
+        shared._open_algos = lambda _symbol: (
+            None if sync_state["algos"] is None else list(sync_state["algos"]))
+        shared._single_symbol_position = lambda _symbol: dict(sync_state["position"] or {})
+        shared._algo_prices = lambda _symbol: {}
+        shared._format_qty = lambda _symbol, qty: str(qty)
+        shared._tick_size = lambda _symbol: 0.01
+        shared._min_qty = lambda _symbol: Decimal("0.001")
+        shared._is_hedge_mode = lambda: False
+        shared._cancel_symbol_algos = lambda _symbol: None
+
+        def shared_place(*_args: Any, **_kwargs: Any) -> Any:
+            if sync_state["place_raises"]:
+                raise RuntimeError("synthetic protection place failure")
+            return None
+
+        shared._place_algo_protection = shared_place
+        shared._close_or_reduce = lambda intent: close_calls.append(intent)
+
+        # (1) 查询故障一轮：不平仓、只告警。同一实例沉淀 QUERY_FAILED。
+        sync_state.update({"algos": None, "position": dict(flat_position),
+                           "place_raises": False})
+        shared._ensure_protection_from_order(dict(query_fail_order))
         check("确证为查询故障时不平仓（只告警）", close_calls == [],
               f"close_calls={len(close_calls)}")
         deferred = db2.fetch_all(
@@ -1017,30 +1090,51 @@ def section_schema_and_guard(tmpdir: Path) -> None:
             "AND action_taken='alert_only_no_flat_close'")
         check("推迟平仓写入可审计的风险事件", len(deferred) >= 1)
 
-        # 残余状态回归（A/P1-P1）：查询失败一轮 **之后** 来一轮成功的同步，再发生
+        # A/N2 关键：**单实例顺序断言本身无法区分 V1 与 r2**。原因是 V1 的标量字段
+        # 在"真实保护失败"那一轮返回前会被自己改写成 PROTECTION_FAILED，读者看到的
+        # 永远是新鲜值；残余只有**并发窗口**内才可达（复验者用 20000 轮双线程实证
+        # 16->0）。所以这里补一条**确定性**的结构断言：失败类别必须由**生产实例**按
+        # 标的存放（V1 只有进程级标量 ``last_protection_sync_reason``，没有该对象）。
+        production_reasons = getattr(shared, "protection_sync", None)
+        check("生产实例按标的存放失败类别（V1 的进程级标量不满足）",
+              production_reasons is not None
+              and production_reasons.get(symbol) == "QUERY_FAILED",
+              f"protection_sync={production_reasons!r}")
+        if production_reasons is not None:
+            check("生产实例：A 标的的失败在 B 标的键下不可见（按标的隔离）",
+                  production_reasons.get(other_symbol) == ""
+                  and production_reasons.defers(other_symbol) is False,
+                  f"get(B)={production_reasons.get(other_symbol)!r}")
+
+        # (2) 残余状态回归（A/P1-P1）：查询失败一轮 **之后** 来一轮成功的同步，再发生
         # 真实的保护挂单失败，必须仍然全平。V1 的成功路径提前 return 且不复位字段，
         # 残留的 QUERY_FAILED 会把这次真实的保护缺口误判成观测故障而放过裸仓。
-        make_broker(algos=[], position=flat_position)._ensure_protection_from_order(
-            dict(query_fail_order))
-        check("成功的一轮同步不留下残余失败类别（成功即复位）",
+        sync_state.update({"algos": [], "position": dict(flat_position)})
+        shared._ensure_protection_from_order(dict(query_fail_order))
+        check("同一实例：成功的一轮同步不留下残余失败类别（成功即复位）",
               close_calls == [], f"close_calls={len(close_calls)}")
-        make_broker(algos=[], position=live_position,
-                    place_raises=True)._ensure_protection_from_order(dict(open_order))
-        check("查询失败之后的真实保护失败仍按 P0 兜底全平（残余状态不再抑制）",
+        if production_reasons is not None:
+            check("生产实例：轮次入口复位失败类别（成功一轮后本标的无残余）",
+                  production_reasons.get(symbol) == "",
+                  f"get(symbol)={production_reasons.get(symbol)!r}")
+        sync_state.update({"position": dict(live_position), "place_raises": True})
+        shared._ensure_protection_from_order(dict(open_order))
+        check("同一实例：查询失败之后的真实保护失败仍按 P0 兜底全平（残余状态不再抑制）",
               len(close_calls) == 1, f"close_calls={len(close_calls)}")
         close_calls.clear()
 
-        # 跨标的隔离：A 标的的 QUERY_FAILED 不得抑制 B 标的的兜底平仓。
-        close_calls.clear()
-        other_symbol = inputs21["ledger_rows"][0]["symbol"]
-        make_broker(algos=None)._ensure_protection_from_order(dict(query_fail_order))
+        # (3) 跨标的隔离：A 标的的 QUERY_FAILED 不得抑制 B 标的的兜底平仓。
+        sync_state.update({"algos": None, "position": dict(flat_position),
+                           "place_raises": False})
+        shared._ensure_protection_from_order(dict(query_fail_order))
         other_order = dict(open_order)
         other_order["symbol"] = other_symbol
         other_live = dict(live_position)
         other_live["symbol"] = other_symbol
-        make_broker(algos=[], position=other_live,
-                    place_raises=True)._ensure_protection_from_order(other_order)
-        check("另一标的的查询失败不抑制本标的的兜底平仓（按标的隔离）",
+        sync_state.update({"algos": [], "position": dict(other_live),
+                           "place_raises": True})
+        shared._ensure_protection_from_order(other_order)
+        check("同一实例：另一标的的查询失败不抑制本标的的兜底平仓（按标的隔离）",
               len(close_calls) == 1, f"close_calls={len(close_calls)}")
         close_calls.clear()
 
@@ -1157,6 +1251,147 @@ def section_fill_revision_wiring(tmpdir: Path) -> None:
           + Decimal(str(canceled["working_leaves_qty_text"]))
           + Decimal(str(canceled["terminal_unfilled_qty_text"])),
           f"actual={dict(canceled) if canceled else None}")
+
+    # ----------------------------------------------------------------- #
+    # 防复发（r3 / N1）：CANCELED 之后交易所又回报一笔迟到成交。
+    # r2 的 ``_component_status`` 用 ``_STATUS_ALIASES.get(x, "")`` 兜底，把 CANCELED
+    # 当成"未知状态"后按分量推导成 PARTIALLY_FILLED —— "终态保留原状态"分支对
+    # CANCELED/EXPIRED/REJECTED/FILLED 永久失效。后果：终态行被去终态化，
+    # working 非零、terminal 归零，该行随即违反 K04 终态不变量
+    # （``WORKING_NONZERO_WHILE_TERMINAL``），且终态单被报成"工作中"。
+    # 这一节走生产私有流路径断言"落库的行永远能被契约自身接受"。
+    # ----------------------------------------------------------------- #
+    reopened.apply_event(ExchangeEvent(
+        event_key="k4", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=client_id, exchange_order_id="901", trade_id="55503",
+        payload={"o": dict(event, **{"X": "CANCELED", "z": "0.0108", "l": "0.0003",
+                                     "t": 55503})},
+        supported=True))
+    late = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (client_id,))
+    check("CANCELED 后的迟到成交不复活订单（状态仍是 CANCELED）",
+          str(late["status"]) == "CANCELED", f"status={late['status']}")
+    check("CANCELED 后的迟到成交：working 归零、余量进 terminal",
+          str(late["working_leaves_qty_text"]) == "0"
+          and str(late["terminal_unfilled_qty_text"]) == "0.0092",
+          f"actual={dict(late) if late else None}")
+    check("CANCELED 后的迟到成交：累计成交推进且仍守恒",
+          str(late["cumulative_filled_qty_text"]) == "0.0108"
+          and Decimal(str(late["accepted_qty_text"]))
+          == Decimal(str(late["cumulative_filled_qty_text"]))
+          + Decimal(str(late["working_leaves_qty_text"]))
+          + Decimal(str(late["terminal_unfilled_qty_text"])),
+          f"actual={dict(late) if late else None}")
+    check("CANCELED 后的迟到成交：落库行仍被 OrderQuantity 契约接受",
+          row_quantity_violations(late) == (),
+          f"violations={row_quantity_violations(late)}")
+    # 终态之后再投一笔成交仍必须幂等推进（不能"只认第一笔迟到成交"）
+    reopened.apply_event(ExchangeEvent(
+        event_key="k5", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=client_id, exchange_order_id="901", trade_id="55504",
+        payload={"o": dict(event, **{"X": "CANCELED", "z": "0.0111", "l": "0.0003",
+                                     "t": 55504})},
+        supported=True))
+    late2 = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (client_id,))
+    check("CANCELED 后第二笔迟到成交继续推进且不破坏终态",
+          str(late2["cumulative_filled_qty_text"]) == "0.0111"
+          and str(late2["working_leaves_qty_text"]) == "0"
+          and str(late2["terminal_unfilled_qty_text"]) == "0.0089"
+          and str(late2["status"]) == "CANCELED"
+          and row_quantity_violations(late2) == (),
+          f"actual={dict(late2) if late2 else None}")
+    # 重复投递同一 trade_id：at-least-once 语义下不得二次计账
+    reopened.apply_event(ExchangeEvent(
+        event_key="k5", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=client_id, exchange_order_id="901", trade_id="55504",
+        payload={"o": dict(event, **{"X": "CANCELED", "z": "0.0111", "l": "0.0003",
+                                     "t": 55504})},
+        supported=True))
+    replay_row = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (client_id,))
+    check("终态后重复投递同一 trade_id 不二次计账",
+          str(replay_row["cumulative_filled_qty_text"]) == "0.0111",
+          f"filled={replay_row['cumulative_filled_qty_text']}")
+
+    # EXPIRED 走同一条兜底分支，同样必须保留终态
+    expired_id = "synth-u04-expired-late-fill"
+    reopened.prepare(
+        client_order_id=expired_id, symbol=symbol, side="BUY", position_side="LONG",
+        order_type="LIMIT", purpose="ENTRY", qty=0.02, price=100.0,
+        reduce_only=False, endpoint="/fapi/v1/order",
+        request={"symbol": symbol, "newClientOrderId": expired_id, "quantity": "0.02"},
+        qty_text="0.02")
+    reopened.apply_event(ExchangeEvent(
+        event_key="e1", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=expired_id, exchange_order_id="902", trade_id="66601",
+        payload={"o": dict(event, **{"c": expired_id, "i": 902, "X": "PARTIALLY_FILLED",
+                                     "z": "0.0047", "l": "0.0047", "t": 66601})},
+        supported=True))
+    reopened.apply_event(ExchangeEvent(
+        event_key="e2", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=expired_id, exchange_order_id="902", trade_id=None,
+        payload={"o": dict(event, **{"c": expired_id, "i": 902, "X": "EXPIRED",
+                                     "l": "0", "t": 0})},
+        supported=True))
+    reopened.apply_event(ExchangeEvent(
+        event_key="e3", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=expired_id, exchange_order_id="902", trade_id="66602",
+        payload={"o": dict(event, **{"c": expired_id, "i": 902, "X": "EXPIRED",
+                                     "z": "0.0057", "l": "0.001", "t": 66602})},
+        supported=True))
+    expired_row = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (expired_id,))
+    check("EXPIRED 后的迟到成交保留终态且行仍被契约接受",
+          str(expired_row["status"]) == "EXPIRED"
+          and str(expired_row["cumulative_filled_qty_text"]) == "0.0057"
+          and str(expired_row["working_leaves_qty_text"]) == "0"
+          and str(expired_row["terminal_unfilled_qty_text"]) == "0.0143"
+          and row_quantity_violations(expired_row) == (),
+          f"actual={dict(expired_row) if expired_row else None}")
+
+    # 第 4 项已闭合行为的回归对照（r3 必须不破坏）：reject 清零 + 拒单后成交 fail-closed。
+    # K04 要求 REJECTED 的 accepted/filled 必须为 0；清零是后续任何成交/对账路径
+    # 能构造出合法 OrderQuantity 的前提。
+    reject_id = "synth-u04-reject-zero"
+    reopened.prepare(
+        client_order_id=reject_id, symbol=symbol, side="BUY", position_side="LONG",
+        order_type="LIMIT", purpose="ENTRY", qty=0.02, price=100.0,
+        reduce_only=False, endpoint="/fapi/v1/order",
+        request={"symbol": symbol, "newClientOrderId": reject_id, "quantity": "0.02"},
+        qty_text="0.02")
+    reopened.reject(reject_id, RuntimeError("synthetic exchange reject"))
+    reject_row = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (reject_id,))
+    check("reject 后四分量全部清零（K04: REJECTED 不得带受理量）",
+          str(reject_row["status"]) == "REJECTED"
+          and str(reject_row["accepted_qty_text"]) == "0"
+          and str(reject_row["cumulative_filled_qty_text"]) == "0"
+          and str(reject_row["working_leaves_qty_text"]) == "0"
+          and str(reject_row["terminal_unfilled_qty_text"]) == "0",
+          f"actual={dict(reject_row) if reject_row else None}")
+    check("reject 后的行仍被 OrderQuantity 契约接受",
+          row_quantity_violations(reject_row) == (),
+          f"violations={row_quantity_violations(reject_row)}")
+    reopened.apply_event(ExchangeEvent(
+        event_key="r1", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=reject_id, exchange_order_id="903", trade_id="77701",
+        payload={"o": dict(event, **{"c": reject_id, "i": 903, "X": "REJECTED",
+                                     "z": "0.0047", "l": "0.0047", "t": 77701})},
+        supported=True))
+    after_reject = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (reject_id,))
+    check("拒单后的成交入账 fail-closed（不把已拒单变成有成交的单）",
+          str(after_reject["cumulative_filled_qty_text"]) == "0"
+          and str(after_reject["status"]) == "REJECTED",
+          f"actual={dict(after_reject) if after_reject else None}")
 
     # 第二个新方法的接线：UNKNOWN 收口成功时把交易所三分量落库（apply_exchange_quantities）
     unknown_id = "synth-u04-quantity-wiring"
