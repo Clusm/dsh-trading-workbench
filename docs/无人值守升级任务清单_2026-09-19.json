@@ -1319,6 +1319,21 @@
             "stale_allowances 现按内容指纹匹配，行号漂移不再误报"
           ],
           "rollback": "git checkout -- <文件>；**13/14 不可单独回退**（KI01 误报会复现）"
+        },
+        {
+          "type": "review_r2_verification",
+          "candidate": "2049c1c",
+          "verdict": "CHANGES_REQUESTED",
+          "archived_path": "docs/dispatch/reviews/U05/2049c1c/Q_r2.md",
+          "p1_5_not_closed": "**P1-5 未真闭合**：任务点名面全部合上（注释/docstring/跨行串/ f-string/装饰器/# type: ignore/__doc__/Unicode/YAML-在串里 均报出；语法错误 .py 整体不放宽、unparsable=0/skipped=20 独立复现一致）。但**代码位置的裸明文凭据仍漏报**：`api_key=<64位key>`、.env 内容贴进 .py、.py 顶层 YAML 行 —— 未打补丁版会报、现不报。作者'不加引号过不了语法解析'的理由不成立，且未登记该残留。行号+指纹双锚安全",
+          "closed": "P1-1（独立写库跑 U01 聚合 AVG(latency_ms)=1234.0，旧口径 3.0）、P1-2、P1-3、P1-4 均闭合",
+          "delta": "新增失败 ∅（统一清单 77，两树唯一失败均为 KI02）",
+          "registration_gaps": "market_query 撤回、生产未接线（零调用方独立 grep 证实）、P2-7 准确；**P2-3/P3-3/P3-4/P3-5 在交付 README/RESUME 找不到登记文字**（实测仍存在）",
+          "new_findings": [
+            "N1 补丁可应用性：评审/集成工作区（autocrlf=false）**仅 8/15 git apply --check 通过**，7 条因仓库混合行尾失败；作者'15/15'依赖未声明的 autocrlf=true（内容两种方式逐字节一致）",
+            "N5 KI01 未修尽：`api_key=fallback_key)` 仍误报（非回归）"
+          ],
+          "unfinished": "KI02 真实失效原因未判；未联网/未接真实 LLM；租约仅假 pid；无 pytest（改用直连探针，未复跑 115/63/48/45）"
         }
       ],
       "blockers": [],
@@ -1379,7 +1394,7 @@
           "sessions": [
             "Q (reviews/U05/R2/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED",
           "reports_dir": "docs/dispatch/reviews/U05/<r2head>/"
         },
         {
@@ -1389,8 +1404,18 @@
           "sessions": [
             "Q (reviews/U05/R2/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED",
           "reports_dir": "docs/dispatch/reviews/U05/2049c1c/"
+        },
+        {
+          "round": "r3",
+          "stage": "修复复验",
+          "candidate": null,
+          "sessions": [
+            "U05 author (r3)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U05/<r3head>/"
         }
       ],
       "qa_runs": []
@@ -1911,7 +1936,7 @@
       "title": "托管、单实例及备份恢复",
       "owner_role": "E",
       "actual_assignee": "U13 作者会话（E 角色）",
-      "status": "READY_FOR_REVIEW",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -2026,6 +2051,15 @@
           "detail": "U13 的 12 个共享适配补丁按 base 0e522b1 生成，但集成 HEAD 已含其它任务对同样文件的改动（尤其 U15 改过 config_loader.py 与 app.py）-> 集成树上 11/12 直接应用失败，git apply --3way 在 6 个文件（config_loader/service/windows_service/app.py/smoke_windows_service_plan/windows_service_host）仍冲突。",
           "handling": "已派 U13 r3 按**集成 HEAD 65644e79** 重新生成补丁，要求逐文件说明'其它任务的改动/你的改动/如何合并'，并在 HEAD 沙箱里自证 12 补丁应用 + **同时跑其它任务的关键验收**（U15 身份/控制面、U01 收入、U04 执行）证明未打坏别人。",
           "lesson": "共享适配补丁必须针对**将被应用的那棵树**生成；当集成树已含他人改动时，作者需在集成版本之上叠加自己的改动，而不是只 diff 自己的 base。"
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "c216af6",
+          "patch_regeneration": "r3 针对集成 HEAD 65644e79 重生成 7 个补丁（其余 5 文件**零差异**——因 U13 的分支历史上包含 r1 的共享文件提交（即已登记的偏差），合并时已把 r1 共享改动带入集成树，故 r2 只需再补 7 个）；7/7 干净应用、无冲突",
+          "i_registration": "smoke_u13_supervision.py 已写入 SCRIPTS -> MANIFEST OK included=71",
+          "cross_task": "test_supervision 166 检查 PASS；test_runtime_identity、test_control_boundary、test_execution_faults、test_income_reconciliation 140/0、smoke_entry_readiness、smoke_release_package 6/0、smoke_ui 52/0、smoke_contracts_v3 173/0 —— **均 exit 0**（证明未打坏已集成的他人改动）",
+          "KI02_closed": "**smoke_windows_service_plan 24/0 通过**；**官方单命令入口全量回归首次端到端成功：`OFFLINE REGRESSION OK scripts=75`（exit 0）** —— 此前在任意 worktree 都中止于第 49 个脚本",
+          "note": "VERIFIED 留待 U12 部署证据"
         }
       ],
       "blockers": [],
@@ -2069,7 +2103,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "e768166",
       "review_assignments": [
         {
           "round": "r1",
