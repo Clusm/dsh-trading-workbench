@@ -1,5 +1,5 @@
 diff --git a/src/llm/openai_compatible_client.py b/src/llm/openai_compatible_client.py
-index 04b80b2..455b998 100644
+index 04b80b2..5d5355d 100644
 --- a/src/llm/openai_compatible_client.py
 +++ b/src/llm/openai_compatible_client.py
 @@ -3,6 +3,7 @@ from __future__ import annotations
@@ -10,10 +10,10 @@ index 04b80b2..455b998 100644
  from typing import Any
  
  import httpx
-@@ -67,6 +68,38 @@ class OpenAICompatibleLLMClient(LLMClient):
-         self.coordinator = coordinator or get_default_coordinator()
-         self.provider_scope = provider_scope(self.base_url, self.api_key)
-         self.default_429_cooldown_seconds = max(0.0, float(default_429_cooldown_seconds))
+@@ -72,6 +73,38 @@ class OpenAICompatibleLLMClient(LLMClient):
+         self._trust_env = os.getenv("MTA_NO_PROXY", "").strip().lower() not in {
+             "1", "true", "yes", "on",
+         }
 +        #: 可选尝试观察器 ``observer(attempt, purpose, deadline, status) -> None``：
 +        #: 每次真正发起 HTTP 尝试时调用一次，供执行侧落 K05 span、判"早返回"
 +        #: 与跨进程额度（U05/S02、DL06）。观测器故障不得影响调用。
@@ -46,9 +46,9 @@ index 04b80b2..455b998 100644
 +            observer(attempt, purpose, deadline, status)
 +        except Exception:  # noqa: BLE001 - 观测器故障不得影响模型调用
 +            return
-         # 与 Binance Broker 使用同一网络语义：MTA_NO_PROXY=1 时不仅依赖调用方
-         # 清理环境变量，还关闭 httpx 的系统代理/PAC 自动发现，避免请求误入失效代理。
-         self._trust_env = os.getenv("MTA_NO_PROXY", "").strip().lower() not in {
+ 
+     def _post(self, payload: dict[str, Any], *, deadline: float | None = None,
+               timeout_seconds: float | None = None,
 @@ -85,7 +118,9 @@ class OpenAICompatibleLLMClient(LLMClient):
          for attempt in range(self.max_retries + 1):
              remaining = None if deadline is None else deadline - time.monotonic()
