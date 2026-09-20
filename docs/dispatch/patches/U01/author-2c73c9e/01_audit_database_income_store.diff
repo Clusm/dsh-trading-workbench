@@ -1,0 +1,139 @@
+diff --git a/src/audit/database.py b/src/audit/database.py
+index a635c48..c015840 100644
+--- a/src/audit/database.py
++++ b/src/audit/database.py
+@@ -1053,6 +1053,51 @@ class AuditDatabase:
+ 
+         self._apply_migration(16, "release_batch_and_observations", apply_release_metadata)
+ 
++        def apply_income_reconciliation() -> None:
++            """U01：收入流水与覆盖证据；UNIQUE 主键含幂等四元组，重复拉取不重复入账。"""
++            self.conn.execute(
++                """CREATE TABLE IF NOT EXISTS income_events (
++                    id INTEGER PRIMARY KEY AUTOINCREMENT,
++                    environment TEXT NOT NULL,
++                    account_ref TEXT NOT NULL,
++                    income_type TEXT NOT NULL,
++                    tran_id TEXT NOT NULL,
++                    symbol TEXT,
++                    asset TEXT NOT NULL,
++                    amount TEXT NOT NULL,
++                    event_time_ms INTEGER NOT NULL,
++                    received_at_ms INTEGER NOT NULL,
++                    source_hash TEXT,
++                    content_hash TEXT NOT NULL,
++                    status TEXT NOT NULL DEFAULT 'ACTIVE',
++                    raw_json TEXT,
++                    UNIQUE(environment, account_ref, income_type, tran_id)
++                )"""
++            )
++            self.conn.execute(
++                "CREATE INDEX IF NOT EXISTS idx_income_events_window "
++                "ON income_events(environment,account_ref,income_type,event_time_ms)"
++            )
++            self.conn.execute(
++                """CREATE TABLE IF NOT EXISTS income_coverage (
++                    id INTEGER PRIMARY KEY AUTOINCREMENT,
++                    environment TEXT NOT NULL,
++                    account_ref TEXT NOT NULL,
++                    income_type TEXT NOT NULL,
++                    start_ms INTEGER NOT NULL,
++                    end_ms INTEGER NOT NULL,
++                    watermark INTEGER NOT NULL,
++                    page_limit INTEGER NOT NULL,
++                    coverage_status TEXT NOT NULL,
++                    gaps_json TEXT,
++                    termination_proof_json TEXT,
++                    synced_at_ms INTEGER NOT NULL,
++                    UNIQUE(environment, account_ref, income_type, start_ms, end_ms)
++                )"""
++            )
++
++        self._apply_migration(17, "income_reconciliation", apply_income_reconciliation)
++
+     def close(self) -> None:
+         self.conn.close()
+ 
+@@ -1749,6 +1794,82 @@ class AuditDatabase:
+              recorded_at or utc_now(), gross_realized, entry_fee, exit_fee, funding_cashflow),
+         )
+ 
++    def insert_income_events(self, rows: Any) -> int:
++        """幂等写入收入流水；同 (env,account,type,tran_id) 已存在则忽略，返回新增数。"""
++        inserted = 0
++        with self.lock:
++            for row in rows:
++                from core.contracts import canonical_hash
++                content_hash = str(row.get("content_hash") or canonical_hash({
++                    "environment": str(row["environment"]).lower(),
++                    "account_ref": str(row["account_ref"]),
++                    "income_type": str(row["income_type"]),
++                    "tran_id": str(row["tran_id"]),
++                    "symbol": row.get("symbol") or "",
++                    "asset": str(row.get("asset") or ""),
++                    "amount": str(row.get("amount") or ""),
++                    "event_time_ms": int(row.get("event_time_ms") or 0),
++                }))
++                cursor = self.conn.execute(
++                    """INSERT OR IGNORE INTO income_events(environment,account_ref,income_type,
++                       tran_id,symbol,asset,amount,event_time_ms,received_at_ms,source_hash,
++                       content_hash,status,raw_json)
++                       VALUES(?,?,?,?,?,?,?,?,?,?,?,'ACTIVE',?)""",
++                    (str(row["environment"]).lower(), str(row["account_ref"]),
++                     str(row["income_type"]), str(row["tran_id"]), row.get("symbol") or "",
++                     str(row.get("asset") or "USDT"), str(row.get("amount") or ""),
++                     int(row.get("event_time_ms") or 0), int(row.get("received_at_ms") or 0),
++                     row.get("source_hash"), content_hash, row.get("raw_json")),
++                )
++                if cursor.rowcount == 1:
++                    inserted += 1
++            self.conn.commit()
++        return inserted
++
++    def fetch_income_events(self, *, environment: str, account_ref: str,
++                            income_type: str | None = None) -> list[dict[str, Any]]:
++        """读取已入库收入流水；返回 dict 行以适配 IncomeEvent.model_validate。"""
++        sql = """SELECT environment,account_ref,income_type,tran_id,symbol,asset,amount,
++                        event_time_ms,received_at_ms,source_hash,content_hash,status
++                 FROM income_events WHERE environment=? AND account_ref=?"""
++        params: list[Any] = [str(environment).lower(), str(account_ref)]
++        if income_type:
++            sql += " AND income_type=?"
++            params.append(str(income_type))
++        sql += " ORDER BY event_time_ms ASC, id ASC"
++        return [dict(row) for row in self.fetch_all(sql, tuple(params))]
++
++    def upsert_income_coverage(self, row: Mapping[str, Any]) -> None:
++        """落库覆盖证据（含结构化终止证明与缺口），按窗口维度幂等覆盖。"""
++        self._insert(
++            """INSERT INTO income_coverage(environment,account_ref,income_type,start_ms,end_ms,
++               watermark,page_limit,coverage_status,gaps_json,termination_proof_json,synced_at_ms)
++               VALUES(?,?,?,?,?,?,?,?,?,?,?)
++               ON CONFLICT(environment,account_ref,income_type,start_ms,end_ms) DO UPDATE SET
++                 watermark=excluded.watermark, page_limit=excluded.page_limit,
++                 coverage_status=excluded.coverage_status, gaps_json=excluded.gaps_json,
++                 termination_proof_json=excluded.termination_proof_json,
++                 synced_at_ms=excluded.synced_at_ms""",
++            (str(row["environment"]).lower(), str(row["account_ref"]),
++             str(row["income_type"]), int(row["start_ms"]), int(row["end_ms"]),
++             int(row["watermark"]), int(row["page_limit"]), str(row["coverage_status"]),
++             json.dumps(row.get("gaps") or [], ensure_ascii=False),
++             json.dumps(row.get("termination_proof"), ensure_ascii=False),
++             int(row["synced_at_ms"])),
++        )
++
++    def fetch_income_coverage(self, *, environment: str, account_ref: str,
++                              income_type: str) -> dict[str, Any] | None:
++        """读取窗口覆盖证据；不存在返回 None（未知不得当零）。"""
++        found = self.fetch_one(
++            """SELECT environment,account_ref,income_type,start_ms,end_ms,watermark,page_limit,
++                      coverage_status,gaps_json,termination_proof_json,synced_at_ms
++               FROM income_coverage WHERE environment=? AND account_ref=? AND income_type=?
++               ORDER BY end_ms DESC LIMIT 1""",
++            (str(environment).lower(), str(account_ref), str(income_type)),
++        )
++        return dict(found) if found is not None else None
++
+     def log_risk_verdict(self, *, verdict_id: str, decision_id: str | None, verdict: str,
+                          reasons: str, raw_json: str) -> None:
+         self._insert(

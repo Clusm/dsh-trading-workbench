@@ -494,6 +494,45 @@ def test_normalization_rejects_missing() -> None:
     check("默认 page_limit 为官方上限", DEFAULT_PAGE_LIMIT == 1000, DEFAULT_PAGE_LIMIT)
 
 
+def test_real_store_integration(fx: dict) -> None:
+    """真实 AuditDatabase 存储层（依赖 I 应用 database.py 适配；未应用则跳过）。"""
+    print("\n[9] 真实存储层（AuditDatabase）幂等入库与覆盖落库")
+    try:
+        from audit.database import AuditDatabase
+    except Exception as exc:  # noqa: BLE001
+        print(f"  SKIP  AuditDatabase 不可用: {exc}")
+        return
+    if not hasattr(AuditDatabase, "insert_income_events"):
+        print("  SKIP  database.py 收入存储适配尚未由 I 应用（作者补丁待审）")
+        return
+
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="mta-u01-store-"))
+    db = AuditDatabase(tmp / "store.sqlite")
+    try:
+        check("迁移版本 >= 17（收入表已建）", db.current_schema_version() >= 17,
+              db.current_schema_version())
+        window = fx["inputs"]["windows"][0]
+        sync = _sync_window(window)
+        book = IncomeReconciliationBook(
+            store=db, environment="demo", account_ref="SYNTH_ACCT_PLACEHOLDER")
+        check("真实库首次写入 4 行", book.persist(sync) == 4)
+        check("真实库重复写入新增 0 行", book.persist(sync) == 0)
+        check("真实库已入库键可回读 4 条", len(book.load_existing()) == 4,
+              book.load_existing())
+        coverage = db.fetch_income_coverage(
+            environment="demo", account_ref="SYNTH_ACCT_PLACEHOLDER",
+            income_type="FUNDING_FEE")
+        check("真实库覆盖证据 COMPLETE（含终止证明）",
+              coverage is not None and coverage["coverage_status"] == "COMPLETE"
+              and coverage["termination_proof_json"] not in (None, "", "null"), coverage)
+        check("真实库环境域大小写归一（DEMO 可查到）",
+              len(db.fetch_income_events(environment="DEMO",
+                                        account_ref="SYNTH_ACCT_PLACEHOLDER")) == 4)
+    finally:
+        db.close()
+
+
 def main() -> int:
     fx = _fixture()
     test_inclusive_endpoint_mapping()
@@ -504,6 +543,7 @@ def main() -> int:
     test_session_reconciliation(fx, sync_state["sync2"])
     test_persistence_idempotency(fx, sync_state["sync"])
     test_normalization_rejects_missing()
+    test_real_store_integration(fx)
     print(f"\nU01 income reconciliation: PASS={PASS_COUNT} FAIL={len(FAILURES)}")
     for item in FAILURES:
         print(f"  - {item}")

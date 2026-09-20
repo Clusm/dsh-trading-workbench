@@ -913,14 +913,32 @@ class IncomeReconciliationBook:
         for row in self.store.fetch_income_events(
             environment=str(self.environment).lower(), account_ref=str(self.account_ref)
         ):
-            event = IncomeEvent.model_validate(dict(row))
-            known[idempotency_key_text(event)] = str(row.get("content_hash") or "")
+            record = dict(row)
+            known[idempotency_key_text(_event_from_storage_row(record))] = str(
+                record.get("content_hash") or ""
+            )
         return known
 
 
 # --------------------------------------------------------------------------- #
 # 幂等入库 (environment, account_ref, income_type, tran_id)
 # --------------------------------------------------------------------------- #
+
+
+#: IncomeEvent 的输入字段；存储行会多带 content_hash/status 等审计列，必须剔除。
+_EVENT_STORAGE_FIELDS = (
+    "environment", "account_ref", "income_type", "tran_id", "symbol", "asset",
+    "amount", "event_time_ms", "received_at_ms", "source_hash",
+)
+
+
+def _event_from_storage_row(row: Mapping[str, Any]) -> IncomeEvent:
+    """存储行 → IncomeEvent；只取契约字段（IncomeEvent 是 extra='forbid'）。"""
+    if isinstance(row, IncomeEvent):
+        return row
+    payload = {name: row[name] for name in _EVENT_STORAGE_FIELDS if name in row}
+    payload.setdefault("source_hash", "")
+    return IncomeEvent.model_validate(payload)
 
 
 def idempotency_keys(events: Sequence[IncomeEvent]) -> tuple[tuple[str, str, str, str], ...]:
