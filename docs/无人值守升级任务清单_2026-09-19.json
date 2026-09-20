@@ -74,7 +74,7 @@
       "title": "冻结契约、基线和CI清单",
       "owner_role": "I",
       "actual_assignee": "I 编排；U00 作者会话由 I 派发",
-      "status": "IN_PROGRESS",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [],
       "owned_paths": [
@@ -198,6 +198,32 @@
             "NEW-R4-P3-3 model_copy 绕过校验后迭代 TypeError"
           ],
           "next": "U00 r5 修复轮 → 独立复验 → contract-v3.0 冻结"
+        },
+        {
+          "type": "contract_reviews_r5",
+          "candidate": "71f8109",
+          "verdict": "PASS-with-notes",
+          "reviewer_model": "默认模型（与 opus 作者跨模型）",
+          "reports": [
+            "Q_w0r1_r5"
+          ],
+          "archived_path": "docs/dispatch/reviews/U00/71f8109/Q_w0r1_r5.md",
+          "result": "6项修复全部独立复现闭合；12项回归项仍闭合；README 23/23 grep 通过；golden/schema/scripts 零改动；smoke PASS 173/0；6/6 schema EQUAL",
+          "residual": [
+            "L17 (P2, 已诚实登记): 三外部标志 source_available/pages_complete/late_recheck_done 仍 mint 侧可伪造",
+            "NEW-R5-P3-1 (P3, 未登记): rules >=5000 层嵌套 → 裸 RecursionError",
+            "L20 (P3): 理由失实 + T3/T5 新增拒绝面无自动化 golden 覆盖",
+            "NEW-R5-P3-2 (P3): 敌对 Mapping 子类可穿透（构造性极强）"
+          ]
+        },
+        {
+          "type": "contract_freeze",
+          "tag": "contract-v3.0",
+          "contract_commit": "ffdab443cae45c1451b5cc13b24e3e73c22038ff",
+          "verified_candidate": "71f8109",
+          "delta_verified_to_tag": "仅 dispatch 文档（RESUME.md/台账/r5 审查归档）；src/core/contracts 与 docs/contracts 内容与 71f8109 逐字节相同",
+          "frozen_by": "I",
+          "date": "2026-09-21"
         }
       ],
       "blockers": [],
@@ -234,7 +260,7 @@
         "DC01-DC16 映射由 Q 在 W0 登记进 F01-F24 矩阵，建议映射见顶层 dc_test_cases"
       ],
       "task_base_commit": null,
-      "contract_commit": null,
+      "contract_commit": "ffdab443cae45c1451b5cc13b24e3e73c22038ff",
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
@@ -280,6 +306,15 @@
           ],
           "verdict": "CHANGES_REQUESTED",
           "reports_dir": "docs/dispatch/reviews/U00/5ee082b/"
+        },
+        {
+          "round": "r5",
+          "candidate": "71f8109",
+          "sessions": [
+            "Q-w0r1-r5 (默认模型, 跨模型复验)"
+          ],
+          "verdict": "PASS-with-notes",
+          "reports_dir": "docs/dispatch/reviews/U00/71f8109/"
         }
       ],
       "qa_runs": [
@@ -1589,7 +1624,7 @@
     }
   ],
   "updated_date": "2026-09-21",
-  "updated_by": "I (claude-code orchestrator; handover from opencode session)",
+  "updated_by": "I (claude-code orchestrator)",
   "increment_registration": {
     "date": "2026-09-20",
     "by": "I",
@@ -1884,7 +1919,7 @@
     "author_local_commit_allowed": true,
     "remote_push_authorized": false,
     "planning_commit": "5295632c748882574a8691d3e7b4b9df2ad7bf37",
-    "contract_commit": null,
+    "contract_commit": "ffdab443cae45c1451b5cc13b24e3e73c22038ff",
     "runtime_inventory_status": "COMPLETED_2026-09-20_见 docs/dispatch/w0_runtime_inventory.md",
     "review_record_pattern": "docs/dispatch/reviews/<ID>/<candidate-short>/<role>_<session>_r<n>.md",
     "task_assignment_fields": {
@@ -1941,11 +1976,26 @@
         "owner": "I/U05",
         "blocks": "check_quality / RC",
         "note": "U00 不越权；在 U05 S02 或 I 集成时修复；不得静默忽略"
+      },
+      {
+        "id": "U00-R5-FU1",
+        "title": "T3/T5 新增拒绝面缺自动化 golden 覆盖（README L20 理由失实）",
+        "status": "OPEN",
+        "owner": "I",
+        "blocks": "建议 U12 RC 前补齐（纳入 smoke 门禁）",
+        "note": "Q r5 已证明 harness 支持 op 标签驱动 Python 级载荷（K05-N14 先例）；不得静默忽略"
+      },
+      {
+        "id": "U00-R5-FU2",
+        "title": "rules 深嵌套(>=5000 层) 触发裸 RecursionError（NEW-R5-P3-1）",
+        "status": "OPEN",
+        "owner": "I",
+        "blocks": "无（P3，构造性极强，方向仍 fail-closed）",
+        "note": "建议补 README §12 L21 登记或加 RecursionError 守卫；不得静默忽略"
       }
     ],
-    "contract_candidate": "5ee082b (r5 修复中)",
-    "handover": "docs/dispatch/交接说明_2026-09-21.md",
-    "contract_candidate_r5_pending": true
+    "contract_candidate": "71f8109",
+    "handover": "docs/dispatch/交接说明_2026-09-21.md"
   },
   "dispatch_version": "v1.1",
   "increment_scope": [
