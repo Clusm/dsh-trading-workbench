@@ -1,0 +1,159 @@
+{
+  "case_id": "F03",
+  "scenario": "同一生命周期的 TP 价格触发与 48 小时时间退出在同一时刻触发，且同一用户退出流被重复投递；交易所 TP 限价单先行成交，本地管理意图仍基于旧仓位修订号。必须只产生一次净减仓、不得反向开仓、不得在仓位归零确认前撤销最后保护单（SL）。",
+  "fixture_version": "w0-independent-v1",
+  "synthetic_data": true,
+  "synthetic_notice": "生命周期、订单、成交与时间戳均为虚构合成值；account_ref 为占位符，不对应任何真实账户或交易所UID。",
+  "inputs": {
+    "environment": "demo",
+    "account_ref": "SYNTH_ACCT_PLACEHOLDER",
+    "symbol": "YYYUSDT",
+    "market_mode": "one_way",
+    "clock_base_ms": 1789862400000,
+    "lifecycle": {
+      "lifecycle_id": "lc-synth-f03",
+      "position_side": "LONG",
+      "qty": "5.0",
+      "entry": {
+        "fill_ref": "SYNTH_FILL_E1",
+        "qty": "5.0",
+        "price": "200.00",
+        "fill_time_ms": 1789344000000,
+        "proven_open_fill_time": true
+      },
+      "elapsed_since_proven_entry_ms": 518400000,
+      "note": "持仓已6天，超过48小时时间退出规则；计时起点为可证明的开仓成交时间"
+    },
+    "position_before": {
+      "position_amt": "5.0",
+      "position_revision": 42,
+      "confirmed_at_ms": 1789862399000
+    },
+    "protective_orders": [
+      {
+        "kind": "SL",
+        "type": "STOP_MARKET",
+        "client_order_ref": "SYNTH_SL_03",
+        "close_position": true,
+        "stop_price": "190.00",
+        "qty": null,
+        "status": "NEW",
+        "is_last_protection": true
+      },
+      {
+        "kind": "TP",
+        "type": "LIMIT",
+        "client_order_ref": "SYNTH_TP_03",
+        "reduce_only": true,
+        "price": "220.00",
+        "qty": "5.0",
+        "status": "NEW"
+      }
+    ],
+    "triggers": [
+      {
+        "trigger_id": "trg-tp",
+        "kind": "tp_price_touch",
+        "at_ms": 1789862400000,
+        "evidence": {
+          "source": "exchange_mark_price",
+          "value": "220.00",
+          "event_at_ms": 1789862399990
+        }
+      },
+      {
+        "trigger_id": "trg-time",
+        "kind": "time_stop",
+        "at_ms": 1789862400000,
+        "rule": {
+          "horizon_ms": 172800000,
+          "from": "proven_open_fill_time"
+        },
+        "elapsed_ms": 518400000,
+        "management_rule_version": "exit-policy-synth-v1"
+      }
+    ],
+    "exchange_events": [
+      {
+        "type": "order_fill",
+        "order_ref": "SYNTH_TP_03",
+        "at_ms": 1789862400150,
+        "side": "SELL",
+        "qty": "5.0",
+        "price": "220.00",
+        "reduce_only": true,
+        "position_effect": "CLOSE",
+        "position_after": "0.0",
+        "position_revision_after": 43,
+        "delivered_to_local_at_ms": 1789862403000,
+        "note": "交易所成交早于本地执行复核；本地曾有窗口仍看到 revision=42"
+      }
+    ],
+    "local_management_flow": [
+      {
+        "management_id": "mgmt-synth-03a",
+        "created_at_ms": 1789862400050,
+        "action": "CLOSE",
+        "max_reduce_qty": "5.0",
+        "based_on_position_revision": 42,
+        "trigger": "time_stop",
+        "idempotency_key": "lc-synth-f03|time_stop|exit-policy-synth-v1|trg-time"
+      },
+      {
+        "management_id": "mgmt-synth-03a",
+        "created_at_ms": 1789862404050,
+        "action": "CLOSE",
+        "max_reduce_qty": "5.0",
+        "based_on_position_revision": 42,
+        "trigger": "time_stop",
+        "idempotency_key": "lc-synth-f03|time_stop|exit-policy-synth-v1|trg-time",
+        "note": "同一用户流重复投递：management_id 与幂等键完全相同"
+      },
+      {
+        "user_command_ref": "ucmd-synth-77",
+        "delivered_at_ms": [1789862404000, 1789862409000],
+        "same_command_repeated": true
+      }
+    ],
+    "policy": {
+      "allowed_actions": ["close", "reduce"],
+      "forbidden_actions": ["open_increase", "reverse", "cancel_last_protection_before_flat_confirmed"]
+    }
+  },
+  "derived_golden": {
+    "signed_fill_sum": "+5.0 (entry) -5.0 (TP) = 0.0",
+    "final_position_amt": "0.0",
+    "additional_management_reduce_orders_submitted": 0,
+    "available_reduce_qty_at_recheck": "0.0",
+    "management_id_dedup": "两条重复流折叠为1条有效管理命令",
+    "protection_cleanup_order": ["TP fill confirmed", "position=0 confirmed", "then cancel remaining SL if still open"],
+    "aggregate_reduce_never_exceeds": "5.0"
+  },
+  "expected_invariants": [
+    "TP 成交与时间退出同时触发时，对同一生命周期只产生一次净减仓效果；净持仓变化 +5.0-5.0=0.0",
+    "重复用户流/重复触发按 management_id 与幂等键折叠，不产生第二轮减仓",
+    "执行前重新核验真实仓位与修订号：基于 revision=42 的管理意图在 revision=43（已归零）后必须被撤销或拒绝，不得执行",
+    "聚合减仓数量不得超过任一时刻的 available_reduce_qty（=最新确认仓量-其他有效在途退出预留）",
+    "减仓指令具备只减仓语义（one-way 用有效 reduceOnly；不得发送会让持仓翻向反侧的指令）",
+    "最后保护单（SL）只能在仓位归零被确认之后，清理由本系统证明归属的遗留保护",
+    "时间退出计时从可证明的开仓成交时间起算（本夹具为6天前，超过48h），且退出规则版本显式记录",
+    "重复投递的用户流不改变最终结果（幂等）",
+    "保护覆盖核验基于实际仓量：不得把 TP 与 SL 数量相加冒充双倍覆盖，也不得先撤 SL 再补保护"
+  ],
+  "forbidden_outcomes": [
+    "第二笔净减仓导致持仓从0变为-5.0（反向开仓）",
+    "先撤最后保护单（SL）再尝试平仓，或在归零确认前撤销保护",
+    "把 TP 成交与时间退出当作两个独立退出而合计减仓10.0",
+    "忽略 position_revision 变化继续执行过期授权",
+    "在仓位已为0后继续发送 reduce/close 类指令",
+    "把重复用户流当作新触发并重新生成随机 management_id",
+    "在 Hedge 模式下机械添加不被支持的参数导致指令被拒或语义错误"
+  ],
+  "derivation": "由规格与交易所语义独立推导，不引用任何被测实现输出：(1) 规格 §6 F03 要求「一次净减仓，不反向开仓，不先撤最后保护」；(2) 规格 K04 规定 management_id 幂等键由生命周期、触发类型、规则版本、触发事件确定，不得每轮随机换 ID；数量随新成交更新生成有序 revision 并撤销旧授权，防止多轮累计超减；执行前重新核验真实仓位与修订号；保护替换采用先建新后撤旧的可验证路径；(3) 规格 §10.2 定义 available_reduce_qty=最新确认仓量-其他有效在途退出预留，重对账后释放预留；退出确认持仓归零后清理已证明归属的遗留保护；one-way 减仓用有效 reduceOnly，Hedge 用正确 positionSide 及方向，closePosition 型保护不得同时发送 quantity/reduceOnly；(4) 数学守恒：净仓位变化=Σ（带符号）减仓数量，任一时刻减仓上限为当前仓量；一旦跨越0即成为反向开仓，超出管理授权（仅 close/reduce，禁止提高净敞口）；(5) 交易所语义：reduceOnly 订单在可减数量不足时会被拒绝，closePosition 保护单全平现有仓位且不能与 quantity 模式混用，因此重复提交会以错误码暴露或被拒，而不是产生第二笔合法减仓；(6) 竞态论证：TP 成交在交易所以 after 本地 recheck 到达成交回执之前完成时，若系统按旧快照 revision=42 执行，会形成对已归零仓位的第二笔卖出，即反向开仓；rev 核验与在途预留是避免双倍减仓的必要不变量。",
+  "source_refs": [
+    "规格 §6 F03（TP与时间退出同时触发、重复用户流 → 一次净减仓，不反向开仓，不先撤最后保护）",
+    "规格 K04 ManagementIntent与部分成交（幂等键、revision、撤销旧授权）",
+    "规格 §10.2 授权、数量和未知订单（available_reduce_qty、保护替换、遗留保护清理）",
+    "Binance USD-M reduceOnly / positionSide / closePosition 订单语义（官方接口文档）"
+  ]
+}
