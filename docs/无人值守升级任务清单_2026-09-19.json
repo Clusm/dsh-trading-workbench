@@ -1291,6 +1291,34 @@
             "P1-5 patch 13 的 .py 裸标识符放宽削弱密钥检测（见上）"
           ],
           "other": "U05 全部运行时 API 在 src/ 零调用方（生产路径未接线）"
+        },
+        {
+          "type": "author_fix_r2",
+          "head_commit": "2049c1c",
+          "commits": [
+            "8a8e31e",
+            "f9a46bc",
+            "2049c1c"
+          ],
+          "fixed": {
+            "P1-5": "scan_tracked_secrets 改用 tokenize 区分代码位置与注释/字符串；**无法词法分析即整体放弃放宽（fail-closed）**；留痕 skipped_bare_identifiers=20 / unparsable_python_files=0；登记表另加行内容指纹双锚（P2-9）。前后：注释/docstring/内嵌 YAML 三种 .py 探针 修复前 [] -> 修复后 ['1:secret-assignment']；而 api_key=<裸变量> 与 cfg.<裸属性链> 两态均 [] -> **KI01 保持关闭**",
+            "P1-1": "patch 09 latency_ms 只写真实耗时或 NULL，failed_rounds 移出耗时列。前后：failed_rounds=3 + 真实 latency_ms=1234 -> 前 agent_runs.latency_ms=3（review.py AVG 读成 3ms）/ 后 latency_ms=1234、output_summary.failed_rounds=3",
+            "P1-2": "分类改以 decision_gate()/report.ok 为准。前后：primary='NO_EDGE' details=['evidence_gate_ok'] -> primary='RESEARCH_INCOMPLETE' details=['evidence_gate_failed','gate:drop_intent:ghost-1']",
+            "P1-3": "mock_allowed 只来自显式开关 MTA_ALLOW_MOCK_LLM（缺省 False）；守卫无条件上报 degraded_reason。前后：mock_allowed=True/clean=True -> mock_allowed=False/clean=False violations=['SILENT_MOCK']；显式开关下 clean=True",
+            "P1-4": "span 登记改非严格 + 结果先落局部变量；CycleRunResult.span_errors 留痕。前后：抛 SpanValidationError 且已执行=['protection'] -> 正常返回且三步齐全",
+            "P2": "P2-1/2/4/5/6/8/9 已修；P2-3(blocked 恒 False)、P2-7(数据侧原因码零调用方) 已登记。P3-1/2/6 已修；P3-3(02/03 回调元数)、P3-4(SpanHandle 可变)、P3-5(admit() 第二期限) 已登记"
+          },
+          "deviations_registered": "market_query 撤回已作显式偏差登记（README §二.4）；接线缺口归 U08 与 U08/U12（README §五）",
+          "patches": "docs/dispatch/patches/U05/8a8e31e/（15 条，01/04/09/11/12/13/14 重出）；独立 repo 根 apply --check 15/15 OK、顺序应用 15/15",
+          "delta": "head 2049c1c 双树沙箱、统一清单 77、逐条非 fail-fast：pristine 失败 {smoke_windows_service_plan.py=KI02}、patched 同 -> **新增失败 ∅**",
+          "tests": "smoke_contracts_v3 173/0（两树）；集成树 test_secret_scanner 26/0、扫描器 SECRET SCAN OK files=397 registered=3 skipped=20 unparsable=0；四套测试 作者树 115/56/48/45、**集成树 115/63/48/45**（56<->63 差为补丁专用断言在作者树跳过）",
+          "known_limits": [
+            "KI02 未判因（仅证明与 U05 无关）",
+            "租约回收只测假 pid",
+            "并发计数未复现≠无风险",
+            "stale_allowances 现按内容指纹匹配，行号漂移不再误报"
+          ],
+          "rollback": "git checkout -- <文件>；**13/14 不可单独回退**（KI01 误报会复现）"
         }
       ],
       "blockers": [],
@@ -1353,6 +1381,16 @@
           ],
           "verdict": "PENDING",
           "reports_dir": "docs/dispatch/reviews/U05/<r2head>/"
+        },
+        {
+          "round": "r2",
+          "stage": "修复复验",
+          "candidate": "2049c1c",
+          "sessions": [
+            "Q (reviews/U05/R2/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U05/2049c1c/"
         }
       ],
       "qa_runs": []
