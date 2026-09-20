@@ -1,0 +1,60 @@
+diff --git a/src/dashboard/app.py b/src/dashboard/app.py
+index 73f99f6..187750b 100644
+--- a/src/dashboard/app.py
++++ b/src/dashboard/app.py
+@@ -380,6 +380,7 @@ def _event_type_cn(value: Any) -> str:
+         # U13：恢复门禁与运行代事件（操作员必须能看到"为什么停止开新仓"）。
+         "recovery_reconcile_required": "恢复后待对账（已停新仓）",
+         "run_generation_error": "运行代持久化失败",
++        "recovery_reconcile_submitted": "恢复对账证据已提交",
+     }.get(str(value), str(value))
+ 
+ def _agent_cn(value: Any) -> str:
+@@ -2122,6 +2123,47 @@ def create_app(service: TradingService) -> FastAPI:
+         return {**result, "verified": True,
+                 "read_back_state": str(getattr(service.control, "state", "") or "")}
+ 
++    @app.post("/api/recovery/reconcile")
++    def api_recovery_reconcile(payload: dict[str, Any], request: Request):
++        """U13/F14 **生产对账入口**：operator 提交结构化对账证据，收口恢复门禁。
++
++        在补上这个入口之前 ``complete_reconcile`` 只有测试调用点，门禁会永久停在
++        ``RECONCILE_REQUIRED`` → 每次重启都强制 close_only（运营死路）。
++
++        授权复用**最严**的那条路径（``set_control_severity_down``：operator-only
++        + 二次确认），因为它正是"放宽一个阻断"的语义；本端点本身**不改变**控制面
++        状态（控制状态仍由 operator 在 /api/control 显式恢复）。
++
++        请求体：``{"observed_at_ms": <int>, "positions_verified": true,
++        "open_orders_verified": true, "confirm": true}``。账户/运行代**不取自请求
++        体**：由服务进程按运行代持久化补齐并强制匹配（P2-6）。
++        """
++        control_role = os.getenv("MTA_CONTROL_ROLE", "operator")
++        decision = authorize_control_request(
++            role=control_role,
++            action="set_control_severity_down",
++            client_host=(request.client.host if request.client else None),
++            requested_state="normal",
++            current_state=str(getattr(service.control, "state", "") or "normal"),
++            actor=control_role,
++            confirm_manual_reenable=bool(payload.get("confirm")),
++            confirm_secret=str(payload.get("confirm") or ""),
++        )
++        if not decision.allowed:
++            raise HTTPException(status_code=decision.http_status,
++                                detail=";".join(decision.reason_codes))
++        evidence = {key: payload.get(key) for key in
++                    ("observed_at_ms", "positions_verified", "open_orders_verified")
++                    if key in payload}
++        result = service.submit_recovery_reconcile(
++            evidence, actor=control_role, confirm=bool(payload.get("confirm")))
++        if not result.get("ok"):
++            # 证据不足/过期/身份不符 → 409（门禁保持阻断，不是 500）。
++            raise HTTPException(
++                status_code=409, detail=";".join(result.get("reason_codes") or ["BLOCKED"]))
++        return {**result, "verified": True,
++                "recovery_gate_state": str(getattr(service.recovery_gate, "state", ""))}
++
+     @app.post("/api/cycle/run")
+     def api_run_cycle():
+         if service.cycle_running():

@@ -1,0 +1,63 @@
+diff --git a/scripts/smoke_windows_service_plan.py b/scripts/smoke_windows_service_plan.py
+index 2669a13..cf58bec 100644
+--- a/scripts/smoke_windows_service_plan.py
++++ b/scripts/smoke_windows_service_plan.py
+@@ -16,7 +16,10 @@ SRC = ROOT / "src"
+ if str(SRC) not in sys.path:
+     sys.path.insert(0, str(SRC))
+ 
+-from core.windows_service import load_windows_service_config  # noqa: E402
++from core.windows_service import (  # noqa: E402
++    load_windows_service_config,
++    resolve_python_executable,
++)
+ from validate_windows_service_plan import (  # noqa: E402
+     build_install_commands,
+     command_text,
+@@ -187,6 +190,46 @@ try:
+         f"{rotate_config.log_path.name}.1").is_file())
+     check("轮转后重新打开当前日志", rotate_config.log_path.is_file()
+           and rotate_config.log_path.stat().st_size == 0)
++
++    print("\n[5] KI02 回退面收口：显式声明必须有效 / 安装期禁止猜测性回退")
++    ki02 = tmp / "ki02"
++    ki02_config = write_config(ki02)
++    # (a) 显式 MTA_PYTHON 指向不存在的路径：必须报错，不得静默回退
++    try:
++        resolve_python_executable(
++            ki02, ".venv/Scripts/python.exe",
++            env={"MTA_PYTHON": str(ki02 / "nope" / "python.exe")})
++        explicit_invalid_blocked = False
++    except ValueError:
++        explicit_invalid_blocked = True
++    check("显式MTA_PYTHON指向不存在路径被拒绝", explicit_invalid_blocked)
++    # (a2) 显式 MTA_PYTHON 有效：仍被接受（不误伤官方推荐写法）
++    resolved, source = resolve_python_executable(
++        ki02, ".venv/Scripts/python.exe", env={"MTA_PYTHON": str(Path(sys.executable))})
++    check("显式MTA_PYTHON有效时仍被接受",
++          source == "env" and resolved == Path(sys.executable).resolve())
++    # (b) 安装期口径：声明缺失时必须失败，不得回退到 sys.executable
++    (ki02 / ".venv" / "Scripts" / "python.exe").unlink()
++    try:
++        resolve_python_executable(ki02, ".venv/Scripts/python.exe",
++                                  allow_fallback=False, env={})
++        install_fallback_blocked = False
++    except ValueError as exc:
++        install_fallback_blocked = "回退" in str(exc)
++    check("安装期(allow_fallback=False)解释器缺失时失败而不是回退",
++          install_fallback_blocked)
++    # (b2) 声明存在时安装期照常解析成功（来源必须是 config）
++    (ki02 / ".venv" / "Scripts" / "python.exe").write_bytes(b"fixture")
++    explicit_ok = load_windows_service_config(
++        ki02_config, project_root=ki02, require_files=True, allow_fallback=False)
++    check("安装期显式声明存在时解析成功且来源为config",
++          explicit_ok.python_executable_source == "config"
++          and explicit_ok.python_executable_is_explicit
++          and not explicit_ok.python_executable_from_fallback)
++    host_source = (ROOT / "scripts" / "windows_service_host.py").read_text(encoding="utf-8")
++    check("宿主脚本安装期强制allow_fallback=False且不再是仅告警",
++          "allow_fallback=False" in host_source
++          and 'warn: python_executable 回退' not in host_source)
+ finally:
+     shutil.rmtree(tmp, ignore_errors=True)
+ 
