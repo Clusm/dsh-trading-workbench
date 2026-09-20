@@ -612,6 +612,169 @@ def check_clock_guard() -> None:
               not reading.deadline_expired(119.0) and reading.deadline_expired(120.0))
 
 
+def check_recovery_script_epoch() -> None:
+    """脚本级同 epoch 与恢复门禁（create/restore_recovery_bundle）。
+
+    **两态可跑**：核心断言（schema/停写声明/成员齐全/哈希篡改被拒/恢复后门禁
+    阻断）在两种状态下都成立；只有"脚本清单是否带 epoch 块""恢复回执是否带
+    entry_gate"取决于共享适配补丁是否已应用，因此用**显式能力探测**处理，
+    并把结论打印出来——不是静默跳过。
+    """
+    print("\n[10] create/restore_recovery_bundle 脚本级同 epoch 与恢复门禁")
+    scripts_dir = ROOT / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from create_recovery_bundle import create_recovery_bundle
+    from restore_recovery_bundle import restore_to_new_directory
+
+    with tempfile.TemporaryDirectory(prefix="u13-scripts-") as tmp:
+        base = Path(tmp)
+        project = base / "project"
+        data = project / "data"
+        (project / "config").mkdir(parents=True)
+        data.mkdir()
+        connection = sqlite3.connect(data / "agent_trader.sqlite")
+        connection.execute("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY)")
+        connection.execute("INSERT INTO schema_migrations VALUES(17)")
+        connection.commit()
+        connection.close()
+        for name, payload in (
+            ("capital_state.json", {"mode": "demo"}),
+            ("channel_state.json", {"date": "2026-09-20"}),
+            ("control_state.json", {"state": "normal"}),
+            ("account_risk_state.json", {"anchor_id": "demo:x"}),
+        ):
+            (data / name).write_text(json.dumps(payload), encoding="utf-8")
+        (project / "config" / "risk_profile.lock.json").write_text("{}", encoding="utf-8")
+        (project / ".env").write_text("SECRET=x", encoding="utf-8")
+
+        bundle = create_recovery_bundle(project, base / "bundles")
+        manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+        # 只用两态都成立的字段做断言（``writer_stopped`` 由 U13 补丁追加）。
+        check("脚本恢复包 schema=2 且声明停写",
+              manifest.get("bundle_schema") == 2
+              and manifest.get("service_was_stopped") is True)
+        check("脚本恢复包不含 .env",
+              not (bundle / ".env").exists() and not (bundle / "state" / ".env").exists())
+        check("脚本恢复包数据库迁移版本进入清单",
+              manifest["files"]["database"]["schema_version"] == 17)
+
+        # 能力探测：U13 epoch 补丁是否已应用到 create_recovery_bundle。
+        epoch = manifest.get("epoch")
+        if isinstance(epoch, dict):
+            stamps = [entry.get("snapshot_at_ms") for entry in manifest["files"].values()]
+            low = int(epoch["snapshot_started_ms"]) - int(epoch["tolerance_ms"])
+            high = int(epoch["snapshot_finished_ms"]) + int(epoch["tolerance_ms"])
+            check("脚本恢复包每个成员都有 snapshot_at_ms",
+                  all(isinstance(value, int) and not isinstance(value, bool)
+                      for value in stamps))
+            check("脚本恢复包成员落在同一 epoch 窗口内",
+                  all(low <= int(value) <= high for value in stamps))
+            check("脚本恢复包声明写者已停（epoch 语义前提）",
+                  manifest.get("writer_stopped") is True)
+        else:
+            print("  NOTE  create_recovery_bundle 未包含 U13 epoch 块"
+                  "（共享适配补丁未应用）；同 epoch 行为已由 core.ops.recovery 覆盖")
+
+        target = base / "restore_target"
+        restored = restore_to_new_directory(bundle, target, execute=True,
+                                           expected_environment="demo")
+        check("脚本恢复演练返回 restored",
+              restored["status"] == "restored"
+              and (target / "data" / "agent_trader.sqlite").is_file())
+        receipt = json.loads((target / "restore_receipt.json").read_text(encoding="utf-8"))
+        if "entry_gate" in receipt:
+            check("脚本恢复回执声明 RECONCILE_REQUIRED 门禁",
+                  receipt["entry_gate"] == RECONCILE_REQUIRED_BEFORE_ENTRY)
+            gate_path = target / receipt.get("recovery_gate_file",
+                                             "data/ops/recovery_gate.json")
+            check("脚本恢复在目标状态根安装恢复门禁", gate_path.is_file())
+            blocked = RecoveryGate.load(gate_path).before_entry(now_ms=1_000_000)
+            check("脚本恢复后立即开仓被拒绝",
+                  not blocked.allowed
+                  and RECONCILE_REQUIRED_BEFORE_ENTRY in blocked.reason_codes)
+        else:
+            print("  NOTE  restore_recovery_bundle 未安装恢复门禁"
+                  "（共享适配补丁未应用）；门禁语义已由 core.ops.recovery 覆盖")
+
+        # 篡改成员必须被拒绝（两态都成立）
+        tampered = base / "tampered_media"
+        import shutil as _shutil
+
+        _shutil.copytree(bundle, tampered)
+        with (tampered / "state" / "capital_state.json").open("ab") as handle:
+            handle.write(b" ")
+        check("脚本恢复校验拒绝被改写的成员",
+              bool(raises(ValueError, restore_to_new_directory, tampered,
+                          base / "tampered_target")))
+
+
+def check_scm_dual_profile() -> None:
+    """decl-6：SCM 托管双 profile 参数化（``windows_service`` 共享适配）。
+
+    能力探测：``WindowsServiceConfig`` 是否已带 U13 的 ``profile`` 字段。未应用
+    补丁时打印 NOTE（不是静默跳过），并把结论写进报告。
+    """
+    print("\n[11] decl-6 SCM 双 profile 参数化")
+    from core.windows_service import WindowsServiceConfig, load_windows_service_config
+
+    if "profile" not in WindowsServiceConfig.__dataclass_fields__:
+        print("  NOTE  windows_service.py 未包含 U13 profile 字段"
+              "（共享适配补丁未应用）；残余已在 U13 处置表中登记")
+        return
+
+    with tempfile.TemporaryDirectory(prefix="u13-scm-") as tmp:
+        root = Path(tmp)
+        (root / "scripts").mkdir(parents=True)
+        (root / "data" / "live").mkdir(parents=True)
+        (root / "config").mkdir()
+        (root / "scripts" / "run_web.py").write_text("# fixture", encoding="utf-8")
+
+        def write(**updates: object) -> Path:
+            payload = {
+                "service_name": "MultiAgentTrader", "host": "127.0.0.1", "port": 8000,
+                "entrypoint": "scripts/run_web.py", "working_directory": ".",
+                "log_path": "data/web_console.log", "interval_minutes": None,
+                "no_autostart": False, "stop_timeout_seconds": 30,
+                "restart_delay_seconds": 30,
+                "python_executable": ".venv/Scripts/python.exe",
+            }
+            payload.update(updates)
+            path = root / "config" / "windows_service.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            return path
+
+        legacy = load_windows_service_config(write(), project_root=root)
+        check("profile 未声明时服务名不变（升级前语义）",
+              legacy.profile is None and legacy.service_name == "MultiAgentTrader")
+        live = load_windows_service_config(
+            write(profile="live", port=8001, log_path="data/live/web_console.log"),
+            project_root=root)
+        check("live profile 解析成功且服务名带 profile 后缀",
+              live.profile == "live" and live.service_name == "MultiAgentTrader-Live")
+        check("live profile 传入 --profile 参数",
+              live.run_arguments()[:4] == ["--host", "127.0.0.1", "--port", "8001"]
+              and "--profile" in live.run_arguments()
+              and live.run_arguments()[live.run_arguments().index("--profile") + 1] == "live")
+        check("SCM binPath 使用限定后的服务名",
+              live.scm_bin_path().count("windows_service_host.py") == 1)
+        demo = load_windows_service_config(
+            write(profile="demo", port=8000), project_root=root)
+        check("demo profile 与 live 服务名互不相同",
+              demo.service_name == "MultiAgentTrader-Demo"
+              and demo.service_name != live.service_name)
+        check("profile=live 但端口不符时被拒绝",
+              bool(raises(ValueError, load_windows_service_config,
+                          write(profile="live", port=8000, log_path="data/live/x.log"),
+                          project_root=root)))
+        check("profile=live 但日志不在 data/live 时被拒绝",
+              bool(raises(ValueError, load_windows_service_config,
+                          write(profile="live", port=8001), project_root=root)))
+        check("非法 profile 被拒绝",
+              bool(raises(ValueError, load_windows_service_config,
+                          write(profile="prod", port=8000), project_root=root)))
+
+
 def check_fingerprint_disposition() -> None:
     print("\n[9] 指纹报告 diff-6 / decl-6 处置登记")
     required = {"diff-6", "decl-6", "fu-1", "fu-2", "fu-4", "fu-paths"}
@@ -639,6 +802,8 @@ def main() -> int:
     check_recovery_epoch_bundle()
     check_reconcile_before_entry()
     check_clock_guard()
+    check_recovery_script_epoch()
+    check_scm_dual_profile()
     check_fingerprint_disposition()
     if FAILURES:
         print(f"\nU13 SUPERVISION ACCEPTANCE FAILED: {len(FAILURES)} -> "
