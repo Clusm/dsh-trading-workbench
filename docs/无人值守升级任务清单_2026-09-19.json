@@ -1838,6 +1838,37 @@
           ],
           "regression": "11/11 全过；4 补丁 apply --check 4/4 OK；无 P0/P1 回归",
           "archived_path": "docs/dispatch/reviews/U15/38029e2/Q_r2.md"
+        },
+        {
+          "type": "author_fix_r3",
+          "head_commit": "abf2eda",
+          "commits": [
+            "26d77a0",
+            "331deb0",
+            "abf2eda"
+          ],
+          "fixed": {
+            "NEW-A": "authorize_new_entry 增加 bundle.identity<->generation 的 environment/account_ref 交叉校验 -> IDENTITY_GENERATION_MISMATCH/409；A1/A2/A3 由 200 -> 全 409；A4 自洽组合仍 200（无假阳性）",
+            "NEW-D": "mint 的 7 个字段类型校验 -> MalformedInputError；credential_epoch='3'/started_at='now'/3.7/True/None 由裸 TypeError/ValueError/静默强转 -> 全部结构化拒绝；合法输入不受影响",
+            "NEW-E": "新增 compare_dependency_lock(root,declared) 产 MATCH/MISMATCH/UNAVAILABLE 并经 IdentityBundle.dependency_comparison_status(含 as_dict()) 交付；diff-2 登记据实更新",
+            "NEW-F": "decision_fallback.provider_env 生效；sources['fallback_provider_env'] 暴露证据",
+            "NEW-G": "emergency_stop 目标态不符->400 EMERGENCY_STOP_TARGET_MISMATCH；unspecified->400 UNKNOWN_CONTROL_ACTION；verify_control_write('bogus','bogus')->CONTROL_STATE_ILLEGAL；auto 仅放行只读与更严方向"
+          },
+          "registered_not_fixed": {
+            "NEW-H": "方向经作者实测为 fail-closed（唯一消费者用 not is_loopback_host -> 403，故 0:0:0:0:0:ffff:127.0.0.1 只使合法本机请求被拒，不会放行非回环）；放宽需 IP 解析+重划白名单，收益不抵风险 -> 登记",
+            "NEW-B/C": "确认已在 README §12 L1；因该文件属禁改共享路径，补充登记写在 is_sensitive_name docstring + 补丁 README（明写键名亦不做 NFKC 归一化与调用方义务）"
+          },
+          "orchestrator_verified": {
+            "smoke_contracts_v3": "PASS 173/0",
+            "test_runtime_identity": "exit 0 (233 PASS)",
+            "test_control_boundary": "exit 0 (63 PASS)",
+            "patch_apply_check": "4/4 OK",
+            "shared_contract_runner_untouched": true
+          },
+          "known_limits": [
+            "模块仍是 src/ 内零消费者；看板/启动期接线与 HTTP 层行为未验证（归 I）"
+          ],
+          "rollback": "git revert 26d77a0 331deb0 abf2eda（补丁未动无需回滚）"
         }
       ],
       "blockers": [
@@ -1917,6 +1948,16 @@
           "verdict": "CHANGES_REQUESTED（单一阻断项 NEW-A）",
           "reports_dir": "docs/dispatch/reviews/U15/38029e2/",
           "note": "为控制预算，E/B/C 三方发现的复验合并为单一独立会话（原独立初审已分别由三方完成）"
+        },
+        {
+          "round": "r3",
+          "stage": "聚焦复验",
+          "candidate": "abf2eda",
+          "sessions": [
+            "Q (reviews/U15/R3/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U15/abf2eda/"
         }
       ],
       "qa_runs": []
