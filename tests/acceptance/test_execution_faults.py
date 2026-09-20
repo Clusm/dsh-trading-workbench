@@ -13,6 +13,7 @@ import inspect
 import json
 import sys
 import tempfile
+import threading
 import traceback
 from decimal import Decimal
 from pathlib import Path
@@ -23,18 +24,26 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from audit.database import AuditDatabase  # noqa: E402
 from core.contracts import DuplicateFillError  # noqa: E402
+from core.contracts.k04_management import REASON_LAST_PROTECTION  # noqa: E402
 from exchange.binance_futures import BinanceFuturesBroker  # noqa: E402
+from exchange.event_models import ExchangeEvent  # noqa: E402
 from exchange.order_outbox import (  # noqa: E402
     DuplicateOrderSubmission,
     OrderOutbox,
 )
 from exchange.protection_commands import (  # noqa: E402
+    REASON_CANCEL_NOT_EXECUTED,
+    REASON_FLAT_CLOSE_NOT_CONFIRMED,
+    REASON_FLAT_NOT_CONFIRMED,
     REASON_HEALTH_NO_FLAT_CLOSE,
+    REASON_PARTIAL_FILL_PRESENT,
     CommandKind,
     CommandKindConflict,
     CrossKindCoverageClaim,
     FaultClass,
     ProtectionSafetyError,
+    ProtectionSyncReasons,
+    QuantizationInputError,
     QuantityStateConflict,
     SubmissionOutcome,
     UnknownDecision,
@@ -45,6 +54,7 @@ from exchange.protection_commands import (  # noqa: E402
     classify_execution_fault,
     classify_row,
     coverage_report,
+    defers_flat_close,
     ensure_execution_schema,
     execute_protection_plan,
     execute_unknown_reconcile,
@@ -330,6 +340,29 @@ def section_dc13_unknown(tmpdir: Path) -> None:
               evidence="synthetic")))
     check("假 Broker 的全平入口从未被调用", broker.close_all_calls == 0)
 
+    # A/P3-1：脏的查询计数列（'abc'/'3.0'）不得抛裸 ValueError 而中断整条收口规划。
+    # 解析不了计数时最不该走的方向是"当作 0 次、无限重试"，因此按预算耗尽处理。
+    for dirty in ("abc", "-1", "1e3"):
+        dirty_plan = plan_unknown_reconcile(
+            {"client_order_id": client_id, "endpoint": inputs["intent"]["endpoint"],
+             "status": "UNKNOWN", "query_attempt_count": dirty},
+            now_ms=retry_at_ms, budget=inputs["query_policy"]["budget"])
+        check(f"脏计数 {dirty!r} 不抛异常且 fail-closed 到 MANUAL_RECOVERY",
+              dirty_plan.decision is UnknownDecision.MANUAL_RECOVERY
+              and dirty_plan.blocks_new_open and dirty_plan.alert_required,
+              f"actual={dirty_plan.decision} attempts={dirty_plan.attempt_no}")
+    # 十进制形式的计数（'3.0'）本身合法：只要求不再抛裸 ValueError，且不因此放宽预算。
+    decimal_count = plan_unknown_reconcile(
+        {"client_order_id": client_id, "endpoint": inputs["intent"]["endpoint"],
+         "status": "UNKNOWN", "query_attempt_count": "3.0"},
+        now_ms=retry_at_ms, budget=inputs["query_policy"]["budget"])
+    check("十进制计数 '3.0' 被解析为 3 而不是抛 ValueError",
+          decimal_count.attempt_no == 3
+          and decimal_count.decision in {
+              UnknownDecision.QUERY_DUE, UnknownDecision.BACKOFF,
+              UnknownDecision.MANUAL_RECOVERY},
+          f"actual={decimal_count.decision} attempts={decimal_count.attempt_no}")
+
     print("\n[4] F04 重启断点：SUBMITTING -> UNKNOWN，不重发（F04）")
     db2 = AuditDatabase(tmpdir / "restart.sqlite")
     outbox2 = OrderOutbox(db2, environment=inputs["environment"])
@@ -417,6 +450,49 @@ def section_f03_protection(tmpdir: Path) -> None:
           f"allowed={allowed} reason={reason}")
 
     flat_unconfirmed = real_position_from_snapshot(inputs["position_flat_unconfirmed"])
+
+    # A/P1-A1：positionAmt==0 只是"快照为零"，不等于"已确认归零"。把 is_flat 当
+    # 已确认会允许撤掉最后一道保护，并在 reason 里谎称 FLAT_CONFIRMED_CLEANUP。
+    for probe_key in ("position_flat_unconfirmed",
+                      "position_flat_unconfirmed_zero_text"):
+        if probe_key not in inputs:
+            continue
+        probe_position = real_position_from_snapshot(inputs[probe_key])
+        probe_allowed, probe_reason = can_cancel_protection(
+            position=probe_position, protections=[protections[0]],
+            target_client_id="SYNTH_SL_03")
+        check(f"未确认归零（{probe_key}）不得撤掉最后一道保护、不得谎报已确认",
+              not probe_allowed
+              and probe_reason in {REASON_LAST_PROTECTION, REASON_FLAT_NOT_CONFIRMED}
+              and probe_reason != "FLAT_CONFIRMED_CLEANUP",
+              f"allowed={probe_allowed} reason={probe_reason}")
+        # 同口径：与 plan_protection_refresh 对同一情形都拒绝。
+        probe_plan = plan_protection_refresh(
+            position=probe_position, protections=protections, flat_confirmed=False)
+        check(f"未确认归零（{probe_key}）与 plan_protection_refresh 同口径拒绝",
+              probe_plan.blocked_reason == REASON_FLAT_NOT_CONFIRMED
+              and not probe_plan.cancels,
+              f"blocked={probe_plan.blocked_reason} cancels={probe_plan.cancels}")
+        # 已确认归零才允许清理，reason 才允许是 FLAT_CONFIRMED_CLEANUP。
+        confirmed_allowed, confirmed_reason = can_cancel_protection(
+            position=probe_position, protections=[protections[0]],
+            target_client_id="SYNTH_SL_03", flat_confirmed=True)
+        check(f"确认归零（{probe_key}）才允许清理且 reason 如实标注",
+              confirmed_allowed and confirmed_reason == "FLAT_CONFIRMED_CLEANUP",
+              f"allowed={confirmed_allowed} reason={confirmed_reason}")
+
+    # A/P3-5：镜像写出的十进制文本列必须有真实读取方，否则"精确勾稽"是空承诺。
+    text_view = protection_view_from_algo({
+        "clientAlgoId": "SYNTH_SL_TEXT", "orderType": "STOP_MARKET",
+        "quantity": 2.0, "triggerPrice": 100.5,
+        "quantity_text": "2", "trigger_price_text": "100.5"})
+    check("镜像文本列优先于浮点原列被读取（精确路径成立）",
+          text_view.qty == Decimal("2") and text_view.trigger_price == Decimal("100.5"),
+          f"actual={text_view}")
+    check("文本列缺失时不静默接受浮点原值（仍拒绝浮点直传）",
+          _is_raised(QuantizationInputError, lambda: protection_view_from_algo({
+              "clientAlgoId": "X", "orderType": "STOP_MARKET",
+              "quantity": 2.0, "triggerPrice": "100.5"})))
     plan_flat_pending = plan_protection_refresh(
         position=flat_unconfirmed, protections=protections, flat_confirmed=False)
     check("仓位归零未确认时不得清理保护",
@@ -437,8 +513,9 @@ def section_f03_protection(tmpdir: Path) -> None:
         ops.append(f"place:{action.order_type}")
         return f"synth-new-{action.order_type}"
 
-    def cancel(action: Any) -> None:
+    def cancel(action: Any) -> bool:
         ops.append(f"cancel:{action.client_id}")
+        return True
 
     executed = execute_protection_plan(plan, place=place, cancel=cancel)
     check("成功路径先挂新后撤旧（调用顺序可复核）",
@@ -446,7 +523,23 @@ def section_f03_protection(tmpdir: Path) -> None:
           f"ops={ops}")
     check("成功路径确实挂新且撤旧各一次",
           len(executed.placed) == 1 and list(executed.canceled) == target["cancel"]
-          and not executed.cancel_skipped)
+          and not executed.cancel_skipped and executed.cancel_failed == ()
+          and executed.cancel_unexecuted_reason == "")
+
+    # A/P2-A6：撤旧回调"什么也没做"（例如只知 clientAlgoId、匹配不到交易所
+    # algoId 而无法发 DELETE）绝不能被记成"已撤销"，否则账本宣称旧保护已终结，
+    # 而交易所侧旧保护仍在（重复保护 + 过期触发器仍会触发）。
+    def noop_cancel(action: Any) -> None:
+        ops.append(f"noop-cancel:{action.client_id}")
+        return None
+
+    ops.clear()
+    noop = execute_protection_plan(plan, place=place, cancel=noop_cancel)
+    check("撤旧回调未执行时记入 cancel_failed 而不是 canceled",
+          noop.cancel_failed == tuple(target["cancel"]) and noop.canceled == ()
+          and noop.cancel_unexecuted_reason == REASON_CANCEL_NOT_EXECUTED
+          and not noop.cancel_skipped,
+          f"actual={noop}")
 
     place_failure = golden["place_failure"]
     fail_order_type = inputs["place_failure_injection"]["fail_order_type"]
@@ -568,6 +661,25 @@ def section_f21_kinds(tmpdir: Path) -> None:
           f"report={coverage.to_dict()}")
     check("Algo 未知命令保留可观测年龄",
           coverage.kind(CommandKind.ALGO).oldest_unknown_age_ms == 400000)
+    # A/P2-A5：SUBMITTING = "已 POST、结果未知"，保护是否存在并不确定，不能算已覆盖；
+    # 词表外状态也不得被计成 terminal（那是 fail-open 方向）。
+    submitting_only = coverage_report(
+        [{"client_order_id": "s", "endpoint": "/fapi/v1/algoOrder",
+          "status": "SUBMITTING", "unknown_since": None}], environment="demo")
+    check("SUBMITTING 的保护命令不被声明为已覆盖",
+          not submitting_only.kind(CommandKind.ALGO).covered
+          and submitting_only.kind(CommandKind.ALGO).submitting == 1,
+          f"actual={submitting_only.to_dict()}")
+    check("词表外状态按未决计入（fail-closed），不冒充已覆盖",
+          not coverage_report(
+              [{"client_order_id": "q", "endpoint": "/fapi/v1/algoOrder",
+                "status": "PARTIAL_UNKNOWN", "unknown_since": None}],
+              environment="demo").kind(CommandKind.ALGO).covered)
+    check("已确认存在的保护命令（NEW）仍算覆盖",
+          coverage_report(
+              [{"client_order_id": "n", "endpoint": "/fapi/v1/algoOrder",
+                "status": "NEW", "unknown_since": None}],
+              environment="demo").kind(CommandKind.ALGO).covered)
     check("用普通订单记录声明 Algo 已覆盖被拒绝",
           _is_raised(CrossKindCoverageClaim, lambda: assert_kind_coverage(
               inputs["coverage_claim"]["rows_offered_as_proof"],
@@ -639,6 +751,26 @@ def section_submission_and_faults(tmpdir: Path) -> None:
     check("部分成交被确认为真实成交且工作余量精确",
           partial.outcome is SubmissionOutcome.PARTIALLY_FILLED
           and partial.fill_confirmed and partial.filled_qty == Decimal("0.0047"))
+    # A/P2-A3：终态带成交与终态零成交必须可分——只读 outcome 的消费者不能把一笔
+    # 已确认的部分成交当成"什么都没有"。
+    for terminal_status in ("CANCELED", "EXPIRED"):
+        canceled_partial = read_submission_result({
+            "orderId": 6, "status": terminal_status, "origQty": "0.01",
+            "executedQty": "0.0053", "avgPrice": "100.00"})
+        check(f"{terminal_status} 带已确认成交时主分类可见且带 reason",
+              canceled_partial.outcome is SubmissionOutcome.TERMINAL_PARTIAL
+              and canceled_partial.fill_confirmed
+              and canceled_partial.filled_qty == Decimal("0.0053")
+              and REASON_PARTIAL_FILL_PRESENT in canceled_partial.reason_codes,
+              f"actual={canceled_partial}")
+        canceled_empty = read_submission_result({
+            "orderId": 7, "status": terminal_status, "origQty": "0.01",
+            "executedQty": "0", "avgPrice": "100.00"})
+        check(f"{terminal_status} 零成交仍为 TERMINAL_UNFILLED 且无成交 reason",
+              canceled_empty.outcome is SubmissionOutcome.TERMINAL_UNFILLED
+              and not canceled_empty.fill_confirmed
+              and REASON_PARTIAL_FILL_PRESENT not in canceled_empty.reason_codes,
+              f"actual={canceled_empty}")
     rejected = read_submission_result({
         "orderId": 5, "status": "REJECTED", "origQty": "0.01",
         "executedQty": "0.005", "avgPrice": "0"})
@@ -662,6 +794,46 @@ def section_submission_and_faults(tmpdir: Path) -> None:
     check("健康故障提议全平被拒绝",
           _is_raised(ProtectionSafetyError, lambda: guard_fault_action(
               forbidden["fault"], forbidden["proposed_action"])))
+
+    # A/P1-A2：V1 只拦 _HEALTH_LIKE 里登记过的 4 个类，未登记的健康类落进 UNKNOWN
+    # 后被放行全平。健康类名永远枚举不全（镜像滞后、Algo 查单失败都不是
+    # QUERY_UNCERTAIN），所以必须改成白名单 fail-closed。
+    blocked_faults: list[str] = []
+    for item in inputs["unregistered_health_like_faults"]:
+        blocked_faults.append(
+            f"{item['fault']}/{item['proposed_action']}"
+            if _is_raised(ProtectionSafetyError, lambda i=item: guard_fault_action(
+                i["fault"], i["proposed_action"]))
+            else f"ALLOWED({item['fault']}/{item['proposed_action']})")
+    check("未登记的健康类/提交未知/未归类故障提议全平全部被拒（白名单 fail-closed）",
+          all(not item.startswith("ALLOWED(") for item in blocked_faults),
+          f"actual={blocked_faults}")
+    check("白名单里只有已确证的保护失败",
+          {item["fault"] for item in inputs["unregistered_health_like_faults"]
+           if not _is_raised(ProtectionSafetyError, lambda i=item: guard_fault_action(
+               i["fault"], i["proposed_action"]))} == set())
+
+    # A/P2-A7：唯一被授权的兜底平仓必须如实写进审计计划（V1 恒为 False = 放行全平
+    # 却在计划里否认发生了仓位动作）。
+    authorized = inputs["flat_close_authorized_fault"]
+    authorized_plan = guard_fault_action(authorized["fault"], authorized["proposed_action"])
+    check("保护确证失败的全平被授权且审计计划如实记录 triggers_flat_close",
+          authorized_plan.triggers_flat_close
+          and authorized_plan.fault_class is FaultClass.PROTECTION
+          and authorized_plan.action == authorized["proposed_action"]
+          and not authorized_plan.touches_pause_state
+          and not authorized_plan.touches_emergency_state,
+          f"actual={authorized_plan}")
+    # 推迟兜底平仓只认"已确证的观测故障"（与 FLAT_CLOSE_AUTHORIZED 方向相反但同样
+    # 是白名单）：空值/保护失败/提交结果未知都必须照常全平，绝不让"证据缺失"
+    # 或"提交结果未知"变成保留裸仓。
+    check("推迟兜底平仓只认已确证的观测故障，空值/保护失败/提交未知一律照常平仓",
+          defers_flat_close("QUERY_FAILED") and defers_flat_close("WS_DISCONNECT")
+          and defers_flat_close("HEALTH_DEGRADED") and defers_flat_close("RATE_LIMITED")
+          and not defers_flat_close("") and not defers_flat_close(None)
+          and not defers_flat_close("PROTECTION_FAILED")
+          and not defers_flat_close("SOMETHING_NEW")
+          and not defers_flat_close("TIMEOUT") and not defers_flat_close("HTTP_503"))
     timeout = classify_execution_fault(TimeoutError("connection timed out"))
     check("超时映射为按原 ID 查单而不是全平",
           timeout.action == "QUERY_BY_ORIGINAL_ID" and not timeout.triggers_flat_close
@@ -759,52 +931,261 @@ def section_schema_and_guard(tmpdir: Path) -> None:
           _is_raised(Exception, lambda: classify_row(dict(unknown_endpoint))))
     db.close()
 
+    # A/P3-2：并发进程已抢先补齐时，"本次新增"必须为空（不能把那列算成自己的），
+    # 且本次没有 DDL 时不得替调用方提交它尚未完成的事务。
+    db3 = AuditDatabase(tmpdir / "concurrent.sqlite")
+    ensure_execution_schema(db3.conn)          # 模拟另一个进程先跑完
+    db3.conn.execute("CREATE TABLE probe_txn(x TEXT)")
+    db3.conn.execute("INSERT INTO probe_txn VALUES('uncommitted')")
+    check("并发方已加好的列不计入本次返回值",
+          ensure_execution_schema(db3.conn) == ())
+    db3.conn.rollback()
+    remaining = db3.conn.execute(
+        "SELECT COUNT(*) AS c FROM probe_txn").fetchone()["c"]
+    check("本次无 DDL 时不替调用方提交未完成事务（rollback 仍能撤销）",
+          int(remaining) == 0, f"remaining={remaining}")
+    db3.close()
+
     print("\n[10] 保护核验失败时的平仓路由：健康故障不平仓，保护缺口仍兜底平仓")
     fixture = load_fixture("f21_algo_standard_separation.json")
+    inputs21 = fixture["inputs"]
+    symbol = inputs21["symbol"]
     db2 = AuditDatabase(tmpdir / "guard.sqlite")
     close_calls: list[Any] = []
 
-    def make_broker(reason: str) -> Any:
+    # A/P1-P1 的修法要求"测试不得直接给内部字段赋值"。因此这里只替换**交易所 I/O
+    # 边界**（查 Algo 单/查持仓/挂单/DELETE），让 _ensure_protection_from_order ->
+    # _resync_protection -> _resync_protection_impl 走**真实生产路径**：失败类别由
+    # 生产代码自己产生，测试不注入任何"本轮新鲜"的假设。
+    def make_broker(*, algos: Any = None, position: Any = None,
+                    place_raises: bool = False) -> Any:
         broker = BinanceFuturesBroker.__new__(BinanceFuturesBroker)
         broker.db = db2
         broker.order_outbox = None
-        broker.last_protection_sync_reason = reason
-        broker._resync_protection = lambda *args, **kwargs: False
+        broker.environment = inputs21["environment"]
+        broker._resync_lock = threading.RLock()
+        broker._open_algos = lambda _symbol: (None if algos is None else list(algos))
+        broker._algo_prices = lambda _symbol: {}
+        broker._single_symbol_position = lambda _symbol: dict(position or {})
+        broker._format_qty = lambda _symbol, qty: str(qty)
+        broker._tick_size = lambda _symbol: 0.01
+        broker._min_qty = lambda _symbol: Decimal("0.001")
+        broker._is_hedge_mode = lambda: False
+        broker._cancel_symbol_algos = lambda _symbol: None
+
+        def place(*_args: Any, **_kwargs: Any) -> Any:
+            if place_raises:
+                raise RuntimeError("synthetic protection place failure")
+            return None
+
+        broker._place_algo_protection = place
         broker._close_or_reduce = lambda intent: close_calls.append(intent)
         return broker
 
-    order = {"symbol": fixture["inputs"]["symbol"], "side": "LONG", "qty": 0.1,
-             "source": "ai"}
-    guard_installed = (
-        "last_protection_sync_reason" in inspect.getsource(
-            BinanceFuturesBroker._ensure_protection_from_order))
+    open_order = {"symbol": symbol, "side": "LONG", "qty": 0.1, "source": "ai",
+                  "stop_loss": 95.0, "take_profit": 105.0}
+    # 无 SL/TP 记录的成交单才会走到"查询 Algo 失败 -> 无法证明有无保护"这条分支
+    # （有 SL/TP 时生产代码携带明确目标，不是观测路径）。
+    query_fail_order = {"symbol": symbol, "side": "LONG", "qty": 0.1, "source": "ai"}
+    live_position = {"symbol": symbol, "positionAmt": "0.1",
+                     "positionSide": "LONG", "markPrice": "100.0"}
+    flat_position = {"symbol": symbol, "positionAmt": "0.0",
+                     "positionSide": "LONG", "markPrice": "100.0"}
+    guard_installed = any(
+        marker in inspect.getsource(BinanceFuturesBroker._ensure_protection_from_order)
+        for marker in ("protection_sync", "last_protection_sync_reason"))
+
     if not guard_installed:
         # 共享适配（src/exchange/binance_futures.py）由 I 应用，本分支尚未包含。
-        # 此时先固定记录"当前行为"作为对照，避免测试变成空断言；适配应用后本节
-        # 会自动切换到下面更严的断言（打补丁的集成树已验证通过）。
+        # 仍然走真实路径记录"修复前"的基线行为：无守护时保护核验失败都全平。
         print("  PENDING  binance_futures 健康故障守护未安装（待 I 应用适配补丁）")
-        make_broker("QUERY_FAILED")._ensure_protection_from_order(dict(order))
-        make_broker("")._ensure_protection_from_order(dict(order))
-        check("未安装守护时任何保护失败都会兜底平仓（对照基线行为）",
-              len(close_calls) == 2, f"close_calls={len(close_calls)}")
-        db2.close()
-        return
+        baseline = len(close_calls)
+        make_broker(algos=None)._ensure_protection_from_order(dict(query_fail_order))
+        check("修复前基线：查询失败无守护时仍兜底全平（对照用）",
+              len(close_calls) - baseline == 1, f"close_calls={len(close_calls)}")
+        baseline = len(close_calls)
+        make_broker(algos=[], position=live_position,
+                    place_raises=True)._ensure_protection_from_order(dict(open_order))
+        check("修复前基线：保护挂单失败仍兜底全平（对照用）",
+              len(close_calls) - baseline == 1, f"close_calls={len(close_calls)}")
+    else:
+        make_broker(algos=None)._ensure_protection_from_order(dict(query_fail_order))
+        check("确证为查询故障时不平仓（只告警）", close_calls == [],
+              f"close_calls={len(close_calls)}")
+        deferred = db2.fetch_all(
+            "SELECT * FROM risk_events WHERE event_type='futures_sync_error' "
+            "AND action_taken='alert_only_no_flat_close'")
+        check("推迟平仓写入可审计的风险事件", len(deferred) >= 1)
 
-    make_broker("QUERY_FAILED")._ensure_protection_from_order(dict(order))
-    check("确证为健康/查询故障时不平仓（只告警）", close_calls == [],
-          f"close_calls={len(close_calls)}")
-    deferred = db2.fetch_all(
-        "SELECT * FROM risk_events WHERE event_type='futures_sync_error' "
-        "AND action_taken='alert_only_no_flat_close'")
-    check("推迟平仓写入可审计的风险事件", len(deferred) >= 1)
+        # 残余状态回归（A/P1-P1）：查询失败一轮 **之后** 来一轮成功的同步，再发生
+        # 真实的保护挂单失败，必须仍然全平。V1 的成功路径提前 return 且不复位字段，
+        # 残留的 QUERY_FAILED 会把这次真实的保护缺口误判成观测故障而放过裸仓。
+        make_broker(algos=[], position=flat_position)._ensure_protection_from_order(
+            dict(query_fail_order))
+        check("成功的一轮同步不留下残余失败类别（成功即复位）",
+              close_calls == [], f"close_calls={len(close_calls)}")
+        make_broker(algos=[], position=live_position,
+                    place_raises=True)._ensure_protection_from_order(dict(open_order))
+        check("查询失败之后的真实保护失败仍按 P0 兜底全平（残余状态不再抑制）",
+              len(close_calls) == 1, f"close_calls={len(close_calls)}")
+        close_calls.clear()
 
-    make_broker("PROTECTION_FAILED")._ensure_protection_from_order(dict(order))
-    check("保护确实失败时仍按 P0 兜底立即平仓（未削弱原策略）",
-          len(close_calls) == 1, f"close_calls={len(close_calls)}")
-    make_broker("")._ensure_protection_from_order(dict(order))
-    check("未归类失败同样保留兜底平仓（不把未知故障当健康故障）",
-          len(close_calls) == 2, f"close_calls={len(close_calls)}")
+        # 跨标的隔离：A 标的的 QUERY_FAILED 不得抑制 B 标的的兜底平仓。
+        close_calls.clear()
+        other_symbol = inputs21["ledger_rows"][0]["symbol"]
+        make_broker(algos=None)._ensure_protection_from_order(dict(query_fail_order))
+        other_order = dict(open_order)
+        other_order["symbol"] = other_symbol
+        other_live = dict(live_position)
+        other_live["symbol"] = other_symbol
+        make_broker(algos=[], position=other_live,
+                    place_raises=True)._ensure_protection_from_order(other_order)
+        check("另一标的的查询失败不抑制本标的的兜底平仓（按标的隔离）",
+              len(close_calls) == 1, f"close_calls={len(close_calls)}")
+        close_calls.clear()
+
+    # 与本分支是否安装共享适配无关：ProtectionSyncReasons 的"按标的 + 每轮复位"
+    # 语义在本模块内可直接验证（这就是修复前标量状态缺的两个属性）。
+    reasons = ProtectionSyncReasons()
+    reasons.begin(symbol)
+    reasons.mark(symbol, "QUERY_FAILED")
+    stale_before = reasons.defers(symbol)
+    reasons.begin(symbol)                      # 新的一轮开始 -> 先复位
+    stale_after = reasons.defers(symbol)
+    reasons.mark("OTHERUSDT", "QUERY_FAILED")
+    check("同步失败类别跨轮次不复位 -> 会抑制平仓（修复前语义，对照）",
+          stale_before is True)
+    check("同步失败类别在轮次入口复位 -> 不再抑制平仓（修复后语义）",
+          stale_after is False and reasons.defers(symbol) is False
+          and reasons.defers("OTHERUSDT") is True
+          and reasons.get(symbol) == "")
+    check("失败类别按标的隔离，不跨标的传染",
+          reasons.defers("OTHERUSDT") is True and reasons.defers(symbol) is False)
+
     db2.close()
+
+
+def section_fill_revision_wiring(tmpdir: Path) -> None:
+    """[11] DC04 落库与重启重放：走私有流真实路径（补丁安装后启用）。
+
+    本节**不**直接调用 ``apply_fill_revision``，也**不**注入任何内部字段：成交被伪造
+    成订单私有流事件交给 ``OrderOutbox.apply_event``，由生产代码自己完成
+    "解析事件 -> 落三分量 -> 记 fill id"。
+    """
+    print("\n[11] 私有流成交落库与重启重放（补丁接线后启用）")
+    if not hasattr(OrderOutbox, "apply_fill_revision"):
+        print("  PENDING  order_outbox 成交落库接线未安装（待 I 应用补丁）")
+        return
+    db_path = tmpdir / "fill_wiring.sqlite"
+    client_id = "synth-u04-fill-wiring"
+    symbol = "ZZZUSDT"
+
+    def make_outbox() -> Any:
+        return OrderOutbox(AuditDatabase(db_path), environment="demo")
+
+    outbox = make_outbox()
+    outbox.prepare(
+        client_order_id=client_id, symbol=symbol, side="BUY", position_side="LONG",
+        order_type="LIMIT", purpose="ENTRY", qty=0.02, price=100.0,
+        reduce_only=False, endpoint="/fapi/v1/order",
+        request={"symbol": symbol, "newClientOrderId": client_id, "quantity": "0.02"},
+        qty_text="0.02")
+    # 私有流首笔部分成交：真实路径（V1 的兜底会在这里抛 STATUS_FILL_MISMATCH）
+    event = {
+        "c": client_id, "i": 901, "X": "PARTIALLY_FILLED", "q": "0.02", "z": "0.0047",
+        "l": "0.0047", "t": 55501, "ap": "100.00", "s": symbol,
+    }
+    first = outbox.apply_event(ExchangeEvent(
+        event_key="k1", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=client_id, exchange_order_id="901", trade_id="55501",
+        payload={"o": event}, supported=True))
+    row = outbox.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (client_id,))
+    check("首笔成交经私有流真实路径落库（第一笔不再抛 STATUS_FILL_MISMATCH）",
+          first and str(row["cumulative_filled_qty_text"]) == "0.0047"
+          and str(row["working_leaves_qty_text"]) == "0.0153",
+          f"actual={dict(row) if row else None}")
+    check("首笔成交后状态由分量推导为 PARTIALLY_FILLED",
+          str(row["status"]) == "PARTIALLY_FILLED", f"status={row['status']}")
+    check("成交 id 被持久化（fill 级幂等的依据）",
+          "55501" in str(row["applied_fill_ids_json"]))
+
+    # 重启（关闭 + 重开同一文件 + 新 OrderOutbox）后重放同一笔成交：必须幂等
+    outbox.db.close()
+    reopened = make_outbox()
+    reopened.apply_event(ExchangeEvent(
+        event_key="k1", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=client_id, exchange_order_id="901", trade_id="55501",
+        payload={"o": event}, supported=True))
+    after = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (client_id,))
+    check("重启后重放同一 fill 不二次计账（累计成交不变）",
+          str(after["cumulative_filled_qty_text"]) == "0.0047"
+          and str(after["working_leaves_qty_text"]) == "0.0153",
+          f"actual={dict(after) if after else None}")
+    # 第二笔新成交仍能继续推进（证明不是"只认第一笔"）
+    reopened.apply_event(ExchangeEvent(
+        event_key="k2", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=client_id, exchange_order_id="901", trade_id="55502",
+        payload={"o": dict(event, **{"l": "0.0058", "z": "0.0105", "t": 55502,
+                                     "X": "PARTIALLY_FILLED"})}, supported=True))
+    second = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (client_id,))
+    check("后续成交继续累加（0.0047 -> 0.0105）",
+          str(second["cumulative_filled_qty_text"]) == "0.0105",
+          f"filled={second['cumulative_filled_qty_text']}")
+    # 终态转 CANCELED 时三分量同步为终态口径（working 归零、余量进 terminal）
+    reopened.apply_event(ExchangeEvent(
+        event_key="k3", event_type="ORDER_TRADE_UPDATE", event_time_ms=None,
+        transaction_time_ms=None, source="user_stream", symbol=symbol,
+        client_order_id=client_id, exchange_order_id="901", trade_id=None,
+        payload={"o": dict(event, **{"X": "CANCELED", "l": "0", "t": 0})},
+        supported=True))
+    canceled = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (client_id,))
+    check("终态行三分量同步（working=0，余量进 terminal）",
+          str(canceled["status"]) == "CANCELED"
+          and str(canceled["working_leaves_qty_text"]) == "0"
+          and str(canceled["terminal_unfilled_qty_text"]) == "0.0095",
+          f"actual={dict(canceled) if canceled else None}")
+    check("终态行仍守恒（accepted == filled + working + terminal）",
+          Decimal(str(canceled["accepted_qty_text"]))
+          == Decimal(str(canceled["cumulative_filled_qty_text"]))
+          + Decimal(str(canceled["working_leaves_qty_text"]))
+          + Decimal(str(canceled["terminal_unfilled_qty_text"])),
+          f"actual={dict(canceled) if canceled else None}")
+
+    # 第二个新方法的接线：UNKNOWN 收口成功时把交易所三分量落库（apply_exchange_quantities）
+    unknown_id = "synth-u04-quantity-wiring"
+    reopened.prepare(
+        client_order_id=unknown_id, symbol=symbol, side="BUY", position_side="LONG",
+        order_type="LIMIT", purpose="ENTRY", qty=0.02, price=100.0,
+        reduce_only=False, endpoint="/fapi/v1/order",
+        request={"symbol": symbol, "newClientOrderId": unknown_id, "quantity": "0.02"},
+        qty_text="0.02")
+    reopened.mark_unknown(unknown_id, TimeoutError("synthetic"))
+
+    class _QueryBroker:
+        def query_order(self, _symbol: str, _client_id: str) -> Any:
+            return {"orderId": 777, "status": "PARTIALLY_FILLED", "origQty": "0.02",
+                    "executedQty": "0.0047"}
+
+        def query_algo_order(self, _client_id: str) -> Any:
+            raise LookupError("not algo")
+
+    resolved = reopened.reconcile_unknown(_QueryBroker())
+    qrow = reopened.db.fetch_one(
+        "SELECT * FROM order_outbox WHERE client_order_id=?", (unknown_id,))
+    check("UNKNOWN 收口成功时交易所三分量落库（apply_exchange_quantities 有生产调用点）",
+          resolved == 1 and str(qrow["accepted_qty_text"]) == "0.02"
+          and str(qrow["cumulative_filled_qty_text"]) == "0.0047"
+          and str(qrow["working_leaves_qty_text"]) == "0.0153"
+          and str(qrow["terminal_unfilled_qty_text"]) == "0",
+          f"actual={dict(qrow) if qrow else None}")
+    reopened.db.close()
 
 
 def main() -> int:
@@ -818,6 +1199,7 @@ def main() -> int:
         section_f21_kinds(tmpdir)
         section_submission_and_faults(tmpdir)
         section_schema_and_guard(tmpdir)
+        section_fill_revision_wiring(tmpdir)
     except Exception:  # noqa: BLE001 - 保留完整栈便于定位
         FAILURES.append("unexpected_exception")
         traceback.print_exc()
