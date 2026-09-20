@@ -1910,6 +1910,18 @@
             "模块仍是 src/ 内零消费者；看板/启动期接线与 HTTP 层行为未验证（归 I）"
           ],
           "rollback": "git revert 26d77a0 331deb0 abf2eda（补丁未动无需回滚）"
+        },
+        {
+          "type": "review_r3_verification",
+          "candidate": "abf2eda",
+          "verdict": "PASS-with-notes",
+          "archived_path": "docs/dispatch/reviews/U15/abf2eda/Q_r3.md",
+          "new_a": "真闭合：A1/A2/A3 均 409 IDENTITY_GENERATION_MISMATCH；A4 自洽 200 无假阳性；12 条独立绕过中仅同环境同账户归一化/整包可控伪造可得 200，**无任何跨环境/跨账户放行**；缺 expected 时校验照样生效",
+          "others": "NEW-D CLOSED（34 种畸形全结构化，合法输入不变）；NEW-E CLOSED（compare_dependency_lock 真产出 MATCH/MISMATCH/UNAVAILABLE，diff-2 登记据实）；NEW-F CLOSED；NEW-G CLOSED",
+          "new_h": "方向判定成立：所有非回环形态实测均 False，唯一消费者 not->403，故只误拒合法本机请求、不放行非回环 -> 登记可接受",
+          "regression": "11 组全成立（settings 漂移 11/11、来源 6/6 CHANGED，注释/空白/键序 5/5 SAME）；补丁 4/4 apply --check OK 且逐字节未改",
+          "new_findings": "7 条全为 P3 且已登记；无未登记 P2 fail-open、无崩溃",
+          "unverifiable": "模块仍零消费者、补丁未落地 -> 看板/启动期/HTTP/清单侧行为不可验（归 I）"
         }
       ],
       "blockers": [
@@ -1997,7 +2009,7 @@
           "sessions": [
             "Q (reviews/U15/R3/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "PASS-with-notes",
           "reports_dir": "docs/dispatch/reviews/U15/abf2eda/"
         }
       ],
