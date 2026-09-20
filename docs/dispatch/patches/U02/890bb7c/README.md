@@ -1,8 +1,9 @@
 # U02 共享适配补丁包 r3（作者 B / 交 I 应用）
 
-**本包取代 `docs/dispatch/patches/U02/2fe7b2a/`（r2 包）。** 目录名 = 交付时作者
-分支 HEAD；补丁在 r3 修复轮生成。基线 = 生成时的集成 HEAD **`I@b4eeda9`**
-（`git -C <I> rev-parse HEAD`）。6 个目标文件的 blob 在 I 的
+**本包取代 `docs/dispatch/patches/U02/2fe7b2a/`（r2 包）。** 目录名 = **交付补丁
+内容的那次提交**（其后可能还有仅改目录名的提交，因此目录名与分支 HEAD 不一定相等；
+分支 HEAD 见交付报告）。补丁在 r3 修复轮生成，基线 = 生成时的集成 HEAD
+**`I@b4eeda9`**（`git -C <I> rev-parse HEAD`）。6 个目标文件的 blob 在 I 的
 `40ff52f` / `59660b2` / `b4eeda9` 三次 HEAD 上**逐字相同**，本包对当前 HEAD 有效。
 
 | 补丁 | 目标文件 | 用途 |
