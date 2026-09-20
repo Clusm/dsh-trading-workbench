@@ -32,6 +32,7 @@ from core.runtime_identity import (  # noqa: E402
     CONFIG_SOURCES_KEY,
     CONFIG_SOURCE_MISSING,
     ENVIRONMENT_OVERRIDE_WHITELIST,
+    ENVIRONMENT_STATE_ROOT_MISMATCH,
     EXECUTION_PROFILE_NOT_DECLARED,
     EXECUTION_SCOPE_UNLOCKED,
     FALLBACK_PROVIDER_UNRECOGNISED,
@@ -45,6 +46,8 @@ from core.runtime_identity import (  # noqa: E402
     SCOPE_HASH_MISMATCH,
     SCOPE_HASH_UNBOUND,
     SETTINGS_WHITELIST,
+    STATE_ROOT_PROFILE_UNLOCKED,
+    LIVE_SHARED_STATE_ROOT,
     CredentialLeakError,
     ExecutionModeError,
     FallbackRouteError,
@@ -69,6 +72,7 @@ from core.runtime_identity import (  # noqa: E402
     collect_artifact_files,
     validate_fallback_route,
     verify_account_binding,
+    verify_environment_state_root,
     verify_strategy_cards_source,
 )
 
@@ -1207,10 +1211,46 @@ def check_fingerprint_disposition_registered() -> None:
           all(item["status"] in valid for item in table.values()))
     check("disposition-has-note-and-owner",
           all(item.get("note") and item.get("owner") for item in table.values()))
+    # r2：F 报告 §3 的 15 条 decl + §1 的 7 条 diff 必须逐条出现（不得漏项）
+    required = {f"diff-{i}" for i in range(1, 8)} | {f"decl-{i}" for i in range(1, 16)}
+    check("disposition-covers-all-decl-and-diff-items",
+          required <= set(table), str(sorted(required - set(table))))
+    # r2：声称 fixed 的项不得同时存在"未接线/未做"的自认（diff-7 曾声称接口已提供）
+    check("diff-7-registration-is-honest",
+          table["diff-7"]["status"] == "registered"
+          and "未做" in table["diff-7"]["note"],
+          table["diff-7"]["note"])
+    check("decl-7-registration-is-honest",
+          table["decl-7"]["status"] == "fixed"
+          and "EXECUTION_SCOPE_UNLOCKED" in table["decl-7"]["note"])
     registered = sorted(k for k, v in table.items() if v["status"] == "registered")
     print(f"INFO fingerprint disposition: fixed="
           f"{sum(1 for v in table.values() if v['status'] == 'fixed')} "
           f"registered={len(registered)} {registered}")
+
+
+def check_environment_state_root_interface() -> None:
+    """diff-7 缺口② 的最小一致性判定接口（纯函数，接线归 U13）。"""
+    ok = verify_environment_state_root("live", "data/live", profile="live",
+                                       project_root="C:/repo")
+    check("state-root-consistent-combination", ok == (), str(ok))
+    check("state-root-live-without-profile-flagged",
+          STATE_ROOT_PROFILE_UNLOCKED in verify_environment_state_root(
+              "live", "data/live", project_root="C:/repo"))
+    check("state-root-shared-live-root-flagged",
+          LIVE_SHARED_STATE_ROOT in verify_environment_state_root(
+              "live", "data", profile="live", project_root="C:/repo")
+          and LIVE_SHARED_STATE_ROOT in verify_environment_state_root(
+              "live", ".", profile="live", project_root="C:/repo"))
+    check("state-root-profile-environment-mismatch",
+          ENVIRONMENT_STATE_ROOT_MISMATCH in verify_environment_state_root(
+              "live", "data/live", profile="demo", project_root="C:/repo"))
+    check("state-root-unbound-inputs",
+          {"ENVIRONMENT_UNBOUND", "STATE_ROOT_UNBOUND"} <= set(
+              verify_environment_state_root("prod", "", profile=None)))
+    check("state-root-demo-shared-root-is-fine",
+          LIVE_SHARED_STATE_ROOT not in verify_environment_state_root(
+              "demo", "data", profile="demo", project_root="C:/repo"))
 
 
 def main() -> int:
@@ -1235,6 +1275,7 @@ def main() -> int:
     check_dl01_cli_mis_selection()
     check_dl01_fallback_illegal_params()
     check_coverage_fail_closed()
+    check_environment_state_root_interface()
     check_fingerprint_disposition_registered()
     if FAILURES:
         print(f"\nU15 RUNTIME IDENTITY ACCEPTANCE FAILED: {len(FAILURES)} -> "

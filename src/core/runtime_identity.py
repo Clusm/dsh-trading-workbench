@@ -20,7 +20,33 @@ U02 提供账户 / 运行代 / 权限验证接口。
 
 本模块是纯函数库：不读 ``.env``/``data``/密钥，不发网络请求，不启动服务。
 唯一的外部读取是调用方显式传入的 ``project_root`` 下的 **受信非敏感文件**
-（依赖锁、策略卡、git 元数据）与环境变量字典快照。
+（依赖锁、策略卡、git 元数据、K01 六类配置来源）与环境变量字典快照。
+
+**U02 / U13 的交接边界（谁必须自建什么）**
+
+本模块**只**提供下列三件东西，其余一律由下游自建（规格 §9「U15 仅提供身份/
+权限验证接口，K04 管理授权的实现归 U02」）：
+
+- :func:`collect_runtime_identity` → ``IdentityBundle``：一次运行的身份事实
+  （``identity`` 的 K01 哈希、``model_route``、``execution_scope``、
+  ``effective_config``、``strategy_source``、``git_state``）+ ``blockers``/
+  ``advisories`` + ``account_ref`` 溯源。**不含** TTL、时钟、nonce。
+- :func:`mint_runtime_generation` / :func:`rotate_credential` → ``RuntimeGeneration``：
+  ``account_ref`` / ``environment`` / ``runtime_instance_id`` / ``generation_id`` /
+  ``scope_hash`` / ``credential_epoch`` / ``key_fingerprint``；轮换不改变前四项。
+- :func:`verify_account_binding` / :func:`authorize_new_entry`：绑定与开仓门禁，
+  返回 ``allowed`` + ``reason_codes`` + 建议 ``http_status``（**fail-closed**：
+  200 只可能来自身份、运行代、readiness 三者都被真正校验过的路径）。
+
+U02 必须自建（K04 ``ManagementAuthorization`` 的 12 字段中本模块只提供 3 个）：
+``nonce``、``issued_at_ms``/``expires_at_ms``（时效 —— 本模块没有任何 TTL 概念，
+也不校验「运行代是否仍有效」）、``revision``、``max_reduce_qty``、``lifecycle_id``、
+``position_side``、``target_protection``，以及授权→意图→命令的关联 ID。
+U02 必须显式传 ``expected``（自己的授权记录里的运行代）、``readiness_allowed``
+（既有 ``entry_readiness`` 结论）与 ``scope_hash``；这三者省略即拒绝。
+
+U13 必须自建：``RuntimePaths``/状态根生成、``runtime_instance_id`` 持久化与实例锁
+绑定、启动期拦截（见 :func:`verify_environment_state_root` 与处置表 ``fu-*``）。
 """
 from __future__ import annotations
 
@@ -185,6 +211,12 @@ PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
 FALLBACK_PROVIDER_UNRECOGNISED = "FALLBACK_PROVIDER_UNRECOGNISED"
 #: 有效配置来源文件缺失（六类来源之一无法采集）。
 CONFIG_SOURCE_MISSING = "CONFIG_SOURCE_MISSING"
+#: environment ↔ 状态根一致性（diff-7 缺口②）。
+ENVIRONMENT_UNBOUND = "ENVIRONMENT_UNBOUND"
+STATE_ROOT_UNBOUND = "STATE_ROOT_UNBOUND"
+STATE_ROOT_PROFILE_UNLOCKED = "STATE_ROOT_PROFILE_UNLOCKED"
+ENVIRONMENT_STATE_ROOT_MISMATCH = "ENVIRONMENT_STATE_ROOT_MISMATCH"
+LIVE_SHARED_STATE_ROOT = "LIVE_SHARED_STATE_ROOT"
 
 #: 执行模式合法取值（``paper`` 仅测试用；profile 只允许 demo/live）。
 MODE_ALLOWED: tuple[str, ...] = ("paper", "demo", "testnet", "live")
@@ -2003,24 +2035,40 @@ def authorize_control_request(
 #: 逐项处置：``fixed``=本任务已用代码/策略修复；``registered``=显式登记为
 #: 未修复残余（附归属）；``aligned``=核对后确认实现与声明一致（无动作）。
 #: 禁止静默忽略：每一项都必须出现在这里。
+#: 键 = ``docs/dispatch/reviews/U00/w0/F_fingerprint_r1.md`` 的 ``diff-N``（§1
+#: 身份输入清单）/``decl-N``（§3 声明与实现不一致清单）；``fu-N`` 为 §4
+#: 「需 U15/E 后续验证」第 N 项，``fu-paths`` 为 §2 RuntimePaths 漂移清单整体。
+#: **status 只描述本模块（及本目录补丁）里真实存在的东西**，生产接线是否完成
+#: 一律写进 note，不得用 fixed 掩盖未接线的部分。
 FINGERPRINT_R1_DISPOSITION: dict[str, dict[str, str]] = {
-    "diff-1": {"status": "fixed", "note": "git 状态含 dirty/缺失原因码（resolve_git_state + mismatch_reasons）；factory 侧 WorkBuddy 实盘专属由 model_route_blockers 表达", "owner": "U15"},
+    "diff-1": {"status": "fixed", "note": "git 状态含 dirty/缺失原因码（resolve_git_state + mismatch_reasons）；factory 侧 WorkBuddy 实盘专属由 model_route_blockers 表达；启动门禁接线属 U13（模块内零消费者）", "owner": "U15/U13"},
     "diff-2": {"status": "fixed", "note": "依赖锁纳入 requirements-lock.txt 且缺失即拒（collect_dependency_lock_files）", "owner": "U15"},
-    "diff-3": {"status": "fixed", "note": "effective_config_hash 三字段采集（白名单+仅实际设置值）", "owner": "U15"},
-    "diff-4": {"status": "fixed", "note": "strategy_hash 覆盖 knowledge/strategy_cards.json 并做文件级来源复核", "owner": "U15"},
-    "diff-5": {"status": "fixed", "note": "model_route_hash 取解析后有效路由（含环境/备用/profile 覆盖）", "owner": "U15"},
-    "diff-6": {"status": "registered", "note": "runtime_instance_id 持久化与实例锁绑定属 U13（RuntimePaths/instance_lock 集成）", "owner": "U13"},
-    "diff-7": {"status": "fixed", "note": "account_ref 由声明值派生、与密钥解耦；environment/状态根一致性校验接口已提供，接线归 U13", "owner": "U15/U13"},
-    "decl-1": {"status": "fixed", "note": "WorkBuddy 非 live 使用→WORKBUDDY_OUTSIDE_LIVE 阻断（默认不允许 demo）", "owner": "U15"},
-    "decl-3": {"status": "fixed", "note": "settings.llm.mock=true 现在真正生效（模型路由强制 Mock 并阻断）", "owner": "U15"},
+    "diff-3": {"status": "fixed", "note": "r2：effective_config_hash 覆盖 K01 EFFECTIVE_CONFIG_SOURCES 六类来源（settings 全量非敏感值 + decision_policy/agents/risk_learning/risk_profile.lock/windows_service），缺失/未采集三态可区分", "owner": "U15"},
+    "diff-4": {"status": "fixed", "note": "strategy_hash 覆盖 knowledge/strategy_cards.json 并做文件级来源复核；r2 起零卡/截断文件拒绝（不得成为可发布身份）", "owner": "U15"},
+    "diff-5": {"status": "fixed", "note": "model_route_hash 取解析后有效路由（含环境/备用/profile 覆盖）；r2 起非 ai_trader 不构造备用、不识别的备用 provider 给 FALLBACK_PROVIDER_UNRECOGNISED", "owner": "U15"},
+    "diff-6": {"status": "registered", "note": "runtime_instance_id 持久化与实例锁绑定属 U13（RuntimePaths/instance_lock 集成）；本模块只提供 RuntimeGeneration 数据结构与 generate 口径", "owner": "U13"},
+    "diff-7": {"status": "registered", "note": "account_ref 由声明值派生、与密钥解耦，且 live 隐式回退被 ACCOUNT_REF_UNPROVEN 阻断（r2 已修）。状态根一致性只到**纯函数判定** verify_environment_state_root(environment, state_root, profile)（ENVIRONMENT_UNBOUND/STATE_ROOT_UNBOUND/STATE_ROOT_PROFILE_UNLOCKED/ENVIRONMENT_STATE_ROOT_MISMATCH/LIVE_SHARED_STATE_ROOT）+ config_loader 补丁的 assert_environment_matches_state_root；RuntimePaths 生成、启动期拦截与双控制台串账本的端到端验证**未做**，归 U13", "owner": "U13"},
+    "decl-1": {"status": "fixed", "note": "WorkBuddy 非 live 使用→WORKBUDDY_OUTSIDE_LIVE 阻断（默认不允许 demo）；r2 起模式未知（None/空/空白）也按非 live 判定，并新增 provider 能力证据要求", "owner": "U15"},
+    "decl-2": {"status": "aligned", "note": "WorkBuddy 只作用于 ai_trader：与 factory.py:30 一致，非 ai_trader 也不生成备用路由（r2 对齐）", "owner": "-"},
+    "decl-3": {"status": "fixed", "note": "settings.llm.mock=true 现在真正生效（模型路由强制 Mock 并阻断）；字符串 'true' 仍按未设置处理（易误读，属已知限制）", "owner": "U15"},
     "decl-4": {"status": "registered", "note": "agents.yaml strategy_trader 声明 model 但主图用确定性执行：属图侧语义，U15 不改变执行路径", "owner": "U03/U15"},
     "decl-5": {"status": "fixed", "note": "同 diff-2", "owner": "U15"},
-    "decl-6": {"status": "registered", "note": "Windows SCM 双 profile 托管（port/profile 参数化）属 U13", "owner": "U13"},
-    "decl-7": {"status": "fixed", "note": "resolve_execution_scope fail-closed：未知模式/profile 拒绝，profile/EXECUTION_MODE 冲突记入 ignored", "owner": "U15"},
+    "decl-6": {"status": "registered", "note": "Windows SCM 双 profile 托管（port/profile 参数化）属 U13；本模块只把 windows_service.json 纳入有效配置哈希", "owner": "U13"},
+    "decl-7": {"status": "fixed", "note": "r2 如实修复：未知模式/profile/空串拒绝；未选 profile 记 EXECUTION_PROFILE_NOT_DECLARED；EXECUTION_MODE=live 且 locked=False 由 EXECUTION_SCOPE_UNLOCKED 阻断（此前该组合仍 locked=False 放行且无告警）", "owner": "U15"},
+    "decl-8": {"status": "aligned", "note": "不读 .env 内容：与实现一致，且 r2 加固（工件路径 root 边界、来源文件敏感键递归丢弃、凭据只记键路径）", "owner": "-"},
+    "decl-9": {"status": "aligned", "note": "WorkBuddy 不使用 SenseNova 共享请求协调器：与 factory.py:30-37 一致，属 LLM 客户端选择，U15 不改", "owner": "-"},
+    "decl-10": {"status": "aligned", "note": "WorkBuddy 子进程遵守主决策 deadline：与 workbuddy_client.py:199-203 一致，不属 U15 路径", "owner": "-"},
+    "decl-11": {"status": "registered", "note": "发布包 SAFE_DOCS 白名单缺最新规格、tracked 诊断脚本入包：文件在 scripts/create_release_package.py（非 U15 独占路径），归属待 I 指派", "owner": "-"},
     "decl-12": {"status": "fixed", "note": "K01 字段映射：本模块直接从事实装配 RuntimeIdentity，不再复用 ReleaseManifest 命名", "owner": "U15"},
     "decl-13": {"status": "registered", "note": "观测表 config_hash 字段名沿用现状（写库 schema 变更归 U09/U12）", "owner": "U09"},
-    "decl-14": {"status": "fixed", "note": "静默 Mock 改为显式判定 + 阻断原因码（策略层）；执行层接线见共享 diff", "owner": "U15"},
+    "decl-14": {"status": "fixed", "note": "静默 Mock 改为显式判定 + 阻断原因码（策略层）；执行层接线见本目录补丁 01/04，合入前运行系统仍无强制力", "owner": "U15/I"},
     "decl-15": {"status": "registered", "note": "供应商模型/effort 枚举无法离线核实（UNKNOWN），不做断言", "owner": "-"},
+    "fu-1": {"status": "registered", "note": "更换 worktree/代码目录后实例锁与账户作用域是否互斥（K01:72、F18）：本模块无状态根/实例锁语义，归 U13", "owner": "U13"},
+    "fu-2": {"status": "registered", "note": "MTA_RELEASE_ID 可整体覆盖 release_id 且与哈希无绑定（service.py:135）：该变量在共享文件读取，U15 独占路径不可改；本模块不读它，也无法为它提供绑定接口", "owner": "U13"},
+    "fu-3": {"status": "registered", "note": "release_observations 的 release_id 绑定是否足以在身份不符时拒绝开仓（release_evidence.py:328-391）：属报告期一致性，非启动门禁；归 U09/U13", "owner": "U09"},
+    "fu-4": {"status": "registered", "note": "Windows SCM 双 profile 托管（同 decl-6）", "owner": "U13"},
+    "fu-5": {"status": "fixed", "note": "DC14/F13 与「指纹必变」的可执行负例：本任务交付 tests/acceptance/test_runtime_identity.py（148+ 项）与 test_control_boundary.py；执行层是否真的拒绝仍待 I 合入补丁后验证", "owner": "U15/I"},
+    "fu-paths": {"status": "registered", "note": "F 报告 §2 的 RuntimePaths 漂移清单（knowledge/review_lessons.json 随代码根漂移、binance_futures.py 兜底 data/ 路径、dashboard 读 data/ 而 service 写 data/live）整体归 U13；RuntimePaths 类尚不存在，U15 不提供也不改动这些共享文件", "owner": "U13"},
 }
 
 
@@ -2035,6 +2083,59 @@ def identity_mismatch_reasons(
 ) -> tuple[str, ...]:
     """K01 身份逐字段比较的薄包装（供服务侧门禁复用）。"""
     return tuple(identity_mismatches(expected, actual, ignore=ignore))
+
+
+def verify_environment_state_root(
+    environment: str | None,
+    state_root: str | Path | None,
+    *,
+    profile: str | None = None,
+    project_root: str | Path | None = None,
+) -> tuple[str, ...]:
+    """``environment`` ↔ 状态根一致性判定（纯函数；空元组 = 一致）。
+
+    落地指纹清单 ``diff-7`` 缺口②：``profile=None`` 且 ``EXECUTION_MODE=live``
+    时 ``Settings.runtime_path`` 退回公共 ``data/`` 根，实盘账本可能与 demo 或
+    另一台控制台共用，此前无任何校验。判定规则：
+
+    - ``environment`` 未声明或不在 ``MODE_ALLOWED`` → ``ENVIRONMENT_UNBOUND``；
+    - ``state_root`` 未声明/空白 → ``STATE_ROOT_UNBOUND``；
+    - 未显式选择 profile → ``STATE_ROOT_PROFILE_UNLOCKED``（状态根无法唯一确定）；
+    - profile 与 environment 不一致 → ``ENVIRONMENT_STATE_ROOT_MISMATCH``；
+    - ``environment == "live"`` 且状态根解析到公共 ``<project_root>/data`` 或
+      ``project_root`` 本身 → ``LIVE_SHARED_STATE_ROOT``。
+
+    只判定路径语义：不改路径、不读文件、不创建目录。``RuntimePaths`` 的生成与
+    启动期接线（终止进程）归 U13；``docs/dispatch/patches/U15/a136cb5/
+    02_config_loader.diff`` 提供 ``Settings.assert_environment_matches_state_root``
+    作为现成接线点。
+    """
+    reasons: list[str] = []
+    env = _text(environment).lower()
+    if not env or env not in MODE_ALLOWED:
+        reasons.append(ENVIRONMENT_UNBOUND)
+    if state_root is None or not _text(state_root):
+        reasons.append(STATE_ROOT_UNBOUND)
+    declared_profile = _text(profile).lower()
+    if not declared_profile:
+        reasons.append(STATE_ROOT_PROFILE_UNLOCKED)
+    elif env and declared_profile != env:
+        reasons.append(ENVIRONMENT_STATE_ROOT_MISMATCH)
+    if env == "live" and _text(state_root):
+        raw = _text(state_root).replace("\\", "/").rstrip("/").lower()
+        try:
+            resolved = Path(state_root) if project_root is None \
+                else Path(project_root) / Path(state_root)
+            resolved = resolved.resolve()
+        except OSError:  # pragma: no cover - 取决于文件系统
+            resolved = None
+        shared = {"data", ".", "data/", "./data"}
+        if raw in shared or (
+            resolved is not None and project_root is not None
+            and resolved in {(Path(project_root) / "data").resolve(), Path(project_root).resolve()}
+        ):
+            reasons.append(LIVE_SHARED_STATE_ROOT)
+    return tuple(dict.fromkeys(reasons))
 
 
 def available_environment_snapshot() -> dict[str, str]:
