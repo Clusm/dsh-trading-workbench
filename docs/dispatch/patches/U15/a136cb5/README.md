@@ -1,5 +1,30 @@
 # U15 共享适配补丁（基线 `a136cb5`）
 
+> **r3 说明（2026-09-21，作者会话 F）**：本轮**四个补丁逐字节未改动**
+> （`git diff` 可核对），改动全部落在 U15 独占路径 `src/core/runtime_identity.py`
+> 与两个验收脚本；`git apply --check -p1` × 4 于 r3 HEAD 重新验证通过。r3
+> 与补丁相关的变化只有两点，均为**调用方义务**，不影响补丁可应用性：
+>
+> 1. **`authorize_new_entry` 现在交叉校验 `bundle.identity` 与 `generation`**
+>    （NEW-A）：`identity.environment`（对 `generation.environment`）与
+>    `identity.account_ref`（对 `generation.account_ref`）不一致即
+>    `IDENTITY_GENERATION_MISMATCH` / 409。接线方（U02 / 服务）必须保证
+>    **铸造运行代用的账户引用与身份采集用的账户引用同源**（都用
+>    `derive_account_ref(env, declared_account_ref=...)` 或都走显式声明）；
+>    用 `<env>:local` 回退的身份去授权一个声明了具体账户的运行代，现在会
+>    被拒 —— 这是修复目标，不是回归。
+> 2. **`decision_fallback.provider_env` 现在生效**（NEW-F）：补丁 01/02 若在
+>    清单/配置里声明的该键名与运行环境变量名不一致，备用路由会按声明名读取；
+>    声明名未设置时仍回退到 `MTA_AI_DECISION_FALLBACK_PROVIDER`。
+>
+> 补丁 01 的 `_dependency_comparison_status()` 与模块 r3 新增的
+> `compare_dependency_lock(root, declared)` **同口径**（`MATCH` = 身份要求的
+> 锁文件都在声明集合且都在盘上；`MISMATCH` = 两份名单漂移；`UNAVAILABLE` =
+> 必需锁文件缺失/形状非法），发布清单字段即 K01
+> `IDENTITY_COVERAGE["dependency"].comparison_status` 的落地；I 合入时可直接把
+> 补丁 01 的实现改为委托该函数（单一判定源），r3 未改动补丁以免影响已验证的
+> 上下文行。
+>
 > **r2 修订（2026-09-21，作者会话 F）**：仅 `02_config_loader.diff` 被替换，其余
 > 三个补丁**逐字节未变**（`git diff` 可核对），因为它们调用的公开接口在 r2 保持
 > 向后兼容（新增参数全部有默认值）：
@@ -142,6 +167,34 @@
      回读一致 ok / 不一致 `CONTROL_WRITE_UNVERIFIED` / 缺回读
      `CONTROL_READBACK_MISSING`；`dashboard.app` 可正常导入。
 3. `git apply --check -p1` × 4：针对 `a136cb5` 工作树**全部通过**。
+
+## 已知限制登记（r3）
+
+以下残余**不在** U15 独占路径内或属刻意保留，逐条写明义务与风险，避免悬空：
+
+| # | 形态 | 方向 | 处置与依据 |
+|---|---|---|---|
+| NEW-B | 全角/同形字键名（如 `ｌｌｍ.ａｐｉ＿ｋｅｙ`）不被 `is_sensitive_name` 识别（只做 `lower()` 子串匹配，无 NFKC），其值可能进入 `model_route_hash` 与 `ResolvedModelRoute.as_dict()`（公开入口 `resolve_model_route(profile_overrides=...)`） | 价值泄漏面（非放行） | 已登记：`docs/contracts/README.md` §12 `L1`（“敏感守卫只查键名/载荷形态，不扫描值内容”）。**补充登记**：除“不扫值”外，键名口径也**不做 Unicode 归一化** —— 修正它要改 K01 共享标记口径（`src/core/contracts/common.py`），不在 U15 独占路径。**调用方义务**：不得把该守卫当值级防泄漏，`profile_overrides` 只允许放非敏感值 |
+| NEW-C | 单行 `NAME=VALUE` 字符串作为**值**不触发 `guard_no_raw_env_payload`（`_looks_like_env_text` 要求 ≥2 行且过半为赋值行） | 同上 | 同 `L1`（“不扫描值内容”）。多行 env 形态仍被拒绝 |
+| NEW-H | `is_loopback_host("0:0:0:0:0:ffff:127.0.0.1")` 返回 `False`（只认缩写 `::ffff:`） | **fail-closed（误拒）** | 唯一消费者 `authorize_control_request` 的用法是 `if not is_loopback_host(...): 403`，`False` = **拒绝**；该形态只会让合法本机管理请求 403，**不会**放行任何非回环来源。放宽需引入 IP 解析并重划白名单（`127.0.0.2` 属 `127/8` 环回但当前刻意排除并有断言），收益不抵风险，故只登记 |
+| decl-11 | 发布包 `SAFE_DOCS` 白名单缺最新规格、tracked 诊断脚本入包 | 打包内容 | 文件在 `scripts/create_release_package.py`（非 U15 独占路径），归属待 I 指派（`FINGERPRINT_R1_DISPOSITION["decl-11"]`） |
+
+## r3 离线验证（实际执行，原始输出在 `_scratch_F/r3/`）
+
+```bash
+cd "C:/Users/Tao/Desktop/币安/mat-wt/EF"
+PY="C:/Users/Tao/Desktop/币安/multi-agent-trader/.venv/Scripts/python.exe"; export PYTHONUTF8=1
+$PY scripts/smoke_contracts_v3.py                  # PASS 173 / FAIL 0（out_smoke_after.txt）
+$PY tests/acceptance/test_runtime_identity.py      # 233 PASS，exit 0（out_acc1_after.txt）
+$PY tests/acceptance/test_control_boundary.py      #  63 PASS，exit 0（out_acc2_after.txt）
+$PY _scratch_F/r3/probe_na_nd.py                   # NEW-A/NEW-D 前后对照（out_before_/out_after_na_nd.txt）
+for p in docs/dispatch/patches/U15/a136cb5/0*.diff; do git apply --check -p1 "$p"; done   # 4/4 OK
+```
+
+**回滚**：r3 改动是 `task/U15` 上的一组提交（基线 `38029e2`），回滚即
+`git revert <r3 提交>`（或由 I 决定 reset 到 `38029e2`）；补丁文件未改动，
+无需回滚。风险档/live 开关、`scripts/run_offline_regression.py`、
+`src/core/contracts/`、`docs/contracts/` 均未触碰。
 
 ## 未做与不确定之处
 
