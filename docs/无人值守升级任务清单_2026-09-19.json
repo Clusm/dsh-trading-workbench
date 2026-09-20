@@ -96,7 +96,17 @@
         "F16",
         "F24"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "runtime_inventory",
+          "path": "docs/dispatch/w0_runtime_inventory.md",
+          "result": "项目根为运行目录；开发转入 mat-wt 隔离区"
+        },
+        {
+          "type": "planning_commit",
+          "commit": "5295632c748882574a8691d3e7b4b9df2ad7bf37"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "Q"
@@ -1621,9 +1631,9 @@
     "state_writer": "I",
     "author_local_commit_allowed": true,
     "remote_push_authorized": false,
-    "planning_commit": null,
+    "planning_commit": "5295632c748882574a8691d3e7b4b9df2ad7bf37",
     "contract_commit": null,
-    "runtime_inventory_status": "PENDING_W0",
+    "runtime_inventory_status": "COMPLETED_2026-09-20_见 docs/dispatch/w0_runtime_inventory.md",
     "review_record_pattern": "docs/dispatch/reviews/<ID>/<candidate-short>/<role>_<session>_r<n>.md",
     "task_assignment_fields": {
       "actual_assignee": "作者当前会话，修复转派保留历史到evidence",
