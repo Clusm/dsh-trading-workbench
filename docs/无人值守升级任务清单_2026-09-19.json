@@ -1088,6 +1088,19 @@
             "无真实报文回放"
           ],
           "rollback": "git revert 33bbb43 8660c55"
+        },
+        {
+          "type": "review_r4_verification",
+          "candidate": "8660c55",
+          "verdict": "PASS-with-notes",
+          "archived_path": "docs/dispatch/reviews/U04/8660c55/Q_r4.md",
+          "n6_closed": "真闭合：自建 tree_r3/tree_r4 对照（r3 filled=0.0105/terminal=0.0095 守恒违规+静默风险事件、一笔全成 filled=0；r4 filled=0.02/working=0/terminal=0.00 无风险事件）；**帧序 fuzz 400 条物理可达生命周期：r3=237 非法 -> r4=0**。6 类绕过（超额/filled==accepted 且 terminal>0/分数边界/其它终态带残量/model_copy/重复投递 + 换新 t 重发 FILLED、accepted=0 收 FILLED）全部被挡；仅进程外篡改 SQLite 能造非法态且读取侧 fail-closed",
+          "non_noop": "r4 测试跑未修树 EXIT=1、155/12，12 条 FAIL 全在新增用例；154+13=167 逐字成立",
+          "n8_new": "**N7 只修一半（N8）**：私有流路径真修（B1/迟到/acknowledge 均归一为 EXPIRED），但 **manual_resolve_unknown 是同一列的第二个写入者**，直 `SET status=?` 绕过 `_update`，其白名单自带 EXPIRED_IN_MATCH -> 别名仍可落库、行不可重水化、且不做三分量同步（合法 CANCELED 也留 working=0.02）。r3 逐字相同、**无生产调用点**。另 docstring'下一事件即自愈'过宽（仅同语义事件自愈）",
+          "n2_registration": "登记诚实但计数不精确：复验者自建读路径退化树实测全套件 167/0（[10] 节 11 条全过）；自建并发探针裸仓 7/8/11 per 20000（登记称 6~20），另见反向 fail-open 3/20000；'7 条'实为 8/11",
+          "delta": "delta=∅（70 条清单同 env，pristine 与打补丁失败集合逐条相同，唯一失败为既有 KI02）",
+          "regression": "22 项全过",
+          "unfinished": "无真实报文回放；N8 是否有仓库外运维调用未查"
         }
       ],
       "blockers": [],
@@ -1165,7 +1178,7 @@
           "sessions": [
             "Q (reviews/U04/R4/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "PASS-with-notes",
           "reports_dir": "docs/dispatch/reviews/U04/8660c55/"
         }
       ],
@@ -3014,6 +3027,14 @@
         "owner": "I（含 KI01，原派 U05）",
         "blocks": "check_quality / U12 RC",
         "note": "4 处均为误报：① docs/dispatch/reviews/U00/0b85bef/C_w0r1_r2.md:31（审查报告正文引用 {\"note\":\"API_KEY=...\"} 文档片段）② tests/acceptance/test_runtime_identity.py:523 SECRET=\"sk-live-DEADBEEF-should-never-appear\"（故意夹具）③ 同文件:707 NESTED_SECRET=\"sk-nested-NEVER-LEAK-0002\"（故意夹具）④ src/llm/factory.py:111 api_key=fallback_key（变量引用，= KI01）。**根因**：_is_placeholder 只用于 secret-assignment 分支，**provider-token 分支无占位符过滤**；且 _is_placeholder 不识别裸小写标识符（变量名）。②③ 由本波集成 U15 引入、①由归档审查报告引入、④为既有 KI01。修复方向：给 provider-token 分支加占位符过滤 + 识别裸标识符；或把这 4 处登记为显式例外。**不得静默忽略**。"
+      },
+      {
+        "id": "U04-R4-FU1",
+        "title": "N8：manual_resolve_unknown 是状态列的第二写入者，绕过 _update 守卫（N7 只修一半）",
+        "status": "OPEN",
+        "owner": "I/U12",
+        "blocks": "无（当前无生产调用点）",
+        "note": "直 SET status=? 绕过 _update；白名单含 EXPIRED_IN_MATCH -> 别名可落库、行不可重水化；不做三分量同步（合法 CANCELED 也留 working=0.02）。r3 起既存、无生产调用点。**本项未在作者侧登记，由 I 在此登记**（否则按标尺应判 CHANGES_REQUESTED）。另 docstring 自愈描述过宽、N2 登记计数不精确（实 8/11 而非 7），属文档准确性。U12 接线前必须处置。"
       }
     ],
     "contract_candidate": "71f8109",
