@@ -33,7 +33,7 @@
 
 | 线 | 任务 | 分支/base | 状态 | 备注 |
 |---|---|---|---|---|
-| CD | U05 真实耗时/模型降级/决策原因 | `task/U05` @ `0e522b1` | **作者已交付 → 初审 B 中** | head `04a2c30`（10 提交）；自测 95/0、54/0、48/0、45/0；15 补丁 `apply --check` 15/15；**新增文件为主、无共享文件越界**；**零迁移/schema 影响**（主动避开 U01 的坑）；**全量 delta 新增失败 = ∅**；KI01 由 patches 13/14 的 `registered_false_positives` 机制处置（**安全性待 B 专项判定**）。**撤回 market_query 适配**（见「跨任务耦合」）|
+| CD | U05 真实耗时/模型降级/决策原因 | `task/U05` @ `0e522b1` | **r2 修复完成 → 复验中** | 初审 B P0=0/P1×5 → r2 全修：**P1-5** 改用 `tokenize`（无法词法分析即**整体放弃放宽**、留痕 `skipped=20/unparsable=0`；注释类凭据重新报出且 **KI01 保持关闭**）；**P1-1** `latency_ms` 只写真实耗时（不再污染 U01 `AVG(latency_ms)`）；**P1-2** 分类以 `report.ok` 为准；**P1-3** `mock_allowed` 仅来自显式开关 `MTA_ALLOW_MOCK_LLM`（缺省 False）；**P1-4** span 违规不再击穿保护链路。补丁包 `8a8e31e/`（15 条）；全量 delta 新增失败 ∅。**登记为显式偏差**：market_query 撤回（S03）、生产接线归 U08/U12 |
 | EF | U13 托管/单实例/备份恢复 | `task/U13` @ `0e522b1` | **r2 修复完成 → 复验中** | r2 已修 **P1-2**（安装戳 `recovery_gate.json.installed`：损坏→`GATE_CORRUPT`、删除→`GATE_MISSING` 均 `allowed=False`；**从未恢复**才 `allowed=True`）与 **P1-3**（`submit_recovery_reconcile()` 成为 `complete_reconcile` 唯一生产调用点 + `before_entry` 接入开仓链 + `POST /api/recovery/reconcile`，端到端含重启第二实例）；KI02 收口（无效 `MTA_PYTHON` 报错、安装期失败）。验收 **166 PASS/0**（原 131），打补丁树全量回归 **0 失败**。**r2 已只交补丁**（12 个 @ `b55c4fb/`；**注意旧目录 `a27fc17/` 仍在，二选一**）|
 | B | U02 策略仓管理与有界退出 | `task/U02` @ `45ebdff` | **作者进行中** | 依赖 U00+U04+U15 **均已满足**；新建 `strategy_position_manager.py`/`management_authorization.py`；消费 U15 的绑定接口与 U04 的保护链路。**额外承担 U15 的跨任务阻塞项**：账本侧 `trade_reconciliation.py:66-69` 的 `account_ref=sha256(api_key)[:16]` 随轮换漂移且与 U15 派生值不一致 |
 | CD | U06a / U08 | — | 待派发 | 线内串行：U05 → U06a → U08 |
