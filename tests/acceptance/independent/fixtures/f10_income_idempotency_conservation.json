@@ -1,0 +1,210 @@
+{
+  "case_id": "F10",
+  "scenario": "收入流出现重复投递、同毫秒满页、迟到事件、双向仓归属不明、窗口无行与非USDT费用：必须幂等守恒、COMPLETE 可证明、未知仍未知。夹具用于验证收入入库、归因与会话勾稽不会把未知折算为零或重复计入。",
+  "fixture_version": "w0-independent-v1",
+  "synthetic_data": true,
+  "synthetic_notice": "tran_id、账户引用与金额均为虚构合成值；account_ref 为占位符，不对应任何真实账户或交易所UID。",
+  "inputs": {
+    "environment": "demo",
+    "account_ref": "SYNTH_ACCT_PLACEHOLDER",
+    "asset_base": "USDT",
+    "windows": [
+      {
+        "window_id": "W1",
+        "start_ms": 1789862400000,
+        "end_ms": 1789872000000,
+        "requested_income_types": ["FUNDING_FEE", "COMMISSION"],
+        "page_size": 2,
+        "pages": [
+          {
+            "page_no": 1,
+            "rows": [
+              {"income_type": "FUNDING_FEE", "tran_id": "SYN-TR-9002", "event_time_ms": 1789862402000, "symbol": "ZZZUSDT", "asset": "USDT", "amount": "-0.50000000"},
+              {"income_type": "FUNDING_FEE", "tran_id": "SYN-TR-9003", "event_time_ms": 1789862402000, "symbol": "ZZZUSDT", "asset": "USDT", "amount": "+0.25000000"}
+            ],
+            "full_page": true
+          },
+          {
+            "page_no": 2,
+            "rows": [
+              {"income_type": "FUNDING_FEE", "tran_id": "SYN-TR-9004", "event_time_ms": 1789862402000, "symbol": "ZZZUSDT", "asset": "USDT", "amount": "-0.30000000"},
+              {"income_type": "FUNDING_FEE", "tran_id": "SYN-TR-9001", "event_time_ms": 1789862401000, "symbol": "ZZZUSDT", "asset": "USDT", "amount": "-1.25000000"}
+            ],
+            "full_page": true
+          },
+          {
+            "page_no": 3,
+            "rows": [],
+            "full_page": false,
+            "terminal": true
+          }
+        ],
+        "source_online": true
+      },
+      {
+        "window_id": "W2",
+        "start_ms": 1789872000000,
+        "end_ms": 1789881600000,
+        "requested_income_types": ["FUNDING_FEE"],
+        "page_size": 1000,
+        "pages": [
+          {"page_no": 1, "rows": [], "full_page": false, "terminal": true}
+        ],
+        "source_online": true,
+        "last_source_success_ms": 1789875000000,
+        "note": "无行 + 来源正常 + 完整分页 + 区间覆盖 => 该窗口零资金费可证明"
+      },
+      {
+        "window_id": "W3",
+        "start_ms": 1789881600000,
+        "end_ms": 1789891200000,
+        "requested_income_types": ["FUNDING_FEE"],
+        "pages": [],
+        "source_online": false,
+        "source_error": "HTTP_500",
+        "last_source_success_ms": null,
+        "note": "来源错误 => GAP/UNKNOWN，不得当作零费用"
+      }
+    ],
+    "overlap_redelivery": [
+      {"redelivered_of": "SYN-TR-9001", "page_no": 2, "note": "同 tran_id 同内容重复投递，必须幂等只入库一次"},
+      {
+        "conflicting_duplicate": {
+          "tran_id": "SYN-TR-9002",
+          "originally": "-0.50000000",
+          "redelivered_as": "-2.50000000",
+          "event_time_ms": 1789862402000,
+          "handling_expected": "QUARANTINE_AND_ALERT"
+        }
+      }
+    ],
+    "late_arrival": {
+      "tran_id": "SYN-TR-9010",
+      "income_type": "FUNDING_FEE",
+      "event_time_ms": 1789862401500,
+      "received_at_ms": 1789862700000,
+      "symbol": "ZZZUSDT",
+      "asset": "USDT",
+      "amount": "-0.40000000",
+      "received_after_coverage_marked_complete": true,
+      "handling_expected": "OUTCOME_REVISION"
+    },
+    "dual_side": {
+      "symbol": "YYYUSDT",
+      "positions": [
+        {"position_side": "LONG", "amt": "0.5"},
+        {"position_side": "SHORT", "amt": "0.3"}
+      ],
+      "income_row": {
+        "tran_id": "SYN-TR-9011",
+        "income_type": "FUNDING_FEE",
+        "event_time_ms": 1789866000000,
+        "symbol": "YYYUSDT",
+        "asset": "USDT",
+        "amount": "-0.40000000",
+        "position_side_field_present": false,
+        "handling_expected": "UNATTRIBUTED（不凭符号正负硬分摊）"
+      }
+    },
+    "non_usdt_fee": {
+      "tran_id": "SYN-TR-9200",
+      "income_type": "COMMISSION",
+      "event_time_ms": 1789863000000,
+      "symbol": "ZZZUSDT",
+      "asset": "KZ",
+      "amount": "-0.01000000",
+      "fx_source": {"available": false, "reason": "NO_SOURCED_RATE_AT_EVENT_TIME"}
+    },
+    "session_reconciliation": {
+      "opening_wallet_usdt": "500.00000000",
+      "closing_wallet_usdt": "496.90000000",
+      "realized_trade_pnl_usdt": "0.00000000",
+      "net_fees_from_fills_usdt": "-0.70000000",
+      "funding_attributed_usdt": "-1.70000000",
+      "funding_unattributed_usdt": "-0.40000000",
+      "transfers_usdt": "0.00000000",
+      "other_classified_usdt": "-0.30000000",
+      "unexplained_usdt": "0.00000000",
+      "note": "非USDT费用（KZ）无来源汇率，不进入USDT净值口径；账户层保留原币金额"
+    }
+  },
+  "derived_golden": {
+    "idempotent_inserts": {
+      "SYN-TR-9001": "inserted_once_despite_two_deliveries",
+      "SYN-TR-9002": "quarantined_conflicting_duplicate_excluded_from_sums",
+      "clean_usdt_row_count": 4
+    },
+    "same_ms_full_page": {
+      "page_size": 2,
+      "page1_full": true,
+      "page2_contains_same_ms_row": "SYN-TR-9004",
+      "lost_rows": 0,
+      "pagination_method": "continue_paging_and_overlap_requery_NOT_last_time_plus_one_skip"
+    },
+    "window_status": {
+      "W1": {
+        "coverage_status_pre_late": "COMPLETE",
+        "outcome_revision_count": 1,
+        "coverage_status_post_late_recheck": "COMPLETE",
+        "cost_status_final": "INCOMPLETE（存在隔离冲突与未归属项）"
+      },
+      "W2": {
+        "coverage_status": "COMPLETE",
+        "funding_amount": "0.00000000",
+        "zero_proven": true
+      },
+      "W3": {
+        "coverage_status": "GAP",
+        "cost_status": "UNKNOWN",
+        "funding_amount": null
+      }
+    },
+    "attribution": {
+      "lifecycle_attributed_usdt": "-1.70000000",
+      "SYN-TR-9011_dual_side": "UNATTRIBUTED",
+      "SYN-TR-9200_non_usdt": {
+        "native_amount": "-0.01000000 KZ",
+        "converted_net_usdt": null,
+        "reason": "NO_SOURCED_FX_RATE"
+      }
+    },
+    "wallet_identity": {
+      "lhs_closing_minus_opening": "-3.10000000",
+      "rhs_components_sum": "-3.10000000",
+      "unexplained_difference": "0.00000000",
+      "note": "未归属资金费仍作为已分类现金流参与勾稽；KZ费用因不可换算不进入USDT净值"
+    }
+  },
+  "expected_invariants": [
+    "幂等主键 (environment, account_ref, income_type, tran_id)：同 tran_id 同内容只入库一次，不重复计入成本",
+    "同 tran_id 内容冲突时必须隔离并告警，不按金额或时间猜测合并",
+    "同毫秒满页继续翻页；禁止用 last_time+1 跳过同毫秒记录；重叠重查用于修复移页，丢行数为0",
+    "内部区间 [start,end)，适配官方包含端点时用 endTime=end-1ms；分页结果与水位在同一事务提交",
+    "窗口无行不等于费用为零：只有来源正常、完整分页、区间覆盖和迟到复查都成立时才可证明零资金费",
+    "迟到事件触发 outcome_revision 并使相应发布证据重算；原始 fill、income 与先前报告保持不可变",
+    "双向仓不凭符号硬分摊；无法确定结算时持仓归属时保留 UNATTRIBUTED",
+    "非 USDT 费用在实际事件时点使用有来源汇率换算；无法换算则不出净值，账户层仍记录原币金额",
+    "资金费、COMMISSION、REALIZED_PNL 用于勾稽，不再次加进已由 fill 计入的成本或收益",
+    "cost_status、attribution_status、coverage_status 三类状态分离，不混用同一枚举",
+    "COMPLETE 必须可证明：来源成功、终端分页、区间覆盖、迟到复查；任一不满足不得标 COMPLETE",
+    "会话钱包勾稽等式成立，未解释差额显式报告（本夹具为 0.00000000）"
+  ],
+  "forbidden_outcomes": [
+    "用时间+金额相近猜测合并内容冲突的同 tran_id",
+    "last_time+1 分页导致同毫秒记录被跳过",
+    "空返回或来源错误被当作零费用或 COMPLETE",
+    "双向仓按符号正负自动分摊资金费",
+    "非 USDT 费用按1:1或任意汇率计入 USDT 净值",
+    "同一手续费或资金费同时通过 fill 和 income 重复计入",
+    "迟到修订改写原始 fill/income 行或先前报告版本",
+    "把 UNATTRIBUTED 或未知折算为0计入净收益",
+    "在 W3 来源不可用时输出该窗口资金费为0"
+  ],
+  "derivation": "由规格与公式独立推导，不引用任何被测实现输出：(1) 规格 §6 F10 要求「幂等守恒；COMPLETE 可证明；未知仍未知」；(2) 规格 K03 规定 IncomeEvent 稳定 ID、幂等、IncomeCoverage 的请求类型/区间/水位/分页终止证据/状态/缺口，以及成本归因守恒——分摊金额总和必须等于源事件可归因金额；cost_status、attribution_status、coverage_status 为三个独立枚举并带 reason_codes；同毫秒满页继续翻页，不能用 last_time+1 跳过；与已有成交 commission 避免重复计手续费，COMMISSION/REALIZED_PNL 只用于勾稽；(3) 规格 §10.1 给出官方 Get Income History 语义（权重30、page/limit 上限1000、tranId 在同一用户同 incomeType 内唯一、时间起止包含边界、历史约三个月），要求幂等主键 (environment, account_ref, income_type, tran_id)、冲突隔离、分页与水位同事务、资金费按结算事件时点的可证明仓位归因、多币种按事件时点有来源汇率换算、后到费用触发 outcome_revision、账户级勾稽等式：期末钱包-期初钱包 = 已实现交易盈亏-净手续费+资金费+净划转+其他已分类现金流+未解释差额；(4) 数学守恒：Σ已分摊金额=Σ可归因金额；本夹具已归属资金费 -1.70 = (-1.25 + 0.25 - 0.30 - 0.40)，隔离冲突项与被排除项不进入求和；钱包等式 LHS=-3.10 与 RHS=-0.70-1.70-0.40-0.30=-3.10 相等，未解释差额为0；(5) 逻辑论证：来源错误窗口的「无数据」与来源正常窗口的「确认为空」是两种不同事实，只有后者能支持零资金费结论。",
+  "source_refs": [
+    "规格 §6 F10（收入重复、同毫秒满页、迟到、双向仓、零资金费、非USDT费用）",
+    "规格 K03 IncomeCoverage与成本完成",
+    "规格 §10.1 收入同步与会话资金勾稽",
+    "Binance Get Income History 官方语义（权重30、page/limit、tranId 唯一性、包含边界）"
+  ]
+}

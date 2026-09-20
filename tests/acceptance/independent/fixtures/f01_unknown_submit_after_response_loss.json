@@ -1,0 +1,165 @@
+{
+  "case_id": "F01",
+  "scenario": "开仓请求已发送到交易所，但客户端响应丢失或收到503。本地不能证明请求未到达，必须先按 UNKNOWN 用原 clientOrderId 查单对账并采纳交易所真实回报；任何情况下不得为同一意图用新 clientOrderId 发起第二笔开仓。夹具内置重试策略陷阱（计划用新 clientOrderId 重试），用于验证系统抵抗重复下单。",
+  "fixture_version": "w0-independent-v1",
+  "synthetic_data": true,
+  "synthetic_notice": "全部订单号、成交号、时间戳均为虚构合成值；account_ref 为占位符，不对应任何真实账户、交易所UID、密钥或签名。",
+  "inputs": {
+    "environment": "demo",
+    "account_ref": "SYNTH_ACCT_PLACEHOLDER",
+    "symbol": "ZZZUSDT",
+    "clock_base_ms": 1789862400000,
+    "intent": {
+      "intent_id": "intent-synth-f01",
+      "action": "OPEN",
+      "side": "BUY",
+      "position_side": "LONG",
+      "order_type": "MARKET",
+      "qty": "3.0",
+      "client_order_id": "synth-open-0001",
+      "created_at_ms": 1789862401000,
+      "policy_version": "pol-synth-v1"
+    },
+    "submission": {
+      "attempt_no": 1,
+      "endpoint": "POST /fapi/v1/order",
+      "sent_at_ms": 1789862401000,
+      "client_outcome": "HTTP_503_OR_RESPONSE_LOST",
+      "response_order_id_received": false,
+      "local_dispatch_state": "SUBMITTING",
+      "proof_of_not_sent": false,
+      "note": "SUBMITTING 且无未发送证明时，必须按 UNKNOWN 处理"
+    },
+    "variants": [
+      {
+        "variant_id": "A_query_finds_order",
+        "exchange_query_results": [
+          {
+            "endpoint": "GET /fapi/v1/order?origClientOrderId=synth-open-0001",
+            "queried_at_ms": 1789862406000,
+            "found": true,
+            "order_ref": "SYNTH_ORDER_A1",
+            "status": "PARTIALLY_FILLED",
+            "orig_qty": "3.0",
+            "executed_qty": "1.2",
+            "avg_price": "100.00",
+            "new_client_ids_created_by_queries": 0
+          },
+          {
+            "endpoint": "GET /fapi/v1/userTrades",
+            "queried_at_ms": 1789862407000,
+            "fills": [
+              {
+                "fill_ref": "SYNTH_FILL_A1",
+                "qty": "1.2",
+                "price": "100.00",
+                "commission_asset": "USDT",
+                "commission": "0.06000000"
+              }
+            ]
+          }
+        ],
+        "expected_reconciliation": {
+          "adopted_client_order_id": "synth-open-0001",
+          "outbox_state_transition": "SUBMITTING->UNKNOWN->RECONCILED",
+          "submit_attempts_total": 1,
+          "accepted_qty_components": {
+            "accepted": "3.0",
+            "filled": "1.2",
+            "working_leaves": "1.8",
+            "terminal_unfilled": "0.0"
+          }
+        }
+      },
+      {
+        "variant_id": "B_bounded_queries_exhausted_no_order",
+        "exchange_query_results": [
+          {
+            "endpoint": "GET /fapi/v1/order?origClientOrderId=synth-open-0001",
+            "queried_at_ms": 1789862406000,
+            "found": false,
+            "error_code": -2013,
+            "note": "一次查不到不代表没有成交，也不代表请求未到达"
+          },
+          {
+            "endpoint": "GET /fapi/v1/userTrades",
+            "queried_at_ms": 1789862470000,
+            "fills": []
+          },
+          {
+            "endpoint": "GET /fapi/v1/order?origClientOrderId=synth-open-0001",
+            "queried_at_ms": 1789862500000,
+            "found": false,
+            "error_code": -2013
+          }
+        ],
+        "query_budget": {
+          "planned_queries": 5,
+          "executed_queries": 5,
+          "budget_exhausted": true
+        },
+        "expected_reconciliation": {
+          "order_state": "UNKNOWN",
+          "escalation": "MANUAL_RECOVERY_PLUS_ALERT",
+          "new_open_blocked_for_symbol": true,
+          "outbox_row_retained": true,
+          "later_bounded_requery_allowed": true,
+          "submit_attempts_total": 1
+        }
+      }
+    ],
+    "retry_pressure": {
+      "duplicate_dispatch_entries_for_same_intent": 1,
+      "scheduled_retry_policy_would_use_new_client_order_id": true,
+      "note": "夹具内置诱导陷阱：若按该重试策略执行，将产生第二笔同意图开仓"
+    }
+  },
+  "derived_golden": {
+    "variant_A": {
+      "new_open_submits": 0,
+      "adopted_order_ref": "SYNTH_ORDER_A1",
+      "qty_conservation": "3.0 = 1.2 + 1.8 + 0.0",
+      "same_intent_orders_at_exchange_max": 1
+    },
+    "variant_B": {
+      "new_open_submits": 0,
+      "order_state": "UNKNOWN",
+      "manual_recovery": true,
+      "outbox_deleted": false,
+      "new_open_blocked": true
+    },
+    "global": {
+      "second_same_intent_open_count": 0,
+      "query_by_original_client_order_id_used": true
+    }
+  },
+  "expected_invariants": [
+    "响应丢失或503后，意图状态只能为 UNKNOWN（除非存在可验证的未发送证明），不得直接判定成功或失败",
+    "仅使用原 clientOrderId 对普通订单与成交执行有界查询；查单行为本身不得创建任何新订单",
+    "variant A：采纳交易所回报，accepted_qty=3.0 满足 filled 1.2 + working_leaves 1.8 + terminal_unfilled 0.0",
+    "variant A：以原订单继续收口剩余工作数量；撤单确认前不得把 working_leaves 计入 terminal_unfilled",
+    "variant B：一次或多次查不到订单不等于没有成交；预算耗尽转 MANUAL_RECOVERY 并告警，未知敞口保持禁止新开仓",
+    "variant B：Outbox 记录保留且允许后续有界复查，不得删除或永久丢弃该命令",
+    "任何变体：同一意图在交易所的开仓订单最多1笔，clientOrderId 保持不变",
+    "重复派发队列与重试策略不得产生第二笔同意图开仓（包括使用新 clientOrderId 的替代提交）",
+    "迟到成交或迟到查询结果可修订本地累积成交事实，不因本地曾标记失败而丢失",
+    "未知状态在解决前持续可见，不依赖删除 Outbox 来消除未知"
+  ],
+  "forbidden_outcomes": [
+    "用新 clientOrderId 重新提交同一开仓意图",
+    "把 503/超时直接当作未发出并重发",
+    "在 UNKNOWN 未查清前再叠加任何开仓或加仓动作",
+    "删除或改写 Outbox 中的未知命令记录",
+    "仅凭一次 -2013（订单不存在）判定无成交",
+    "在撤单确认前把 working_leaves 计入 terminal_unfilled",
+    "把晚到的成交事实丢弃以维持本地终态判断"
+  ],
+  "derivation": "由规格与交易所语义独立推导，不引用任何被测实现输出：(1) 规格 §6 F01 规定「请求已到交易所但响应丢失/503未知 → 查单对账，无第二笔同意图开仓」；(2) 规格 §10.2 规定无法证明未发送时按 UNKNOWN 处理、未知请求仍按原 client ID 查单、授权过期不停止对账也不产生新 ID 重复提交、有界查询后转 MANUAL_RECOVERY 并告警、禁止靠删除 Outbox 解决、后续恢复查询不得永久丢弃该命令；(3) 规格 K04 定义数量三分量守恒 accepted_qty = cumulative_filled_qty + working_leaves_qty + terminal_unfilled_qty，NEW/PARTIALLY_FILLED 时 terminal_unfilled=0，撤单确认前不得把 remaining 计入 terminal_unfilled；迟到 fill 可修正终态累计成交事实；(4) 交易所语义：Binance USD-M 下单接口的 clientOrderId 是调用方提供的幂等标识（同一 symbol 未终结订单不可重复使用），查询接口支持按 origClientOrderId 检索；HTTP 5xx/超时发生时服务端可能已经接受订单，因此必须查单而不能重发；(5) 安全性论证：在查清原订单前提交第二笔同意图订单，会使同符号敞口由 3.0 变为最多 6.0，违反「无第二笔同意图开仓」与未知敞口禁止新增风险的要求。",
+  "source_refs": [
+    "规格 §6 F01（请求已到交易所但响应丢失/503未知 → 查单对账，无第二笔同意图开仓）",
+    "规格 §10.2 授权、数量和未知订单",
+    "规格 K04 ManagementIntent与部分成交（数量三分量守恒）",
+    "规格 §5 CLOSE_ONLY 与未知订单处理",
+    "Binance USD-M New Order / Query Order 的 clientOrderId 幂等语义（官方接口文档）"
+  ]
+}

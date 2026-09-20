@@ -1,0 +1,172 @@
+{
+  "case_id": "F16",
+  "scenario": "影子B方向样本被误标为AI执行候选、同一订单多次 fill、闭合后资金费迟到：候选与闭合计数不得膨胀，门禁必须可撤销、可重算，且原始记录不可变。夹具验证执行候选只计真实AI方向候选、闭合只计唯一完整生命周期、迟到成本触发修订与门禁重算。",
+  "fixture_version": "w0-independent-v1",
+  "synthetic_data": true,
+  "synthetic_notice": "候选、成交、资金费与编号均为虚构合成值；account_ref 为占位符，不对应任何真实账户或交易所UID。",
+  "inputs": {
+    "environment": "demo",
+    "account_ref": "SYNTH_ACCT_PLACEHOLDER",
+    "release_id": "rel-synth-f16",
+    "profile": "demo",
+    "candidate_events": [
+      {
+        "candidate_id": "cand-1",
+        "channel": "ai",
+        "symbol": "ZZZUSDT",
+        "direction": "LONG",
+        "setup": "breakout",
+        "closed_bar_time_ms": 1789858800000,
+        "deterministic_verification": "PASS",
+        "strategy_version": "strat-synth-v1",
+        "evidence_id": "eb-c1"
+      },
+      {
+        "candidate_id": "cand-1-retry",
+        "channel": "ai",
+        "duplicate_of": "cand-1",
+        "retry_of_request": "req-1",
+        "closed_bar_time_ms": 1789858800000,
+        "deterministic_verification": "PASS"
+      },
+      {
+        "candidate_id": "cand-2",
+        "channel": "ai",
+        "symbol": "YYYUSDT",
+        "direction": "SHORT",
+        "setup": "trend",
+        "closed_bar_time_ms": 1789858800000,
+        "deterministic_verification": "PASS",
+        "strategy_version": "strat-synth-v1",
+        "evidence_id": "eb-c2"
+      },
+      {
+        "candidate_id": "cand-3",
+        "channel": "ai",
+        "symbol": "ZZZUSDT",
+        "direction": "NEUTRAL",
+        "no_edge": true,
+        "deterministic_verification": "NO_EDGE",
+        "closed_bar_time_ms": 1789858800000
+      },
+      {
+        "candidate_id": "cand-shadow-mislabeled",
+        "channel_claimed": "ai",
+        "channel_actual_by_evidence": "shadow_b",
+        "shadow_execution_weight": "0",
+        "source": "intel_readonly_sidecar",
+        "evidence_ref": "shadow-raw-9",
+        "symbol": "ZZZUSDT",
+        "direction": "LONG",
+        "setup": "breakout",
+        "closed_bar_time_ms": 1789858800000
+      },
+      {
+        "candidate_id": "cand-shadow-2",
+        "channel_claimed": "shadow_b",
+        "shadow_execution_weight": "0",
+        "symbol": "YYYUSDT",
+        "direction": "SHORT",
+        "closed_bar_time_ms": 1789858800000
+      }
+    ],
+    "closure_events": {
+      "lifecycle_id": "lc-synth-f16",
+      "taker_fee_bps": "5",
+      "entry_fills": [
+        {"fill_ref": "SYN-F1", "qty": "0.5", "price": "100.0"},
+        {"fill_ref": "SYN-F2", "qty": "1.0", "price": "100.2"},
+        {"fill_ref": "SYN-F3", "qty": "1.5", "price": "100.4"}
+      ],
+      "exit_fills": [
+        {"fill_ref": "SYN-F4", "qty": "2.0", "price": "101.0", "kind": "partial_reduce"},
+        {"fill_ref": "SYN-F5", "qty": "1.0", "price": "101.5", "kind": "final_reduce"}
+      ],
+      "closure_status": "COMPLETE",
+      "cost_status_at_closure": "COMPLETE"
+    },
+    "late_events": [
+      {
+        "event_id": "late-funding-1",
+        "kind": "funding_fee",
+        "lifecycle_id": "lc-synth-f16",
+        "event_time_ms": 1789859900000,
+        "received_at_ms": 1789863000000,
+        "amount_usdt": "-0.07000000",
+        "received_after_closure_complete": true
+      }
+    ],
+    "gate_snapshot": {
+      "direction_candidates_required": 200,
+      "unique_complete_closures_required": 30,
+      "current_counts_before_detection": {
+        "direction_candidates": 3,
+        "unique_complete_closures": 1,
+        "note": "mislabeled 影子样本已被错误计入 direction_candidates"
+      }
+    }
+  },
+  "derived_golden": {
+    "direction_candidates_counted": 2,
+    "excluded_from_200": [
+      "cand-1-retry（与 cand-1 同去重键）",
+      "cand-3（NO_EDGE，仅计研究完成次数）",
+      "cand-shadow-mislabeled（证据来源为影子B且 execution_weight=0）",
+      "cand-shadow-2（影子通道）"
+    ],
+    "dedup_key": "(profile, strategy_version, symbol, direction, setup, closed_bar_time)",
+    "closures_counted": 1,
+    "fills_in_lifecycle": 5,
+    "closure_counting_note": "5笔fill只产生1笔完整闭合；不按fill或部分平仓次数凑数",
+    "closure_pnl_golden": {
+      "avg_entry": "300.8/3.0 = 100.26666667",
+      "gross_pnl_usdt": "303.5 - 300.8 = 2.70000000",
+      "fees_usdt": "(300.8 + 303.5) * 0.0005 = 0.30215000",
+      "late_funding_usdt": "-0.07000000",
+      "net_after_revision_usdt": "2.70000000 - 0.30215000 - 0.07000000 = 2.32785000"
+    },
+    "late_funding_effect": {
+      "outcome_revision": "late-funding-1",
+      "cost_status_recomputed": "COMPLETE_WITH_REVISION",
+      "original_fills_modified": false,
+      "release_evidence_recalculated": true,
+      "calculator_version_required": true
+    },
+    "gate_revocable": {
+      "mislabel_detected": true,
+      "candidate_count_after_recompute": 2,
+      "evidence_invalidation_and_recompute": true,
+      "closure_count_unaffected_by_funding_revision": 1
+    }
+  },
+  "expected_invariants": [
+    "200方向候选按 (profile, strategy_version, symbol, direction, setup, closed_bar) 去重；重试或重复请求不增加计数",
+    "影子B/C方向行（execution_weight=0）不计入执行候选；即使被误标为AI通道也必须按证据来源排除",
+    "声称AI但证据来源为影子的记录必须被排除并触发门禁重算，不得静默保留计数",
+    "NO_EDGE 可计研究完成次数但不计200方向候选；纯中性、坏数据、模型不可用不得计数",
+    "30笔闭合按唯一完整生命周期计数；同一订单多笔fill、多次部分平仓不重复计数",
+    "闭合后迟到资金费触发 outcome_revision，成本状态与相应发布证据重算，并记录计算器版本",
+    "原始 fill、income 与先前报告不可变，修订只追加新版本",
+    "门禁计数可从原始事件集重算并得到相同结果（可重放）；误计入样本可撤销",
+    "AI 通道与影子通道分别报告，不互相证明；影子不得增加执行候选或执行权重",
+    "门禁撤销或重算保留审计记录与原因码"
+  ],
+  "forbidden_outcomes": [
+    "影子B样本计入200方向候选或30笔闭合",
+    "同一研究请求重试使候选计数增加",
+    "按 fill 或部分平仓次数累加闭合数（5笔fill计为5笔闭合）",
+    "迟到资金费被忽略而保留旧的 COMPLETE 或旧净收益",
+    "重算时改写原始 fill/income 行或先前报告",
+    "NO_EDGE、中性或坏数据记录被计为方向候选",
+    "门禁计数不可复算或只能依赖单一缓存快照",
+    "影子行进入主决策输入或获得非零执行权重"
+  ],
+  "derivation": "由规格与公式独立推导，不引用任何被测实现输出：(1) 规格 §6 F16 要求「候选/闭合不膨胀，门禁可撤销并可重算」；(2) 规格 K06 规定200候选保留方向性含义（完成最低研究且有 LONG/SHORT 候选及确定性验证结果的唯一机会），NO_EDGE 可计研究完成次数但只有真实方向候选才计200门槛，纯中性/坏数据/模型不可用不得计数；按 profile、策略版本、symbol、方向、setup、闭合bar 去重，重试不增加；影子B方向行不计执行候选；30笔闭合按唯一完整 lifecycle，不按 fill 或部分平仓次数凑数；已闭合成本后来补全触发审计修订并使相应发布证据重算，原始记录不可改，纯报告修复重算须说明计算器版本；(3) 决策链路专项评估报告 §8 规定影子维持零执行权重、不进入主决策输入，数千个重叠B样本不可当独立交易；(4) 规格 §10.1 规定后到费用触发 outcome_revision，原始 fill、收入和先前报告保持不可变；(5) 交易所语义：一张订单可产生多笔 fill，一个生命周期由多笔开平fill构成，因此计数应按唯一生命周期而不是成交笔数；(6) 计数论证：去重键相同的事件在集合语义下只贡献基数1；若误标样本不撤销，200门槛会被少量影子样本污染，且无法回溯校正——因此门禁必须保存原始事件集并可重算。闭合成本重算公式：总额=Σ(exit_notional)-Σ(entry_notional)，费用=Σ(notional×fee_bps/10000)，净=毛-费用-资金费；本夹具毛盈亏2.7、费用0.30215、资金费-0.07，净2.32785。",
+  "source_refs": [
+    "规格 §6 F16（B影子样本冒充AI候选、同单多fill、资金费晚到）",
+    "规格 K06 ReleaseEvidence（200候选/30闭合/去重/迟到成本修订/计算器版本）",
+    "规格 §12 门禁定义、SLO与范围取舍",
+    "规格 §10.1 outcome_revision（迟到费用修订）",
+    "决策链路专项评估报告 §8 影子情报如何进入未来决策（零执行权重与隔离）"
+  ]
+}
