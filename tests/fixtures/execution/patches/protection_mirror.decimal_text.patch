@@ -1,5 +1,5 @@
 diff --git a/src/exchange/protection_mirror.py b/src/exchange/protection_mirror.py
-index 733256c..db2c059 100644
+index 733256c..7dffa06 100644
 --- a/src/exchange/protection_mirror.py
 +++ b/src/exchange/protection_mirror.py
 @@ -3,9 +3,11 @@ from __future__ import annotations
@@ -81,7 +81,7 @@ index 733256c..db2c059 100644
                  )
              self.db.conn.execute(
                  """INSERT INTO protection_reconciliations(
-@@ -177,6 +203,32 @@ class ProtectionOrderMirror:
+@@ -177,6 +203,39 @@ class ProtectionOrderMirror:
                  "open_algos": len(valid), "missing": sorted(missing), **details,
                  "reason": "" if matched else "保护单镜像与持仓不一致", "checked_at": now}
  
@@ -96,6 +96,13 @@ index 733256c..db2c059 100644
 +
 +        注意：**不**用它替代交易所实时查询——镜像可能滞后，用它冒充"当前保护状态"
 +        会把过期保护当成已覆盖。实时保护刷新仍以 ``_open_algos`` 的交易所回报为准。
++
++        **接线状态（known_limit，U04/r3-N4）**：本方法目前**没有任何生产调用者**。
++        存在的理由是让三个 ``*_text`` 列有一个"精确勾稽"的读取方，从而把
++        "镜像里的数量/触发价全程 Decimal"从写侧承诺变成可验证的读侧能力；在
++        审计/恢复工具接入之前，它只能由测试直接调用（见
++        ``tests/acceptance/test_execution_faults.py``）。也就是说：文本列**已写入、
++        可读出、但还没有自动化消费者**——不构成保护刷新链路的组成部分。
 +        """
 +        sql = ("SELECT * FROM protection_order_mirror WHERE environment=? "
 +               "AND status='NEW'")

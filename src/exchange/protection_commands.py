@@ -1076,6 +1076,11 @@ def plan_protection_refresh(
     * 无仓且已确认归零：清理遗留保护（CANCEL）。
     * 若一次刷新会把该仓位的保护清零（没有任何 KEEP/PLACE 留下），则拒绝全部
       CANCEL 并报 ``CANNOT_REMOVE_LAST_PROTECTION``。
+
+    ``flat_confirmed`` 按**严格布尔**判定（``is True``，N3）：签名声明 ``bool``，
+    传入 ``1``/``"false"``/``"true"``/``[0]`` 这类非布尔真值一律按"未确认"处理
+    （fail-closed，与 :func:`can_cancel_protection` 同口径）——"已确认归零"会直接
+    授权清理最后一道保护，这个判断不允许靠真值转换蒙对。
     """
     target = position.abs_qty
     reasons: list[str] = []
@@ -1083,7 +1088,7 @@ def plan_protection_refresh(
     existing = [item for item in protections if item.order_type]
 
     if position.is_flat:
-        if not flat_confirmed:
+        if flat_confirmed is not True:
             return ProtectionPlan(
                 symbol=position.symbol, position_side=position.position_side,
                 target_qty=ZERO, flat_confirmed=False, actions=(),
@@ -1277,8 +1282,14 @@ def can_cancel_protection(
     挂单未成交、镜像滞后都会出现 ``positionAmt==0``）。因此这里只认
     ``flat_confirmed``，与 :func:`plan_protection_refresh` 同口径：未确认归零时
     绝不清理最后一道保护，且 reason 不谎称 ``FLAT_CONFIRMED_CLEANUP``。
+
+    ``flat_confirmed`` 按**严格布尔**判定（``is True``，N3）：签名声明 ``bool``，
+    ``"false"``/``1``/``[0]`` 这类非布尔真值一律按"未确认"处理（fail-closed）。
+    选择"降级为未确认"而不是"抛异常"是有意的——本函数的返回契约是
+    ``(bool, reason)``，非布尔入参只可能是调用方违约，降级到保守分支既不放行
+    危险动作，也不会在撤单路径上引入新的异常面。
     """
-    if flat_confirmed:
+    if flat_confirmed is True:
         return True, "FLAT_CONFIRMED_CLEANUP"
     remaining = [
         item for item in protections
