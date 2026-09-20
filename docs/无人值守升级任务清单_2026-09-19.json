@@ -524,8 +524,8 @@
       "id": "U02",
       "title": "策略仓管理和有界退出授权",
       "owner_role": "B",
-      "actual_assignee": null,
-      "status": "PLANNED",
+      "actual_assignee": "U02 作者会话（B 角色）",
+      "status": "IN_PROGRESS",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -580,7 +580,7 @@
       "dl_work_packages": [
         "DL03"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "45ebdffa0f005a9dfe2a72fe0cfbdaa4f67beae2",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
