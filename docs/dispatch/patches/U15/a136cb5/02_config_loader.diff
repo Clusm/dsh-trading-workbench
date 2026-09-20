@@ -1,0 +1,70 @@
+--- a/src/core/config_loader.py
++++ b/src/core/config_loader.py
+@@ -9,6 +9,26 @@
+ import yaml
+ from dotenv import load_dotenv
+ 
++from core.runtime_identity import collect_effective_config
++
++
++#: 原因码 / 异常标识：未显式选择 profile 却要跑实盘。
++LIVE_WITHOUT_PROFILE_STATE_ROOT = "LIVE_WITHOUT_PROFILE_STATE_ROOT"
++
++
++class LiveWithoutProfileStateRootError(ValueError):
++    """``profile=None`` 且 ``environment == "live"``：状态根无法唯一确定。
++
++    无 profile 时 ``runtime_path`` 会退回公共 ``data/`` 目录，两台控制台
++    （或换代码根不换状态根）会共用同一实盘账本。这里 fail-closed 拒绝启动，
++    而不是静默按公共路径运行。
++    """
++
++    code = LIVE_WITHOUT_PROFILE_STATE_ROOT
++
++    def __init__(self, message: str = LIVE_WITHOUT_PROFILE_STATE_ROOT) -> None:
++        super().__init__(message)
++
+ 
+ @dataclass
+ class Settings:
+@@ -53,6 +73,40 @@
+             raise ValueError("实盘目录不能通过链接指向其他账本")
+         return target
+ 
++    def assert_environment_matches_state_root(self, environment: str | None) -> None:
++        """校验 ``environment`` 与状态根是否一致（fail-closed）。
++
++        唯一被拒绝的组合是：``profile_name is None`` 且 ``environment == "live"``
++        —— 此时 ``runtime_path`` 无法把实盘状态锁进 ``data/live``，公共目录会
++        被实盘账本占用（换代码根不改状态根 / 双控制台串账本）。抛
++        ``LiveWithoutProfileStateRootError``（``code`` 为
++        ``LIVE_WITHOUT_PROFILE_STATE_ROOT``），由启动方决定如何终止进程。
++
++        未显式传入 environment、或传入 demo/testnet/paper 时保持现状不改变
++        任何既有行为（存在性触发，缺省即向后兼容）。
++        """
++        text = str(environment or "").strip().lower()[:32]
++        if self.profile_name is None and text == "live":
++            raise LiveWithoutProfileStateRootError(
++                f"{LIVE_WITHOUT_PROFILE_STATE_ROOT}: MTA_PROFILE 未设置但 environment=live，"
++                "实盘状态根无法确定"
++            )
++
++    @property
++    def effective_config_payload(self) -> dict[str, Any]:
++        """K01 ``effective_config`` 三字段载荷（settings / profile_overrides /
++        environment_overrides）。
++
++        只收录白名单点分路径中 **实际存在** 的值，命中敏感标记的键被丢弃；
++        环境覆盖只取白名单内确实设置的变量，因此 ``.env`` 里的凭据不可能
++        进入有效配置哈希，代码默认值也不会被当成有效值。
++        """
++        return collect_effective_config(
++            raw_settings=self.raw_settings,
++            profile=self.profile_name,
++            env=os.environ,
++        ).as_payload()
++
+     @property
+     def console_port(self) -> int:
+         return 8001 if self.profile_name == "live" else 8000
