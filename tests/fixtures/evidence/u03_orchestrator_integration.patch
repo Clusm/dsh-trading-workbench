@@ -1,5 +1,5 @@
 diff --git a/src/agents/orchestrator.py b/src/agents/orchestrator.py
-index 7ac28fb..a87d5ac 100644
+index 7ac28fb..4c340da 100644
 --- a/src/agents/orchestrator.py
 +++ b/src/agents/orchestrator.py
 @@ -16,6 +16,7 @@ from audit.jsonl_logger import JsonlLogger
@@ -10,32 +10,48 @@ index 7ac28fb..a87d5ac 100644
  from core.portfolio_policy import evaluate_portfolio_intent
  from data.market_query import TOOL_SPECS, execute_tool
  from llm.base import LLMClient, call_chat
-@@ -680,6 +681,65 @@ def _check_open_query_provenance(intents: list[Any],
+@@ -680,6 +681,100 @@ def _check_open_query_provenance(intents: list[Any],
      return issues
  
  
++#: U15 未接线前：研究证据门禁在"身份未固定"下的放行开关。**缺省 False = fail-closed**
++#: ——未固定身份的 OPEN 一律丢单；只有显式置 True（仅限 paper/离线）才允许在
++#: identity_pinned=False 下开仓，且每轮都会写一条审计事件留痕。
++ALLOW_UNPINNED_RESEARCH_EVIDENCE = False
++
++#: 策略侧缺省必需分源（支持字段级写法，如 ``mark_funding.funding_rate``）。留空表示
++#: "只按意图自报的 required_sources 设防"；策略卡就绪后在此收紧口径。
++RESEARCH_EVIDENCE_REQUIRED_SOURCES: tuple[str, ...] = ()
++
++
 +def _research_evidence_gate(decision: Any, snapshots: dict[Any, Any],
 +                            db: AuditDatabase, run_id: str) -> tuple[Any, list[str]]:
 +    """U03 逐意图证据门禁：只丢证据不足/数值矛盾的开仓意图，退出不受影响。
 +
-+    证据包由 ``agents.research_evidence`` 按 (symbol, interval) **逐意图独立**构建，
-+    两个意图不共享 PASS；claim 由程序比较真实快照数值，744.13>744.9、
-+    78550<78443 这类叙述矛盾确定性拒绝，不因自由文本解释放行。
-+
-+    RuntimeIdentity 由 U15 接线；未接线时报告显式置 identity_pinned=False，
-+    不把"身份未固定"冒充成已验证身份。门禁只做减量（丢 open），
-+    不改风险档/白名单/live 开关，也不阻断退出。
++    - claim 由程序比较真实快照数值（744.13>744.9、78550<78443 确定性拒绝）；
++      模型自报 claim 只能附加，不能替换程序基准、也不能用自报 claim 顶掉
++      "开仓必须给出可解析入场价"。
++    - 身份未固定（U15 未接线）时按 ALLOW_UNPINNED_RESEARCH_EVIDENCE fail-closed。
++    - 放行路径把逐意图 (evidence_id, binding_id) 写进审计事件，执行侧可证明
++      "这一单的证据是哪个"；把绑定落到订单字段属 K02 README §12 C#12 / U05 缺口。
++    - 只做减量：不改风险档/白名单/live 开关，不动 pipeline_authorized（授权位由
++      core.decision_pipeline 统一置位，避免误报"未授权开仓"critical 事件）。
 +    """
 +    open_indexes = [index for index, item in enumerate(decision.intents)
 +                    if getattr(item, "action", None) == "open"]
 +    if not open_indexes:
 +        return decision, []
++
++    def _binding_key(index: int, item: Any) -> str:
++        # client_order_id 是执行集合里唯一稳定的逐单键（风险层 model_copy 会保留；
++        # 位置序号在缩减数量/跳过失败项后不再可靠），缺失时退回本轮序号。
++        return str(getattr(item, "client_order_id", None) or f"open[{index}]")
++
 +    payloads: list[dict[str, Any]] = []
-+    for position, index in enumerate(open_indexes):
++    for index in open_indexes:
 +        item = decision.intents[index]
 +        payload = item.model_dump(mode="json")
-+        # TradeIntent 没有稳定 intent_id：用本轮内序号做绑定，报告回传顺序一致。
-+        payload["intent_id"] = f"open[{position}]"
++        payload["intent_id"] = _binding_key(index, item)
 +        evidence = getattr(item, "evidence", None)
 +        payload["interval"] = getattr(evidence, "confirmation_interval", None)
 +        payloads.append(payload)
@@ -43,13 +59,34 @@ index 7ac28fb..a87d5ac 100644
 +        payloads, list(snapshots.values()), now_ms=int(time.time() * 1000),
 +        cycle_id=str(getattr(decision, "pipeline_decision_id", "") or ""),
 +        identity=None,  # TODO(U15): 接入 RuntimeIdentity 后改为传入真实身份
++        allow_unpinned=ALLOW_UNPINNED_RESEARCH_EVIDENCE,
++        default_required_sources=RESEARCH_EVIDENCE_REQUIRED_SOURCES,
 +    )
++    accepted_bindings = [item for item in report.bindings() if item["accepted"]]
++    if accepted_bindings:
++        db.log_risk_event(
++            event_type="research_evidence_binding", severity="info",
++            details="逐意图证据绑定: " + "；".join(
++                f"{item['intent_id']}={item['evidence_id']}"
++                for item in accepted_bindings),
++            action_taken="passed open intents carry evidence binding",
++            raw={"run_id": run_id, "identity_pinned": report.identity_pinned,
++                 "unpinned_allowed": report.unpinned_allowed,
++                 "bindings": accepted_bindings},
++        )
 +    blocked = {entry.intent_id for entry in report.intents if not entry.accepted}
 +    if not blocked:
 +        return decision, []
-+    blocked_symbols = [str(getattr(decision.intents[index], "symbol", ""))
-+                       for position, index in enumerate(open_indexes)
-+                       if f"open[{position}]" in blocked]
++    blocked_symbols: list[str] = []
++    kept: list[Any] = []
++    for index, item in enumerate(decision.intents):
++        if getattr(item, "action", None) != "open":
++            kept.append(item)
++            continue
++        if _binding_key(index, item) in blocked:
++            blocked_symbols.append(str(getattr(item, "symbol", "")))
++        else:
++            kept.append(item)
 +    db.log_risk_event(
 +        event_type="research_evidence_blocked", severity="critical",
 +        details="；".join(
@@ -58,17 +95,15 @@ index 7ac28fb..a87d5ac 100644
 +        ),
 +        action_taken="drop open intents; preserve exits",
 +        raw={"run_id": run_id, "blocked": sorted(blocked),
-+             "identity_pinned": report.identity_pinned},
++             "identity_pinned": report.identity_pinned,
++             "unpinned_allowed": report.unpinned_allowed},
 +    )
-+    kept = [item for index, item in enumerate(decision.intents)
-+            if getattr(item, "action", None) != "open"
-+            or f"open[{open_indexes.index(index)}]" not in blocked]
 +    action = ("close" if any(item.action in {"close", "reduce"} for item in kept)
 +              else "adjust" if kept else "no_trade")
 +    note = (" | [U03] 逐意图证据门禁拒绝开仓: " + ",".join(blocked_symbols)
 +            + ("" if report.identity_pinned else " (identity_pinned=False)"))
 +    return decision.model_copy(update={
-+        "intents": kept, "decision": action, "pipeline_authorized": False,
++        "intents": kept, "decision": action,
 +        "reasoning": (decision.reasoning or "") + note,
 +    }), []
 +
@@ -76,7 +111,7 @@ index 7ac28fb..a87d5ac 100644
  def _build_decision(payload: dict[str, Any], *, strict: bool) -> tuple[TradeDecision, list[str]]:
      """构建 TradeDecision。
  
-@@ -816,6 +876,7 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
+@@ -816,6 +911,7 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
      query_used = 0
      queried: list[str] = []
      query_evidence: dict[str, dict[str, Any]] = {}
@@ -84,7 +119,7 @@ index 7ac28fb..a87d5ac 100644
      query_details: dict[str, dict[str, Any]] = {}
      force_submit = False
      decision_was_downgraded = False
-@@ -906,6 +967,10 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
+@@ -906,6 +1002,10 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                          decision, issues = _build_decision(args, strict=strict)
                          if not issues:
                              issues = _check_open_query_provenance(decision.intents, query_evidence)
@@ -95,20 +130,22 @@ index 7ac28fb..a87d5ac 100644
                              if issues and strict:
                                  raise DecisionValidationError(
                                      issues,
-@@ -1014,6 +1079,12 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
+@@ -1014,6 +1114,14 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                                  if symbol and isinstance(quality, dict):
                                      query_evidence[symbol] = dict(quality)
                                      query_details[symbol] = dict(result)
 +                                    # U03：保留本轮快照，供逐意图证据门禁按
 +                                    # (symbol, interval) 独立建包（15m 不得冒充 4h）。
-+                                    _interval = str(result.get("interval") or "15m")
-+                                    query_snapshots[(symbol, _interval)] = (
-+                                        snapshot_from_tool_result(
-+                                            result, interval=_interval))
++                                    # 出参缺周期标签就不建快照（fail closed，不猜周期）。
++                                    _interval = str(result.get("interval") or "").strip()
++                                    if _interval:
++                                        query_snapshots[(symbol, _interval)] = (
++                                            snapshot_from_tool_result(
++                                                result, interval=_interval))
                                      research_detail_done = True
                              result["_budget"] = {
                                  "used": query_used,
-@@ -1058,6 +1129,10 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
+@@ -1058,6 +1166,10 @@ def run_orchestrator(*, llm: LLMClient, model: str, recorder: AgentRecorder,
                  last_error = None
                  if not issues:
                      issues = _check_open_query_provenance(decision.intents, query_evidence)
