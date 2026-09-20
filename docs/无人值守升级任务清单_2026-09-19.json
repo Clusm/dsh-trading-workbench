@@ -1500,8 +1500,8 @@
       "id": "U06a",
       "title": "影子最小隔离与口径修正",
       "owner_role": "D",
-      "actual_assignee": null,
-      "status": "PLANNED",
+      "actual_assignee": "U06a 作者会话",
+      "status": "IN_PROGRESS",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -1551,7 +1551,7 @@
       "dl_work_packages": [
         "DL08"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "59660b26f71f5c7057847bfb0caced5d88776218",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
@@ -2228,8 +2228,8 @@
       "id": "U14",
       "title": "外部告警送达与主机失联检测",
       "owner_role": "E",
-      "actual_assignee": null,
-      "status": "PLANNED",
+      "actual_assignee": "U14 作者会话",
+      "status": "IN_PROGRESS",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -2279,7 +2279,7 @@
       "dl_work_packages": [
         "DL10"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "59660b26f71f5c7057847bfb0caced5d88776218",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
