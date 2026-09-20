@@ -1,0 +1,1760 @@
+{
+  "schema_version": 4,
+  "plan_version": "v3",
+  "created_date": "2026-09-19",
+  "purpose": "多Agent人工分派清单；不执行命令、不自动启动任务",
+  "baseline_commit_observed": "05d28e0",
+  "base_commit_for_assignment": null,
+  "assignment_policy": "分派时由集成负责人填入准确完整commit和实际角色，不把历史观察值当最新基线",
+  "execution_authorization": "planning_only",
+  "live_enabled": false,
+  "risk_parameters_change_authorized": false,
+  "shared_file_owner": "I",
+  "shared_files": [
+    "src/audit/database.py",
+    "src/audit/migrations.py",
+    "src/core/service.py",
+    "src/core/graph.py",
+    "src/exchange/binance_futures.py",
+    "src/agents/models.py",
+    "src/dashboard/app.py",
+    ".github/workflows/ci.yml",
+    "config/",
+    "src/core/config_loader.py",
+    "src/core/release_manifest.py",
+    "scripts/run_offline_regression.py",
+    "src/exchange/trade_reconciliation.py",
+    "src/core/decision_pipeline.py",
+    "src/agents/execution.py",
+    "src/agents/orchestrator.py",
+    "src/core/decision_policy.py",
+    "src/exchange/order_outbox.py",
+    "src/exchange/protection_mirror.py",
+    "src/core/agent_recorder.py",
+    "src/llm/factory.py",
+    "src/llm/failover_client.py",
+    "src/intel/service.py",
+    "src/dashboard/templates/decisions.html",
+    "src/signal_engine/scanner.py",
+    "src/core/signal_ticket.py",
+    "src/agents/strategy_trader.py",
+    "src/core/health_watch.py",
+    "scripts/report_release_readiness.py",
+    "src/core/windows_service.py",
+    "scripts/run_web.py",
+    "src/core/instance_lock.py",
+    "scripts/windows_service_host.py",
+    "src/core/db_backup.py",
+    "scripts/restore_recovery_bundle.py",
+    "scripts/create_recovery_bundle.py",
+    "scripts/health_watch.py",
+    "src/core/entry_readiness.py",
+    "src/data/market_query.py",
+    "src/data/macro_public.py",
+    "src/data/onchain_public.py",
+    "src/core/intel_cache.py",
+    "src/llm/workbuddy_client.py",
+    "src/llm/request_coordinator.py",
+    "src/llm/openai_compatible_client.py"
+  ],
+  "ownership_note": "owned_paths为任务精确范围；共享文件为integration_targets由I合入业务作者的独立适配补丁；Q仅独占tests/acceptance/independent/。新增范围先登记，同角色亦不并发修改重叠路径。 2026-09-20 I登记：U01新增review/calibration/lessons文件范围（DL06/RV01-RV03）；DL01-DL10映射见各任务dl_work_packages；DC01-DC16待Q在W0登记。",
+  "statuses": [
+    "PLANNED",
+    "IN_PROGRESS",
+    "READY_FOR_REVIEW",
+    "CHANGES_REQUESTED",
+    "REVIEWED",
+    "INTEGRATED",
+    "VERIFIED",
+    "BLOCKED"
+  ],
+  "tasks": [
+    {
+      "id": "U00",
+      "title": "冻结契约、基线和CI清单",
+      "owner_role": "I",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [],
+      "owned_paths": [
+        "docs/contracts/",
+        "scripts/run_offline_regression.py",
+        "src/core/contracts/"
+      ],
+      "contracts": [
+        "K01",
+        "K02",
+        "K03",
+        "K04",
+        "K05",
+        "K06"
+      ],
+      "fault_tests": [
+        "F09",
+        "F13",
+        "F16",
+        "F24"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "Q"
+      ],
+      "integration_targets": [
+        "src/agents/models.py",
+        "src/audit/migrations.py",
+        ".github/workflows/ci.yml"
+      ],
+      "implementation_requires": [],
+      "priority": "P0",
+      "offline_acceptance": [
+        "现有与新增smoke均登记或有明确排除理由",
+        "实际基线、契约版本、共享文件负责人已登记",
+        "DL01-DL10/RV01-RV03 增量与 review/lessons 文件范围已登记且不改变风险档；DC 映射由 Q 登记",
+        "运行根/数据根/进程/锁路径已只读盘点；integration与运行根隔离，不在运行目录合并或checkout",
+        "K01-K06实际schema、正反golden及契约测试通过；占位文件不得标FROZEN",
+        "确认编排器、实际模型、并发和权限可用；禁网测试环境与依赖锁校验完成；规划基线→W0→契约标签顺序无循环"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL10"
+      ],
+      "registered_increments": [
+        "DL01-DL10 已登记进各任务 dl_work_packages（来源：决策链路专项评估与优化报告_2026-09-19.md）",
+        "RV01-RV03 已登记进 U01（DL06），三个纯内存复现转为回归",
+        "review/lessons 文件范围登记进 U01 owned_paths（review.py、calibration.py、lessons.py）",
+        "DC01-DC16 映射由 Q 在 W0 登记进 F01-F24 矩阵，建议映射见顶层 dc_test_cases"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U01",
+      "title": "资金费流水与成本闭环",
+      "owner_role": "A",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U00"
+      ],
+      "owned_paths": [
+        "src/exchange/income_reconciliation.py",
+        "tests/integration/test_income_reconciliation.py",
+        "tests/fixtures/income/",
+        "src/agents/review.py",
+        "src/agents/calibration.py",
+        "src/agents/lessons.py",
+        "tests/integration/test_review_statistics.py"
+      ],
+      "contracts": [
+        "K01",
+        "K03"
+      ],
+      "fault_tests": [
+        "F10",
+        "F14",
+        "F16",
+        "F23"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "B",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/audit/database.py",
+        "src/exchange/trade_reconciliation.py",
+        "src/exchange/binance_futures.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K03:FROZEN"
+      ],
+      "priority": "P0",
+      "offline_acceptance": [
+        "分页完整性和已验证零费用可证明",
+        "金额归因守恒，迟到收入可修订不重复闭合",
+        "未知成本保留INCOMPLETE",
+        "官方page分页、包含边界映射和重复ID内容冲突均有反例",
+        "成本/归因/查询覆盖各自状态明确",
+        "钱包现金流与会话口径独立勾稽，不重复计fill和income手续费",
+        "RV01-RV03 三个复现转回归：NULL 不计赢、失效判定需触发事件、校准区分高/低估且小样本不出结论",
+        "query_review_library 无文件写入副作用；两 profile 并行查询互不污染且无跨账本读取"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL05",
+        "DL06"
+      ],
+      "rv_fixes": [
+        "RV01",
+        "RV02",
+        "RV03"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U02",
+      "title": "策略仓管理和有界退出授权",
+      "owner_role": "B",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U00",
+        "U04",
+        "U15"
+      ],
+      "owned_paths": [
+        "src/core/strategy_position_manager.py",
+        "src/core/management_authorization.py",
+        "tests/integration/test_strategy_position_manager.py"
+      ],
+      "contracts": [
+        "K01",
+        "K04"
+      ],
+      "fault_tests": [
+        "F03",
+        "F06",
+        "F09",
+        "F19",
+        "F21"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "A",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/core/service.py",
+        "src/core/decision_pipeline.py",
+        "src/agents/execution.py",
+        "src/exchange/binance_futures.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K04:FROZEN"
+      ],
+      "priority": "P0",
+      "offline_acceptance": [
+        "硬退出与预期持仓分离",
+        "旧仓应用策略显式，重启不隐式批量退出",
+        "重复退出不反向开仓",
+        "管理预留原子处理并发退出，过期授权不阻断UNKNOWN查单",
+        "保留人工pause/emergency语义，不用健康故障触发全平"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL03"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U03",
+      "title": "逐意图可验证研究证据",
+      "owner_role": "C",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U00"
+      ],
+      "owned_paths": [
+        "src/agents/research_evidence.py",
+        "tests/integration/test_research_evidence.py",
+        "tests/fixtures/evidence/",
+        "tests/integration/test_market_evidence_quality.py"
+      ],
+      "contracts": [
+        "K01",
+        "K02"
+      ],
+      "fault_tests": [
+        "F09",
+        "F13",
+        "F17"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "D",
+        "B",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/agents/models.py",
+        "src/agents/orchestrator.py",
+        "src/core/decision_policy.py",
+        "src/core/graph.py",
+        "src/core/decision_pipeline.py",
+        "src/data/market_query.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K02:FROZEN"
+      ],
+      "priority": "P0",
+      "offline_acceptance": [
+        "事实从有时效和finality的快照计算",
+        "两意图不得借用对方PASS",
+        "数值矛盾有确定性拒绝结果",
+        "首批仅验证有限结构化claim，模板生成事实摘要，不承诺全自然语言验真",
+        "新增Decimal通过适配器兼容现有float/REAL",
+        "DC06/DC11/DC12：缺失funding/OI不得当0，逐源时点/finality可核对；注入文本不得改变工具权限"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL02",
+        "DL04"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U04",
+      "title": "部分成交、保护和重放验收",
+      "owner_role": "B",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U00"
+      ],
+      "owned_paths": [
+        "tests/acceptance/test_execution_faults.py",
+        "tests/fixtures/execution/",
+        "src/exchange/protection_commands.py"
+      ],
+      "contracts": [
+        "K01",
+        "K04"
+      ],
+      "fault_tests": [
+        "F01",
+        "F02",
+        "F03",
+        "F04",
+        "F21"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "A",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/exchange/order_outbox.py",
+        "src/exchange/protection_mirror.py",
+        "src/exchange/binance_futures.py",
+        "src/exchange/trade_reconciliation.py",
+        "src/audit/database.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K04:FROZEN"
+      ],
+      "priority": "P0",
+      "offline_acceptance": [
+        "0.01到0.0047部分成交数量可勾稽",
+        "未知提交查单且不重复发单",
+        "保护随真实仓位更新，竞态不反向持仓",
+        "普通/Algo命令分别持久化与查单，未知状态有界升级不盲重发",
+        "CANCELED后迟到fill仍修订仓量和保护"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL05"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U05",
+      "title": "真实耗时、模型降级和决策原因",
+      "owner_role": "C",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U00",
+        "U03"
+      ],
+      "owned_paths": [
+        "src/core/decision_trace.py",
+        "tests/integration/test_decision_trace.py",
+        "tests/integration/test_model_route_safety.py",
+        "tests/integration/test_background_refresh_budget.py",
+        "tests/integration/test_cross_process_llm_admission.py"
+      ],
+      "contracts": [
+        "K01",
+        "K05"
+      ],
+      "fault_tests": [
+        "F07",
+        "F20"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "B",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/core/agent_recorder.py",
+        "src/llm/factory.py",
+        "src/llm/failover_client.py",
+        "src/core/graph.py",
+        "src/audit/database.py",
+        "src/data/market_query.py",
+        "src/data/macro_public.py",
+        "src/data/onchain_public.py",
+        "src/core/intel_cache.py",
+        "src/llm/workbuddy_client.py",
+        "src/llm/request_coordinator.py",
+        "src/llm/openai_compatible_client.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K05:FROZEN"
+      ],
+      "priority": "P0",
+      "offline_acceptance": [
+        "请求次数与失败轮次分开",
+        "所有模型尝试共享绝对deadline",
+        "LLM失败不阻塞持仓保护和对账",
+        "缺key/Mock/非法effort显式阻断Demo/live新仓；WorkBuddy裁剪保留证据字段，无法容纳即拒绝研究，不静默降推理档",
+        "背景采集含HTTP与摘要的整体deadline；分源缓存及刷新不阻塞管理线程，慢源/失败源有新鲜度与原因码",
+        "同provider及凭据别名的多进程共享准入、崩溃占用回收及限流退避均有隔离测试；不读取真实key",
+        "主辅no_trade原因码和阶段span完整；持仓管理优先，未完成候选研究不得记录为NO_EDGE"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL01",
+        "DL03",
+        "DL04",
+        "DL06",
+        "DL07"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U06a",
+      "title": "影子最小隔离与口径修正",
+      "owner_role": "D",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U00"
+      ],
+      "owned_paths": [
+        "src/intel/shadow_status.py",
+        "tests/integration/test_shadow_status.py"
+      ],
+      "contracts": [
+        "K01",
+        "K06"
+      ],
+      "fault_tests": [
+        "F07",
+        "F11",
+        "F16",
+        "F20"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "C",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/intel/service.py",
+        "src/dashboard/templates/decisions.html",
+        "src/core/service.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K06:FROZEN"
+      ],
+      "priority": "P1",
+      "offline_acceptance": [
+        "旧口径明确展示且执行权重零",
+        "C未配置不产生无效绩效样本",
+        "侧车不争用管理线程和额外LLM调用"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {
+        "F11": "FIRST_RELEASE_LABEL_DISCLOSURE_C_UNCONFIGURED_ISOLATION_ONLY"
+      },
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL08"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U06b",
+      "title": "影子v2固定时点标签",
+      "owner_role": "D",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": false,
+      "depends_on": [
+        "U00",
+        "U06a"
+      ],
+      "owned_paths": [
+        "src/intel/shadow_v2/__init__.py",
+        "src/intel/shadow_v2/sampler.py",
+        "src/intel/shadow_v2/labels.py",
+        "src/intel/shadow_v2/models.py",
+        "tests/integration/test_shadow_labels.py",
+        "tests/fixtures/shadow/labels/"
+      ],
+      "contracts": [
+        "K01",
+        "K02"
+      ],
+      "fault_tests": [
+        "F09",
+        "F11",
+        "F17"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "C",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/intel/service.py",
+        "src/audit/database.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K02:FROZEN"
+      ],
+      "priority": "P2",
+      "offline_acceptance": [
+        "固定目标时点取价，超容差明确MISSING",
+        "独立全白名单采样与实验版本隔离",
+        "无未来信息回填或稀疏路径伪补齐"
+      ],
+      "deployment_acceptance": [
+        "后置任务的独立实验或维护验收，不阻断首批"
+      ],
+      "fault_test_scope": {
+        "F11": "FULL_V2_LABELS"
+      },
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL08"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U07",
+      "title": "配对实验与独立样本统计",
+      "owner_role": "D",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": false,
+      "depends_on": [
+        "U03",
+        "U06b"
+      ],
+      "owned_paths": [
+        "src/intel/shadow_v2/statistics.py",
+        "tests/integration/test_shadow_statistics.py",
+        "tests/fixtures/shadow/statistics/"
+      ],
+      "contracts": [
+        "K02",
+        "K06"
+      ],
+      "fault_tests": [
+        "F11",
+        "F16",
+        "F24"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "C",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/audit/database.py",
+        "src/dashboard/templates/decisions.html"
+      ],
+      "implementation_requires": [
+        "U00:K02:FROZEN",
+        "U00:K06:FROZEN"
+      ],
+      "priority": "P2",
+      "offline_acceptance": [
+        "同机会配对，重叠样本不冒充独立",
+        "费用压力及区间报告可重放",
+        "研究不自动晋升执行权重"
+      ],
+      "deployment_acceptance": [
+        "后置任务的独立实验或维护验收，不阻断首批"
+      ],
+      "fault_test_scope": {
+        "F11": "FULL_V2_LABELS"
+      },
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL08",
+        "DL09"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U08",
+      "title": "策略漏斗与管理责任展示",
+      "owner_role": "C",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U00",
+        "U05"
+      ],
+      "owned_paths": [
+        "tests/integration/test_strategy_funnel.py",
+        "docs/策略扫描原因码.md",
+        "src/core/strategy_funnel.py"
+      ],
+      "contracts": [
+        "K02",
+        "K05"
+      ],
+      "fault_tests": [
+        "F03",
+        "F09",
+        "F19"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "B",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/signal_engine/scanner.py",
+        "src/core/signal_ticket.py",
+        "src/agents/strategy_trader.py",
+        "src/dashboard/app.py"
+      ],
+      "implementation_requires": [
+        "U00:K02:FROZEN",
+        "U00:K05:FROZEN"
+      ],
+      "priority": "P1",
+      "offline_acceptance": [
+        "扫描未触发及全部跳过原因可区分",
+        "有效ticket跨轮和重启恢复且不重复",
+        "每仓能定位管理者与规则版本"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL03",
+        "DL07"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U09",
+      "title": "发布证据与事件恢复门禁",
+      "owner_role": "I",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U01",
+        "U03",
+        "U05",
+        "U06a",
+        "U15",
+        "U08"
+      ],
+      "owned_paths": [
+        "src/core/release_evidence.py",
+        "tests/acceptance/test_release_evidence_v2.py"
+      ],
+      "contracts": [
+        "K01",
+        "K03",
+        "K05",
+        "K06"
+      ],
+      "fault_tests": [
+        "F10",
+        "F12",
+        "F16",
+        "F23",
+        "F24"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "Q",
+        "A"
+      ],
+      "integration_targets": [
+        "src/audit/database.py",
+        "src/core/health_watch.py",
+        "scripts/report_release_readiness.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K03:FROZEN",
+        "U00:K05:FROZEN",
+        "U00:K06:FROZEN"
+      ],
+      "priority": "P0",
+      "offline_acceptance": [
+        "B影子不冒充执行候选",
+        "完整lifecycle去重计数，晚到成本重算",
+        "ACK不等于恢复，所有门禁说明来源",
+        "观察窗口首尾缺失计入分母，纯中性NO_EDGE不计200方向候选",
+        "同运行工件重启和不同RC变更区分，成本修订后重算门禁"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL07",
+        "DL10"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U10a",
+      "title": "可运行发布包与准确运维说明",
+      "owner_role": "F",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U00",
+        "U15"
+      ],
+      "owned_paths": [
+        "scripts/create_release_package.py",
+        "docs/运行与故障恢复手册_2026-09-06.md",
+        "docs/文档索引.md",
+        "docs/代码维护规范.md"
+      ],
+      "contracts": [
+        "K01",
+        "K06"
+      ],
+      "fault_tests": [
+        "F13",
+        "F14",
+        "F15"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "E",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/core/windows_service.py",
+        "scripts/run_web.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K06:FROZEN"
+      ],
+      "priority": "P1",
+      "offline_acceptance": [
+        "来源文件和必要配置不漏包",
+        "凭据及运行状态不入代码包",
+        "解压后自检及所有相对文档链接通过"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL06"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U10b",
+      "title": "旧脚本与历史文档整理",
+      "owner_role": "F",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": false,
+      "depends_on": [
+        "U10a",
+        "U12"
+      ],
+      "owned_paths": [
+        "docs/archive/",
+        "scripts/diagnostics/",
+        "scripts/maintenance/"
+      ],
+      "contracts": [
+        "K01"
+      ],
+      "fault_tests": [
+        "F13"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "E",
+        "Q"
+      ],
+      "integration_targets": [],
+      "implementation_requires": [
+        "U00:K01:FROZEN"
+      ],
+      "priority": "P2",
+      "offline_acceptance": [
+        "逐文件引用/运行入口核实后可恢复归档",
+        "被引用策略注册表和来源保留",
+        "独立列删除清单并核验所有旧入口"
+      ],
+      "deployment_acceptance": [
+        "后置任务的独立实验或维护验收，不阻断首批"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL09"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U11",
+      "title": "核心模块渐进拆分",
+      "owner_role": "F",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": false,
+      "depends_on": [
+        "U10b",
+        "U12"
+      ],
+      "owned_paths": [
+        "docs/重构接口映射.md"
+      ],
+      "contracts": [
+        "K01",
+        "K02",
+        "K03",
+        "K04"
+      ],
+      "fault_tests": [
+        "F01",
+        "F03",
+        "F04",
+        "F09",
+        "F14"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "A",
+        "B",
+        "C",
+        "Q"
+      ],
+      "integration_targets": [],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K02:FROZEN",
+        "U00:K03:FROZEN",
+        "U00:K04:FROZEN"
+      ],
+      "priority": "P2",
+      "offline_acceptance": [
+        "逐模块转移所有权后实施",
+        "公共接口与行为回放一致",
+        "重构不混风控或策略行为修改"
+      ],
+      "deployment_acceptance": [
+        "后置任务的独立实验或维护验收，不阻断首批"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL09"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U13",
+      "title": "托管、单实例及备份恢复",
+      "owner_role": "E",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U00",
+        "U15"
+      ],
+      "owned_paths": [
+        "src/core/ops/supervision.py",
+        "src/core/ops/recovery.py",
+        "tests/acceptance/test_supervision.py",
+        "src/core/runtime_paths.py",
+        "scripts/ops/verify_runtime_paths.py",
+        "scripts/ops/verify_recovery_plan.py"
+      ],
+      "contracts": [
+        "K01",
+        "K04",
+        "K05"
+      ],
+      "fault_tests": [
+        "F04",
+        "F05",
+        "F06",
+        "F08",
+        "F14",
+        "F17",
+        "F18",
+        "F19",
+        "F20"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "F",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/core/config_loader.py",
+        "src/core/service.py",
+        "src/core/instance_lock.py",
+        "src/core/windows_service.py",
+        "scripts/windows_service_host.py",
+        "scripts/run_web.py",
+        "src/core/db_backup.py",
+        "scripts/restore_recovery_bundle.py",
+        "scripts/create_recovery_bundle.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K04:FROZEN",
+        "U00:K05:FROZEN"
+      ],
+      "priority": "P0",
+      "offline_acceptance": [
+        "profile显式、人工禁用live优先于恢复",
+        "重启有界、停机恢复先对账",
+        "单账户执行者、DB与JSON一致恢复包有演练",
+        "RuntimePaths全路径清单兼容迁移，shared_egress_root保持唯一",
+        "备份JSON与SQLite同epoch，恢复后先回拉再开仓"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL10"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U14",
+      "title": "外部告警送达与主机失联检测",
+      "owner_role": "E",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U00"
+      ],
+      "owned_paths": [
+        "src/core/ops/alert_delivery.py",
+        "tests/acceptance/test_alert_delivery.py",
+        "tests/fixtures/alerts/"
+      ],
+      "contracts": [
+        "K01",
+        "K05"
+      ],
+      "fault_tests": [
+        "F06",
+        "F12",
+        "F22"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "F",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/core/health_watch.py",
+        "scripts/health_watch.py",
+        "src/audit/database.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K05:FROZEN"
+      ],
+      "priority": "P0",
+      "offline_acceptance": [
+        "接收/送达/确认区别记录，不接受配置自证",
+        "本机主进程故障与主机关机分别可检测",
+        "真实渠道未确认时保留OPS_BLOCKED",
+        "心跳包含交易证据时间防止假健康，投递队列独立交易DB",
+        "无设备回执用可审计人类确认验证演练但不伪造DELIVERED"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL10"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U15",
+      "title": "运行身份、有效配置和控制权限",
+      "owner_role": "F",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U00"
+      ],
+      "owned_paths": [
+        "src/core/runtime_identity.py",
+        "tests/acceptance/test_runtime_identity.py",
+        "tests/acceptance/test_control_boundary.py"
+      ],
+      "contracts": [
+        "K01",
+        "K04",
+        "K06"
+      ],
+      "fault_tests": [
+        "F06",
+        "F09",
+        "F13",
+        "F15",
+        "F18",
+        "F19"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "E",
+        "B",
+        "C",
+        "Q"
+      ],
+      "integration_targets": [
+        "src/core/release_manifest.py",
+        "src/core/config_loader.py",
+        "src/dashboard/app.py",
+        "src/core/entry_readiness.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K04:FROZEN",
+        "U00:K06:FROZEN"
+      ],
+      "priority": "P0",
+      "offline_acceptance": [
+        "实际依赖锁、策略与模型覆盖均影响身份",
+        "控制接口保持回环及验证写入",
+        "提供账户/运行代/权限验证接口供U02绑定管理授权，不负责U02实现",
+        "account_ref与API密钥轮换解耦，身份绑定实际账户与路径",
+        "有效模型路由/参数来源与Mock状态可审计，身份/门禁接口使用冻结夹具验证；与U05联合端到端验收归U12 BUILD，不作为U15先行集成的反向依赖"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {},
+      "estimate_status": "REESTIMATE_AT_W0",
+      "dl_work_packages": [
+        "DL01",
+        "DL04",
+        "DL10"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    },
+    {
+      "id": "U12",
+      "title": "RC集成、故障验收和观察交付",
+      "owner_role": "I",
+      "actual_assignee": null,
+      "status": "PLANNED",
+      "required_for_first_release": true,
+      "depends_on": [
+        "U01",
+        "U02",
+        "U03",
+        "U04",
+        "U05",
+        "U06a",
+        "U08",
+        "U09",
+        "U10a",
+        "U13",
+        "U14",
+        "U15"
+      ],
+      "owned_paths": [
+        "docs/releases/unattended_rc/",
+        "tests/acceptance/test_unattended_release.py"
+      ],
+      "contracts": [
+        "K01",
+        "K02",
+        "K03",
+        "K04",
+        "K05",
+        "K06"
+      ],
+      "fault_tests": [
+        "F01",
+        "F02",
+        "F03",
+        "F04",
+        "F05",
+        "F06",
+        "F07",
+        "F08",
+        "F09",
+        "F10",
+        "F11",
+        "F12",
+        "F13",
+        "F14",
+        "F15",
+        "F16",
+        "F17",
+        "F18",
+        "F19",
+        "F20",
+        "F21",
+        "F22",
+        "F23",
+        "F24"
+      ],
+      "evidence": [],
+      "blockers": [],
+      "reviewer_roles": [
+        "Q"
+      ],
+      "integration_targets": [
+        ".github/workflows/ci.yml",
+        "scripts/run_offline_regression.py"
+      ],
+      "implementation_requires": [
+        "U00:K01:FROZEN",
+        "U00:K02:FROZEN",
+        "U00:K03:FROZEN",
+        "U00:K04:FROZEN",
+        "U00:K05:FROZEN",
+        "U00:K06:FROZEN"
+      ],
+      "priority": "P0",
+      "offline_acceptance": [
+        "当前RC全量回归、故障矩阵和一致恢复通过",
+        "U12 BUILD验证U05+U15真实集成候选：缺key/Mock阻断新仓且保护管理继续；不得仅凭各模块夹具通过认定S05完成",
+        "同版本既有7天200候选30完整闭合门禁不降低",
+        "运维实测与告警证据齐全；未启用实盘如实报告"
+      ],
+      "deployment_acceptance": [
+        "本任务在线/宿主适用证据随U12对应检查点验收，离线mock不代表通过"
+      ],
+      "fault_test_scope": {
+        "F11": "FIRST_RELEASE_LABEL_DISCLOSURE_C_UNCONFIGURED_ISOLATION_ONLY; v2_labels=DEFERRED"
+      },
+      "estimate_status": "REESTIMATE_AT_W0",
+      "checkpoints": [
+        {
+          "id": "BUILD",
+          "requires": "首批任务INTEGRATED及离线验收，SLO冻结，RC不可变工件",
+          "status": "PLANNED"
+        },
+        {
+          "id": "DEPLOY_DEMO",
+          "requires": "BUILD通过，RuntimePaths/恢复核验，存量策略明确及相应部署授权",
+          "status": "PLANNED"
+        },
+        {
+          "id": "OBSERVE",
+          "requires": "DEPLOY_DEMO后同RC真实门禁达到7天/200方向候选/30成本完整闭合",
+          "status": "PLANNED"
+        },
+        {
+          "id": "OPS",
+          "requires": "宿主托管、实际告警确认与失联/恢复演练",
+          "status": "PLANNED"
+        },
+        {
+          "id": "RELEASE",
+          "requires": "BUILD/DEPLOY_DEMO/OBSERVE/OPS和必要风险覆盖全部通过；live仍待单独启动",
+          "status": "PLANNED"
+        }
+      ],
+      "dl_work_packages": [
+        "DL10"
+      ],
+      "task_base_commit": null,
+      "contract_commit": null,
+      "dependency_commits": {},
+      "pending_dependencies": [],
+      "integration_candidate_commit": null,
+      "review_assignments": [],
+      "qa_runs": []
+    }
+  ],
+  "specification": "无人值守交付与多Agent执行规格_2026-09-19.md",
+  "review_record": "无人值守方案细审与修订记录_2026-09-19.md",
+  "dependency_semantics": "depends_on是INTEGRATED合并门槛，不是启动门槛；正式实现要求implementation_requires冻结。允许基于冻结接口用夹具先行，记录pending_dependencies；Q最终候选必须包含全部依赖及共享适配。",
+  "independent_qa_paths": [
+    "tests/acceptance/independent/"
+  ],
+  "verification_policy": {
+    "no_self_review": true,
+    "required_artifacts": [
+      "task_id",
+      "base_commit",
+      "head_commit",
+      "contract_version",
+      "changed_files",
+      "behavior_delta",
+      "migration",
+      "offline_test_evidence",
+      "deployment_test_evidence",
+      "reviewer",
+      "known_limits",
+      "rollback",
+      "contract_commit",
+      "dependency_commits",
+      "integration_candidate_commit",
+      "candidate_tree_hash",
+      "qa_test_commit",
+      "live_side_effects"
+    ],
+    "offline_is_not_deployment": true,
+    "live_start_requires_separate_instruction": true,
+    "candidate_policy": "I在隔离integration构建包含依赖、作者代码、共享适配的候选；Q验证精确candidate+独立测试commit；代码/契约/配置/依赖/适配改变使相关审核失效；同候选仅fast-forward晋级，禁止未经复验cherry-pick重建",
+    "artifact_stage_policy": "作者阶段candidate/qa字段可为null且deployment证据为PENDING；REVIEWED前候选与QA字段必须齐全，VERIFIED再要求适用部署证据。U00无已冻结contract_commit，冻结成功后的独立台账提交引用它，禁止自指commit。"
+  },
+  "external_decisions": [
+    {
+      "id": "D01",
+      "name": "宿主托管与实盘禁用恢复策略",
+      "owner_role": "E",
+      "status": "PENDING",
+      "blocks_checkpoint": "DEPLOY_DEMO_OPS_CONFIGURATION",
+      "development_blocked": false
+    },
+    {
+      "id": "D02",
+      "name": "告警接收人、升级路径和异地心跳探针",
+      "owner_role": "E",
+      "status": "PENDING",
+      "blocks_checkpoint": "OPS",
+      "development_blocked": false
+    },
+    {
+      "id": "D03",
+      "name": "账户必要风险硬约束的覆盖与audit迁移决定",
+      "owner_role": "I",
+      "status": "PENDING",
+      "blocks_checkpoint": "RELEASE",
+      "development_blocked": false
+    },
+    {
+      "id": "D04",
+      "name": "存量仓位规则版本和时间退出适用策略",
+      "owner_role": "B",
+      "status": "PENDING",
+      "blocks_checkpoint": "DEPLOY_WITH_EXISTING_POSITIONS",
+      "development_blocked": false
+    },
+    {
+      "id": "D05",
+      "name": "运维SLO测量口径和目标冻结",
+      "owner_role": "I",
+      "status": "PENDING",
+      "blocks_checkpoint": "RC_FREEZE",
+      "development_blocked": false
+    }
+  ],
+  "updated_date": "2026-09-20",
+  "updated_by": "I",
+  "increment_registration": {
+    "date": "2026-09-20",
+    "by": "I",
+    "source_report": "docs/决策链路专项评估与优化报告_2026-09-19.md",
+    "dl_work_packages": [
+      "DL01",
+      "DL02",
+      "DL03",
+      "DL04",
+      "DL05",
+      "DL06",
+      "DL07",
+      "DL08",
+      "DL09",
+      "DL10"
+    ],
+    "rv_fixes": {
+      "RV01": "U01",
+      "RV02": "U01",
+      "RV03": "U01"
+    },
+    "dc_test_cases_registration": "PENDING_Q_REGISTRATION_AT_W0",
+    "notes": "DL 映射见各任务 dl_work_packages；RV 复现转回归归 U01；DC01-DC16 由 Q 在 W0 登记进 F 矩阵，建议映射见 dc_test_cases。本登记不改变风险档、交易代码与运行状态。 v1.1补齐首批路径与验收；DL09为后置设计映射，不代表实现范围已经可分派，须后续登记所有权和重新批准。"
+  },
+  "dc_test_cases": [
+    {
+      "id": "DC01",
+      "proposed_task": "U01",
+      "proposed_fault_refs": "F10/F23",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC02",
+      "proposed_task": "U01",
+      "proposed_fault_refs": "F10",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC03",
+      "proposed_task": "U01",
+      "proposed_fault_refs": "-",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC04",
+      "proposed_task": "U04",
+      "proposed_fault_refs": "F02/F03/F21",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC05",
+      "proposed_task": "U01",
+      "proposed_fault_refs": "F15",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC06",
+      "proposed_task": "U03",
+      "proposed_fault_refs": "F09/F13",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC07",
+      "proposed_task": "U03",
+      "proposed_fault_refs": "F09",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC08",
+      "proposed_task": "U05",
+      "proposed_fault_refs": "F07",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC09",
+      "proposed_task": "U05",
+      "proposed_fault_refs": "F20",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC10",
+      "proposed_task": "U08",
+      "proposed_fault_refs": "F19",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC11",
+      "proposed_task": "U03",
+      "proposed_fault_refs": "F09",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC12",
+      "proposed_task": "U03",
+      "proposed_fault_refs": "F09/F15",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC13",
+      "proposed_task": "U04",
+      "proposed_fault_refs": "F02/F21",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC14",
+      "proposed_task": "U15",
+      "proposed_fault_refs": "F13",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC15",
+      "proposed_task": "U06a",
+      "proposed_fault_refs": "F16",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    },
+    {
+      "id": "DC16",
+      "proposed_task": "U09",
+      "proposed_fault_refs": "F17/F24",
+      "registration_owner": "Q",
+      "status": "PENDING_W0_REGISTRATION"
+    }
+  ],
+  "dispatch": {
+    "mode": "opencode_subagents",
+    "coordinator": "I",
+    "implementation_lines": {
+      "A": [
+        "U01"
+      ],
+      "B": [
+        "U04",
+        "U02"
+      ],
+      "CD": [
+        "U03",
+        "U05",
+        "U06a",
+        "U08"
+      ],
+      "EF": [
+        "U15",
+        "U13",
+        "U14",
+        "U10a"
+      ]
+    },
+    "deferred_lines": {
+      "D": [
+        "U06b",
+        "U07"
+      ],
+      "F": [
+        "U10b",
+        "U11"
+      ]
+    },
+    "max_parallel_lines": 4,
+    "worktree_root": "C:/Users/Tao/Desktop/币安/mat-wt",
+    "branch_pattern": "task/<ID>",
+    "integration_windows_per_day": 2,
+    "qa_mode": "independent_subagent_per_review",
+    "no_self_review": true,
+    "manual": "docs/多Agent执行分派手册_2026-09-20.md",
+    "role_cards": "docs/dispatch/角色卡.md",
+    "task_cards": "docs/dispatch/任务卡.md",
+    "version": "v1.1",
+    "integration_worktree": "C:/Users/Tao/Desktop/币安/mat-wt/I",
+    "integration_branch": "integration/unattended-v3",
+    "state_writer": "I",
+    "author_local_commit_allowed": true,
+    "remote_push_authorized": false,
+    "planning_commit": null,
+    "contract_commit": null,
+    "runtime_inventory_status": "PENDING_W0",
+    "review_record_pattern": "docs/dispatch/reviews/<ID>/<candidate-short>/<role>_<session>_r<n>.md",
+    "task_assignment_fields": {
+      "actual_assignee": "作者当前会话，修复转派保留历史到evidence",
+      "review_assignments": "角色/会话/精确候选/报告路径",
+      "qa_runs": "会话/candidate/test_commit/命令/退出码/证据hash"
+    },
+    "first_release_example_order": [
+      "U00",
+      "U01",
+      "U04",
+      "U03",
+      "U15",
+      "U02",
+      "U05",
+      "U06a",
+      "U08",
+      "U13",
+      "U14",
+      "U10a",
+      "U09",
+      "U12"
+    ],
+    "start_policy": "契约冻结即可先行实现；分支选当时已审核集成HEAD，记录缺失依赖并使用冻结夹具；依赖就绪后刷新候选并复验，不永久从contract标签起步",
+    "w0_sequence": [
+      "runtime_inventory",
+      "planning_commit_and_integration_worktree",
+      "bootstrap_review_workspaces",
+      "schemas_and_executable_golden",
+      "independent_contract_review",
+      "freeze_contract_tag",
+      "record_contract_commit_in_later_ledger_commit",
+      "create_implementation_branches"
+    ]
+  },
+  "dispatch_version": "v1.1",
+  "increment_scope": [
+    {
+      "id": "S01",
+      "dl": [
+        "DL02",
+        "DL04"
+      ],
+      "tasks": [
+        "U03"
+      ],
+      "scope": "FIRST_RELEASE",
+      "paths": [
+        "src/data/market_query.py"
+      ],
+      "acceptance": "分源缺失/时点/finality/有限数值claim及注入负例"
+    },
+    {
+      "id": "S02",
+      "dl": [
+        "DL01",
+        "DL04"
+      ],
+      "tasks": [
+        "U05"
+      ],
+      "scope": "FIRST_RELEASE",
+      "paths": [
+        "src/llm/workbuddy_client.py",
+        "src/llm/factory.py",
+        "src/llm/openai_compatible_client.py",
+        "src/llm/failover_client.py"
+      ],
+      "acceptance": "模型capability/Mock/参数兼容/结构化裁剪和统一期限"
+    },
+    {
+      "id": "S03",
+      "dl": [
+        "DL04"
+      ],
+      "tasks": [
+        "U05"
+      ],
+      "scope": "FIRST_RELEASE",
+      "paths": [
+        "src/data/market_query.py",
+        "src/data/macro_public.py",
+        "src/data/onchain_public.py",
+        "src/core/intel_cache.py",
+        "src/core/graph.py"
+      ],
+      "acceptance": "整体刷新期限、分源缓存、后台刷新、管理不被慢源阻塞"
+    },
+    {
+      "id": "S04",
+      "dl": [
+        "DL01"
+      ],
+      "tasks": [
+        "U05"
+      ],
+      "scope": "FIRST_RELEASE",
+      "paths": [
+        "src/llm/request_coordinator.py"
+      ],
+      "acceptance": "跨进程共享准入和崩溃恢复；脱敏凭据别名"
+    },
+    {
+      "id": "S05",
+      "dl": [
+        "DL01",
+        "DL04"
+      ],
+      "tasks": [
+        "U15",
+        "U05"
+      ],
+      "scope": "FIRST_RELEASE",
+      "paths": [
+        "src/core/runtime_identity.py",
+        "src/core/entry_readiness.py"
+      ],
+      "acceptance": "有效路由身份与Mock开仓阻断联调"
+    },
+    {
+      "id": "S06",
+      "dl": [
+        "DL09"
+      ],
+      "tasks": [
+        "U07",
+        "U10b",
+        "U11"
+      ],
+      "scope": "DEFERRED_REQUIRES_SCOPE_REGISTRATION",
+      "paths": [],
+      "acceptance": "完整经验库/校准v2另行登记，禁止以清理或纯重构提交夹带学习行为变化"
+    }
+  ]
+}
