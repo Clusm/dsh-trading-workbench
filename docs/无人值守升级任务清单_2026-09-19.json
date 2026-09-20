@@ -1408,6 +1408,21 @@
           "type": "shared_patch_artifact",
           "status": "PRODUCING",
           "note": "首轮作者只给了文字描述，未产出 unified diff；已派补交会话产出到 docs/dispatch/patches/U15/a136cb5/"
+        },
+        {
+          "type": "review_r1_B",
+          "candidate": "a136cb5",
+          "verdict": "CHANGES_REQUESTED",
+          "counts": "P0 x1 / P1 x6 / P2 x7 / P3 x3",
+          "archived_path": "docs/dispatch/reviews/U15/a136cb5/B_r1.md",
+          "key_findings": [
+            "P0-1 authorize_new_entry 省略 expected 即完全不校验绑定 -> demo bundle + live 外来运行代 得 200（runtime_identity.py:1329）",
+            "P1 scope_hash 从不比较（:1168）；mint 传 AccountRef 时静默忽略 environment（:1097）",
+            "P1 account_ref 裸字符串不补 env: 前缀 -> 同账户两值",
+            "P1 WorkBuddy live 分支不查凭据且写伪证据 mock_source=credential_present -> live 无凭据仍 200",
+            "P1 collect_runtime_identity 未暴露 fallback_local=False -> 生产走 live:local（跨账户碰撞）",
+            "U02 缺口: 账本 account_ref 仍 sha256(api_key)[:16] 且轮换漂移，与 U15 不一致；指纹 diff-7 被作者标 fixed 但实际未闭合（L9）"
+          ]
         }
       ],
       "blockers": [
@@ -1468,7 +1483,7 @@
             "B (reviews/U15/B/r1)",
             "C (reviews/U15/C/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED (B 已回；E/C 待回)",
           "reports_dir": "docs/dispatch/reviews/U15/a136cb5/",
           "note": "Q 的独立验收安排在 I 组装的 integration_candidate 上进行（非作者 head），以避免重复且覆盖共享适配"
         }
