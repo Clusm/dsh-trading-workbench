@@ -1,0 +1,21 @@
+All checks passed!
+PROFILE LOCK OK sha256=333d6a6b1e324cfa6721bc7a3b2dc56f5997530633903f4605e386e6bf392a61
+  locked_fields=30 symbols=20 quote=USDT
+No broken requirements found.
+DEPENDENCY LOCK OK packages=50 sha256=a28db842304ac10ab8349d5bb62a23bf52a75a0ee803d5a3791f98218b8e66d4
+  python=3.13 platform=win32
+SECRET SCAN FAIL docs\dispatch\RESUME.md:36 rule=secret-assignment
+Traceback (most recent call last):
+  File "C:\Users\Tao\Desktop\币安\mat-wt\B\_sb\sb_int\scripts\check_quality.py", line 71, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "C:\Users\Tao\Desktop\币安\mat-wt\B\_sb\sb_int\scripts\check_quality.py", line 65, in main
+    _run([sys.executable, "scripts/scan_tracked_secrets.py"])
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Tao\Desktop\币安\mat-wt\B\_sb\sb_int\scripts\check_quality.py", line 51, in _run
+    subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Tao\AppData\Local\Programs\Python\Python313\Lib\subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['C:\\Users\\Tao\\Desktop\\币安\\multi-agent-trader\\.venv\\Scripts\\python.exe', 'scripts/scan_tracked_secrets.py']' returned non-zero exit status 1.

@@ -1,8 +1,9 @@
 # U02 共享适配补丁包 r3（作者 B / 交 I 应用）
 
-**本包取代 `docs/dispatch/patches/U02/2fe7b2a/`（r2 包）。** 目录名 = **交付补丁
-内容的那次提交**（其后可能还有仅改目录名的提交，因此目录名与分支 HEAD 不一定相等；
-分支 HEAD 见交付报告）。补丁在 r3 修复轮生成，基线 = 生成时的集成 HEAD
+**本包取代 `docs/dispatch/patches/U02/2fe7b2a/`（r2 包）。** 目录名 = **首次交付
+补丁内容的那次提交**；其后还有若干**不进补丁**的追加提交（README/evidence 修订、
+目录改名、U02 独占文件的 lint 清理），因此目录名与分支 HEAD 不相等——分支 HEAD
+见交付报告。补丁在 r3 修复轮生成，基线 = 生成时的集成 HEAD
 **`I@b4eeda9`**（`git -C <I> rev-parse HEAD`）。6 个目标文件的 blob 在 I 的
 `40ff52f` / `59660b2` / `b4eeda9` 三次 HEAD 上**逐字相同**，本包对当前 HEAD 有效。
 
@@ -110,6 +111,12 @@ AFTER（r3）
   2/3/4/6 仍全 PASS（跨轮 / 5 轮全部 EXECUTED）
   R3_PAPER_ROUND_PROBE FAIL=0
 ```
+**注**：r2 包自带的 `2fe7b2a/evidence/probe_p1_paper_exit_key.py` 里那条
+"同轮同指纹仍共享同一个退出键"的断言记录的是 **r2 的行为**，r3 之后**不再成立**
+（同轮第二次现在是 `duplicate_skipped`）——它由本包 `probe_r3_paper_round.py` 的
+用例 1/1b/5 取代。该 r2 探针只是证据留档，不在任何门禁清单里；本包顺带清了它两处
+F841（未用局部变量，零行为改动）。
+
 **登记（口径变化，非缺陷）**：显式 `client_order_id`（如 guardian 的
 `mta-g-<sha24>`）在**纸面**路径上现在**跨轮**也判重复（r2 会再次 EXECUTED）。
 这与生产一致——`execute()` 先用 `orders` 表按 `client_order_id` 查重，同一 cid
@@ -305,6 +312,35 @@ r3 前后对照探针（evidence/，全部 FAIL→0）：
   probe_r3_paper_round.py     → BEFORE FAIL=3 → AFTER FAIL=0（r3-3）
   probe_r3_sweep_alert.py     → BEFORE FAIL=1 → AFTER FAIL=0（r3-5）
 ```
+
+### 质量门禁 `scripts/check_quality.py` —— **如实登记：B 工作区与本沙箱都仍为红，原因均在 U02 之外**
+
+任务书称"门禁现已全绿"，实测**不成立**（B@`4856aec` 即为红）。逐环节核实：
+
+| 环节 | B 工作区（改前 4856aec） | B 工作区（r3 后） | 沙箱 = I@b4eeda9 + U02 独占文件 + 6 补丁 |
+|---|---|---|---|
+| `ruff check` | **7 错**：2 处在本包 r2 evidence、2 处在 U02 独占文件、1 处在 U02 独占模块、3 处在**非 U02 的陈旧副本** | **4 错，全部在非 U02 文件**（见下） | **0 错**（已在沙箱实测 `All checks passed`） |
+| `py_compile` | 通过 | 通过 | 通过 |
+| profile/dependency lock | 通过 | 通过 | 通过 |
+| `scan_tracked_secrets` | **5 处**（`docs/无人值守升级任务清单_2026-09-19.json:3102`、`src/llm/factory.py:111`、`tests/acceptance/test_runtime_identity.py:523/707`） | 同左 | **1 处：`docs/dispatch/RESUME.md:36`** |
+
+已由本包清掉的 3 处（都在 U02 独占路径内，零行为改动）：`tests/integration/
+test_strategy_position_manager.py` 未用 `import tempfile`；`scripts/smoke_u02_…`
+无占位符 f-string；`src/core/management_authorization.py` 未用的死变量 `stable`
+（**这 3 处修完后，沙箱里的 `ruff` 环节已全绿**）。
+
+**剩下未清的 4 处 ruff 全在非 U02 文件**：`src/exchange/order_outbox.py:21`、
+`src/exchange/protection_commands.py:40`、`tests/acceptance/test_execution_faults.py:36`
+与 `:964`。它们**在 I@b4eeda9 的同名文件里已经全部干净**（作者实测：把这 4 个文件
+从 I@b4eeda9 取出后 `ruff` 全过）——即这些是 B 分支相对 I 的**陈旧副本**，不是
+U02 引入、也不随 U02 补丁进入 I。同理 `scan_tracked_secrets` 的命中全在
+`RESUME.md` / 任务清单 / `src/llm/factory.py` / `test_runtime_identity.py`，
+其中 `RESUME.md` 按任务约束**只由 I 更新**，U02 无权改动。
+
+**结论（不粉饰）**：U02 自己的改动**没有打破门禁**，并把 U02 路径内的 lint 债清零；
+但 `check_quality` 在 B 工作区与本沙箱**都无法变绿**，剩余失败项 100% 落在
+U02 独占路径之外（3 个陈旧副本 + I 持有的 `RESUME.md`）。这一点请与任务书里的
+"门禁现已全绿"口径对齐后再判。
 
 ## 复现步骤（沙箱全部落在作者工作区内，不写仓库文件）
 
