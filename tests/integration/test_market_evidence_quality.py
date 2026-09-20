@@ -4,7 +4,7 @@
 
 A. **共享适配补丁可复核且行为正确**：把
    ``tests/fixtures/evidence/s01_market_query_adaptation.patch`` 用严格 unified diff
-   应用器打到当前 ``src/data/market_query.py`` 的内存副本上（基线漂移会立刻暴露），
+   应用器打到 ``src/data/market_query.py`` 的内存副本上（基线漂移会立刻暴露），
    再把结果作为独立模块导入，验证：
      - ``funding/OI/mark 缺失 → None``，绝不再回落到 ``0.0``；
      - 交易所真实返回的 0 保留为 0（"缺失" ≠ "数值为零"）；
@@ -15,13 +15,18 @@ B. **证据层口径**（``agents.research_evidence``）对 patched / legacy 两
    都给出同一结论：缺失就是缺失（missing_fields + values 无该键），真实 0 是数据；
    注入文本不改变可用性、时点或权限。
 
-补丁本身不落在共享文件上：作者只提交统一 diff，由 I 归档并应用。
+**两种状态都必须通过**（U03 r4 集成期缺陷修复）：补丁未应用（作者/审查 worktree）
+时从现网文件正向构造后像；补丁已应用（集成树，I 已把 S01 口径落到生产路径）时
+识别"已应用"并**绝不二次应用**——二次应用必然 context mismatch。行尾归一化使得
+"补丁混行尾 vs 目标文件混行尾"不再被误判成 mismatch，但改内容的漂移仍必须失败。
 """
 from __future__ import annotations
 
 import ast
 import importlib.util
 import json
+import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -63,23 +68,38 @@ def check(name: str, condition: bool, detail: object = "") -> bool:
     return bool(condition)
 
 
-# ------------------------------------------------------- 严格 unified diff 应用器
+# ------------------------------------------- 行尾归一化 + 严格 unified diff 应用器
+
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+BASELINE_COMMIT = "ffdab44"  # 冻结基线：S01 适配补丁的前像出处
 
 
-def apply_unified_diff(original: str, diff_text: str) -> str:
+def normalize_eol(text: str) -> str:
+    """把 CRLF / CR 统一成 LF：只动行尾，行内字符一个不改。"""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def apply_unified_diff(original: str, diff_text: str, *, reverse: bool = False) -> str:
     """把单文件 unified diff 打到 ``original`` 上；任何上下文不符立即抛错。
 
-    只支持 ``@@ -a,b +c,d @@`` 单文件补丁（本任务的适配补丁形态），
-    不做模糊匹配：基线一漂移就必须失败，而不是静默打歪。
+    行尾归一化（U03 r4 修复）：上下文匹配与拼接一律在 LF 口径下进行，因此
+    "补丁是混行尾、目标文件也是混行尾"不再被误判成 context mismatch。归一化
+    **只**剥掉行尾 ``\\r``，行内字符逐字比较：改内容的漂移照样失败；依然不做
+    模糊匹配、不做空白折叠，基线一漂移就必须报错而不是静默打歪。
+
+    只支持 ``@@ -a,b +c,d @@`` 单文件补丁（本任务的适配补丁形态）。
+    ``reverse=True`` 时按后像匹配、还原前像（用于识别"补丁已应用"）。
     """
-    orig_lines = original.splitlines(keepends=True)
-    diff_lines = diff_text.splitlines(keepends=True)
+    if reverse:
+        diff_text = reverse_unified_diff(diff_text)
+    orig_lines = normalize_eol(original).splitlines(keepends=True)
+    diff_lines = normalize_eol(diff_text).splitlines(keepends=True)
     hunks: list[tuple[int, list[str]]] = []
     index = 0
     while index < len(diff_lines):
         line = diff_lines[index]
         if line.startswith("@@"):
-            header = line.rstrip("\r\n")
+            header = line.rstrip("\n")
             spec = header.split("@@")[1].strip().split(" ")[0]
             old_start = int(spec[1:].split(",")[0])
             index += 1
@@ -104,16 +124,16 @@ def apply_unified_diff(original: str, diff_text: str) -> str:
         for line in body:
             if line.startswith("\\"):
                 continue
-            content = line[1:] if line[:1] in (" ", "+", "-") else line
+            if line[:1] not in (" ", "+", "-"):
+                raise ValueError(f"unexpected diff line: {line!r}")
+            content = line[1:]
             if line.startswith(" "):
                 expect.append(content)
                 produced.append(content)
             elif line.startswith("-"):
                 expect.append(content)
-            elif line.startswith("+"):
-                produced.append(content)
             else:
-                raise ValueError(f"unexpected diff line: {line!r}")
+                produced.append(content)
         actual = orig_lines[start:start + len(expect)]
         if actual != expect:
             raise ValueError(
@@ -126,26 +146,146 @@ def apply_unified_diff(original: str, diff_text: str) -> str:
     return "".join(out)
 
 
+def reverse_unified_diff(diff_text: str) -> str:
+    """反转 unified diff（+/- 互换、hunk 头起止互换），用于从后像还原前像。"""
+    out: list[str] = []
+    for line in normalize_eol(diff_text).splitlines(keepends=True):
+        if line.startswith("@@"):
+            match = _HUNK_HEADER.match(line)
+            if match is None:
+                raise ValueError(f"unparsable hunk header: {line!r}")
+            out.append(
+                f"@@ -{match.group(3)},{match.group(4) or '1'} "
+                f"+{match.group(1)},{match.group(2) or '1'} @@\n"
+            )
+        elif line.startswith(("---", "+++")):
+            out.append(line)
+        elif line.startswith("+"):
+            out.append("-" + line[1:])
+        elif line.startswith("-"):
+            out.append("+" + line[1:])
+        else:
+            out.append(line)
+    return "".join(out)
+
+
+# ------------------------------------------- 补丁状态解析（未应用 / 已应用）
+
+MQ_PATCH = "s01_market_query_adaptation.patch"
+ORCH_PATCH = "u03_orchestrator_integration.patch"
+MQ_REL_PATH = "src/data/market_query.py"
+ORCH_REL_PATH = "src/agents/orchestrator.py"
+
+# 后像特征（补丁新增行）/ 前像特征（补丁删除行）——用于判断现网文件处于哪种状态。
+MQ_ADDED = (
+    "SOURCE_TTL_SECONDS = {",
+    "def _source_number(payload: Any, key: str) -> float | None:",
+    "def _source_quality(payload: Any",
+    'funding_rate = _source_number(premium, "lastFundingRate")',
+)
+MQ_REMOVED = (
+    'funding_rate = float(premium.get("lastFundingRate") or 0.0)',
+    'float(premium.get("markPrice") or 0.0)',
+    'float(oi.get("openInterest") or 0.0)',
+)
+# 接线补丁是纯插入（无删除行），故"未应用"以"新增特征一个都不在"判定。
+ORCH_ADDED = (
+    "ALLOW_UNPINNED_RESEARCH_EVIDENCE = False",
+    "RESEARCH_EVIDENCE_REQUIRED_SOURCES: tuple[str, ...] = (",
+    "allow_unpinned=ALLOW_UNPINNED_RESEARCH_EVIDENCE,",
+)
+ORCH_REMOVED: tuple[str, ...] = ()
+
+
+def patch_text_of(name: str) -> str:
+    return (FIXTURES / name).read_bytes().decode("utf-8")
+
+
+def _patch_state(text: str, added: tuple[str, ...], removed: tuple[str, ...]) -> str:
+    """按前后像特征判断文件状态：``unapplied`` / ``applied`` / ``drifted``。"""
+    body = normalize_eol(text)
+    n_added = sum(1 for marker in added if marker in body)
+    n_removed = sum(1 for marker in removed if marker in body)
+    if n_added == len(added) and n_removed == 0:
+        return "applied"
+    if n_added == 0 and (not removed or n_removed == len(removed)):
+        return "unapplied"
+    return "drifted"
+
+
+def _frozen_baseline(rel_path: str) -> str | None:
+    """从冻结基线取前像；git 不可用 / 无此提交 / 超时一律返回 None（不抛错）。"""
+    try:
+        proc = subprocess.run(
+            ["git", "show", f"{BASELINE_COMMIT}:{rel_path}"],
+            cwd=str(ROOT), capture_output=True, timeout=60, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return proc.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def resolve_patch_states(rel_path: str, patch_name: str,
+                         added: tuple[str, ...], removed: tuple[str, ...],
+                         ) -> tuple[str, str, str]:
+    """统一解析 ``(前像, 后像, 出处)``，两种状态都必须工作。
+
+    - 补丁**未应用**（作者/审查 worktree）：现网文件即前像 → 正向应用（现状行为）；
+    - 补丁**已应用**（集成树，I 已落生产路径）：现网文件即后像 → **绝不再打一次**；
+      前像依次尝试「冻结基线(git)」→「反向应用补丁」，两者都拿不到就显式报错，
+      宁可失败也不静默空转。
+    """
+    patch = patch_text_of(patch_name)
+    on_disk = (ROOT / rel_path).read_bytes().decode("utf-8")
+    state = _patch_state(on_disk, added, removed)
+    if state == "unapplied":
+        return on_disk, apply_unified_diff(on_disk, patch), "现网即前像/未应用"
+    if state == "drifted":
+        raise AssertionError(
+            f"{rel_path}: 现网文件既非补丁前像也非后像（基线漂移），拒绝静默通过"
+        )
+    baseline = _frozen_baseline(rel_path)
+    if baseline is not None and _patch_state(baseline, added, removed) == "unapplied":
+        return baseline, on_disk, f"git:{BASELINE_COMMIT}/已应用"
+    recovered = apply_unified_diff(on_disk, patch, reverse=True)
+    if _patch_state(recovered, added, removed) == "unapplied":
+        return recovered, on_disk, "反向应用/已应用"
+    raise AssertionError(
+        f"{rel_path}: 现网文件是补丁后像，但既取不到冻结基线也无法反向还原"
+    )
+
+
 def load_patched_market_query():
-    """把补丁应用结果作为独立模块导入（不写仓库、不改共享文件）。"""
-    original = (ROOT / "src" / "data" / "market_query.py").read_bytes().decode("utf-8")
-    patch = (FIXTURES / "s01_market_query_adaptation.patch").read_bytes().decode("utf-8")
-    patched = apply_unified_diff(original, patch)
+    """把补丁应用结果作为独立模块导入（不写仓库、不改共享文件）。
+
+    未应用：现网前像 → 正向应用；已应用（集成树）：直接用现网后像，不二次应用。
+    """
+    original, patched, provenance = resolve_patch_states(
+        MQ_REL_PATH, MQ_PATCH, MQ_ADDED, MQ_REMOVED)
     work = Path(tempfile.mkdtemp(prefix="u03_mq_"))
     target = work / "market_query_patched.py"
-    target.write_bytes(patched.encode("utf-8"))
+    target.write_bytes(normalize_eol(patched).encode("utf-8"))
     spec = importlib.util.spec_from_file_location("u03_market_query_patched", target)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module, original, patched
+    return module, original, patched, provenance
 
 
 # ------------------------------------------------------------------- A. 补丁验证
 
 
-def test_patch(module, original: str, patched: str) -> None:
+def test_patch(module, original: str, patched: str, provenance: str) -> None:
     print("\n[A] S01 共享适配补丁：可应用、口径正确")
+    print(f"     现网 {MQ_REL_PATH} 状态解析：{provenance}")
     check("补丁确实改变了目标文件", patched != original)
+    check("后像恒等于「前像 + 补丁」（已应用态不二次应用、也未空转）",
+          normalize_eol(apply_unified_diff(original, patch_text_of(MQ_PATCH)))
+          == normalize_eol(patched))
     check("补丁未触碰开仓白名单/交易范围代码",
           patched.count("scope.allows_open") == original.count("scope.allows_open")
           and patched.count("TradingScope") == original.count("TradingScope"))
@@ -194,24 +334,39 @@ def test_patch(module, original: str, patched: str) -> None:
           and future["fresh_until_ms"] == AS_OF_MS + 60_000, future)
 
 
-def test_patch_rejects_drift() -> None:
+def test_patch_rejects_drift(original: str) -> None:
+    """漂移检测必须仍然有效：行尾归一化不得把它削弱成"随便都能打上"。"""
     print("\n[A2] 补丁对基线漂移敏感（不能静默打歪）")
-    patch = (FIXTURES / "s01_market_query_adaptation.patch").read_bytes().decode("utf-8")
-    original = (ROOT / "src" / "data" / "market_query.py").read_bytes().decode("utf-8")
-    mangled = original.replace(
-        '    funding_rate = float(premium.get("lastFundingRate") or 0.0)\r\n',
-        '    funding_rate = 0.0  # 已被其他改动替换\r\n',
-    ).replace(
+    patch = patch_text_of(MQ_PATCH)
+    base = normalize_eol(original)  # 前像（未应用=现网；已应用=冻结基线/反向还原）
+    mangled = base.replace(
         '    funding_rate = float(premium.get("lastFundingRate") or 0.0)\n',
         '    funding_rate = 0.0  # 已被其他改动替换\n',
     )
-    check("夹具基线确实被改动", mangled != original)
+    check("夹具基线确实被改动", mangled != base)
+    check("被改的正是补丁关注的行（删除行内容已变）",
+          'float(premium.get("lastFundingRate") or 0.0)' not in mangled)
+    for label, candidate in (
+        ("改内容、行尾与前像相同", mangled),
+        ("改内容、且全文件行尾换成 CRLF", mangled.replace("\n", "\r\n")),
+    ):
+        try:
+            apply_unified_diff(candidate, patch)
+        except ValueError as exc:
+            check(f"漂移被拒：{label}", "mismatch" in str(exc), str(exc))
+        else:
+            check(f"漂移被拒：{label}", False, "patch was applied silently")
+
+    print("\n[A3] 行尾归一化：内容一致、行尾不同不再误判 mismatch")
+    all_crlf = base.replace("\n", "\r\n")
     try:
-        apply_unified_diff(mangled, patch)
+        applied = apply_unified_diff(all_crlf, patch)
     except ValueError as exc:
-        check("上下文不符时拒绝应用并报错", True and "mismatch" in str(exc), str(exc))
+        check("全 CRLF 前像仍能应用（行尾不再误判 mismatch）", False, str(exc))
     else:
-        check("上下文不符时拒绝应用并报错", False, "patch was applied silently")
+        check("全 CRLF 前像仍能应用（行尾不再误判 mismatch）", True)
+        check("行尾归一化不改变应用结果（与常规前像逐行一致）",
+              normalize_eol(applied) == normalize_eol(apply_unified_diff(base, patch)))
 
 
 # ------------------------------------------------------------- B. 证据层口径
@@ -342,11 +497,13 @@ def test_legacy_zero_echo_is_not_trusted(results: dict) -> None:
 # ------------------------------------------------- C. 接线补丁的缺省口径（r3）
 
 
-def load_patched_orchestrator() -> tuple[str, str]:
-    """把 U03 接线补丁打到 ``src/agents/orchestrator.py`` 的内存副本上（不写仓库）。"""
-    original = (ROOT / "src" / "agents" / "orchestrator.py").read_bytes().decode("utf-8")
-    patch = (FIXTURES / "u03_orchestrator_integration.patch").read_bytes().decode("utf-8")
-    return original, apply_unified_diff(original, patch)
+def load_patched_orchestrator() -> tuple[str, str, str]:
+    """把 U03 接线补丁打到 ``src/agents/orchestrator.py`` 的内存副本上（不写仓库）。
+
+    同样兼容"已应用"状态：接线补丁是纯插入，二次应用会**静默重复插入**（比
+    market_query 的显式报错更阴），因此已应用时直接采用现网后像。
+    """
+    return resolve_patch_states(ORCH_REL_PATH, ORCH_PATCH, ORCH_ADDED, ORCH_REMOVED)
 
 
 def _literal_assignment(source: str, name: str):
@@ -366,8 +523,12 @@ def _literal_assignment(source: str, name: str):
 def test_orchestrator_wiring_policy() -> None:
     """r3（Q-NEW-2/3）：接线补丁必须在**默认配置**下让两道控制真实生效。"""
     print("\n[C] U03 接线补丁：分源门禁缺省生效 + 轮次分量非空")
-    original, patched = load_patched_orchestrator()
+    original, patched, provenance = load_patched_orchestrator()
+    print(f"     现网 {ORCH_REL_PATH} 状态解析：{provenance}")
     check("补丁确实改变了 orchestrator", patched != original)
+    check("后像恒等于「前像 + 补丁」（已应用态不二次插入）",
+          normalize_eol(apply_unified_diff(original, patch_text_of(ORCH_PATCH)))
+          == normalize_eol(patched))
     patch_text = (FIXTURES / "u03_orchestrator_integration.patch").read_text(encoding="utf-8")
     check("补丁仍是纯插入（无删除行）",
           not [line for line in patch_text.splitlines()
@@ -395,9 +556,9 @@ def main() -> int:
     print("=" * 72)
     print("U03 / S01 分源证据质量 离线回归（独立脚本，无 pytest）")
     print("=" * 72)
-    module, original, patched = load_patched_market_query()
-    test_patch(module, original, patched)
-    test_patch_rejects_drift()
+    module, original, patched, provenance = load_patched_market_query()
+    test_patch(module, original, patched, provenance)
+    test_patch_rejects_drift(original)
     test_source_quality_contract(results)
     test_injection_does_not_change_permissions(results)
     test_legacy_zero_echo_is_not_trusted(results)
