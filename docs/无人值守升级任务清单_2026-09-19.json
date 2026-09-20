@@ -525,7 +525,7 @@
       "title": "策略仓管理和有界退出授权",
       "owner_role": "B",
       "actual_assignee": "U02 作者会话（B 角色）",
-      "status": "IN_PROGRESS",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -634,6 +634,19 @@
             "巡检兜底仅在收到该标的退出请求时触发"
           ],
           "gate_note": "作者报告沙箱 check_quality 仅失败于 **docs/dispatch/RESUME.md:36**（I 自己的文件，写 KI01 时留下了 api_key=<...> 字面量）-> I 已改写该处，**两个门禁恢复全绿**。B 工作区的 4 处 ruff 属**陈旧副本**（同名文件在集成树已干净）"
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "d6fcf51",
+          "verdict": "Q r3 PASS-with-notes",
+          "code_identity": "git diff d6fcf51 HEAD -- <U02 路径> 为空",
+          "patches": "890bb7c/ 的 6 个补丁在集成 U13/U05 后仍 6/6 干净应用、无冲突（补丁基线为 I@40ff52f）",
+          "i_registration": "smoke_u02_strategy_position_manager.py 已写入 SCRIPTS -> MANIFEST OK included=76",
+          "tests": "test_strategy_position_manager **158/0**；smoke_u02 OK；契约 173/0；check_quality **OK files=280**",
+          "cross_task": "smoke_trade_reconciliation 23/0、smoke_order_outbox 26/0、test_execution_faults OK、test_income_reconciliation 140/0、smoke_ui 52/0、smoke_entry_readiness PASS —— 均 exit 0",
+          "offline_regression": "**OFFLINE REGRESSION OK scripts=80**（exit 0）",
+          "verified_residuals": "① `_consumed_ids` 为**纯内存 set**：重启后同 exit_key 会再次 SUBMIT_REDUCE -> '已消费不可重发'**仅在进程内成立**（复验者专项证实；属已登记 P2-9，建议文档措辞补'（进程内）'）② NEW-B `open_ledger()` 无条件覆盖账本会抹掉成交事实（**零调用方**，潜在）③ NEW-D/C 两个窄边界已登记",
+          "note": "VERIFIED 留待 U12 部署证据；账本分区迁移见 U02-LEDGER-PARTITION（未落地前不得在生产启用 MTA_ACCOUNT_REF）"
         }
       ],
       "blockers": [],
@@ -671,7 +684,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "43210d8",
       "review_assignments": [
         {
           "round": "r2",
