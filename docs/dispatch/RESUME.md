@@ -34,7 +34,7 @@
 | 线 | 任务 | 分支/base | 状态 | 备注 |
 |---|---|---|---|---|
 | CD | U05 真实耗时/模型降级/决策原因 | `task/U05` @ `0e522b1` | **作者已交付 → 初审 B 中** | head `04a2c30`（10 提交）；自测 95/0、54/0、48/0、45/0；15 补丁 `apply --check` 15/15；**新增文件为主、无共享文件越界**；**零迁移/schema 影响**（主动避开 U01 的坑）；**全量 delta 新增失败 = ∅**；KI01 由 patches 13/14 的 `registered_false_positives` 机制处置（**安全性待 B 专项判定**）。**撤回 market_query 适配**（见「跨任务耦合」）|
-| EF | U13 托管/单实例/备份恢复 | `task/U13` @ `0e522b1` | **作者已交付 → 初审 F 中** | head `bf4c0cc`（6 提交）；`test_supervision` 131 PASS/0；11 个补丁 `apply --check` 11/11。**KI02 已修**：`resolve_python_executable` 回退链 → worktree 内 `smoke_windows_service_plan` 19/0，全量回归不再中止（补丁应用态 **0 失败**）；**配置无需改动**（缺陷在解析层）。**偏差记录**：作者把 11 个共享文件改动提交进了自己分支（应只交补丁）|
+| EF | U13 托管/单实例/备份恢复 | `task/U13` @ `0e522b1` | **初审 CHANGES_REQUESTED → r2 修复中** | head `bf4c0cc`；F 初审 P0=0/P1×3：**核心已独立复现属实**（补丁逐字节一致、`30/60/120` 持久化、锁真互斥、epoch/坏包守卫有效）。阻断：**P1-2 恢复门禁 fail-open**（`recovery_gate.json` 损坏/删除 → `allowed=True`）、**P1-3 门禁未接线**（`complete_reconcile` 无调用点 → 永久 `RECONCILE_REQUIRED` 每次重启 close_only）、KI02 回退面未收口（无效 `MTA_PYTHON` 被静默忽略、安装期只告警不失败）。**KI02 主体已修**：打补丁树全量回归 **0 失败**（pristine 有 1=KI02）。**偏差**：曾把共享文件提交进自己分支（r2 要求只交补丁）|
 | B | U02 策略仓管理与有界退出 | — | 待派发 | 依赖 U00+U04+**U15**；U04 尚未 INTEGRATED |
 | CD | U06a / U08 | — | 待派发 | 线内串行：U05 → U06a → U08 |
 | EF | U14 / U10a | — | 待派发 | 线内串行：U13 → U14 → U10a |
