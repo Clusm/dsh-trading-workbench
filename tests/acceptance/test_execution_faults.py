@@ -93,6 +93,18 @@ def load_fixture(name: str) -> dict[str, Any]:
         return json.load(handle)
 
 
+def _migration_versions(db: Any) -> list[int]:
+    """读取当前迁移版本集合（升序）。
+
+    **相对式取数**：本文件不写死"链到几"。U04 只做 ``ALTER TABLE ... ADD COLUMN``
+    式的前向兼容补齐，**不新增迁移、不抬升 schema 版本号**——这是
+    "U04 前后该集合不变"的**相对性质**，与"链当前停在第几版"无关。硬编码上限
+    会随任何其它任务的迁移推进而误报（U01 的迁移 17 正是例子）。
+    """
+    return [int(row["version"]) for row in db.fetch_all(
+        "SELECT version FROM schema_migrations ORDER BY version")]
+
+
 def _is_raised(exc_type: type[BaseException], fn: Any) -> bool:
     try:
         fn()
@@ -930,11 +942,15 @@ def section_schema_and_guard(tmpdir: Path) -> None:
     """[9][10] 向前兼容列补齐；保护核验失败时的平仓路由（健康故障不平仓）。"""
     print("\n[9] 执行命令分账列的幂等补齐（不抬升 schema 版本号）")
     db = AuditDatabase(tmpdir / "schema.sqlite")
-    versions_before = [
-        row["version"] for row in db.fetch_all(
-            "SELECT version FROM schema_migrations ORDER BY version")]
-    check("补列前迁移版本为 1..16（U04 不新增迁移）",
-          versions_before == list(range(1, 17)), f"actual={versions_before}")
+    versions_before = _migration_versions(db)
+    schema_version_before = db.current_schema_version()
+    # 相对式：只断言"链良构"（自 1 起、连续、无跳号/重复、非空），**不写死到 16**。
+    # 硬编码上限会把"U04 不新增迁移"这一相对性质错写成"基线绝对状态"，任何其它
+    # 任务的迁移推进都会误报（U01 的迁移 17 已实测打破过这条断言）。
+    check("补列前迁移链良构（自 1 起连续前缀、非空；上限不写死）",
+          len(versions_before) > 0
+          and versions_before == list(range(1, len(versions_before) + 1)),
+          f"actual={versions_before}")
     legacy_columns = (
         "client_order_id,environment,release_id,business_key,symbol,side,position_side,"
         "order_type,purpose,qty,price,reduce_only,endpoint,status,request_json,"
@@ -955,9 +971,16 @@ def section_schema_and_guard(tmpdir: Path) -> None:
           and "protection_order_mirror.quantity_text" in added
           and len(added) == 10, f"added={added}")
     check("第二次调用为空操作（幂等）", ensure_execution_schema(db.conn) == ())
-    check("补列不改变迁移版本号",
-          [row["version"] for row in db.fetch_all(
-              "SELECT version FROM schema_migrations ORDER BY version")] == versions_before)
+    # 核心相对性质：补列前/后取两次事实，断言**相等**——这同时证明了
+    # "U04 不新增迁移"（集合不变，没有多出任何一行 schema_migrations）与
+    # "不抬升 schema 版本号"（current_schema_version() 不变，release_evidence 的
+    # GO 判定不受影响）。用前后两次取数而非具体集合，是这条性质的正确表达。
+    versions_after = _migration_versions(db)
+    check("补列不新增迁移且不改变迁移版本集合（前后两次取数相等）",
+          versions_after == versions_before, f"before={versions_before} after={versions_after}")
+    check("补列不抬升 schema 版本号（current_schema_version 前后相等）",
+          db.current_schema_version() == schema_version_before,
+          f"before={schema_version_before} after={db.current_schema_version()}")
     legacy = db.fetch_one("SELECT * FROM order_outbox WHERE client_order_id='legacy-1'")
     check("旧行仍可读且新列为空（不重写历史数据）",
           str(legacy["status"]) == "FILLED" and legacy["command_kind"] is None
