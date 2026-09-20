@@ -1,0 +1,53 @@
+diff --git a/src/data/market_query.py b/src/data/market_query.py
+index 25dac69..f152a6f 100644
+--- a/src/data/market_query.py
++++ b/src/data/market_query.py
+@@ -4,6 +4,7 @@ from __future__ import annotations
+ import statistics
+ import threading
+ import time
++from collections.abc import Mapping
+ from concurrent.futures import ThreadPoolExecutor
+ from pathlib import Path
+ from typing import Any
+@@ -21,6 +22,7 @@ from data.binance_public import (
+     prepare_closed_klines,
+     select_top_symbols,
+ )
++from core.decision_trace import DecisionReason, reason_from_source_errors
+ from data.binance_transport import request_json
+ from data.kline_store import get_bar_metadata, get_klines
+ from data.market_stream_cache import get_marks, get_tickers
+@@ -176,6 +178,32 @@ def _pack_candles(klines: list[list[Any]], interval: str, max_candles: int = 20)
+     }
+ 
+ 
++def reason_from_quality(quality: Mapping[str, Any] | None) -> DecisionReason | None:
++    """把 ``data_quality`` 的可观测缺口映射为 U05 原因码（供执行/审计侧消费）。
++
++    判定只看**结构化事实**：``ok=False`` / ``issues`` 非空 / 有源不可用 →
++    ``DATA_UNAVAILABLE``；部分源可用（取到但不全）另附 ``RESEARCH_INCOMPLETE``
++    辅因——"完全取不到"与"只拿到一部分"是两件不同的事。无缺口返回 ``None``。
++    """
++    payload = dict(quality or {})
++    if not payload:
++        return None
++    issues = [str(item) for item in (payload.get("issues") or [])]
++    sources = payload.get("sources") if isinstance(payload.get("sources"), Mapping) else {}
++    unavailable = sorted(
++        str(name) for name, item in sources.items()
++        if isinstance(item, Mapping) and not item.get("available", True)
++    )
++    missing = [str(item) for item in (payload.get("missing_fields") or [])]
++    if payload.get("ok", True) and not issues and not unavailable:
++        return None
++    degraded = bool(sources) and bool(unavailable) and len(unavailable) < len(sources)
++    return reason_from_source_errors(
++        issues + [f"source_unavailable:{name}" for name in unavailable] + missing,
++        labels=("market_query",), degraded=degraded,
++    )
++
++
+ def query_symbol_detail(symbol: str, interval: str = "15m", limit: int = 200,
+                         include_candles: bool = True,
+                         deadline: float | None = None) -> dict[str, Any]:
