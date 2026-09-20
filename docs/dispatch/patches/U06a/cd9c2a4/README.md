@@ -98,3 +98,32 @@ cfg B (default)               : exit=0
   以便区分"无数据"与"未计算"。
 - `decisions.html` 的改动是**纯展示层**：不改变任何门禁判定、不改变执行权重、
   不新增数据源；所有新字段都在缺失时回落到原有展示。
+
+## 6. 应用后的实测（沙箱，前像 = 集成 HEAD）
+
+在 `git archive <本任务 head>` 的沙箱里应用本目录 3 个补丁后实测：
+
+```text
+tests/integration/test_shadow_status.py   exit=0  PASS 239 / FAIL 0   （未应用时 200 / 0）
+scripts/smoke_u06a_shadow_isolation.py    exit=0  PASS 46  / FAIL 0   （未应用时 10 / 0）
+scripts/smoke_contracts_v3.py             exit=0  PASS 173 / FAIL 0
+scripts/smoke_intel_sidecar.py            exit=0  19 通过 / 0 失败    （未改则失败）
+scripts/smoke_ui.py                       exit=0  通过 52 / 失败 0
+scripts/check_quality.py                  exit=0  QUALITY CHECK OK files=264 untracked=0
+scripts/run_offline_regression.py         exit=0  OFFLINE REGRESSION OK scripts=80
+```
+
+`run_offline_regression` 的 pristine 基线（同一沙箱、不打补丁）同样是
+`OFFLINE REGRESSION OK scripts=80` → **失败集合差集 = ∅**（`scripts=80` 而非 79，
+是因为沙箱里把本任务新增的 `scripts/smoke_u06a_shadow_isolation.py` 按清单要求
+临时登记了一次；**该登记行必须由 I 加入**，见该脚本 docstring）。
+
+**`/decisions` 真实渲染**（沙箱 TestClient，status 200）命中：
+`影子口径` / `LEGACY_ACTIVE` / `配置声明不可抬升` / `v2 固定时点标签 DEFERRED` /
+`A/B/C 研究隔离` / `C=unconfigured` / `旧口径已知缺陷（6 条）`；
+`可人工评审` 已消失。
+
+> ⚠️ **集成注意**：新增冒烟脚本会让 `run_offline_regression` 的清单校验
+> （`_validate_smoke_manifest`）在**登记前**直接 raise
+> `RuntimeError: 未登记冒烟脚本: scripts/smoke_u06a_shadow_isolation.py`。
+> 必须与登记行**同批原子落地**（`W1-MANIFEST-TRANSIENT`）。
