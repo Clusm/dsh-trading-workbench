@@ -1423,6 +1423,25 @@
             "P1 collect_runtime_identity 未暴露 fallback_local=False -> 生产走 live:local（跨账户碰撞）",
             "U02 缺口: 账本 account_ref 仍 sha256(api_key)[:16] 且轮换漂移，与 U15 不一致；指纹 diff-7 被作者标 fixed 但实际未闭合（L9）"
           ]
+        },
+        {
+          "type": "review_r1_E",
+          "candidate": "a136cb5",
+          "verdict": "CHANGES_REQUESTED",
+          "counts": "P0 x1 / P1 x5 / P2 x9 / P3 x7",
+          "archived_path": "docs/dispatch/reviews/U15/a136cb5/E_r1.md",
+          "key_findings": [
+            "P0 配置漂移失明: effective_config_hash 白名单仅 23 键；risk_profile.lock.json/decision_policy/risk_learning/windows_service 在模块零引用，而冻结 K01 EFFECTIVE_CONFIG_SOURCES 明列这六类",
+            "P0 实证: ai_daily_loss_stop 0.30->0.99、require_initial_sl_tp->false、base_url_map.live->evil、strategy_max_leverage 20->100、capital.initial_equity 500->1e5 全部同哈希；裁剪 settings 至白名单键亦同哈希",
+            "P0 反向: src/ 下遗留脚本改动会改变身份（敏感度倒挂）",
+            "P1 门禁默认 fail-open（与 B 的 P0-1 同一缺陷）",
+            "P1 登记失真: diff-7 称'状态根一致性校验接口已提供'但模块无任何 state_root 接口；decl-7 标 fixed 但 EXECUTION_MODE=live 无 profile 仍 locked=False 放行且无告警",
+            "P1 {\"cards\":[]} 空策略卡可建身份并放行"
+          ]
+        },
+        {
+          "type": "author_claim_audit",
+          "note": "作者自述'指纹报告修复 12 项'，但 E/B 两名独立审查者各自证明其中至少 2 项为虚报（diff-7 状态根接口不存在 / diff-7 account_ref 未闭合）。作者对自己工作的'已修复'声明不得作为证据。"
         }
       ],
       "blockers": [
