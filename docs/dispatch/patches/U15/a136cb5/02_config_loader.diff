@@ -1,10 +1,14 @@
 --- a/src/core/config_loader.py
 +++ b/src/core/config_loader.py
-@@ -9,6 +9,26 @@
+@@ -9,6 +9,30 @@
  import yaml
  from dotenv import load_dotenv
  
-+from core.runtime_identity import collect_effective_config
++from core.runtime_identity import (
++    collect_effective_config,
++    collect_source_config_files,
++    verify_environment_state_root,
++)
 +
 +
 +#: 原因码 / 异常标识：未显式选择 profile 却要跑实盘。
@@ -27,27 +31,37 @@
  
  @dataclass
  class Settings:
-@@ -53,6 +73,40 @@
+@@ -53,6 +77,63 @@
              raise ValueError("实盘目录不能通过链接指向其他账本")
          return target
  
 +    def assert_environment_matches_state_root(self, environment: str | None) -> None:
 +        """校验 ``environment`` 与状态根是否一致（fail-closed）。
 +
-+        唯一被拒绝的组合是：``profile_name is None`` 且 ``environment == "live"``
-+        —— 此时 ``runtime_path`` 无法把实盘状态锁进 ``data/live``，公共目录会
-+        被实盘账本占用（换代码根不改状态根 / 双控制台串账本）。抛
-+        ``LiveWithoutProfileStateRootError``（``code`` 为
-+        ``LIVE_WITHOUT_PROFILE_STATE_ROOT``），由启动方决定如何终止进程。
++        判定委托给 ``core.runtime_identity.verify_environment_state_root``
++        （唯一判定源，避免两套口径）。被拒绝的组合（都只在 environment 为
++        live 时成立）：
 +
-+        未显式传入 environment、或传入 demo/testnet/paper 时保持现状不改变
-+        任何既有行为（存在性触发，缺省即向后兼容）。
++        - 未显式选择 profile（``STATE_ROOT_PROFILE_UNLOCKED``）：``runtime_path``
++          只有 live 会分区到 ``data/live``，无 profile 时实盘退回公共根；
++        - 状态根就是公共根 / 代码根（``LIVE_SHARED_STATE_ROOT``）；
++        - 除此之外的 live 不一致（``ENVIRONMENT_STATE_ROOT_MISMATCH`` /
++          ``STATE_ROOT_UNBOUND`` 等）同样按 fail-closed 拒绝。
++
++        ``environment`` 未传或为 demo/testnet/paper 时**直接返回**，不改变任何
++        既有行为（存在性触发，缺省即向后兼容）。
 +        """
 +        text = str(environment or "").strip().lower()[:32]
-+        if self.profile_name is None and text == "live":
++        if text != "live":
++            return
++        data_rel = str(self.raw_settings.get("paths", {}).get("data_dir", "data"))
++        reasons = verify_environment_state_root(
++            text, data_rel, profile=self.profile_name, project_root=self.project_root,
++        )
++        if reasons:
 +            raise LiveWithoutProfileStateRootError(
-+                f"{LIVE_WITHOUT_PROFILE_STATE_ROOT}: MTA_PROFILE 未设置但 environment=live，"
-+                "实盘状态根无法确定"
++                f"{LIVE_WITHOUT_PROFILE_STATE_ROOT}: environment={text} "
++                f"profile={self.profile_name} reasons={','.join(reasons)}"
 +            )
 +
 +    @property
@@ -58,11 +72,24 @@
 +        只收录白名单点分路径中 **实际存在** 的值，命中敏感标记的键被丢弃；
 +        环境覆盖只取白名单内确实设置的变量，因此 ``.env`` 里的凭据不可能
 +        进入有效配置哈希，代码默认值也不会被当成有效值。
++
++        r2：额外采集 K01 ``EFFECTIVE_CONFIG_SOURCES`` 的其余五类来源
++        （decision_policy / agents / risk_learning / risk_profile.lock /
++        windows_service），使风险档、止损线、执行端点与服务定义的漂移都会
++        改变 ``effective_config_hash``；来源文件缺失同样改变哈希并在
++        ``missing_sources`` 可见。
 +        """
++        dumps, dropped, dropped_payloads, missing = collect_source_config_files(
++            self.project_root,
++        )
 +        return collect_effective_config(
 +            raw_settings=self.raw_settings,
 +            profile=self.profile_name,
 +            env=os.environ,
++            source_configs=dumps,
++            source_dropped_sensitive=dropped,
++            source_dropped_payloads=dropped_payloads,
++            source_missing=missing,
 +        ).as_payload()
 +
      @property

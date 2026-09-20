@@ -1,5 +1,32 @@
 # U15 共享适配补丁（基线 `a136cb5`）
 
+> **r2 修订（2026-09-21，作者会话 F）**：仅 `02_config_loader.diff` 被替换，其余
+> 三个补丁**逐字节未变**（`git diff` 可核对），因为它们调用的公开接口在 r2 保持
+> 向后兼容（新增参数全部有默认值）：
+>
+> - `01_release_manifest.diff`：`collect_runtime_identity` 的调用形态不变；r2 起
+>   它产出的 `effective_config_hash` 自动覆盖 K01 六类配置来源，且
+>   `identity_blockers` 会多出 live 专属原因码（如 `EXECUTION_SCOPE_UNLOCKED`、
+>   `ACCOUNT_REF_UNPROVEN`）——这是信息增加，不是接口破坏。
+> - `03_dashboard_app.diff`：只用 `authorize_control_request` /
+>   `verify_control_write`，二者 r2 未改签名与语义。
+> - `04_entry_readiness.diff`：只消费 `identity_blockers` / `model_route_ok`
+>   两个 facts 键，r2 未改其语义。
+>
+> `02_config_loader.diff` 的 r2 变化：① `effective_config_payload` 额外采集
+> `collect_source_config_files`（decision_policy / agents / risk_learning /
+> risk_profile.lock / windows_service），使风险档、止损线、执行端点与服务定义的
+> 漂移都会改变指纹；② `assert_environment_matches_state_root` 的判定改为委托
+> `verify_environment_state_root`（单一判定源），并**只在 `environment == "live"`
+> 时收紧**——其余组合直接返回，行为与修订前一致。
+>
+> 修订后用 `git apply --check -p1` 重新验证通过；并在工作树外的 sandbox
+> （`_scratch_F/patchgen/sandbox/`，原样 `src/` + 修订后的 `config_loader.py`）
+> 实跑：live+无 profile → `LIVE_WITHOUT_PROFILE_STATE_ROOT`、live+公共根 → 同左、
+> demo/testnet/paper/空值 → 6/6 不抛、`effective_config_payload` 为三字段且
+> `config_sources` 含六个标签、payload 中无 `SK-` 字面量。
+
+
 本目录是 U15「运行身份、有效配置和控制权限」的**共享文件适配补丁**，供 I 在
 `task/U15`（`src/core/runtime_identity.py` + 两个验收脚本）之上把共享文件接线
 合入。之前只提交了 `runtime_identity.py` 与验收脚本，共享文件的改动停留在文字
@@ -53,15 +80,20 @@
     仍为空记 `unknown`）；不传时行为与旧签名兼容。I 合入时建议由服务传入
     `service.runtime_instance_id`。
 
-### 02 `config_loader.py`（向后兼容）
+### 02 `config_loader.py`（向后兼容，r2 已修订）
 
 - `Settings.effective_config_payload`：调用 `collect_effective_config`，返回 K01
   三字段载荷（白名单点分路径 + 仅实际存在的值 + 白名单环境变量），凭据与
-  `.env` 原文不可能进入。
-- `Settings.assert_environment_matches_state_root(environment)`：`profile_name is
-  None` 且 `environment == "live"` 时抛 `LiveWithoutProfileStateRootError`
-  （`code` / 消息为 `LIVE_WITHOUT_PROFILE_STATE_ROOT`）。其它组合（demo /
-  testnet / paper / 空值 / 已设 profile）不改变任何既有行为。调用时机由 U13
+  `.env` 原文不可能进入；r2 起并入 `collect_source_config_files` 的六类来源
+  （settings / decision_policy / agents / risk_learning / risk_profile.lock /
+  windows_service），缺失来源以 `__missing__` 标记进入哈希。
+- `Settings.assert_environment_matches_state_root(environment)`：仅在
+  `environment == "live"` 时委托 `verify_environment_state_root` 判定，命中
+  任一原因码（`STATE_ROOT_PROFILE_UNLOCKED` / `LIVE_SHARED_STATE_ROOT` /
+  `ENVIRONMENT_STATE_ROOT_MISMATCH` / `STATE_ROOT_UNBOUND`）即抛
+  `LiveWithoutProfileStateRootError`（`code` / 消息为
+  `LIVE_WITHOUT_PROFILE_STATE_ROOT`，消息含具体原因码）。其余组合（demo /
+  testnet / paper / 空值）不改变任何既有行为——函数直接返回。调用时机由 U13
   接线（启动前终止进程）。
 
 ### 03 `dashboard/app.py`（行为变更，见下）

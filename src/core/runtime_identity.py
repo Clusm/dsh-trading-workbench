@@ -2100,15 +2100,20 @@ def verify_environment_state_root(
 
     - ``environment`` 未声明或不在 ``MODE_ALLOWED`` → ``ENVIRONMENT_UNBOUND``；
     - ``state_root`` 未声明/空白 → ``STATE_ROOT_UNBOUND``；
-    - 未显式选择 profile → ``STATE_ROOT_PROFILE_UNLOCKED``（状态根无法唯一确定）；
+    - ``environment == "live"`` 但未显式选择 profile →
+      ``STATE_ROOT_PROFILE_UNLOCKED``（``Settings.runtime_path`` 只有 live 会
+      分区到 ``data/live``，无 profile 时实盘退回公共根）；
     - profile 与 environment 不一致 → ``ENVIRONMENT_STATE_ROOT_MISMATCH``；
     - ``environment == "live"`` 且状态根解析到公共 ``<project_root>/data`` 或
       ``project_root`` 本身 → ``LIVE_SHARED_STATE_ROOT``。
 
+    demo/paper/testnet 不产生 live 专属原因码：它们沿用既有共享根布局，不是
+    不一致（``STATE_ROOT_PROFILE_UNLOCKED`` 只对 live 报告）。
+
     只判定路径语义：不改路径、不读文件、不创建目录。``RuntimePaths`` 的生成与
     启动期接线（终止进程）归 U13；``docs/dispatch/patches/U15/a136cb5/
     02_config_loader.diff`` 提供 ``Settings.assert_environment_matches_state_root``
-    作为现成接线点。
+    作为现成接线点（该补丁只在 environment=live 时收紧，其余组合行为不变）。
     """
     reasons: list[str] = []
     env = _text(environment).lower()
@@ -2117,24 +2122,26 @@ def verify_environment_state_root(
     if state_root is None or not _text(state_root):
         reasons.append(STATE_ROOT_UNBOUND)
     declared_profile = _text(profile).lower()
-    if not declared_profile:
-        reasons.append(STATE_ROOT_PROFILE_UNLOCKED)
-    elif env and declared_profile != env:
+    if declared_profile and env and declared_profile != env:
         reasons.append(ENVIRONMENT_STATE_ROOT_MISMATCH)
-    if env == "live" and _text(state_root):
-        raw = _text(state_root).replace("\\", "/").rstrip("/").lower()
-        try:
-            resolved = Path(state_root) if project_root is None \
-                else Path(project_root) / Path(state_root)
-            resolved = resolved.resolve()
-        except OSError:  # pragma: no cover - 取决于文件系统
-            resolved = None
-        shared = {"data", ".", "data/", "./data"}
-        if raw in shared or (
-            resolved is not None and project_root is not None
-            and resolved in {(Path(project_root) / "data").resolve(), Path(project_root).resolve()}
-        ):
-            reasons.append(LIVE_SHARED_STATE_ROOT)
+    if env == "live":
+        if not declared_profile:
+            reasons.append(STATE_ROOT_PROFILE_UNLOCKED)
+        if _text(state_root):
+            raw = _text(state_root).replace("\\", "/").rstrip("/").lower()
+            try:
+                resolved = Path(state_root) if project_root is None \
+                    else Path(project_root) / Path(state_root)
+                resolved = resolved.resolve()
+            except OSError:  # pragma: no cover - 取决于文件系统
+                resolved = None
+            shared = {"data", ".", "data/", "./data"}
+            if raw in shared or (
+                resolved is not None and project_root is not None
+                and resolved in {(Path(project_root) / "data").resolve(),
+                                 Path(project_root).resolve()}
+            ):
+                reasons.append(LIVE_SHARED_STATE_ROOT)
     return tuple(dict.fromkeys(reasons))
 
 
