@@ -27,15 +27,15 @@
 | CD | U03 | `fb8ae5a` | **✅ INTEGRATED（接线暂缓）** | r3 复验 PASS → 集成时暴露"仅集成态可见"缺陷（测试读现网文件二次打补丁）→ r4 修好（两态均通过 + 行尾归一化、不削弱漂移检测），**真实集成树绿灯**。**但 U03 的 orchestrator 接线补丁使管线缺 pinned 身份时 fail-closed 拒绝全部开仓 → 既有 `smoke_p0b_loop.py` 与 `smoke_ui.py` 新增失败**（仅 U15 集成时两者均 PASS）。决策：**暂缓接线补丁**（保留模块 + S01 + 登记），撤销后两者恢复（28/0、52/0）。接线依赖 U15 身份接入管线 → 归 **U12 BUILD 联合候选**。 |
 | B | U04 | `8660c55` | **r4 修复完成 → 聚焦复验中** | r4 已修 **N6**（`FILLED` 必须由分量背书，否则退回推导）→ 两条路径 `filled=0.02/working=0/terminal=0.00/viol=()`；**补齐 `X=FILLED` 覆盖**（154→**167 通过/0 失败**，未修树 155/12 失败=非空转）；**N7 选择修**（`EXPIRED_IN_MATCH` 归一为词表内终态、可重水化、历史遗留行自愈）；**N2 残余如实写入测试注释**（结构断言挡不住"对象正确、读路径退化"，并发实测 6~20/20000 裸仓）。全量 delta = ∅ |
 
-**W1 出口状态**：**四条线作者全部交付**（U01/U03/U15/U04）；**U00/U01/U03/U15 已 INTEGRATED**（U03 的 orchestrator 接线暂缓，见 `W1-JOINT-WIRING`）；U04 r3 复验进行中。
+**W1 出口状态：✅ 完成** —— **U00 / U01 / U03 / U04 / U15 全部 INTEGRATED**。U03 的 orchestrator 接线暂缓（`W1-JOINT-WIRING`，归 U12）。W1 共经历：U01（r2+r3）、U03（r2+r3+r4）、U04（r2+r3+r4+r5）、U15（r2+r3）多轮修复 + 每轮独立复验；每条任务的集成都做了**代码与已验证 head 的逐字节一致性证明**，并在补丁应用后跑**全量离线回归与 pristine 的失败集合差集**。
 
 ### W2 进度
 
 | 线 | 任务 | 分支/base | 状态 | 备注 |
 |---|---|---|---|---|
 | CD | U05 真实耗时/模型降级/决策原因 | `task/U05` @ `0e522b1` | **作者已交付 → 初审 B 中** | head `04a2c30`（10 提交）；自测 95/0、54/0、48/0、45/0；15 补丁 `apply --check` 15/15；**新增文件为主、无共享文件越界**；**零迁移/schema 影响**（主动避开 U01 的坑）；**全量 delta 新增失败 = ∅**；KI01 由 patches 13/14 的 `registered_false_positives` 机制处置（**安全性待 B 专项判定**）。**撤回 market_query 适配**（见「跨任务耦合」）|
-| EF | U13 托管/单实例/备份恢复 | `task/U13` @ `0e522b1` | **初审 CHANGES_REQUESTED → r2 修复中** | head `bf4c0cc`；F 初审 P0=0/P1×3：**核心已独立复现属实**（补丁逐字节一致、`30/60/120` 持久化、锁真互斥、epoch/坏包守卫有效）。阻断：**P1-2 恢复门禁 fail-open**（`recovery_gate.json` 损坏/删除 → `allowed=True`）、**P1-3 门禁未接线**（`complete_reconcile` 无调用点 → 永久 `RECONCILE_REQUIRED` 每次重启 close_only）、KI02 回退面未收口（无效 `MTA_PYTHON` 被静默忽略、安装期只告警不失败）。**KI02 主体已修**：打补丁树全量回归 **0 失败**（pristine 有 1=KI02）。**偏差**：曾把共享文件提交进自己分支（r2 要求只交补丁）|
-| B | U02 策略仓管理与有界退出 | — | 待派发 | 依赖 U00+U04+**U15**；U04 尚未 INTEGRATED |
+| EF | U13 托管/单实例/备份恢复 | `task/U13` @ `0e522b1` | **r2 修复完成 → 复验中** | r2 已修 **P1-2**（安装戳 `recovery_gate.json.installed`：损坏→`GATE_CORRUPT`、删除→`GATE_MISSING` 均 `allowed=False`；**从未恢复**才 `allowed=True`）与 **P1-3**（`submit_recovery_reconcile()` 成为 `complete_reconcile` 唯一生产调用点 + `before_entry` 接入开仓链 + `POST /api/recovery/reconcile`，端到端含重启第二实例）；KI02 收口（无效 `MTA_PYTHON` 报错、安装期失败）。验收 **166 PASS/0**（原 131），打补丁树全量回归 **0 失败**。**r2 已只交补丁**（12 个 @ `b55c4fb/`；**注意旧目录 `a27fc17/` 仍在，二选一**）|
+| B | U02 策略仓管理与有界退出 | `task/U02` @ `45ebdff` | **作者进行中** | 依赖 U00+U04+U15 **均已满足**；新建 `strategy_position_manager.py`/`management_authorization.py`；消费 U15 的绑定接口与 U04 的保护链路。**额外承担 U15 的跨任务阻塞项**：账本侧 `trade_reconciliation.py:66-69` 的 `account_ref=sha256(api_key)[:16]` 随轮换漂移且与 U15 派生值不一致 |
 | CD | U06a / U08 | — | 待派发 | 线内串行：U05 → U06a → U08 |
 | EF | U14 / U10a | — | 待派发 | 线内串行：U13 → U14 → U10a |
 
