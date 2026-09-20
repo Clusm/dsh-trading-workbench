@@ -100,8 +100,17 @@ git apply --check -p1 <01|02|03|04|05|06>          # 六个补丁各自 OK（独
   smoke_trade_reconciliation / smoke_decision_pipeline / smoke_service_lifecycle /
   smoke_close_reconcile / smoke_fault_matrix / smoke_contracts_v3 /
   smoke_entry_readiness / smoke_ui
-生效性探针（证明不是"文件改了行为没变"）：tests/probe_u02_wiring.py、tests/probe_u02_service.py
+生效性探针（证明不是"文件改了行为没变"，须在已应用补丁的沙箱内运行）：
+  _scratch_B/probe_u02_wiring.py   -> PROBE FAIL=0（account_ref 解耦/轮换不变 + 纸面重复退出幂等 + 旧仓迁移）
+  _scratch_B/probe_u02_service.py  -> SVC PROBE FAIL=0（账户域绑定/注入/零退出/emergency 与 pause 语义）
+  _scratch_B/dl03_probe.py         -> DL03 PROBE FAIL=0（管理动作优先 + NEEDS_AUTH + 摘除不降级为 open）
+证据文件：_scratch_B/out_{pristine,sb}.txt（逐条 exit 码）、_scratch_B/log_{pristine,sb}.txt
+补丁生成器（可复现）：_scratch_B/apply_u02_changes.py <目标根>；delta 工具：_scratch_B/run_regression_matrix.py
 ```
+
+> 说明：`_scratch_B/` 是作者本地证据目录，**不属于交付物**，可整体删除；它不参与
+> 任何补丁或测试。仓库的 ``tests/`` 下**没有** `probe_*.py`（未提交），避免把
+> "只在补丁态可跑"的探针混进两态安全的自有测试。
 
 ## 写入的共享列/字段：既有语义与消费者（不改语义，只改来源或新增）
 
