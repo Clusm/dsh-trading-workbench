@@ -1,0 +1,76 @@
+diff --git a/scripts/health_watch.py b/scripts/health_watch.py
+index cafa749..b47cdff 100644
+--- a/scripts/health_watch.py
++++ b/scripts/health_watch.py
+@@ -10,10 +10,19 @@
+ 用法示例：
+   .venv/Scripts/python.exe scripts/health_watch.py --once
+   .venv/Scripts/python.exe scripts/health_watch.py --interval-seconds 30 --count 10
++  .venv/Scripts/python.exe scripts/health_watch.py --profile live --state-root D:/state --once
++
++U14（F06/F12/F22）：``--state-root`` 是状态根的显式注入点（与
++``MTA_STATE_ROOT`` / ``paths.state_root`` 同一口径，均由
++``core.runtime_paths.resolve_state_base`` 判定），换代码目录部署时用它可以
++盯住**同一份**状态。输出 JSON 追加 ``trading_evidence_at`` / ``outage_kind`` /
++``state_root_source`` 等字段；退出码语义不变（0 健康且已验证 / 1 发现异常 /
++2 健康但外部告警通道未验证）。
+ """
+ from __future__ import annotations
+ 
+ import argparse
++import inspect
+ import json
+ import os
+ import sys
+@@ -38,18 +47,35 @@ def _load_settings_yaml(project_root: Path) -> dict:
+         return {}
+ 
+ 
++def _from_settings_supports_state_root() -> bool:
++    """探测 ``from_settings`` 是否已接受 ``state_root``（共享补丁可能未同时应用）。"""
++    try:
++        return "state_root" in inspect.signature(
++            HealthWatchConfig.from_settings).parameters
++    except (TypeError, ValueError):  # pragma: no cover - 内建/不可解析
++        return False
++
++
+ def _build_config(args: argparse.Namespace) -> HealthWatchConfig:
+     project_root = Path(args.project_root).resolve()
+     profile = args.profile if args.profile else os.getenv("MTA_PROFILE")
+     settings = _load_settings_yaml(project_root)
+-    return HealthWatchConfig.from_settings(
+-        project_root,
+-        profile=profile,
+-        observation_stale_seconds=(
++    common = {
++        "profile": profile,
++        "observation_stale_seconds": (
+             float(args.observation_stale_seconds)
+             if args.observation_stale_seconds is not None else None),
+-        raw_settings=settings,
+-    )
++        "raw_settings": settings,
++    }
++    if _from_settings_supports_state_root():
++        return HealthWatchConfig.from_settings(
++            project_root, state_root=args.state_root, **common)
++    # 核心补丁未同时应用：显式拒绝，而不是静默忽略 --state-root（静默忽略会让
++    # 操作者以为盯住了指定状态根，实际盯的是旧布局）。
++    if args.state_root:
++        raise SystemExit(
++            "--state-root 需要 src/core/health_watch.py 的 U14 适配补丁同时应用")
++    return HealthWatchConfig.from_settings(project_root, **common)
+ 
+ 
+ def _run_once(config: HealthWatchConfig) -> tuple[dict, bool]:
+@@ -67,6 +93,9 @@ def main() -> int:
+     parser.add_argument("--profile", default=None,
+                         choices=[None, "demo", "live"],
+                         help="运行剖面；默认读 MTA_PROFILE")
++    parser.add_argument("--state-root", default=None,
++                        help="显式状态根（等价于 MTA_STATE_ROOT）；换代码目录部署时"
++                             "用它盯住同一份状态（U14/U13 同一解析口径）")
+     parser.add_argument("--once", action="store_true",
+                         help="单次检查后退出（默认行为）")
+     parser.add_argument("--interval-seconds", type=float, default=None,
