@@ -1,8 +1,20 @@
 diff --git a/src/exchange/binance_futures.py b/src/exchange/binance_futures.py
-index 3c0b9db..45e5137 100644
+index 3c0b9db..b3ba6a7 100644
 --- a/src/exchange/binance_futures.py
 +++ b/src/exchange/binance_futures.py
-@@ -690,6 +690,30 @@ class BinanceFuturesBroker:
+@@ -49,7 +49,10 @@ def _request_purpose(method: str, path: str, params: dict[str, Any]) -> str:
+         return "startup"
+     if normalized_path in {"/fapi/v1/account", "/fapi/v2/account", "/fapi/v3/account",
+                            "/fapi/v1/positionRisk", "/fapi/v2/positionRisk",
+-                           "/fapi/v1/positionSide/dual"}:
++                           "/fapi/v1/positionSide/dual",
++                           # U01：收入流水是账户对账输入，不是普通请求；缺此分支会被
++                           # 判成 normal，预算/优先级与语义不符（P3-8）。
++                           "/fapi/v1/income"}:
+         return "account_reconcile"
+     if normalized_path in {"/fapi/v1/userTrades"}:
+         return "trade_reconcile"
+@@ -690,6 +693,30 @@ class BinanceFuturesBroker:
              time.sleep(0.5)
          return data
  

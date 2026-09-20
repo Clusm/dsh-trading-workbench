@@ -132,7 +132,9 @@ def invalidation_triggered(triggers: list[dict], *, symbol: str,
     """是否存在落在此仓位生命周期内的证伪触发事件。"""
     symbol = str(symbol or "").upper()
     for item in triggers:
-        if item["symbol"] and item["symbol"] != symbol:
+        # 触发事件缺 symbol 时**不得**回退成「匹配所有仓位」（P3-3 fail-open）：
+        # 无法归因到具体标的的证伪事件一律不匹配，宁可少算不可串算。
+        if not item["symbol"] or item["symbol"] != symbol:
             continue
         if opened_at and item["at"] < opened_at:
             continue
