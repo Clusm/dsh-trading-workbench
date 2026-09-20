@@ -411,6 +411,15 @@ def test_attribution_and_conservation(fx: dict, sync) -> None:
           final_conflict.cost_status == "INCOMPLETE"
           and "INCOME_ID_CONFLICT" in final_conflict.reason_codes, final_conflict)
 
+    # P3-N3：缺归因分支提前 return，不得把 INCOME_ID_CONFLICT 一并掩盖。
+    no_attr_conflict = window_cost_finalization(
+        sync, attribution=None, late_recheck_done=True, lifecycle_id="LC-ZZZ-1")
+    check("缺归因 + 有隔离 -> 两个 reason 同时回带（不被提前 return 掩盖）",
+          REASON_ATTRIBUTION_MISSING in no_attr_conflict.reason_codes
+          and "INCOME_ID_CONFLICT" in no_attr_conflict.reason_codes
+          and no_attr_conflict.cost_status == "INCOMPLETE",
+          no_attr_conflict)
+
     # 无冲突 + 归因全部成功 -> cost 才可能 COMPLETE
     ws = fx["inputs"]["windows"][0]
     clean_pages = [
@@ -982,7 +991,12 @@ def _patched_database_dir() -> tuple[Path, str]:
             "补丁 01 无法应用到 src 副本（作者必须保证补丁可 git apply）: "
             f"{applied.stderr.strip() or applied.stdout.strip()}"
         )
-    return sandbox / "src", f"补丁沙箱 git apply（{'已应用'}）"
+    # 模式串由**实跑证据**派生（returncode），不硬编码「已应用」：否则测试会替补丁
+    # 宣称一个它并未验证的状态（P3-N4）。补丁是否真的生效另有 ``hasattr`` 断言兜底。
+    return sandbox / "src", (
+        f"补丁沙箱 git apply -p1（rc={applied.returncode}"
+        f", {'已应用' if applied.returncode == 0 else '未应用'}）"
+    )
 
 
 def _load_audit_database():
@@ -1005,6 +1019,12 @@ def _load_audit_database():
     finally:
         if sys.path and sys.path[0] == str(sandbox_src):
             sys.path.pop(0)
+    if not hasattr(module.AuditDatabase, "insert_income_events"):
+        # 模式串声称「补丁已应用」时必须有实证：导入后的类真的带收入写入方法。
+        # 缺失即为结构性失败（由调用方 FAIL 暴露），不得静默当作已应用（P3-N4）。
+        raise RuntimeError(
+            "补丁沙箱导入的 AuditDatabase 缺少 insert_income_events：补丁未生效"
+        )
     return module.AuditDatabase, mode, sandbox_src
 
 

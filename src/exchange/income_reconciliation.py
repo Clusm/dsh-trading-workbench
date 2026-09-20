@@ -595,14 +595,18 @@ def window_cost_finalization(
         return finalize_costs(lifecycle_id, coverage=None, attribution=None)
     if sync.events and attribution is None:
         # 非空窗口缺归因决策：缺的是归因，不是零费用证明（P2-7 的 reason 误导）。
+        # 隔离冲突同样必须回带 ``INCOME_ID_CONFLICT``：否则该 reason 被本条提前 return
+        # 掩盖（只剩 ``NO_ATTRIBUTION_DECISIONS``），排障时看不出「有键被判同键不同内容」
+        # 且已被移出窗口聚合（P3-N3）。cost_status 仍为 INCOMPLETE。
+        reasons = tuple(coverage_problems(sync.coverage)) + (REASON_ATTRIBUTION_MISSING,)
+        if sync.quarantine:
+            reasons = reasons + (REASON_ID_CONFLICT,)
         return CostFinalization(
             lifecycle_id=lifecycle_id,
             cost_status="INCOMPLETE",
             coverage_status=sync.coverage.coverage_status,
             attribution_status="UNKNOWN",
-            reason_codes=tuple(dict.fromkeys(
-                tuple(coverage_problems(sync.coverage)) + (REASON_ATTRIBUTION_MISSING,)
-            )),
+            reason_codes=tuple(dict.fromkeys(reasons)),
         )
     proof = None
     if not sync.events:
