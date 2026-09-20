@@ -1,5 +1,5 @@
 diff --git a/src/exchange/order_outbox.py b/src/exchange/order_outbox.py
-index 477374d..ebb0458 100644
+index 477374d..4b2a6f1 100644
 --- a/src/exchange/order_outbox.py
 +++ b/src/exchange/order_outbox.py
 @@ -8,7 +8,23 @@ from datetime import datetime, timedelta, timezone
@@ -26,7 +26,7 @@ index 477374d..ebb0458 100644
  
  
  _ACTIVE = {"SUBMITTING", "UNKNOWN", "ACKNOWLEDGED", "NEW", "PARTIALLY_FILLED"}
-@@ -21,6 +37,31 @@ _RANK = {
+@@ -21,6 +37,40 @@ _RANK = {
  }
  
  
@@ -44,8 +44,17 @@ index 477374d..ebb0458 100644
 +    这些真实前置状态与 ``filled == 0`` 的第一笔成交全部抛 ``STATUS_FILL_MISMATCH``。
 +    这里改为**由分量推导**：``filled == 0 -> NEW``、``0 < filled < accepted ->
 +    PARTIALLY_FILLED``、``filled == accepted -> FILLED``，终态保留原状态。
++
++    **兜底语义：别名未命中时保留原值**（``.get(x, x)`` 而不是 ``.get(x, "")``）。
++    终态判定必须看得见订单自己的状态：若兜底成空串，``CANCELED``/``EXPIRED``/
++    ``REJECTED``/``FILLED`` 会被当成"未知状态"，"终态保留原状态"这条分支对它们
++    **永久失效**——终态行收到迟到成交后会被去终态化成 ``PARTIALLY_FILLED``，
++    ``working`` 非零、``terminal`` 归零，该行随即违反 K04 终态不变量。词表外的状态
++    不会因此外泄：它们不落在终态集合里，一律落到下面的分量推导分支，返回值恒为
++    ``OrderQuantity`` 词表内的状态（未知状态走 fail-safe 推导，不原样透传）。
 +    """
-+    stored = _STATUS_ALIASES.get(str(stored_status or "").upper(), "")
++    stored = _STATUS_ALIASES.get(str(stored_status or "").upper(),
++                                 str(stored_status or "").upper())
 +    if stored in _QUANTITY_TERMINAL:
 +        return stored
 +    if filled <= 0:
@@ -58,7 +67,7 @@ index 477374d..ebb0458 100644
  class PendingOrderConflict(RuntimeError):
      """同一业务键已有未决开仓命令。"""
  
-@@ -40,6 +81,9 @@ class OrderOutbox:
+@@ -40,6 +90,9 @@ class OrderOutbox:
                   max_reconcile_per_cycle: int = 5) -> None:
          self.db = db
          self.environment = str(environment)
@@ -68,7 +77,7 @@ index 477374d..ebb0458 100644
          self.last_event_at: float | None = None
          self.last_reconcile_at: float | None = None
          self.last_error: str | None = None
-@@ -55,9 +99,20 @@ class OrderOutbox:
+@@ -55,9 +108,20 @@ class OrderOutbox:
      def prepare(self, *, client_order_id: str, symbol: str, side: str,
                  position_side: str | None, order_type: str, purpose: str,
                  qty: float, price: float | None, reduce_only: bool,
@@ -91,7 +100,7 @@ index 477374d..ebb0458 100644
          key = self.business_key(symbol=symbol, side=side,
                                  position_side=position_side, purpose=purpose)
          with self.db.lock:
-@@ -82,14 +137,17 @@ class OrderOutbox:
+@@ -82,14 +146,17 @@ class OrderOutbox:
                      """INSERT INTO order_outbox(
                          client_order_id,release_id,environment,business_key,symbol,side,position_side,
                          order_type,purpose,qty,price,reduce_only,endpoint,status,request_json,
@@ -112,7 +121,7 @@ index 477374d..ebb0458 100644
                  )
                  self.db.conn.commit()
              except sqlite3.IntegrityError as exc:
-@@ -135,18 +193,115 @@ class OrderOutbox:
+@@ -135,18 +202,115 @@ class OrderOutbox:
              self.db.conn.commit()
  
      def reject(self, client_order_id: str, exc: BaseException) -> None:
@@ -232,7 +241,7 @@ index 477374d..ebb0458 100644
                  (client_order_id,),
              ).fetchone()
              if not previous:
-@@ -156,18 +311,46 @@ class OrderOutbox:
+@@ -156,18 +320,46 @@ class OrderOutbox:
                      previous_status not in _TERMINAL and
                      _RANK.get(status, 0) < _RANK.get(previous_status, 0)):
                  return
@@ -280,7 +289,7 @@ index 477374d..ebb0458 100644
                   client_order_id),
              )
              self.db.conn.commit()
-@@ -193,6 +376,26 @@ class OrderOutbox:
+@@ -193,6 +385,26 @@ class OrderOutbox:
          self._update(client_id, status=status,
                       exchange_order_id=str(order.get("i") or "") or None,
                       response=order, error_type=None, resolved_at=resolved)
@@ -307,7 +316,7 @@ index 477374d..ebb0458 100644
          self.last_event_at = time.time()
          self.last_error = None
          return True
-@@ -219,6 +422,28 @@ class OrderOutbox:
+@@ -219,6 +431,28 @@ class OrderOutbox:
                      found = isinstance(response, dict) and response.get("orderId")
                  if found:
                      self.acknowledge(str(row["client_order_id"]), response)
