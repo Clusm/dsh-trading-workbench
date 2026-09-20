@@ -265,6 +265,47 @@ class ZeroFeeProof(BaseModel):
     coverage_hash: str | None = None
 
 
+def _coverage_provable_reasons(
+    coverage_model: IncomeCoverage | None,
+) -> list[str]:
+    """仅凭 coverage 自身可复核的零费用条件（结构化状态 / 缺口 / 终止证明 / 水位）。
+
+    不含 ``source_available``/``pages_complete``/``late_recheck_done`` 三个由调用方
+    提供的外部标志。``zero_fee_proof``（铸证）与 ``finalize_costs``（复算）共用本
+    函数，使后者不必信任调用方自报的 ``provable`` 布尔。
+    """
+    if coverage_model is None:
+        return [REASON_NO_COVERAGE]
+    reasons: list[str] = []
+    if coverage_model.coverage_status == "GAP":
+        reasons.append(REASON_COVERAGE_GAP)
+    elif coverage_model.coverage_status != "COMPLETE":
+        reasons.append(REASON_COVERAGE_NOT_COMPLETE)
+    if coverage_model.gaps:
+        if coverage_model.coverage_status == "COMPLETE":
+            reasons.append(REASON_COVERAGE_GAPS_DECLARED)
+        elif REASON_COVERAGE_GAP not in reasons:
+            reasons.append(REASON_COVERAGE_GAP)
+    proof = coverage_model.termination_proof
+    if proof is None:
+        reasons.append(REASON_TERMINATION_PROOF_MISSING)
+    else:
+        if (
+            proof.start_ms != coverage_model.start_ms
+            or proof.end_ms != coverage_model.end_ms
+        ):
+            reasons.append(REASON_TERMINATION_PROOF_MISMATCH)
+        if (
+            proof.last_page_size >= proof.page_limit
+            or proof.terminated_at_ms < proof.end_ms
+        ):
+            reasons.append(REASON_TERMINATION_PROOF_INVALID)
+    if coverage_model.watermark < coverage_model.end_ms:
+        reasons.append(REASON_WATERMARK_BEFORE_END)
+    reasons.extend(half_open_problems(coverage_model.start_ms, coverage_model.end_ms))
+    return reasons
+
+
 def zero_fee_proof(
     coverage: IncomeCoverage | Mapping[str, Any] | None,
     *,
@@ -275,41 +316,11 @@ def zero_fee_proof(
     """空窗口“零费用”可证明条件：来源正常 + 完整分页 + 区间覆盖 + 无缺口 + 迟到复查。
 
     返回对象回带 coverage 的整体内容哈希，调用方不得自报布尔/字典；
-    ``finalize_costs`` 会重新计算哈希并要求一致，跨窗口复用一律拒绝。
+    ``finalize_costs`` 会用 ``_coverage_provable_reasons`` 由入参 coverage 重算
+    可复核条件、并要求哈希一致，跨窗口复用与自报 provable 一律拒绝。
     """
     coverage_model = _coverage_model(coverage)
-    reasons: list[str] = []
-    if coverage_model is None:
-        reasons.append(REASON_NO_COVERAGE)
-    else:
-        if coverage_model.coverage_status == "GAP":
-            reasons.append(REASON_COVERAGE_GAP)
-        elif coverage_model.coverage_status != "COMPLETE":
-            reasons.append(REASON_COVERAGE_NOT_COMPLETE)
-        if coverage_model.gaps:
-            if coverage_model.coverage_status == "COMPLETE":
-                reasons.append(REASON_COVERAGE_GAPS_DECLARED)
-            elif REASON_COVERAGE_GAP not in reasons:
-                reasons.append(REASON_COVERAGE_GAP)
-        proof = coverage_model.termination_proof
-        if proof is None:
-            reasons.append(REASON_TERMINATION_PROOF_MISSING)
-        else:
-            if (
-                proof.start_ms != coverage_model.start_ms
-                or proof.end_ms != coverage_model.end_ms
-            ):
-                reasons.append(REASON_TERMINATION_PROOF_MISMATCH)
-            if (
-                proof.last_page_size >= proof.page_limit
-                or proof.terminated_at_ms < proof.end_ms
-            ):
-                reasons.append(REASON_TERMINATION_PROOF_INVALID)
-        if coverage_model.watermark < coverage_model.end_ms:
-            reasons.append(REASON_WATERMARK_BEFORE_END)
-        reasons.extend(
-            half_open_problems(coverage_model.start_ms, coverage_model.end_ms)
-        )
+    reasons: list[str] = _coverage_provable_reasons(coverage_model)
     if not source_available:
         reasons.append(REASON_SOURCE_UNAVAILABLE)
     if not pages_complete:
@@ -612,6 +623,14 @@ def finalize_costs(
     无事件时必须传入 ``zero_fee_proof`` 的结果对象（``ZeroFeeProof``）：
     字典/布尔自报一律不构成证明（``ZERO_FEE_NOT_PROVABLE``），且证明必须与
     传入 ``coverage`` 内容哈希一致，跨窗口复用 → ``ZERO_FEE_PROOF_MISMATCH``。
+
+    本函数**不信任**调用方对象的 ``provable`` 布尔：始终用
+    ``_coverage_provable_reasons`` 由入参 ``coverage`` 重算可复核条件（状态
+    非 COMPLETE、已声明缺口、缺 ``TerminationProof`` 或窗口/短页/时间不符、
+    水位未达窗口末尾、区间非法），任一不成立即按对应 reason code 拒绝。
+    手工构造 ``ZeroFeeProof(provable=True, coverage_hash=<正确哈希>)`` 不能
+    跳过这些条件。外部三标志（来源可用/分页完整/迟到复查）仍由铸证方提供，
+    属已登记限制（README §12 L17）。
     """
     coverage_model = _coverage_model(coverage)
     coverage_status = coverage_model.coverage_status if coverage_model else None
@@ -648,6 +667,10 @@ def finalize_costs(
         else:
             if proof.coverage_hash != model_content_hash(coverage_model):
                 zero_fee_reasons.append(REASON_ZERO_FEE_PROOF_MISMATCH)
+            # 由入参 coverage 自行重算，不采信调用方对象的 provable 布尔。
+            recomputed = _coverage_provable_reasons(coverage_model)
+            if recomputed:
+                zero_fee_reasons.extend(recomputed)
             if not proof.provable:
                 zero_fee_reasons.extend(
                     proof.reason_codes or (REASON_ZERO_FEE_NOT_PROVABLE,)
