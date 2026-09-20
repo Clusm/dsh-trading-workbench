@@ -1350,8 +1350,8 @@
       "id": "U15",
       "title": "运行身份、有效配置和控制权限",
       "owner_role": "F",
-      "actual_assignee": null,
-      "status": "PLANNED",
+      "actual_assignee": "U15 作者会话（claude-opus；首次会话 2.6 分钟异常中断未产出，精简提示词重派后完成）",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -1374,8 +1374,50 @@
         "F18",
         "F19"
       ],
-      "evidence": [],
-      "blockers": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "a136cb5",
+          "commits": [
+            "450419b",
+            "acb7096",
+            "a136cb5"
+          ],
+          "new_files": [
+            "src/core/runtime_identity.py (1522行)",
+            "tests/acceptance/test_runtime_identity.py (716行)",
+            "tests/acceptance/test_control_boundary.py (201行)"
+          ],
+          "shared_files_untouched": true,
+          "contract_untouched": true,
+          "self_reported": {
+            "smoke_contracts_v3": "PASS 173 / FAIL 0",
+            "smoke_entry_readiness": "6/0",
+            "smoke_release_package": "PASS",
+            "fingerprint_disposition": "修复 12 项 / 登记 5 项（无静默忽略）"
+          },
+          "known_gaps": [
+            "共享 4 文件未改，故启动门禁/Mock阻断/控制回环角色分离尚未生效（只交策略与冻结接口）",
+            "src/core/service.py 接线未做（非其集成目标）",
+            "account_ref 未声明时回落 env:local 且 stable=False；与 trade_reconciliation sha256(api_key)[:16] 的轮换耦合未替换（属 U02）",
+            "src/llm/factory.py 未接线，WORKBUDDY_OUTSIDE_LIVE 仅身份面生效",
+            "未跑全量 run_offline_regression.py"
+          ]
+        },
+        {
+          "type": "shared_patch_artifact",
+          "status": "PRODUCING",
+          "note": "首轮作者只给了文字描述，未产出 unified diff；已派补交会话产出到 docs/dispatch/patches/U15/a136cb5/"
+        }
+      ],
+      "blockers": [
+        {
+          "id": "U15-B1",
+          "text": "共享适配补丁文件缺失（作者仅文字描述），补交会话进行中",
+          "owner": "I",
+          "status": "IN_PROGRESS"
+        }
+      ],
       "reviewer_roles": [
         "E",
         "B",
@@ -1411,12 +1453,26 @@
         "DL04",
         "DL10"
       ],
-      "task_base_commit": null,
-      "contract_commit": null,
+      "task_base_commit": "ffdab443cae45c1451b5cc13b24e3e73c22038ff",
+      "contract_commit": "ffdab443cae45c1451b5cc13b24e3e73c22038ff",
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r1",
+          "stage": "初审",
+          "candidate": "a136cb5",
+          "sessions": [
+            "E (reviews/U15/E/r1)",
+            "B (reviews/U15/B/r1)",
+            "C (reviews/U15/C/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U15/a136cb5/",
+          "note": "Q 的独立验收安排在 I 组装的 integration_candidate 上进行（非作者 head），以避免重复且覆盖共享适配"
+        }
+      ],
       "qa_runs": []
     },
     {
