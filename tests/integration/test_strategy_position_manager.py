@@ -297,6 +297,23 @@ def test_reservation_conserves_under_concurrent_exits() -> None:
     check("重复释放被幂等识别", not m.release_exit("c-1", reason="again"))
     check("释放后可减量恢复", ledger_m.available_qty == Decimal("0.01"))
 
+    # 交易所快照是权威量：每轮退出请求都以它校正仓位，绝不锁定首轮的旧值。
+    m2 = _manager()
+    g1 = m2.request_exit(exit_key="g-1", lifecycle_id="lc-9", symbol="XUSDT",
+                         position_side="LONG", qty="0.01", current_qty="0.03")
+    check("首轮按权威量预留", g1.submit_qty == Decimal("0.01"))
+    check("可用量 = 权威量 - 在途预留",
+          m2.ledger("lc-9").available_qty == Decimal("0.02"),
+          m2.ledger("lc-9").as_dict())
+    g2 = m2.request_exit(exit_key="g-2", lifecycle_id="lc-9", symbol="XUSDT",
+                        position_side="LONG", qty="0.05", current_qty="0.03")
+    check("超量请求被可用量夹逼", g2.submit_qty == Decimal("0.02"), g2.as_dict())
+    g3 = m2.request_exit(exit_key="g-3", lifecycle_id="lc-9", symbol="XUSDT",
+                        position_side="LONG", qty="0.01", current_qty="0.01")
+    check("仓位收缩被读出后无可用量即 no-op",
+          g3.action == "NOOP" and g3.submit_qty == Decimal(0), g3.as_dict())
+    check("收缩后守恒式成立", reservation_conserved(m2.ledger("lc-9")))
+
 
 def test_expired_authorization_does_not_block_unknown_reconcile() -> None:
     print("\n[5] 过期授权不阻断 UNKNOWN 查单/收口")

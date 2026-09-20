@@ -565,6 +565,11 @@ class StrategyPositionManager:
                 ledger = ManagementReservationLedger(
                     position_qty=authoritative, lifecycle_id=str(lifecycle_id))
                 self._ledgers[str(lifecycle_id)] = ledger
+            else:
+                # 交易所快照是权威量：每轮以它校正仓位，绝不能沿用上一轮的旧值
+                # （否则成交后的仓量收缩读不出来，可用量会凭空变大）。
+                # 在途预留只在其超过新仓量时被释放，正常的在途退出不受影响。
+                ledger.reconcile_position(authoritative)
             requested = decimal_from_value(qty)
             if requested < 0:
                 requested = Decimal(0)
