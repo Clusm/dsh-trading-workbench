@@ -24,8 +24,10 @@
 |---|---|---|---|---|
 | EF | U15 | `a136cb5`(+`6dd0d1a` 补丁) | **CHANGES_REQUESTED → r2 修复中** | 初审 E/B/C 三份一致 CHANGES_REQUESTED：**P0×2**（`authorize_new_entry` 省略 `expected` 即 fail-open；配置漂移失明——风险参数改动不变身份哈希）+ P1×17（含嵌套键凭据泄漏、`scope_hash` 从不比较、WorkBuddy live 写伪证据）。报告已归档 `docs/dispatch/reviews/U15/a136cb5/{E,B,C}_r1.md` |
 | A | U01 | `c290c50` | **READY_FOR_REVIEW** | 初审 B 已派发；4 提交、测试 78/0 与 44/0、契约 173/0、无越界；**注意补丁 04（`binance_request_policy.py`）超出作者授权路径未应用**，不应用则真实调用抛 `UnknownBinanceEndpoint`（需 I 决断） |
-| CD | U03 | `3f49e03` | **READY_FOR_REVIEW** | 初审 D/B 已派发；5 提交、两测试 exit 0、契约 173/0、共享零改动 |
+| CD | U03 | `3f49e03` | **CHANGES_REQUESTED → r2 修复中** | 初审 D/B 一致 CHANGES_REQUESTED：D 的 **P1-1 模型自报 claims 完全覆盖程序生成 claim**（直接违反"模型不得覆盖行情事实"）+ B 的 P1（`identity=None` fail-open、畸形 claim 崩溃、`evidence_id` 不唯一不落地）。报告归档 `docs/dispatch/reviews/U03/3f49e03/{D,B}_r1.md` |
 | B | U04 | — | 作者进行中 | 已有 4 提交 |
+
+**集成时必须原子处理（否则 `run_offline_regression` 红）**：U01/U03 的 `scripts/smoke_*.py` 需在集成时与 `SCRIPTS` 登记**同批落地**（`run_offline_regression.py` 由 I 独占）。U15 用 `tests/acceptance/*.py` 命名，不触发该门禁。详见 JSON `dispatch.known_issues` 的 `W1-MANIFEST-TRANSIENT`。
 
 **已知基线缺陷（非本批次引入，勿重复排查）**：`scripts/smoke_windows_service_plan.py` 在部分 worktree 失败 —— `config/windows_service.json` 指向 worktree 内 `.venv`，而该 worktree 无 `.venv`（A 线作者实测发现）。
 
