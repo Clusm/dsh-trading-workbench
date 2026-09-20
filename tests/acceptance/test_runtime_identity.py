@@ -37,7 +37,14 @@ from core.runtime_identity import (  # noqa: E402
     EXECUTION_SCOPE_UNLOCKED,
     FALLBACK_PROVIDER_UNRECOGNISED,
     IDENTITY_BINDING_UNPROVEN,
+    IDENTITY_GENERATION_MISMATCH,
     IDENTITY_MALFORMED,
+    DEPENDENCY_COMPARISON_MATCH,
+    DEPENDENCY_COMPARISON_MISMATCH,
+    DEPENDENCY_COMPARISON_UNAVAILABLE,
+    DEPENDENCY_LOCK_FILES,
+    RuntimeIdentityError,
+    compare_dependency_lock,
     PROVIDER_CAPABILITY_UNPROVEN,
     PROVIDER_UNAVAILABLE,
     READINESS_UNPROVEN,
@@ -797,7 +804,12 @@ def check_provider_evidence_and_fallback() -> None:
 def check_mock_blocks_new_entry_via_u02_gate() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = make_root(Path(raw))
-        bundle = build(tmp, credentials={"SENSENOVA_API_KEY": False})
+        # r3：bundle 与 generation 必须指向同一账户。此前 bundle 走 <env>:local
+        # 回退（demo:local），与 generation 的 demo:acct 不一致 —— 引入 NEW-A
+        # 交叉校验后这种“身份与运行代根本不是一回事”的组合必须先被
+        # IDENTITY_GENERATION_MISMATCH 拦下，本函数要验的模型/就绪阻断就测不到了。
+        bundle = build(tmp, credentials={"SENSENOVA_API_KEY": False},
+                       declared_account_ref="acct")
         generation = mint_runtime_generation(
             environment="demo", account_ref=derive_account_ref("demo", declared_account_ref="acct"),
             runtime_instance_id="rt-test", scope_hash="scope-1")
@@ -807,7 +819,8 @@ def check_mock_blocks_new_entry_via_u02_gate() -> None:
                                        readiness_allowed=True)
         check("mock-blocks-authorize-new-entry", not decision.allowed
               and "MODEL_ROUTE_MOCK" in decision.reason_codes and decision.http_status == 409)
-        ok_bundle = build(tmp, credentials={"SENSENOVA_API_KEY": True})
+        ok_bundle = build(tmp, credentials={"SENSENOVA_API_KEY": True},
+                          declared_account_ref="acct")
         ok = authorize_new_entry(ok_bundle, generation, expected=generation,
                                  environment="demo", account_ref=generation.account_ref,
                                  runtime_instance_id="rt-test", scope_hash="scope-1",
@@ -910,6 +923,190 @@ def check_gate_is_fail_closed() -> None:
                                                  readiness_allowed=True)
         check("gate-malformed-expected-rejected", not malformed_expected.allowed
               and RUNTIME_GENERATION_MALFORMED in malformed_expected.reason_codes)
+
+
+def check_bundle_generation_cross_check() -> None:
+    """r3 NEW-A：bundle.identity 与 generation 必须指向同一环境/账户。"""
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = make_root(Path(raw))
+        demo_bundle = build(tmp, declared_account_ref="acct-demo")
+        live_bundle = collect_runtime_identity(
+            tmp, environment="live", runtime_instance_id="rt-LIVE",
+            profile="live", execution_mode="live",
+            env={"EXECUTION_MODE": "live", "MTA_PROFILE": "live"},
+            credentials_present={"SENSENOVA_API_KEY": True},
+            raw_settings=SETTINGS, raw_agents=AGENTS,
+            declared_account_ref="live-acct-other", fallback_local=True,
+        )
+        gen_demo = mint_runtime_generation(
+            environment="demo", account_ref=derive_account_ref("demo", declared_account_ref="acct-demo"),
+            runtime_instance_id="rt-demo", scope_hash="scope-D")
+        gen_live = mint_runtime_generation(
+            environment="live", account_ref=derive_account_ref("live", declared_account_ref="live-acct-other"),
+            runtime_instance_id="rt-LIVE", scope_hash="scope-L")
+
+        # 修复前：两者均为 allowed=True / 200 / reason_codes=()
+        forward = authorize_new_entry(demo_bundle, gen_live, expected=gen_live,
+                                      readiness_allowed=True)
+        check("new-a-demo-bundle-live-generation-rejected",
+              not forward.allowed and forward.http_status == 409
+              and forward.reason_codes == (IDENTITY_GENERATION_MISMATCH,),
+              str(forward.as_dict()))
+        # 全部显式绑定到该 live 运行代也**不能**绕过（这正是复查的绕过形态）
+        fully_bound = authorize_new_entry(
+            demo_bundle, gen_live, expected=gen_live,
+            environment="live", account_ref=gen_live.account_ref,
+            runtime_instance_id="rt-LIVE", scope_hash="scope-L",
+            readiness_allowed=True)
+        check("new-a-explicit-bindings-cannot-bypass",
+              not fully_bound.allowed and fully_bound.http_status == 409
+              and IDENTITY_GENERATION_MISMATCH in fully_bound.reason_codes,
+              str(fully_bound.as_dict()))
+        # 反向：live bundle + demo generation
+        reverse = authorize_new_entry(live_bundle, gen_demo, expected=gen_demo,
+                                      readiness_allowed=True)
+        check("new-a-live-bundle-demo-generation-rejected",
+              not reverse.allowed and IDENTITY_GENERATION_MISMATCH in reverse.reason_codes,
+              str(reverse.as_dict()))
+        # 对照：身份与运行代自洽时必须放行（不制造假阳性）
+        control = authorize_new_entry(demo_bundle, gen_demo, expected=gen_demo,
+                                      readiness_allowed=True)
+        check("new-a-consistent-identity-and-generation-allowed",
+              control.allowed, str(control.reason_codes))
+        # 交叉校验只比环境/账户：实例号不同不误报（实例绑定用 runtime_instance_id）
+        other_instance = mint_runtime_generation(
+            environment="demo", account_ref=derive_account_ref("demo", declared_account_ref="acct-demo"),
+            runtime_instance_id="rt-other-instance", scope_hash="scope-D")
+        check("new-a-instance-difference-is-not-a-cross-mismatch",
+              authorize_new_entry(demo_bundle, other_instance, expected=other_instance,
+                                  readiness_allowed=True).allowed)
+        # 账户/环境逐项：同一环境换账户也要拒绝
+        same_env_other_account = mint_runtime_generation(
+            environment="demo", account_ref=derive_account_ref("demo", declared_account_ref="someone-else"),
+            runtime_instance_id="rt-demo", scope_hash="scope-D")
+        check("new-a-same-environment-other-account-rejected",
+              IDENTITY_GENERATION_MISMATCH in authorize_new_entry(
+                  demo_bundle, same_env_other_account,
+                  expected=same_env_other_account,
+                  readiness_allowed=True).reason_codes)
+
+
+def check_generation_input_types_are_strict() -> None:
+    """r3 NEW-D：mint 的数值/文本字段类型不对 → 结构化拒绝，不抛裸异常。"""
+    ref = derive_account_ref("demo", declared_account_ref="acct")
+    base = dict(environment="demo", account_ref=ref, runtime_instance_id="rt-1")
+    for label, extra in (
+        ("epoch-string", {"credential_epoch": "3"}),
+        ("epoch-none", {"credential_epoch": None}),
+        ("epoch-bool", {"credential_epoch": True}),
+        ("epoch-float", {"credential_epoch": 3.7}),
+        ("epoch-list", {"credential_epoch": [3]}),
+        ("started-at-string", {"started_at": "now"}),
+        ("started-at-object", {"started_at": object()}),
+        ("scope-string-int", {"scope_hash": 123}),
+        ("fingerprint-int", {"key_fingerprint_value": 123}),
+        ("environment-int", {"environment": 123}),
+        ("account-ref-dict", {"account_ref": {"value": "x"}}),
+        ("account-ref-none", {"account_ref": None}),
+        ("instance-int", {"runtime_instance_id": 7}),
+    ):
+        kwargs = dict(base)
+        kwargs.update(extra)
+        expect_raises(f"mint-rejects-{label}", (MalformedInputError,),
+                      mint_runtime_generation, **kwargs)
+    # 保留既有的语义化拒绝（不能被上面的类型检查掩盖）
+    expect_raises("mint-still-rejects-empty-environment", (MissingRuntimeInputError,),
+                  mint_runtime_generation, environment="", account_ref=ref,
+                  runtime_instance_id="rt-1")
+    expect_raises("mint-still-rejects-unknown-environment", (ExecutionModeError,),
+                  mint_runtime_generation, environment="prod", account_ref=ref,
+                  runtime_instance_id="rt-1")
+    expect_raises("mint-still-rejects-empty-instance", (MissingRuntimeInputError,),
+                  mint_runtime_generation, environment="demo", account_ref=ref,
+                  runtime_instance_id="   ")
+    expect_raises("mint-still-rejects-negative-epoch", (RuntimeIdentityError,),
+                  mint_runtime_generation, environment="demo", account_ref=ref,
+                  runtime_instance_id="rt-1", credential_epoch=-1)
+    # 合法输入不受影响
+    ok = mint_runtime_generation(environment="demo", account_ref=ref,
+                                 runtime_instance_id="rt-1", credential_epoch=2,
+                                 started_at=1000.0, scope_hash="scope-1",
+                                 key_fingerprint_value=key_fingerprint("k"))
+    check("mint-accepts-well-formed-inputs",
+          ok.credential_epoch == 2 and ok.started_at == 1000.0
+          and ok.scope_hash == "scope-1", str(ok.as_dict()))
+
+
+def check_fallback_provider_env_is_honoured() -> None:
+    """r3 NEW-F：``llm.decision_fallback.provider_env`` 改名后备用不得静默丢失。"""
+    renamed = json.loads(json.dumps(SETTINGS))
+    renamed["llm"]["decision_fallback"]["provider_env"] = "MY_FALLBACK_ENV"
+    env_common = {"OPENCODE_MODEL": "union-alpha",
+                  "OPENCODE_BASE_URL": "https://opencode.ai/zen/v1"}
+    creds = {"SENSENOVA_API_KEY": True, "OPENCODE_API_KEY": True}
+    via_declared_name = resolve_model_route(
+        raw_settings=renamed, raw_agents=AGENTS,
+        env={**env_common, "MY_FALLBACK_ENV": "opencode"},
+        credentials_present=creds, execution_mode="live")
+    check("fallback-provider-env-declared-name-is-read",
+          len(tuple(via_declared_name.route.fallback_routes)) == 1
+          and via_declared_name.sources["fallback"].startswith("declared:opencode"),
+          str(via_declared_name.sources))
+    # 未设置声明名 → 仍按缺省名（不因改名而把旧变量当不存在）
+    via_default_name = resolve_model_route(
+        raw_settings=renamed, raw_agents=AGENTS,
+        env={**env_common, "MTA_AI_DECISION_FALLBACK_PROVIDER": "opencode"},
+        credentials_present=creds, execution_mode="live")
+    check("fallback-provider-env-default-name-still-works",
+          len(tuple(via_default_name.route.fallback_routes)) == 1,
+          str(via_default_name.sources))
+    # 两个名字都没设 → 如实 absent（不是静默识别）
+    absent = resolve_model_route(
+        raw_settings=renamed, raw_agents=AGENTS, env=dict(env_common),
+        credentials_present=creds, execution_mode="live")
+    check("fallback-provider-env-absent-is-reported",
+          tuple(absent.route.fallback_routes) == ()
+          and absent.sources["fallback"] == "absent", str(absent.sources))
+    check("fallback-provider-env-name-is-exported-as-evidence",
+          via_declared_name.sources["fallback_provider_env"] == "MY_FALLBACK_ENV")
+
+
+def check_dependency_comparison_status() -> None:
+    """r3 NEW-E：diff-2 缺口②的 comparison_status 必须真的产出。"""
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = make_root(Path(raw))
+        (tmp / "requirements-dev-lock.txt").write_text("pytest-lock==1\n", encoding="utf-8")
+        check("dependency-comparison-match-when-all-declared",
+              compare_dependency_lock(tmp) == DEPENDENCY_COMPARISON_MATCH)
+        check("dependency-comparison-match-with-explicit-declaration",
+              compare_dependency_lock(tmp, declared=list(DEPENDENCY_LOCK_FILES))
+              == DEPENDENCY_COMPARISON_MATCH)
+        check("dependency-comparison-mismatch-on-drifted-declaration",
+              compare_dependency_lock(tmp, declared=["Pipfile.lock"])
+              == DEPENDENCY_COMPARISON_MISMATCH)
+        check("dependency-comparison-unavailable-on-bad-shape",
+              compare_dependency_lock(tmp, declared="requirements-lock.txt")
+              == DEPENDENCY_COMPARISON_UNAVAILABLE)
+        # 名单齐备但盘上缺文件 → UNAVAILABLE（名单漂移优先于缺文件，见 MISMATCH 用例）
+        (tmp / "requirements-lock.txt").unlink()
+        check("dependency-comparison-unavailable-when-declared-file-missing",
+              compare_dependency_lock(tmp, declared=list(DEPENDENCY_LOCK_FILES))
+              == DEPENDENCY_COMPARISON_UNAVAILABLE)
+        check("dependency-comparison-unavailable-without-deployed-lock",
+              compare_dependency_lock(tmp) == DEPENDENCY_COMPARISON_UNAVAILABLE)
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = make_root(Path(raw))
+        (tmp / "requirements-dev-lock.txt").write_text("pytest-lock==1\n", encoding="utf-8")
+        bundle = build(tmp, declared_account_ref="acct")
+        check("bundle-produces-dependency-comparison-status",
+              bundle.dependency_comparison_status == DEPENDENCY_COMPARISON_MATCH
+              and bundle.as_dict()["dependency_comparison_status"]
+              == DEPENDENCY_COMPARISON_MATCH,
+              str(bundle.as_dict()["dependency_comparison_status"]))
+        (tmp / "requirements-dev-lock.txt").unlink()
+        degraded = build(tmp, declared_account_ref="acct")
+        check("bundle-reports-unavailable-when-lock-missing",
+              degraded.dependency_comparison_status == DEPENDENCY_COMPARISON_UNAVAILABLE)
 
 
 def check_unknown_mode_is_strictest() -> None:
@@ -1273,6 +1470,10 @@ def main() -> int:
     check_provider_evidence_and_fallback()
     check_mock_blocks_new_entry_via_u02_gate()
     check_gate_is_fail_closed()
+    check_bundle_generation_cross_check()
+    check_generation_input_types_are_strict()
+    check_fallback_provider_env_is_honoured()
+    check_dependency_comparison_status()
     check_unknown_mode_is_strictest()
     check_scope_is_locked_or_flagged()
     check_account_ref_is_proven_or_blocked()

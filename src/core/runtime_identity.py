@@ -184,6 +184,12 @@ SETTINGS_WHITELIST: tuple[str, ...] = (
 #: ``account_ref`` 允许的显式声明来源（与密钥材料**无关**）。
 ACCOUNT_REF_KEYS: tuple[str, ...] = ("MTA_ACCOUNT_REF",)
 
+#: K01 ``IDENTITY_COVERAGE["dependency"]`` 第二项 ``comparison_status`` 的取值
+#: （U15 r3 NEW-E：此前只在发布清单补丁里存在，模块内从未产出）。
+DEPENDENCY_COMPARISON_MATCH = "MATCH"
+DEPENDENCY_COMPARISON_MISMATCH = "MISMATCH"
+DEPENDENCY_COMPARISON_UNAVAILABLE = "UNAVAILABLE"
+
 # --------------------------------------------------------------------------
 # 门禁原因码（fail-closed 默认值）
 # --------------------------------------------------------------------------
@@ -196,6 +202,10 @@ READINESS_UNPROVEN = "READINESS_UNPROVEN"
 #: 入参形状不合法（非本模块的数据结构）→ 结构化拒绝，不抛裸 AttributeError。
 IDENTITY_MALFORMED = "IDENTITY_MALFORMED"
 RUNTIME_GENERATION_MALFORMED = "RUNTIME_GENERATION_MALFORMED"
+#: 身份 bundle 与其要授权的运行代**指向不同环境/账户**（U15 r3 NEW-A）：
+#: 二者各自自洽，但互不一致 —— 说明“本次运行的身份”与“被授权的运行代”不是
+#: 同一回事，禁止静默 200。
+IDENTITY_GENERATION_MISMATCH = "IDENTITY_GENERATION_MISMATCH"
 #: 调用方要求了作用域绑定但运行代没有 scope_hash（或反之不一致）。
 SCOPE_HASH_UNBOUND = "SCOPE_HASH_UNBOUND"
 SCOPE_HASH_MISMATCH = "SCOPE_HASH_MISMATCH"
@@ -234,6 +244,22 @@ CONTROL_STATE_SEVERITY: dict[str, int] = {
     "paused": 2,
     "emergency": 3,
 }
+
+#: ``emergency_stop`` 的语义就是“进入 emergency”：显式给出别的目标态即拒绝
+#: （U15 r3 NEW-G P3-1：此前 ``emergency_stop + close_only`` 被放行，审计会记成
+#: “紧急停机”却只进 close_only）。
+EMERGENCY_STOP_TARGET_MISMATCH = "EMERGENCY_STOP_TARGET_MISMATCH"
+#: 回读/请求状态不是本模块已知的控制状态 → 结构化拒绝，不按“文本相等”判成功
+#: （U15 r3 NEW-G P3-3：``('bogus','bogus')`` 此前 ok=True）。
+CONTROL_STATE_ILLEGAL = "CONTROL_STATE_ILLEGAL"
+#: ``auto`` 流程允许的动作（只读 + 更严方向；放宽方向在上游已 409）。
+AUTO_PERMITTED_ACTIONS: tuple[str, ...] = (
+    "read_status",
+    "acknowledge_incident",
+    "set_control",
+    "set_control_severity_up",
+    "emergency_stop",
+)
 
 #: 每个角色可执行的控制动作（未列出即拒绝）。
 CONTROL_ACTION_ROLES: dict[str, tuple[str, ...]] = {
@@ -294,7 +320,16 @@ class StrategySourceMismatchError(RuntimeIdentityError):
 
 
 def is_sensitive_name(name: Any) -> bool:
-    """键名是否命中 K01 敏感标记（大小写不敏感的子串匹配）。"""
+    """键名是否命中 K01 敏感标记（大小写不敏感的子串匹配）。
+
+    已知限制（已登记：``docs/contracts/README.md`` §12 ``L1``，U15 r3 NEW-B）：
+    只做 ``lower()`` + 子串匹配，**不做 Unicode 归一化（NFKC）**。因此全角/同形字
+    键名（如 ``ｌｌｍ.ａｐｉ＿ｋｅｙ``）不会被识别为敏感键，其值可能进入
+    ``model_route_hash`` 与 ``ResolvedModelRoute.as_dict()``。补这一层要引入
+    ``unicodedata.normalize`` 并重新界定“敏感键”口径（含各语言同形字），属
+    K01 敏感标记的共享口径变更（``src/core/contracts/common.py``），不在 U15
+    独占路径内；调用方不应把该守卫当作“值级防泄漏”。
+    """
     lowered = str(name).lower()
     return any(marker in lowered for marker in SENSITIVE_KEY_MARKERS)
 
@@ -438,6 +473,41 @@ def collect_dependency_lock_files(
     if require_lock and DEPENDENCY_LOCK_FILES[0] not in payload:
         raise MissingRuntimeInputError([DEPENDENCY_LOCK_FILES[0]])
     return payload
+
+
+def compare_dependency_lock(
+    root: Path | str, *, declared: Sequence[str] | None = None,
+) -> str:
+    """K01 ``IDENTITY_COVERAGE["dependency"]`` 的 ``comparison_status``（NEW-E）。
+
+    指纹报告 ``diff-2`` 缺口②要求“比对结果另存”：只把锁文件内容拿进
+    ``dependency_hash`` 还不够，还要**显式产出一个可复核的对照结论**，
+    否则“名单漂移（清单声明集合漏掉身份要求的锁文件 → 锁文件改动漏出指纹）”
+    这种复发形态没有任何证据位可查。取值与语义：
+
+    - ``MATCH``：身份模块要求的每个部署锁文件都在 ``declared`` 里，且确实在盘上；
+    - ``MISMATCH``：两份名单已漂移（``declared`` 漏了身份要求的锁文件 → 该文件的
+      改动不会体现在清单指纹里）；
+    - ``UNAVAILABLE``：必需锁文件缺失（身份不可证明），或 ``declared`` 形状非法。
+
+    ``declared=None`` 表示调用方**没有**自己的声明集合：此时只报告身份侧锁文件
+    是否齐备（齐备 ``MATCH``／缺失 ``UNAVAILABLE``），不制造虚假对照。
+
+    只读：不改路径、不写文件、不读 ``.env``。发布清单侧的字段落地见
+    ``docs/dispatch/patches/U15/<基线>/01_release_manifest.diff``
+    （``manifest.dependency_comparison_status``，接线归 I）。
+    """
+    base = Path(root)
+    if declared is not None and (
+            not isinstance(declared, Sequence) or isinstance(declared, (str, bytes))):
+        return DEPENDENCY_COMPARISON_UNAVAILABLE
+    required = tuple(DEPENDENCY_LOCK_FILES)
+    declared_set = {str(name) for name in (required if declared is None else declared)}
+    if any(name not in declared_set for name in required):
+        return DEPENDENCY_COMPARISON_MISMATCH
+    if not all((base / name).is_file() for name in required):
+        return DEPENDENCY_COMPARISON_UNAVAILABLE
+    return DEPENDENCY_COMPARISON_MATCH
 
 
 #: 单个工件文件的大小上限（源文件级别足够）；超出即拒绝，避免把数据文件卷进身份。
@@ -947,7 +1017,19 @@ def resolve_model_route(
 
     fallback_cfg = llm.get("decision_fallback") or {}
     fallback_cfg = fallback_cfg if isinstance(fallback_cfg, Mapping) else {}
-    fallback_provider = env_map.get("MTA_AI_DECISION_FALLBACK_PROVIDER", "").strip().lower()
+    # NEW-F：备用 provider 的**环境变量名本身**是可配置的
+    # （``decision_fallback.provider_env``）；此前硬编码读
+    # ``MTA_AI_DECISION_FALLBACK_PROVIDER``，配置改名后备用会被静默丢弃
+    # （status='absent'），运维以为有备用、身份里却什么都没有。
+    fallback_env_name = _text(fallback_cfg.get("provider_env")) \
+        or "MTA_AI_DECISION_FALLBACK_PROVIDER"
+    # 先按声明名读；声明名未设置时回退到既有默认名（向后兼容：老配置里
+    # provider_env 就写着默认名，两者等价；改名后旧名仍生效不至于静默丢备用）。
+    fallback_provider = _text(env_map.get(fallback_env_name)).lower()
+    if not fallback_provider and fallback_env_name != "MTA_AI_DECISION_FALLBACK_PROVIDER":
+        fallback_provider = _text(
+            env_map.get("MTA_AI_DECISION_FALLBACK_PROVIDER")).lower()
+    sources["fallback_provider_env"] = fallback_env_name
     fallback_routes, fallback_reasons, fallback_status = _fallback_route(
         fallback_cfg, env_map, creds, provider=fallback_provider, agent_name=agent_name)
     sources["fallback"] = fallback_status
@@ -1500,7 +1582,17 @@ def mint_runtime_generation(
       环境的运行代，K04 只比对 environment 字段，等于 live 用 demo 授权放行）；
     - 传裸字符串时一律经 :func:`derive_account_ref` 归一化（补 ``env:`` 前缀），
       同一账户不会因构造入口不同得到两个 ``account_ref``。
+
+    U15 r3 类型健壮性（NEW-D）：``environment``/``runtime_instance_id`` 必须是
+    字符串，``credential_epoch`` 必须是非负整数，``started_at`` 必须是实数或
+    ``None``，``scope_hash``/``key_fingerprint_value``/``account_ref`` 必须是
+    字符串或 ``None``（``account_ref`` 也接受 ``AccountRef``）。形状不对一律
+    ``MalformedInputError``（结构化拒绝），**不再**泄漏
+    ``TypeError``/``ValueError`` 之裸异常（此前 ``credential_epoch='3'`` 抛
+    ``'<' not supported between instances of 'str' and 'int'``）。
     """
+    if not isinstance(environment, str):
+        raise MalformedInputError(["environment must be a string"])
     env = _text(environment).lower()
     if not env:
         raise MissingRuntimeInputError(["environment"])
@@ -1515,15 +1607,41 @@ def mint_runtime_generation(
                 f"{_text(account_ref.environment)!r}; refusing to silently prefer one"
             )
         ref = account_ref
-    else:
+    elif isinstance(account_ref, str):
         ref = derive_account_ref(
             env, declared_account_ref=_text(account_ref), fallback_local=False,
         )
+    else:
+        # 非 AccountRef/非字符串（dict、list、None 等）：不静默 str() 成一个
+        # 看似合法的账户引用，直接结构化拒绝。
+        raise MalformedInputError(
+            [f"account_ref must be AccountRef or str, got {type(account_ref).__name__}"]
+        )
+    if not isinstance(runtime_instance_id, str):
+        raise MalformedInputError(["runtime_instance_id must be a string"])
     instance = _text(runtime_instance_id)
     if not instance:
         raise MissingRuntimeInputError(["runtime_instance_id"])
+    if isinstance(credential_epoch, bool) or not isinstance(credential_epoch, int):
+        raise MalformedInputError(
+            [f"credential_epoch must be an int, got {type(credential_epoch).__name__}"]
+        )
     if credential_epoch < 0:
         raise RuntimeIdentityError("credential_epoch must be >= 0")
+    if started_at is not None and (
+            isinstance(started_at, bool) or not isinstance(started_at, (int, float))):
+        raise MalformedInputError(
+            [f"started_at must be a real number or None, got {type(started_at).__name__}"]
+        )
+    if scope_hash is not None and not isinstance(scope_hash, str):
+        raise MalformedInputError(
+            [f"scope_hash must be a string or None, got {type(scope_hash).__name__}"]
+        )
+    if key_fingerprint_value is not None and not isinstance(key_fingerprint_value, str):
+        raise MalformedInputError(
+            ["key_fingerprint_value must be a string or None, "
+             f"got {type(key_fingerprint_value).__name__}"]
+        )
     seed = "|".join((ref.environment, ref.value, instance, "" if started_at is None else f"{started_at:.6f}"))
     generation_id = "gen-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
     return RuntimeGeneration(
@@ -1639,6 +1757,9 @@ class IdentityBundle:
     #: ``stable``/``source``，使 U02/看板不必二次派生，也让 ``<env>:local``
     #: 回退可被检测（stable=False）。r2 起不再只存在于被丢弃的局部变量里。
     account_ref_ref: AccountRef | None = None
+    #: K01 ``IDENTITY_COVERAGE["dependency"]`` 的 ``comparison_status``
+    #: （NEW-E）：锁文件声明的对照结论，见 :func:`compare_dependency_lock`。
+    dependency_comparison_status: str = DEPENDENCY_COMPARISON_UNAVAILABLE
 
     @property
     def entry_allowed(self) -> bool:
@@ -1673,6 +1794,7 @@ class IdentityBundle:
                 self.account_ref_ref.as_dict() if self.account_ref_ref else None
             ),
             "account_ref_stable": self.account_ref_stable,
+            "dependency_comparison_status": self.dependency_comparison_status,
             "blockers": list(self.blockers),
             "advisories": list(self.advisories),
             "entry_allowed": self.entry_allowed,
@@ -1827,7 +1949,35 @@ def collect_runtime_identity(
         effective_config=effective, strategy_source=strategy,
         git_state=git_state, blockers=blockers, advisories=advisories,
         account_ref_ref=ref,
+        # NEW-E：diff-2 缺口②的「比对结果另存」——结论随身份工件一起产出，
+        # 调用方不必重新推导（锁文件缺失时上面已抛 MissingRuntimeInputError，
+        # 这里保留 best-effort 语义：拿不到就如实报 UNAVAILABLE）。
+        dependency_comparison_status=compare_dependency_lock(root),
     )
+
+
+def _identity_generation_mismatches(
+    identity: RuntimeIdentity, generation: RuntimeGeneration,
+) -> tuple[str, ...]:
+    """``IdentityBundle.identity`` ↔ ``RuntimeGeneration`` 的交叉一致性（NEW-A）。
+
+    只比较“这个身份指向哪个环境/哪个账户”：
+    ``environment`` 与 ``account_ref``。两者任一不等即
+    ``IDENTITY_GENERATION_MISMATCH`` —— 因为此时“本次运行的身份”与“被授权的
+    运行代”在事实层就不是同一回事，任何 reason_codes 都无法区分“真的绑定成功”
+    与“身份跟运行代根本不是一回事”。
+
+    刻意**不**比较 ``runtime_instance_id``：``IdentityBundle`` 里没有该字段
+    （``RuntimeIdentity`` 的 ``runtime_instance_id`` 与运行代实例号同为一次运行
+    的实例标识，但两者来源不同，逐字比较会误报）；调用方要绑定实例号请用
+    ``authorize_new_entry(runtime_instance_id=...)``。
+    """
+    reasons: list[str] = []
+    if _text(identity.environment).lower() != _text(generation.environment).lower():
+        reasons.append(IDENTITY_GENERATION_MISMATCH)
+    elif _text(identity.account_ref) != _text(generation.account_ref):
+        reasons.append(IDENTITY_GENERATION_MISMATCH)
+    return tuple(reasons)
 
 
 @dataclass(frozen=True)
@@ -1874,6 +2024,15 @@ def authorize_new_entry(
     ``expected`` 与 ``generation`` 分别可传 ``environment``/``account_ref``/
     ``runtime_instance_id``/``scope_hash`` 作为额外的显式绑定要求；``scope_hash``
     的缺失/不一致按 ``SCOPE_HASH_UNBOUND``/``SCOPE_HASH_MISMATCH`` 拒绝。
+
+    **bundle ↔ generation 交叉校验（U15 r3 NEW-A）**：``bundle`` 存活时，它的
+    ``identity.environment``/``identity.account_ref`` 必须与 ``generation`` 的
+    同名字段一致，否则 ``IDENTITY_GENERATION_MISMATCH``（409）。缺少这层校验
+    时，把 ``expected``/``environment``/``account_ref``/``runtime_instance_id``/
+    ``scope_hash`` 全部显式绑定到一个**异账户 live 运行代**、却拿 demo 身份的
+    bundle 来授权，同样会得到 ``allowed=True / 200 / reason_codes=()``：调用方
+    能证明“我打算授权的确实是那个运行代”，但证明不了“**本次运行**就是那个
+    运行代”。两个方向（demo bundle + live gen、live bundle + demo gen）都拒绝。
     """
     reasons: list[str] = []
     advisories: list[str] = []
@@ -1900,6 +2059,11 @@ def authorize_new_entry(
             expected, generation, environment=environment, account_ref=account_ref,
             runtime_instance_id=runtime_instance_id, scope_hash=scope_hash,
         ).reason_codes)
+    if isinstance(bundle, IdentityBundle) and isinstance(generation, RuntimeGeneration):
+        # NEW-A：身份 bundle 与被授权运行代必须指向同一环境与同一账户。
+        # 这一步不看调用方传了哪些绑定参数 —— 上面那组只证明“expected 与
+        # generation 一致”，本组证明“本次运行的身份与 generation 一致”。
+        reasons.extend(_identity_generation_mismatches(bundle.identity, generation))
     if readiness_allowed is None:
         reasons.append(READINESS_UNPROVEN)
     elif not readiness_allowed:
@@ -1919,8 +2083,18 @@ def authorize_new_entry(
 def is_loopback_host(host: str | None) -> bool:
     """来源是否为本机环回（控制接口只允许环回）。
 
-    接受 ``127.0.0.1`` / ``::1`` / ``localhost`` 与 IPv4-mapped IPv6
-    （``::ffff:127.0.0.1``）；``0.0.0.0``、私有网段与任意域名一律拒绝。
+    接受 ``127.0.0.1`` / ``::1`` / ``localhost`` 与**缩写形式**的 IPv4-mapped
+    IPv6（``::ffff:127.0.0.1``）；``0.0.0.0``、私有网段与任意域名一律拒绝。
+
+    已知限制（U15 r3 NEW-H，**已登记、方向 fail-closed，不修**）：完整展开形式的
+    IPv4-mapped 回环（``0:0:0:0:0:ffff:127.0.0.1``）不被识别 → 返回 ``False``。
+    本函数的唯一消费者是 :func:`authorize_control_request`，其用法为
+    ``if not is_loopback_host(host): return 403``，即 ``False`` = **拒绝**；
+    因此该形态只会让合法的本机管理请求被 403（可用性问题），**不会**放行任何
+    非回环来源 —— 是保守方向的误拒，不是安全缺陷。放宽它需要引入 IP 解析并
+    重新界定白名单（例如 ``127.0.0.2`` 属 ``127/8`` 环回但当前被刻意排除，
+    见 ``tests/acceptance/test_control_boundary.py``），收益不等于风险，故按
+    「已如实登记」处理。
     """
     text = _text(host).strip().lower()
     if not text:
@@ -1931,7 +2105,18 @@ def is_loopback_host(host: str | None) -> bool:
     return text in LOOPBACK_HOSTS
 
 
-def _role_allows(role: str, action: str) -> bool:
+def _role_allows(role: str, action: str, *, lowering: bool = False) -> bool:
+    """角色能否执行该动作。
+
+    ``auto`` 不是 ``CONTROL_ROLES`` 成员（无人工权限），但它是自动恢复流程的
+    执行者：文档语义是“只能不变或放宽到更严的反面”。r3 NEW-G P3-4 之前它
+    **什么都做不了**（连 ``read_status`` 都 403），与自身文档矛盾，也让自动
+    恢复在需要收紧时无路可走。现在：只读类动作放行；状态类动作放行**更严**
+    方向（``lowering=False``），放宽方向在上游已按
+    ``AUTO_RECOVERY_BLOCKED_BY_MANUAL_DISABLE`` 409 拦下。
+    """
+    if role == AUTO_ACTOR:
+        return action in AUTO_PERMITTED_ACTIONS and not lowering
     return role in CONTROL_ACTION_ROLES.get(action, ())
 
 
@@ -1949,15 +2134,28 @@ class ControlWriteVerdict:
 def verify_control_write(
     *, requested_state: str, read_back_state: str | None, read_back_ok: bool = True,
 ) -> ControlWriteVerdict:
-    """写后回读校验；“写入成功”必须被回读证据证明。"""
+    """写后回读校验；“写入成功”必须被回读证据证明。
+
+    r3 NEW-G P3-3：回读一致性**不足以**证明写入有意义 —— ``('bogus','bogus')``
+    文本相等但两者都不是本模块已知的控制状态，此前会得到 ``ok=True``。现在
+    先做状态合法性判定：任一非空状态不在 ``CONTROL_STATE_SEVERITY`` 内即
+    ``CONTROL_STATE_ILLEGAL``（fail-closed，ok=False），再比较一致性。
+    """
     reasons: list[str] = []
     if not read_back_ok:
         reasons.append("CONTROL_READBACK_FAILED")
-    if read_back_state is None or _text(read_back_state) == "":
+    requested_text = _text(requested_state)
+    read_back_text = _text(read_back_state)
+    if requested_text and requested_text not in CONTROL_STATE_SEVERITY:
+        reasons.append(CONTROL_STATE_ILLEGAL)
+    if read_back_text and read_back_text not in CONTROL_STATE_SEVERITY:
+        reasons.append(CONTROL_STATE_ILLEGAL)
+    if read_back_state is None or read_back_text == "":
         reasons.append("CONTROL_READBACK_MISSING")
-    elif _text(read_back_state) != _text(requested_state):
+    elif read_back_text != requested_text:
         reasons.append("CONTROL_WRITE_UNVERIFIED")
-    return ControlWriteVerdict(not reasons, tuple(reasons))
+    unique = tuple(dict.fromkeys(reasons))
+    return ControlWriteVerdict(not unique, unique)
 
 
 def authorize_control_request(
@@ -1977,9 +2175,13 @@ def authorize_control_request(
 
     - 非环回来源一律 403（``NON_LOOPBACK_REJECTED``）；
     - 角色/动作不匹配 → 403（``ROLE_NOT_PERMITTED``）；
-    - 未知动作/状态 → 400（fail-closed，不做默认放行）；
+    - 未知动作/状态 → 400（fail-closed，不做默认放行）；``unspecified`` 这类
+      “注册表里没有角色”的伪动作也按未知动作 400（r3 NEW-G P3-2）；
+    - ``emergency_stop`` 只能进 ``emergency``：显式给出别的目标态 →
+      400 ``EMERGENCY_STOP_TARGET_MISMATCH``（r3 NEW-G P3-1）；
     - ``auto`` 流程不得把人工禁用的状态放宽 → 409
-      （``AUTO_RECOVERY_BLOCKED_BY_MANUAL_DISABLE``）；
+      （``AUTO_RECOVERY_BLOCKED_BY_MANUAL_DISABLE``）；只读与**更严**方向
+      放行（r3 NEW-G P3-4，此前 auto 连 ``read_status`` 都 403）；
     - 人工从更严状态恢复需要显式 ``confirm_manual_reenable``，``emergency``
       还需要 ``confirm_secret == "emergency"``（沿用既有二次确认语义）。
     """
@@ -1989,7 +2191,10 @@ def authorize_control_request(
         return PermissionDecision(False, ("NON_LOOPBACK_REJECTED",), 403)
     if role_text not in CONTROL_ROLES and role_text != AUTO_ACTOR:
         return PermissionDecision(False, ("UNKNOWN_ROLE",), 403)
-    if action_text not in CONTROL_ACTION_ROLES:
+    if action_text not in CONTROL_ACTION_ROLES or not CONTROL_ACTION_ROLES[action_text]:
+        # 注册表里存在但没有任何角色 = 不是一个可执行动作（``unspecified`` 即此形态）：
+        # 按**未知动作** 400 拒绝。r3 NEW-G P3-2 之前它会落到 ROLE_NOT_PERMITTED/403，
+        # 把“动作不存在”误报成“权限不足”（口径不一致，且 403 更适合已认证越权）。
         return PermissionDecision(False, ("UNKNOWN_CONTROL_ACTION",), 400)
 
     state_actions = ("set_control", "emergency_stop", "set_control_severity_up",
@@ -2003,6 +2208,10 @@ def authorize_control_request(
             return PermissionDecision(False, ("CONTROL_STATE_REQUIRED",), 400)
         if target not in CONTROL_STATE_SEVERITY:
             return PermissionDecision(False, ("UNKNOWN_CONTROL_STATE",), 400)
+        if action_text == "emergency_stop" and target != "emergency":
+            # 紧急停机只能进 emergency：显式给别的目标态会被审计记成“紧急停机”
+            # 却只进 close_only（r3 NEW-G P3-1）。
+            return PermissionDecision(False, (EMERGENCY_STOP_TARGET_MISMATCH,), 400)
         current = _text(current_state) or "normal"
         if current not in CONTROL_STATE_SEVERITY:
             return PermissionDecision(False, ("UNKNOWN_CONTROL_STATE",), 400)
@@ -2016,7 +2225,7 @@ def authorize_control_request(
             if role_text != "operator":
                 return PermissionDecision(False, ("ROLE_NOT_PERMITTED",), 403)
 
-    if not _role_allows(role_text, action_text):
+    if not _role_allows(role_text, action_text, lowering=lowering):
         return PermissionDecision(False, ("ROLE_NOT_PERMITTED",), 403)
 
     reasons: list[str] = []
@@ -2050,7 +2259,7 @@ def authorize_control_request(
 #: 一律写进 note，不得用 fixed 掩盖未接线的部分。
 FINGERPRINT_R1_DISPOSITION: dict[str, dict[str, str]] = {
     "diff-1": {"status": "fixed", "note": "git 状态含 dirty/缺失原因码（resolve_git_state + mismatch_reasons）；factory 侧 WorkBuddy 实盘专属由 model_route_blockers 表达；启动门禁接线属 U13（模块内零消费者）", "owner": "U15/U13"},
-    "diff-2": {"status": "fixed", "note": "依赖锁纳入 requirements-lock.txt 且缺失即拒（collect_dependency_lock_files）", "owner": "U15"},
+    "diff-2": {"status": "fixed", "note": "缺口①依赖锁纳入 requirements-lock.txt 且缺失即拒（collect_dependency_lock_files）；缺口②（比对结果另存）r3 起由 compare_dependency_lock(root, declared) 真正产出 MATCH/MISMATCH/UNAVAILABLE（K01 IDENTITY_COVERAGE['dependency'].comparison_status），并随 IdentityBundle.dependency_comparison_status 一起交付；发布清单字段 dependency_comparison_status 的接线在补丁 01，合入前清单侧仍为空值", "owner": "U15/I"},
     "diff-3": {"status": "fixed", "note": "r2：effective_config_hash 覆盖 K01 EFFECTIVE_CONFIG_SOURCES 六类来源（settings 全量非敏感值 + decision_policy/agents/risk_learning/risk_profile.lock/windows_service），缺失/未采集三态可区分", "owner": "U15"},
     "diff-4": {"status": "fixed", "note": "strategy_hash 覆盖 knowledge/strategy_cards.json 并做文件级来源复核；r2 起零卡/截断文件拒绝（不得成为可发布身份）", "owner": "U15"},
     "diff-5": {"status": "fixed", "note": "model_route_hash 取解析后有效路由（含环境/备用/profile 覆盖）；r2 起非 ai_trader 不构造备用、不识别的备用 provider 给 FALLBACK_PROVIDER_UNRECOGNISED", "owner": "U15"},
@@ -2167,6 +2376,7 @@ __all__.extend([
     "READINESS_UNPROVEN",
     "IDENTITY_MALFORMED",
     "RUNTIME_GENERATION_MALFORMED",
+    "IDENTITY_GENERATION_MISMATCH",
     "SCOPE_HASH_UNBOUND",
     "SCOPE_HASH_MISMATCH",
     "EXECUTION_PROFILE_NOT_DECLARED",
@@ -2174,8 +2384,17 @@ __all__.extend([
     "CONFIG_SOURCE_FILES",
     "CONFIG_SOURCES_KEY",
     "CONFIG_SOURCE_MISSING",
+    # 控制面原因码（r3 NEW-G）。
+    "EMERGENCY_STOP_TARGET_MISMATCH",
+    "CONTROL_STATE_ILLEGAL",
+    "AUTO_PERMITTED_ACTIONS",
+    # 依赖锁对照结论（r3 NEW-E，K01 IDENTITY_COVERAGE['dependency']）。
+    "DEPENDENCY_COMPARISON_MATCH",
+    "DEPENDENCY_COMPARISON_MISMATCH",
+    "DEPENDENCY_COMPARISON_UNAVAILABLE",
     "MalformedInputError",
     "collect_source_config_files",
+    "compare_dependency_lock",
     "fingerprint_disposition",
     "identity_mismatch_reasons",
     "available_environment_snapshot",

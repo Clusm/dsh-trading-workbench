@@ -19,6 +19,7 @@ from core.runtime_identity import (  # noqa: E402
     AUTO_ACTOR,
     CONTROL_ACTION_ROLES,
     CONTROL_ROLES,
+    CONTROL_STATE_ILLEGAL,
     CONTROL_STATE_SEVERITY,
     authorize_control_request,
     is_loopback_host,
@@ -174,6 +175,63 @@ def check_verified_write() -> None:
           verify_control_write(requested_state="Paused", read_back_state="paused").ok is False)
 
 
+def check_r3_semantics() -> None:
+    """r3 NEW-G：紧急停机目标态 / 伪动作 / 非法状态回读 / auto 的方向语义。"""
+    # P3-1：emergency_stop 只能进 emergency
+    wrong_target = decide(role="operator", action="emergency_stop",
+                          requested_state="close_only", confirm_secret="emergency")
+    check("emergency-stop-target-must-be-emergency", not wrong_target.allowed
+          and wrong_target.reason_codes == ("EMERGENCY_STOP_TARGET_MISMATCH",)
+          and wrong_target.http_status == 400, str(wrong_target.as_dict()))
+    # 不传 requested_state 时按 emergency（既有语义不变）
+    implied = decide(role="operator", action="emergency_stop",
+                     requested_state="emergency", confirm_secret="emergency")
+    check("emergency-stop-with-emergency-target-allowed", implied.allowed)
+    # P3-2：注册表里没有角色的伪动作按未知动作 400（不是 403）
+    unspecified = decide(role="operator", action="unspecified")
+    check("unspecified-action-is-unknown-action",
+          not unspecified.allowed
+          and unspecified.reason_codes == ("UNKNOWN_CONTROL_ACTION",)
+          and unspecified.http_status == 400, str(unspecified.as_dict()))
+    # P3-3：回读一致性不足以证明写入有意义 —— 非法状态一律拒绝
+    bogus = verify_control_write(requested_state="bogus", read_back_state="bogus")
+    check("write-illegal-state-is-rejected", not bogus.ok
+          and bogus.reason_codes == (CONTROL_STATE_ILLEGAL,), str(bogus.as_dict()))
+    bogus_readback = verify_control_write(requested_state="paused", read_back_state="bogus")
+    check("write-illegal-readback-state-is-rejected", not bogus_readback.ok
+          and CONTROL_STATE_ILLEGAL in bogus_readback.reason_codes
+          and "CONTROL_WRITE_UNVERIFIED" in bogus_readback.reason_codes)
+    check("write-legal-states-still-verified",
+          verify_control_write(requested_state="paused", read_back_state="paused").ok)
+    # P3-4：auto 只读与更严方向放行，放宽方向仍 409
+    check("auto-can-read-status", decide(role=AUTO_ACTOR, action="read_status").allowed)
+    check("auto-can-tighten", decide(role=AUTO_ACTOR, action="set_control_severity_up",
+                                     requested_state="paused", current_state="normal").allowed)
+    check("auto-can-set-stricter-state",
+          decide(role=AUTO_ACTOR, action="set_control", requested_state="close_only",
+                 current_state="normal").allowed)
+    auto_loosen = decide(role=AUTO_ACTOR, action="set_control", requested_state="normal",
+                         current_state="paused")
+    check("auto-still-cannot-loosen",
+          not auto_loosen.allowed
+          and auto_loosen.reason_codes == ("AUTO_RECOVERY_BLOCKED_BY_MANUAL_DISABLE",)
+          and auto_loosen.http_status == 409)
+    check("auto-cannot-resolve-incident",
+          not decide(role=AUTO_ACTOR, action="resolve_incident").allowed)
+
+
+def check_loopback_expanded_form_is_conservative() -> None:
+    """r3 NEW-H：完整展开的 IPv4-mapped 回环被**拒绝**（方向 fail-closed）。"""
+    check("expanded-ipv4-mapped-loopback-not-accepted",
+          not is_loopback_host("0:0:0:0:0:ffff:127.0.0.1"))
+    # 返回 False = 拒绝：门禁侧必须 403，绝不因该形态而放行
+    decision = decide(role="operator", action="set_control", requested_state="paused",
+                      client_host="0:0:0:0:0:ffff:127.0.0.1")
+    check("expanded-ipv4-mapped-loopback-denied",
+          not decision.allowed and decision.http_status == 403
+          and decision.reason_codes == ("NON_LOOPBACK_REJECTED",), str(decision.as_dict()))
+
+
 def check_action_registry_shape() -> None:
     check("no-role-can-do-unspecified",
           all(role not in CONTROL_ACTION_ROLES["unspecified"] for role in CONTROL_ROLES))
@@ -188,6 +246,8 @@ def main() -> int:
     check_role_separation()
     check_manual_disable_beats_auto_recovery()
     check_verified_write()
+    check_r3_semantics()
+    check_loopback_expanded_form_is_conservative()
     check_action_registry_shape()
     if FAILURES:
         print(f"\nU15 CONTROL BOUNDARY ACCEPTANCE FAILED: {len(FAILURES)} -> "
