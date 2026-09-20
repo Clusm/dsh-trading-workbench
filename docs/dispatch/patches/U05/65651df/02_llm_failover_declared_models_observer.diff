@@ -1,0 +1,118 @@
+diff --git a/src/llm/failover_client.py b/src/llm/failover_client.py
+index af6cb11..16f8113 100644
+--- a/src/llm/failover_client.py
++++ b/src/llm/failover_client.py
+@@ -8,6 +8,7 @@ messages 不会重复下单。
+ from __future__ import annotations
+ 
+ import time
++from collections.abc import Sequence
+ from typing import Any, Callable, TypeVar
+ 
+ import httpx
+@@ -38,7 +39,8 @@ class FailoverLLMClient(LLMClient):
+ 
+     def __init__(self, primary: LLMClient, fallback: LLMClient, *,
+                  primary_name: str, fallback_name: str,
+-                 min_remaining_seconds: float = 15.0) -> None:
++                 min_remaining_seconds: float = 15.0,
++                 declared_models: Sequence[str] = ()) -> None:
+         self.primary = primary
+         self.fallback = fallback
+         self.primary_name = str(primary_name)
+@@ -46,6 +48,25 @@ class FailoverLLMClient(LLMClient):
+         self.min_remaining_seconds = max(0.0, float(min_remaining_seconds))
+         self.last_provider = self.primary_name
+         self.fallback_count = 0
++        #: 本链路**显式声明**的模型名集合（主 + 备）。调用方据此区分"合法的备用
++        #: 路由"与"静默参数继承"（U05/S02 PARAMETER_INHERITANCE）。
++        self.declared_fallbacks = tuple(
++            str(item) for item in declared_models if str(item or "").strip()
++        )
++        #: 可选尝试观察器 ``observer(provider, purpose, deadline) -> None``：
++        #: 每发起一次尝试调用一次，供执行侧落 K05 span 与路由风险判定（DL06/S02）。
++        self.attempt_observer: Callable[[str, str | None, float | None], None] | None = None
++
++    def _observe(self, provider: str, *, purpose: str | None,
++                 deadline: float | None) -> None:
++        """观测失败不得阻塞决策（可观测性是旁路，不是控制流）。"""
++        observer = self.attempt_observer
++        if observer is None:
++            return
++        try:
++            observer(provider, purpose, deadline)
++        except Exception:  # noqa: BLE001 - 观测器故障不得影响模型调用
++            return
+ 
+     @staticmethod
+     def _cooldown_remaining(client: LLMClient) -> float:
+@@ -68,7 +89,7 @@ class FailoverLLMClient(LLMClient):
+         return remaining > 0 and remaining >= self.min_remaining_seconds
+ 
+     def _call(self, primary_call: Callable[[], _T], fallback_call: Callable[[], _T],
+-              *, deadline: float | None) -> _T:
++              *, deadline: float | None, purpose: str | None = None) -> _T:
+         if deadline is not None and time.monotonic() >= deadline:
+             raise LLMTimeBudgetExceeded("LLM total time budget exceeded")
+         # 已知主供应商正在 Retry-After 冷却时直接使用独立备用额度，避免在主协调器
+@@ -76,7 +97,9 @@ class FailoverLLMClient(LLMClient):
+         if self._cooldown_remaining(self.primary) > 0 and self._can_fallback(deadline):
+             self.last_provider = self.fallback_name
+             self.fallback_count += 1
++            self._observe(self.fallback_name, purpose=purpose, deadline=deadline)
+             return fallback_call()
++        self._observe(self.primary_name, purpose=purpose, deadline=deadline)
+         try:
+             result = primary_call()
+             self.last_provider = self.primary_name
+@@ -87,14 +110,25 @@ class FailoverLLMClient(LLMClient):
+                 raise
+             self.last_provider = self.fallback_name
+             self.fallback_count += 1
++            self._observe(self.fallback_name, purpose=purpose, deadline=deadline)
+             return fallback_call()
+ 
+     @staticmethod
+-    def _annotate(raw: dict[str, Any], provider: str, fallback_used: bool) -> dict[str, Any]:
++    def _annotate(raw: dict[str, Any], provider: str, fallback_used: bool,
++                  *, deadline: float | None = None) -> dict[str, Any]:
+         # 只添加本系统命名空间的可观测字段，不改供应商 choices/usage 协议。
+         raw.setdefault("_mta", {})
+         if isinstance(raw["_mta"], dict):
+-            raw["_mta"].update({"provider": provider, "fallback_used": fallback_used})
++            raw["_mta"].update({
++                "provider": provider,
++                "fallback_used": fallback_used,
++                # 期限落在本系统命名空间：绝对时刻用**单调时钟**（不可与墙钟混用），
++                # 同时回带剩余毫秒便于判定"这次尝试是否借了本轮的预算"（U05/DL07）。
++                "deadline_monotonic": deadline,
++                "deadline_remaining_ms": (
++                    None if deadline is None else int((deadline - time.monotonic()) * 1000)
++                ),
++            })
+         return raw
+ 
+     def complete(self, system: str, user: str, *, deadline: float | None = None,
+@@ -105,10 +139,11 @@ class FailoverLLMClient(LLMClient):
+         response = self._call(
+             lambda: self.primary.complete(system, user, deadline=deadline, purpose=purpose),
+             lambda: self.fallback.complete(system, user, deadline=deadline, purpose=purpose),
+-            deadline=deadline,
++            deadline=deadline, purpose=purpose,
+         )
+         response.raw = self._annotate(
+             response.raw, self.last_provider, self.fallback_count > before,
++            deadline=deadline,
+         )
+         return response
+ 
+@@ -127,6 +162,7 @@ class FailoverLLMClient(LLMClient):
+                 messages, tools=tools, tool_choice=tool_choice,
+                 deadline=deadline, purpose=purpose,
+             ),
+-            deadline=deadline,
++            deadline=deadline, purpose=purpose,
+         )
+-        return self._annotate(raw, self.last_provider, self.fallback_count > before)
++        return self._annotate(raw, self.last_provider, self.fallback_count > before,
++                              deadline=deadline)
