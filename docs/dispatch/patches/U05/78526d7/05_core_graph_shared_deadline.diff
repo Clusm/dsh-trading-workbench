@@ -1,5 +1,5 @@
 diff --git a/src/core/graph.py b/src/core/graph.py
-index b32e1bd..8f6ee66 100644
+index c3345c8..4cc7316 100644
 --- a/src/core/graph.py
 +++ b/src/core/graph.py
 @@ -20,6 +20,7 @@ from audit.database import AuditDatabase

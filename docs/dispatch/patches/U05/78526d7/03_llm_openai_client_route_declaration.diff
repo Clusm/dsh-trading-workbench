@@ -1,5 +1,5 @@
 diff --git a/src/llm/openai_compatible_client.py b/src/llm/openai_compatible_client.py
-index 04b80b2..5d5355d 100644
+index 0a283c6..daa7ca8 100644
 --- a/src/llm/openai_compatible_client.py
 +++ b/src/llm/openai_compatible_client.py
 @@ -3,6 +3,7 @@ from __future__ import annotations

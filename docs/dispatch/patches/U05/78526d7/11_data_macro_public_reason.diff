@@ -1,0 +1,34 @@
+diff --git a/src/data/macro_public.py b/src/data/macro_public.py
+index 1979947..445f24b 100644
+--- a/src/data/macro_public.py
++++ b/src/data/macro_public.py
+@@ -7,10 +7,29 @@ import httpx
+ from urllib.parse import quote as url_quote
+ 
+ from agents.models import MacroBrief
++from core.decision_trace import DecisionReason, reason_from_source_errors
+ 
+ YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
+ 
+ 
++def reason_from_errors(errors: list[str], *,
++                       degraded: bool = False) -> DecisionReason | None:
++    """把本模块收集的源级错误映射为 U05 原因码（无错误返回 ``None``）。
++
++    宏观源全部是"取不到就是缺失"，因此统一归 ``DATA_UNAVAILABLE``；若这一轮
++    实际用的是陈旧/部分数据，调用方另行声明 ``degraded=True`` 以附
++    ``RESEARCH_INCOMPLETE`` 辅因。
++
++    ``degraded`` 必须由**调用方**显式给出——那是只有调用方才掌握的事实。
++    旧口径用 ``len(errors) < 8`` 这类与源集合大小耦合的魔法常量去**猜**它，
++    源一增删就静默失准（B-r1 P2-6）。
++    """
++    if not errors:
++        return None
++    return reason_from_source_errors(list(errors), labels=("macro_public",),
++                                     degraded=bool(degraded))
++
++
+ def _yahoo_chart(symbol: str, range_: str = "5d", interval: str = "1d") -> dict[str, Any]:
+     safe_symbol = url_quote(symbol, safe="")
+     r = httpx.get(
