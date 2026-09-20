@@ -110,7 +110,7 @@ def is_unpinned_identity(identity: RuntimeIdentity) -> bool:
 
     堵的是 B-P1-1 的同族逃逸：``identity is not None`` 会把模块自带的哨兵
     ``UNPINNED_IDENTITY``（或它的 ``model_copy`` / 等值裸 dict）判成"身份已固定"，
-    报告随之输出 ``identity_pinned=True`` 的**虚假备份**、门禁整门放行。
+    报告随之输出 ``identity_pinned=True`` 的**虚假背书**、门禁整门放行。
     这里按语义判：字段全等 ⇒ 是哨兵；``environment`` 为 ``unpinned`` ⇒ 是哨兵族
     （手改 ``runtime_instance_id`` 之类的近等值副本同样不放过）。
     """
