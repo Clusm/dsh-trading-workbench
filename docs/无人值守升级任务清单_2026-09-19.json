@@ -379,6 +379,36 @@
             "04": "应由 I 应用（1 行；demo-fapi.binance.com 也 strict=True）"
           },
           "positives": "三状态独立、资金费守恒、Decimal、空窗!=零、query_review_library 只读 经独立复现成立"
+        },
+        {
+          "type": "author_fix_r2",
+          "head_commit": "b4a322e",
+          "commits": [
+            "f138176",
+            "b4a322e"
+          ],
+          "note": "含一次会话异常中止；工作保全为 WIP fb1378c 后由接续会话推进",
+          "patch01_regenerated": "+294/-0，5 处：content_hash 改调 K03 income_content_hash（删自造指纹=P0-B 第二半）/ 新增 *_norm 键列使唯一约束与 K03 幂等键等价 / fetch_income_coverage(start_ms,end_ms)+range / 新增 income_conflicts 表 / docstring 不再谎称同事务",
+          "p0b_three_way": [
+            "c290c50源+旧补丁: REPLAY CRASH: ValidationError（key->hash 被当事件）",
+            "HEAD源+旧补丁: duplicates=0 quarantined=4 events=0 Σ=0 -> 重放抹账",
+            "HEAD源+新补丁: duplicates=4 quarantined=0 events=4 Σ=-1.80 -> NO_LOSS（库内 hash 与 K03 一致）"
+          ],
+          "case9": "[9] 不再 SKIP，真实走 AuditDatabase：迁移>=17 / 首写 4 行 / 重复写新增 0 / 覆盖证据 COMPLETE / 重放全部判 duplicates / 重放不抹账（事件集仍 4）/ content_hash 与 K03 单一真值源一致 / 同键不同内容判隔离 / 冲突行落库可审计且不污染事件表；exit 0",
+          "orchestrator_verified": {
+            "smoke_contracts_v3": "PASS 173/0",
+            "test_income_reconciliation": "exit 0 PASS=139 FAIL=0",
+            "test_review_statistics": "exit 0 PASS=44 FAIL=0",
+            "shared_contract_runner_untouched": true,
+            "patch_apply_check": "01/02/03/04 各自 OK；沙箱顺序组合 01+02 / 01+03 / 02+04 / 全四个 均 OK"
+          },
+          "author_self_correction": "作者更正自报笔误：Σ 应为 -1.80 而非先前所写 -1.70",
+          "known_limits": [
+            "事件与覆盖分别提交（非单事务，fail-closed 顺序）",
+            "_sum_commissions 对 commission 取 abs（口径已写入 docstring）",
+            "P3-1/2/4/5/7 与部分契约侧出口未改，作者登记在补丁 README 的「未修项登记」表"
+          ],
+          "rollback": "迁移 17 为纯新增表，回退代码即回滚"
         }
       ],
       "blockers": [],
@@ -2488,6 +2518,14 @@
         "owner": "I",
         "blocks": "无（集成时原子解决）",
         "note": "已把 scripts/smoke_u04_execution_faults.py 补入 U04 owned_paths；登记补丁 run_offline_regression.register_u04.patch 与冒烟脚本须同批落地。非作者缺陷。"
+      },
+      {
+        "id": "CONTRACT-FREEZE-BOUNDARY",
+        "title": "下游任务的残余限制**不得**直接写入已冻结的 docs/contracts/README.md §12",
+        "status": "DECIDED",
+        "owner": "I",
+        "blocks": "无",
+        "note": "U01 作者请求把其「未修项登记」表落入 docs/contracts/README.md §12，但该文件属 contract-v3.0 冻结产物（tag ffdab44）；改动它即构成契约变更，须升版并重跑相关复验。I 决定：**本轮不写**，U01 残余限制记录在本台账 known_limits；若确需进入契约，作为 contract-v3.1 候选在 U12 RC 前统一评估。"
       }
     ],
     "contract_candidate": "71f8109",
