@@ -853,11 +853,49 @@ def test_shared_adapter_two_states() -> None:
                     "SELECT name FROM sqlite_master WHERE type='table' "
                     "AND name='alert_deliveries'")
                 check("补丁态：alert_deliveries 审计表存在", table is not None, table)
-                check("补丁态：AuditDatabase.trading_evidence_timestamp 可用",
-                      has_evidence, has_evidence)
                 # 关键：新表不得推进迁移版本（否则会打破既有 range(1, N) 断言）。
                 check("补丁态：新增告警审计表**不**推进 schema 版本（无伴随断言破坏）",
                       db.current_schema_version() == 17, db.current_schema_version())
+                check("补丁态：交易证据读取**唯一来源**在 core.ops.alert_delivery"
+                      "（audit.database 不另立第二套口径）",
+                      not has_evidence, has_evidence)
+                now_ms = int(time.time() * 1000)
+                base = {"environment": "live", "incident_key": "acc|svc|R",
+                        "attempt": 1, "first_occurred_at_ms": now_ms}
+                check("补丁态：审计行状态由事实派生（SUBMITTED）",
+                      db.record_alert_delivery(**base, submitted_at_ms=now_ms))
+                fabricated = ""
+                try:
+                    db.record_alert_delivery(**base, submitted_at_ms=now_ms,
+                                             provider_receipt="rcpt",
+                                             delivered_at_ms=now_ms)
+                except ValueError as exc:
+                    fabricated = str(exc)
+                check("补丁态：无设备回执的 DELIVERED 被拒（不得伪造送达）",
+                      "device" in fabricated, fabricated)
+                check("补丁态：被拒后审计行仍是 SUBMITTED（不落半截事实）",
+                      db.fetch_alert_deliveries(environment="live")[0]["state"] == "SUBMITTED",
+                      db.fetch_alert_deliveries(environment="live")[0]["state"])
+                lying = ""
+                try:
+                    db.record_alert_delivery(**base, submitted_at_ms=now_ms, state="DELIVERED")
+                except ValueError as exc:
+                    lying = str(exc)
+                check("补丁态：调用方自报状态与事实不符即拒绝",
+                      "mismatch" in lying, lying)
+                check("补丁态：带设备回执的真实送达可记录（DELIVERED）",
+                      db.record_alert_delivery(
+                          **base, submitted_at_ms=now_ms, provider_receipt="rcpt",
+                          delivered_at_ms=now_ms + 5, device_receipt="dev-acc",
+                          manual_ack_actor="operator", manual_ack_note="phone call-back"))
+                check("补丁态：同 attempt 的低阶重报不得把已记录状态降级",
+                      db.record_alert_delivery(**base, submitted_at_ms=now_ms) is False
+                      and db.fetch_alert_deliveries(environment="live")[0]["state"]
+                      == "DELIVERED")
+                row = db.fetch_alert_deliveries(environment="live")[0]
+                check("补丁态：设备回执与人工确认留存在审计行（可审计）",
+                      row["device_receipt"] == "dev-acc"
+                      and row["manual_ack_actor"] == "operator", dict(row))
             else:
                 check("未打补丁态：AuditDatabase 无告警审计 API（未假装接入）",
                       not has_api and not has_evidence, (has_api, has_evidence))
