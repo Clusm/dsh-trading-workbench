@@ -1,8 +1,0 @@
-== 事实基准：BNBUSDT 1h closed_close = 744.13 ==
-[A] 自报 claim 与程序一致（冗余声明）: ('VALID', True, [], [('close_above_price', '1h:closed_close > 744', 'PASS')])
-[B] 自报**附加**为真的额外 claim（LONG 侧加一条 close_below_price）: ('VALID', True, [], [('close_above_price', '1h:closed_close > 744', 'PASS'), ('extra', '1h:closed_close < 1000', 'PASS')])
-[C] 自报附加为假的额外 claim（仍受程序校验）: ('REJECTED', False, ['K02:CLAIM_FALSE'], [('close_above_price', '1h:closed_close > 744', 'PASS'), ('false-extra', '1h:closed_close < 1', 'FAIL')])
-[D] 自报附加越界操作数（引用不存在的事实）: ('REJECTED', False, ['CLAIM_DECLARATION_REJECTED:override:close_above_price'], [('close_above_price', '1h:closed_close > 744', 'PASS')])
-[E] 自报与程序基准同 kind 但不同阈值（替换尝试）: ('REJECTED', False, ['CLAIM_DECLARATION_REJECTED:override:close_above_price'], [('close_above_price', '1h:closed_close > 744', 'PASS')])
-[F] expected 非布尔: ('REJECTED', False, ['CLAIM_DECLARATION_REJECTED:override:close_above_price'], [('close_above_price', '1h:closed_close > 744', 'PASS')])
-[G] 无 claims 字段（基线路径）: ('VALID', True, [], [('close_above_price', '1h:closed_close > 744', 'PASS')])
