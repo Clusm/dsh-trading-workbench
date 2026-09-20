@@ -983,6 +983,22 @@
           ],
           "rollback": "git revert cc6de61 da3327f 083c16d",
           "suggestion_to_i": "把'可空向后兼容列不抬 schema_version'写进 docs/contracts/README.md §10.2 —— 与 U01 同类请求，I 决定不写冻结契约（见 CONTRACT-FREEZE-BOUNDARY）"
+        },
+        {
+          "type": "review_r2_verification",
+          "candidate": "cc6de61",
+          "verdict": "CHANGES_REQUESTED",
+          "archived_path": "docs/dispatch/reviews/U04/cc6de61/Q_r2.md",
+          "closed": [
+            "can_cancel_protection（9 种零写法/缺失/tiny-nonzero 全挡）",
+            "健康故障 35 名字 x 4 动作枚举，LEAKS=[] 且真保护失败仍放行",
+            "apply_fill_revision 第一笔成交（5/5）",
+            "4 补丁 apply --check + 打补丁树 133/0",
+            "回归 6/6"
+          ],
+          "author_pushback_upheld": "第 3 项**作者抗辩成立**：复验者自行 AST 枚举确认 V1 唯一 return False 在返回前即写入字段，两条不写路径均返回 True 且读者在 ok=True 时提前 return => 单线程读不到残余，A 的 N->N+1->N+2 不可复现。真缺陷是跨标的/跨线程窗口，独立复现 V1 bare=16/20000 -> r2 bare=0",
+          "blocking_n1": "N1（P2 未登记）：_component_status 用 _STATUS_ALIASES.get(x,'') 令'终态保留原状态'分支对 CANCELED/EXPIRED/REJECTED/FILLED 永久失效；私有流真实路径 CANCELED+迟到成交 -> working=0.0143!=0、terminal=0，被判 WORKING_NONZERO_WHILE_TERMINAL，返回 PARTIALLY_FILLED/revision_only=False。V1 在同场景抛错（成交入不了账），r2 变成写入非法态 = **半修**。复验者实测一行修复（.get(x,x)）后作者套件仍 133/0。",
+          "other": "N2 护栏空转（P3）、N3 非布尔 flat_confirmed、N4 mirrored_protection_views 无调用者"
         }
       ],
       "blockers": [],
@@ -1040,7 +1056,7 @@
           "sessions": [
             "Q (reviews/U04/R2/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED",
           "reports_dir": "docs/dispatch/reviews/U04/cc6de61/"
         }
       ],
