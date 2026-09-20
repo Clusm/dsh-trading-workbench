@@ -211,6 +211,47 @@ def test_full_refresh_end_to_end(db) -> None:  # noqa: ANN001
           str(disclosure["caliber"]["limitations"]))
 
 
+def test_metrics_failure_is_not_reported_fresh(db) -> None:  # noqa: ANN001
+    """P2-1：聚合失败后**不得**报 REFRESHED / age≈0（陈旧当新值 = 假新鲜）。
+
+    把聚合入口 ``intel_observability`` 换成抛错桩，并让"距上次成功"超过重算间隔
+    （直接推进成功时刻，不 sleep 900s），再整轮刷新。
+    """
+    svc = _make_service(db, {"enabled": True})
+    first = svc.maybe_refresh(force=True)
+    check("首轮汇总为 REFRESHED", first["shadow_metrics"]["state"] == "REFRESHED",
+          str(first["shadow_metrics"]))
+    original = svc.db.intel_observability
+
+    def boom(*_a, **_k):
+        raise RuntimeError("aggregate failed")
+
+    try:
+        svc.db.intel_observability = boom  # type: ignore[method-assign]
+        # 推进"上次成功"时刻，令本轮到期重算（不 sleep）。
+        svc._metrics_success_at = (
+            (svc._metrics_success_at or 0.0) - (svc.metrics_refresh_seconds + 60.0))
+        second = svc.maybe_refresh(force=True)
+    finally:
+        svc.db.intel_observability = original  # type: ignore[method-assign]
+
+    metrics = second["shadow_metrics"]
+    check("聚合失败后 state 为 FAILED（不是 REFRESHED）",
+          metrics["state"] == "FAILED", str(metrics))
+    check("聚合失败后 age 未被重置为 0（说的是距上次成功）",
+          isinstance(metrics["age_seconds"], float)
+          and metrics["age_seconds"] >= svc.metrics_refresh_seconds,
+          str(metrics))
+    check("聚合失败后仍带旧缓存（events_24h 不清空）",
+          "events_24h" in second["shadow_evaluation"], str(second["shadow_evaluation"]))
+    check("失败原因进入本轮错误列表",
+          any(item.startswith("metrics:") for item in second["errors"]),
+          str(second["errors"]))
+    check("披露仍声明未按 source 过滤的残留缺口（不因失败而消失）",
+          second["shadow_disclosure"]["release_gate"]["residual_gap"]["fixed_here"] is False,
+          str(second["shadow_disclosure"]["release_gate"]["residual_gap"]))
+
+
 def test_over_budget_degrades_labeling(db) -> None:  # noqa: ANN001
     """超预算 → 降级可选阶段并留痕（必达要点③：不拖住管理线程）。"""
     original = ss.research_load_plan
@@ -277,6 +318,7 @@ def main() -> int:
     if applied:
         run_case("[2] 整轮刷新端到端", test_full_refresh_end_to_end)
         run_case("[3] 超预算降级", test_over_budget_degrades_labeling)
+        run_case("[4] 聚合失败不得报新值", test_metrics_failure_is_not_reported_fresh)
     else:
         _note("共享适配未应用：本分支只承载独占产物，整轮接线由集成树/补丁沙箱验证。")
         _note("模块契约与旧字段兼容已在 [1] 断言，本脚本在两态都非空转。")

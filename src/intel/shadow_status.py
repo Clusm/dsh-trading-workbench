@@ -101,6 +101,9 @@ LEGACY_LIMITATIONS: tuple[str, ...] = (
     "不是真实成交成本。",
     "同轮相邻信号高度重叠，数千条样本不等于数千次独立交易；不能按平均收益排名。",
     "A/B/C 三组的交易时点、覆盖标的与机会集合不同，不是同一样本的随机实验，禁止互相证明。",
+    "**B/C 研究影子行在现行发布门禁里仍会被计入**「200 方向候选」分母："
+    "src/core/release_evidence.py 的候选查询只按 signal 过滤、尚未按 source 过滤；"
+    "本批只提供 release_gate_role/research_sources 事实，来源过滤由 U09 施加。",
 )
 
 
@@ -548,6 +551,26 @@ def build_disclosure(*, config: Mapping[str, Any] | None,
             "authority": "src/core/release_evidence.py (U09 固定并版本化)",
             "gate_constants": {"min_directional_candidates": 200,
                                "min_eligible_closed_trades": 30},
+            # gate_constants 是**字面量副本**，不是运行时读取：本模块刻意不 import
+            # 核心门禁（研究侧车只依赖标准库）。副本漂移由测试检测，但运行时披露
+            # 在 U09 改阈值后会先说旧数字——这是已知的披露时效限制。
+            "gate_constants_source": (
+                "字面量副本（shadow_status 不 import core.release_evidence）；"
+                "漂移由 tests/integration/test_shadow_status.py 的 "
+                "test_gate_caliber_agrees_with_release_evidence 检测，"
+                "不是运行时读取"),
+            # 机器可读的**残留缺口**：给 U09 一个稳定钩子，也给 UI 一个渲染源；
+            # 本模块只描述事实，不实现来源过滤、不建立第二套 GO 判断器。
+            "residual_gap": {
+                "id": "release_gate_counts_research_rows",
+                "summary": ("现行门禁按 signal 过滤、未按 source 过滤：B/C 研究影子行"
+                            "仍会计入「200 方向候选」分母。"),
+                "impact": ("directional_candidates 会被研究行推高（观测到的 Δ=+100/七天内可"
+                           "持续新增分钟粒度机会键）；eligible_closed/observation_days 不受影响。"),
+                "authority": "U09（src/core/release_evidence.py）",
+                "fixed_here": False,
+                "disclosure_only": True,
+            },
             "note": (
                 "B/C 为 research_only：其样本不是执行候选，也不得充当已闭合交易或"
                 "观察天数，禁止跨组互相证明。200 方向候选的业务口径由 U09 在 "

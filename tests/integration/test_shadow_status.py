@@ -86,6 +86,13 @@ def test_execution_weight_is_a_constant_zero() -> None:
           == "FIRST_RELEASE_LABEL_DISCLOSURE_C_UNCONFIGURED_ISOLATION_ONLY")
     check("旧口径 ID 已固定", ss.LEGACY_CALIBER_ID == "legacy-v1-rolling-mark-price")
     check("旧口径缺陷清单非空（不能只说“参考”）", len(ss.LEGACY_LIMITATIONS) >= 5)
+    # P2-6：清单必须包含它**自己**最要紧的缺陷（B/C 影子行仍进 200 候选分母），
+    # 否则页面会自相矛盾地暗示"研究样本不进发布门槛"。
+    joined = "".join(ss.LEGACY_LIMITATIONS)
+    check("缺陷清单含「仍会计入发布门禁候选」这条自有缺陷",
+          "计入" in joined and "200 方向候选" in joined, joined[-60:])
+    check("缺陷清单点明未按 source 过滤",
+          "source" in joined and "release_evidence" in joined, joined[-60:])
     check("模块 schema 版本已声明", ss.SCHEMA_VERSION == "u06a-shadow-status-v1")
     check("只有 bullish/bearish 算方向性样本",
           ss.DIRECTIONAL_SIGNALS == frozenset({"bullish", "bearish"}))
@@ -347,6 +354,18 @@ def test_gate_caliber_agrees_with_release_evidence() -> None:
           "第二套 GO" in gate["note"] or "不建立第二套" in gate["note"])
     check("research_sources 与 release_gate_role 同源",
           set(gate["research_sources"]) == {ss.SOURCE_B, ss.SOURCE_C})
+    # P3-11：门槛常量是**副本**，必须如实声明来源与漂移检测，不得暗示运行时读取。
+    check("披露声明门槛常量是副本而非运行时读取",
+          "副本" in gate["gate_constants_source"]
+          and "import" in gate["gate_constants_source"]
+          and "test_gate_caliber_agrees_with_release_evidence" in gate["gate_constants_source"],
+          gate["gate_constants_source"])
+    check("披露声明现行门禁未按 source 过滤的残留缺口（机器可读）",
+          gate["residual_gap"]["id"] == "release_gate_counts_research_rows"
+          and gate["residual_gap"]["fixed_here"] is False
+          and "source" in gate["residual_gap"]["summary"], str(gate["residual_gap"]))
+    check("残留缺口归属 U09（不在本批修）",
+          "U09" in gate["residual_gap"]["authority"], str(gate["residual_gap"]))
 
 
 def test_marker_forbids_gate_counting() -> None:
@@ -622,8 +641,50 @@ def test_service_level_wiring() -> None:
                                                "degraded": ["metrics_cache_fresh"]}, [])
         check("未到期时标 CACHED", third["state"] == "CACHED", str(third))
         check("CACHED 时给出年龄", isinstance(third["age_seconds"], float), str(third))
+        check("CACHED 不是陈旧（未超期）", third["stale"] is False, str(third))
         check("缓存标记有界", third["bounded"] is True
               and third["min_refresh_seconds"] >= svc2.refresh_seconds, str(third))
+
+        # P2-1 回归：聚合失败后**不得**把缓存里的旧值当新值报告。
+        import time as _time
+        fresh_state = svc2._refresh_metrics_summary(
+            {"allow_metrics": True, "allow_labeling": True, "degraded": []}, [])
+        check("成功刷新标 REFRESHED 且不陈旧",
+              fresh_state["state"] == "REFRESHED" and fresh_state["stale"] is False,
+              str(fresh_state))
+        digest_before = json.dumps(svc2._metrics_cache, sort_keys=True, default=str)
+        computed_before = svc2._metrics_computed_at
+        _time.sleep(1.05)
+        original_obs = svc2.db.intel_observability
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("aggregate failed")
+
+        fail_errors: list[str] = []
+        try:
+            svc2.db.intel_observability = _boom  # type: ignore[method-assign]
+            failed_state = svc2._refresh_metrics_summary(
+                {"allow_metrics": True, "allow_labeling": True, "degraded": []}, fail_errors)
+        finally:
+            svc2.db.intel_observability = original_obs  # type: ignore[method-assign]
+        check("聚合失败后 state 不是 REFRESHED（假新鲜）",
+              failed_state["state"] == "FAILED", str(failed_state))
+        check("聚合失败后标 stale=True", failed_state["stale"] is True, str(failed_state))
+        check("聚合失败后 age 不被重置为 0（说的是距上次**成功**）",
+              isinstance(failed_state["age_seconds"], float)
+              and failed_state["age_seconds"] >= 1.0, str(failed_state))
+        check("聚合失败后 computed_at 不动（缓存仍是旧值）",
+              failed_state["computed_at"] == computed_before
+              and json.dumps(svc2._metrics_cache, sort_keys=True, default=str) == digest_before,
+              str(failed_state))
+        check("聚合失败后 cached=True（确实在用旧缓存）",
+              failed_state["cached"] is True, str(failed_state))
+        check("聚合失败原因如实登记",
+              failed_state["last_error"] == "RuntimeError"
+              and any(item.startswith("metrics:") for item in fail_errors),
+              f"{failed_state['last_error']} / {fail_errors}")
+        check("聚合失败不冻结重试（年龄继续增长 → 到期重试）",
+              svc2._metrics_age_seconds() >= 1.0, str(svc2._metrics_age_seconds()))
         errors: list[str] = []
         svc2._refresh_metrics_summary({"allow_metrics": True, "allow_labeling": True,
                                        "degraded": []}, errors)
@@ -659,6 +720,25 @@ def test_service_level_wiring() -> None:
 # --------------------------------------------------------------------------- #
 # [8] 展示层接线（仅当共享适配已应用时执行）
 # --------------------------------------------------------------------------- #
+def _render_snapshot(*, metrics_state: str = "FAILED") -> dict:
+    """合成一份最小 ``web3_intel`` 快照：披露来自**真实** :func:`build_disclosure`。
+
+    指标故意处于**陈旧**态（FAILED），且 ``shadow_evaluation`` 为空（=从未成功计算），
+    用来验证页面既说出"旧值"、也不把"未计算"渲染成 0。
+    """
+    metrics = {"state": metrics_state, "age_seconds": 12.5, "stale": True,
+               "last_error": "RuntimeError", "sample_loss_state": "CACHED"}
+    return {
+        "status": "degraded", "execution_weight": 0.0, "symbols": [],
+        "wallet_tracker": {"status": "unconfigured"},
+        "token_audit": {"status": "unconfigured"},
+        "shadow_disclosure": ss.build_disclosure(
+            config={"enabled": True}, metrics=metrics),
+        "shadow_metrics": {**metrics, "evaluations": []},
+        "shadow_evaluation": {},
+    }
+
+
 def test_dashboard_shows_legacy_caliber() -> None:
     template = ROOT / "src" / "dashboard" / "templates" / "decisions.html"
     text = template.read_text(encoding="utf-8")
@@ -668,6 +748,17 @@ def test_dashboard_shows_legacy_caliber() -> None:
     check("决策页展示 A/B/C 组状态", "A/B/C 研究隔离" in text)
     check("决策页展示旧口径已知缺陷", "旧口径已知缺陷" in text)
     check("决策页不再把影子行标为“可人工评审”", "可人工评审" not in text)
+    # P2-2：release_gate.note 的关键 caveat 必须**渲染**，不能只存在 JSON 里。
+    check("决策页渲染 release_gate.note（与 JSON 同源，不是复制文本）",
+          "sgr.note" in text)
+    check("决策页渲染残留缺口（未按 source 过滤 / 仍进 200 候选）",
+          "residual_gap" in text and "仍会计入" in text)
+    # P3-9：汇总指标缓存状态与年龄必须**渲染**（否则 CACHED/UNAVAILABLE 无陈旧提示）。
+    check("决策页渲染 shadow_metrics 的 state 与 age", "shadow_metrics" in text
+          and "sm.state" in text and "sm.age_seconds" in text)
+    # P3-8：未计算不得渲染成 0（与 missing_sample_accounting 的反模式一致）。
+    check("决策页不再用 `or 0` 把未计算渲染成 0 事件",
+          "events_24h or 0" not in text and "未计算" in text)
 
     from jinja2 import Environment, FileSystemLoader
     env = Environment(loader=FileSystemLoader(str(template.parent)))
@@ -701,6 +792,37 @@ def test_dashboard_shows_legacy_caliber() -> None:
     empty = fragment.render(wi={})
     check("无披露数据时不崩且不伪造权重",
           empty.startswith("0|DEFERRED|") and empty.endswith("limits=0"), empty)
+
+    # P2-2 / P3-8 / P3-9 端到端渲染：真实整页 + 合成快照。只看**页面可见区**：
+    # 原始 JSON 折叠块会把整份快照 tojson 出来，直接对整页做子串判断会得到
+    # "渲染了 X" 的**假 HIT**（补丁前的状态串就是这样被误判的）。
+    from types import SimpleNamespace
+    request = SimpleNamespace(url=SimpleNamespace(path="/decisions"),
+                              query_params={}, method="GET")
+    observability = SimpleNamespace(
+        checks=[], data_age_seconds=None, execution_conversion=None,
+        guardian_review_age_seconds=None, llm_availability=None,
+        sampled_decisions=0, scan_errors=0, signal_events=0)
+    snapshot = _render_snapshot()
+    html = env.get_template("decisions.html").render(
+        latest={"web3_intel": snapshot, "ts": None, "id": None},
+        decisions=[], observability=observability, now_ts=0,
+        console_token="", request=request)
+    marker = "查看 Web3/合约市场情报原始输出"
+    visible = html.split(marker)[0] if marker in html else html
+    gate_note = snapshot["shadow_disclosure"]["release_gate"]["note"]
+    check("可见区渲染出 release_gate.note 全文（与 JSON 同源）",
+          gate_note in visible, visible[:0])
+    check("可见区渲染出「尚未按 source 过滤」caveat（P2-2）",
+          "尚未按 source 过滤" in visible, visible[:0])
+    check("可见区渲染出残留缺口（仍会计入 200 候选）",
+          "仍会计入" in visible, visible[:0])
+    check("可见区不把未计算渲染成 0 事件（P3-8）",
+          "24h 事件 0" not in visible and "—（未计算）" in visible, visible[:0])
+    check("可见区给出汇总指标缓存状态与年龄（P3-9）",
+          "汇总指标缓存 · FAILED" in visible and "12.5s" in visible, visible[:0])
+    check("可见区说明失败后显示的是旧值", "旧值" in visible, visible[:0])
+    check("原始 JSON 折叠块仍在（未裁剪既有信息）", marker in html)
 
 
 # --------------------------------------------------------------------------- #
