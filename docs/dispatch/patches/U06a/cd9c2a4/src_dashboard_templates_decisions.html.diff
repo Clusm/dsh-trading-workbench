@@ -1,8 +1,8 @@
 diff --git a/src/dashboard/templates/decisions.html b/src/dashboard/templates/decisions.html
-index fa58950..dc096af 100644
+index fa58950..008a5f2 100644
 --- a/src/dashboard/templates/decisions.html
 +++ b/src/dashboard/templates/decisions.html
-@@ -146,6 +146,21 @@
+@@ -146,6 +146,22 @@
          <div class="label">Token Audit · {{ (wi.token_audit or {}).status or 'unconfigured' }}</div>
          <div class="value">{{ (wi.token_audit or {}).note or '尚未配置合约地址映射' }}</div>
        </div>
@@ -13,7 +13,8 @@ index fa58950..dc096af 100644
 +        <div class="value">{{ (sd.caliber or {}).label or '旧口径 v1（轮转刷新取价，仅研究参考）' }}；
 +          执行权重 {{ sdw.effective|default(0, true) }}（配置声明不可抬升{{ '，已登记冲突' if sdw.conflict else '' }}）；
 +          v2 固定时点标签 {{ (sd.v2_labels or {}).state or 'DEFERRED' }}；
-+          计入发布门槛 {{ '是' if (sd.release_gate or {}).shadow_counted else '否' }}</div>
++          研究样本可作执行候选 {{ '是' if (sd.release_gate or {}).research_eligible else '否' }}；
++          门槛口径由 {{ (sd.release_gate or {}).authority or 'release_evidence（U09 固定）' }} 固定</div>
 +      </div>
 +      {% set na = sd.cohorts or {} %}
 +      <div class="intel-box">
@@ -24,7 +25,7 @@ index fa58950..dc096af 100644
      </div>
      {% if wi.symbols %}
      <div class="table-wrap" style="margin-top:10px">
-@@ -165,7 +180,8 @@
+@@ -165,7 +181,8 @@
        </table>
      </div>
      {% endif %}
@@ -34,7 +35,7 @@ index fa58950..dc096af 100644
      {% if evals %}
      <div class="table-wrap" style="margin-top:10px">
        <table>
-@@ -179,11 +195,19 @@
+@@ -179,11 +196,19 @@
              <td class="num">{% if ev.avg_mfe_pct is not none %}{{ '%.3f'|format(ev.avg_mfe_pct) }}/{{ '%.3f'|format(ev.avg_mae_pct) }}%{% else %}—{% endif %}</td>
              <td class="num">{{ ev.avg_path_samples }}/{{ ev.required_path_samples }}</td>
              <td class="num">{{ ev.observation_span_days }}/7</td>

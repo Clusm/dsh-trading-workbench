@@ -151,6 +151,18 @@ def is_research_shadow(source: str) -> bool:
     return release_gate_role(source) == GATE_ROLE_RESEARCH_ONLY
 
 
+def research_sources() -> tuple[str, ...]:
+    """返回所有 ``research_only`` 来源，供 U09 在发布门禁里做来源过滤。
+
+    ``src/core/release_evidence.py`` 的 200 方向候选口径由 U09 固定；本函数只
+    提供**事实**（哪些来源是纯研究），不复制门禁判定，不建立第二套 GO 判断器。
+
+    Returns:
+        ``research_only`` 来源元组，顺序与 :data:`COHORTS` 一致。
+    """
+    return tuple(spec.source for spec in COHORTS if spec.gate_role == GATE_ROLE_RESEARCH_ONLY)
+
+
 def execution_weight_guard(config: Mapping[str, Any] | None) -> dict[str, Any]:
     """返回影子组**实际生效**的执行权重与配置声明冲突。
 
@@ -528,15 +540,20 @@ def build_disclosure(*, config: Mapping[str, Any] | None,
                      "U12 必须记录 F11:v2_labels=DEFERRED。"),
         },
         "release_gate": {
-            "shadow_counted": False,
-            "counted_toward": {
-                "directional_candidates": False,
-                "eligible_closed_trades": False,
-                "observation_days": False,
-            },
             "role_by_source": {spec.source: spec.gate_role for spec in COHORTS},
-            "note": ("影子样本不得计入 K06 发布门槛；200 方向候选的业务口径由 U09 "
-                     "在 src/core/release_evidence.py 固定并版本化，禁止跨组替代。"),
+            "research_sources": list(research_sources()),
+            "research_eligible": False,
+            "executed_trade_counted": False,
+            "observation_days_counted": False,
+            "authority": "src/core/release_evidence.py (U09 固定并版本化)",
+            "gate_constants": {"min_directional_candidates": 200,
+                               "min_eligible_closed_trades": 30},
+            "note": (
+                "B/C 为 research_only：其样本不是执行候选，也不得充当已闭合交易或"
+                "观察天数，禁止跨组互相证明。200 方向候选的业务口径由 U09 在 "
+                "src/core/release_evidence.py 固定：现有实现按 signal 去重后计数，"
+                "尚未按 source 过滤；U06a 只提供 release_gate_role/research_sources "
+                "事实，供 U09 施加来源过滤，不建立第二套 GO 判断器。"),
         },
         "cohorts": dict(cohort_state or cohort_configuration(raw)),
         "sample_loss": dict(sample_loss or {}),
