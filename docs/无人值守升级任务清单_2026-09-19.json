@@ -629,6 +629,33 @@
             "orchestrator 未实跑（仅静态+补丁校验）"
           ],
           "patch_updated": "u03_orchestrator_integration.patch 已更新（纯插入 112 行，apply --check CLEAN，AST 通过）"
+        },
+        {
+          "type": "review_r2_verification",
+          "candidate": "5ffc6c0",
+          "verdict": "CHANGES_REQUESTED",
+          "counts": "CLOSED 6 / PARTIAL 1 / NOT CLOSED 0",
+          "archived_path": "docs/dispatch/reviews/U03/5ffc6c0/Q_r2.md",
+          "closed": [
+            "claim 权威化",
+            "畸形 claim 不崩溃（CRASH=0）",
+            "字段级分源",
+            "evidence_id/binding_id 唯一性",
+            "status/accepted 一致（矛盾数=0）",
+            "抽查 9 项"
+          ],
+          "blocking": [
+            "P2 未登记 Q-NEW-1: 显式传入模块自带 UNPINNED_IDENTITY 得 identity_pinned=True/report.ok=True/gate.ok=True（哨兵逃逸，一行可修）",
+            "P2 未登记 Q-NEW-3: 接线 default_required_sources=() 且 TradeIntent 无该字段 -> 字段级分源门禁生产路径完全不生效，D-P1-2 原风险仍在"
+          ],
+          "i_owned": "Q-NEW-7（smoke_u03_*.py 未登记致 manifest 红）属 I 的原子登记项，非作者缺陷（已登记为 W1-MANIFEST-TRANSIENT）",
+          "p3": [
+            "Q-NEW-2 接线 cycle_id 恒 '' -> binding 轮次分量失效",
+            "declared 覆盖 default、尾点静默降级、周期自证同义反复、U15 前无法开仓+critical 刷屏、data_observed_at_ms 精确相等耦合"
+          ],
+          "allow_unpinned_judgement": "受控降级，不是新 fail-open（显式 kwarg、默认 False、无配置入口、全程落审计、gate.ok 仍要求无拒绝项）；真正的 fail-open 是同族 Q-NEW-1",
+          "regression": "9/9 仍成立；三个补丁 apply --check EXIT=0；orchestrator 补丁纯插入 112/0",
+          "note": "README 无 U03 known-limits，残留 P2 未登记"
         }
       ],
       "blockers": [],
@@ -692,7 +719,7 @@
           "sessions": [
             "Q (reviews/U03/R2/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED（1 PARTIAL）",
           "reports_dir": "docs/dispatch/reviews/U03/5ffc6c0/",
           "note": "为确保预算，D 与 B 两方发现的复验合并为单一独立会话（原独立初审已分别由 D、B 完成）；复验方需自建探针、不得采信作者前后对照"
         }
@@ -773,6 +800,20 @@
             "[10] 严格断言在未打补丁分支标 PENDING（打补丁树 95/0）",
             "未做真机/在线验证"
           ]
+        },
+        {
+          "type": "review_r1_A",
+          "candidate": "8eb0480",
+          "verdict": "CHANGES_REQUESTED",
+          "counts": "P0=0 / P1 x5 / P2 x8 / P3 x8",
+          "archived_path": "docs/dispatch/reviews/U04/8eb0480/A_r1.md",
+          "key_findings": [
+            "P1 can_cancel_protection:1153 把 position.is_flat 当'已确认归零'，允许撤掉最后一道保护且 reason 谎称 FLAT_CONFIRMED_CLEANUP；同模块 plan_protection_refresh 对同一情形明确拒绝 -> 可致裸仓",
+            "P1 guard_fault_action 只拦 4 个已登记健康类；未登记健康故障（PROTECTION_MIRROR_STALE、ALGO_ORDER_QUERY_FAILED 等）落入 UNKNOWN 后被放行全平，与'健康故障不得触发全平'冲突",
+            "P1 补丁 binance_futures 的 last_protection_sync_reason 跨流程/跨标的且成功路径不复位（stop_ok and take_ok: return True 提前返回）-> 残余 QUERY_FAILED 会抑制该有的兜底平仓，保留裸仓；作者测试直接赋值该字段恰好掩盖此缺陷"
+          ],
+          "patch_opinions": "order_outbox fill 幂等接线正确（同事务 applied_fill_ids），但 apply_fill_revision 状态兜底使第一笔成交必抛 STATUS_FILL_MISMATCH，且两个新方法无调用者；binance_futures'先挂新后撤旧'经独立验证确实无窗口期裸奔（唯一完全达成项），但丢掉逐条容错、_cancel_action 静默 skip 却被记为已撤；不抬 schema_version 理由成立（release_evidence:448 的 GO 门），建议写入契约文档；protection_mirror 三个 *_text 列只写不读",
+          "positives": "模块本体质量高；三分量守恒与 Decimal 全程成立；未发现 P0"
         }
       ],
       "blockers": [],
@@ -820,7 +861,7 @@
           "sessions": [
             "A (reviews/U04/A/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED",
           "reports_dir": "docs/dispatch/reviews/U04/8eb0480/"
         }
       ],
