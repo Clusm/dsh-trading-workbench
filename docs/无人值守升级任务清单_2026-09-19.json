@@ -2301,7 +2301,7 @@
       "title": "外部告警送达与主机失联检测",
       "owner_role": "E",
       "actual_assignee": "U14 作者会话",
-      "status": "IN_PROGRESS",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -2320,7 +2320,41 @@
         "F12",
         "F22"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "68903f8",
+          "base": "59660b2",
+          "commits": [
+            "d6ad4d1",
+            "5249004",
+            "e09b380",
+            "a6010dd",
+            "7c430c8",
+            "8583392",
+            "ab23ee1",
+            "68903f8"
+          ],
+          "orchestrator_verified": {
+            "shared_reverted": "git diff 59660b2 -- src/core/health_watch.py scripts/health_watch.py src/audit/database.py scripts/run_offline_regression.py = 0 行；分支仅含独占文件+补丁",
+            "patches": "docs/dispatch/patches/U14/7c430c8/（4 diff + README）；**三态 git 配置下 apply --check 4/4 OK**"
+          },
+          "must_haves": "①三级分开（唯一阶梯 K05 transition_state；HTTP200->SUBMITTED、provider_receipt->ACCEPTED 且 delivered_at_ms=null、有送达时间无设备回执->停 ACCEPTED+DELIVERED_WITHOUT_DEVICE_RECEIPT；跳级/时间倒序抛 AlertLadderViolation 不落库）②两成因分开（host_uptime vs evidence_age -> PROCESS_MISSING/HOST_DOWN/HOST_CONTINUITY_UNKNOWN/TRADING_STALLED）③OPS_BLOCKED 不伪造送达（未验证通道不调用 transport、恒 OPS_BLOCKED；仅 HTTP200->OPS_DEGRADED+NO_CONFIRMED_DELIVERY；有设备回执才 OPS_OK）④心跳带交易证据时间（重放/序号回退/未来时间戳不推进时间线）⑤队列独立（<state_root>/ops/alert_queue.sqlite；200 条积压后交易库目录与字节零变化；主库损坏仍可投递）⑥人工确认可审计（非 auto+confirm+note -> ACKNOWLEDGED 且 delivered_at_ms=null 入 alert_audit）",
+          "tests": "验收 164/0（未打补丁）、179/0（打补丁）；冒烟 28/0；smoke_contracts_v3 173/0",
+          "delta": "s0(59660b2)=79/79、s1(作者树+04)=80/80、s2(01-04)=80/80，失败集合差集 ∅；一处**不可复现**的 smoke_llm_deadline 抖动（作者只称不可复现，未称零影响）",
+          "shared_columns": "读面 release_observations.observed_at / execution_fills.received_at / protection_reconciliations.checked_at（消费者 health_watch、release_evidence 已列）；**写面只有新表 alert_deliveries**",
+          "migration": "**无新迁移** -> current_schema_version 仍 17；9 处 range(1,18) 断言逐条列于补丁 README §3 且均不触发 -> 无伴随补丁",
+          "known_limits": [
+            "真实通道未验证（U12 OPS/D02）",
+            "host uptime 平台假设未在真实宿主做断电演练",
+            "交易证据粒度=三表 MAX",
+            "未做多进程队列写压力",
+            "from_settings 会读 MTA_STATE_ROOT（建议 I 在回归入口补 env.pop）"
+          ],
+          "housekeeping": "EF 工作区有他人遗留的未跟踪沙箱目录（_sb_*/_scratch_*），未跟踪 .py 达 1429 个 -> Windows 命令行长度上限使 EF 本地 check_quality/scan_tracked_secrets 无法运行（WinError 206）。I 已删 _sb_*（1429->1177），_scratch_r2(49M)/_scratch_r3/_scratch_F 仍在。**集成树不受影响**（无这些目录，门禁全绿）。",
+          "unfinished": "真实通道/宿主验收归 U12 OPS（D02）"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "F",
