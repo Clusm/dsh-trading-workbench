@@ -109,7 +109,7 @@ def build_fixture() -> tuple[Path, dict[str, object], datetime, datetime]:
     db.close()
     manifest = {
         "manifest_schema": 1, "release_id": "rel-fixture", "environment": "demo",
-        "account_ref": "demo:test-account", "schema_version": 16,
+        "account_ref": "demo:test-account", "schema_version": 17,
         "content_hash": "fixture", "dependency_hash": "fixture",
     }
     return db_path, manifest, start, end

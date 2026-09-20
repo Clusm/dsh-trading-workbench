@@ -84,6 +84,10 @@ SCRIPTS = (
     # 两者全程离线，只读 tests/fixtures/evidence/ 下的合成夹具。
     "scripts/smoke_u03_research_evidence.py",
     "scripts/smoke_u03_market_evidence_quality.py",
+    # U01（A 账本）：收入分页/幂等入账/守恒与 RV01–RV03 复盘统计回归。
+    # 两者全程离线，只读 tests/fixtures/income/ 下的合成夹具。
+    "scripts/smoke_u01_income.py",
+    "scripts/smoke_u01_review_statistics.py",
 )
 EXCLUDED_SMOKE_SCRIPTS = {
     # 第[6]节直接调用 query_symbol_detail/query_symbol_cards 打公共行情接口，

@@ -116,7 +116,7 @@ check("Hedge closePosition保护无需quantity/reduceOnly也算完整覆盖",
       hedge_result["ok"] is True)
 versions = [r["version"] for r in db.fetch_all(
     "SELECT version FROM schema_migrations ORDER BY version")]
-check("数据库迁移版本1到16完整", versions == list(range(1, 17)))
+check("数据库迁移版本1到17完整", versions == list(range(1, 18)))
 db.close()
 
 print("\n[4] 仓位归零后自动收口残留Algo保护单")

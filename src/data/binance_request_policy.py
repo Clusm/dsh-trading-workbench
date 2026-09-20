@@ -72,6 +72,7 @@ _ENDPOINTS: dict[tuple[str, str], int] = {
     ("GET", "/fapi/v1/positionSide/dual"): 1,
     ("GET", "/fapi/v1/openOrders"): 1,
     ("GET", "/fapi/v1/order"): 1,
+    ("GET", "/fapi/v1/income"): 30,
     ("GET", "/fapi/v1/userTrades"): 5,
     ("GET", "/fapi/v1/algoOrder"): 1,
     ("GET", "/fapi/v1/openAlgoOrders"): 1,

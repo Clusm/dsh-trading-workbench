@@ -556,7 +556,7 @@ client_module.httpx.Client = old_http
 
 # ---------------------------------------------------------------------------
 # 场景 10：恢复旧代码配新 schema
-# 注入点：用恢复包模拟「旧代码(期望schema=16) 配 新schema(=17)」。期望：明确拒绝
+# 注入点：用恢复包模拟「旧代码(期望schema=17) 配 新schema(=18)」。期望：明确拒绝
 # 不兼容启动（fail-closed），而非吞异常默认 paper。
 # ---------------------------------------------------------------------------
 print("\n[场景10] 恢复旧代码配新schema")
@@ -564,13 +564,13 @@ proj10 = WORK / "proj10"
 data10 = proj10 / "data"
 (proj10 / "config").mkdir(parents=True)
 data10.mkdir()
-db10 = AuditDatabase(data10 / "agent_trader.sqlite")  # 当前代码：迁移到 16
+db10 = AuditDatabase(data10 / "agent_trader.sqlite")  # 当前代码：迁移到 17
 # 模拟「新代码产生的更高 schema 版本」
 db10.conn.execute(
     "INSERT INTO schema_migrations(version,name,applied_at) "
-    "VALUES(17,'future_column','2026-09-16T00:00:00+00:00')")
+    "VALUES(18,'future_column','2026-09-16T00:00:00+00:00')")
 db10.conn.commit()
-check("新schema版本被数据库记录", db10.current_schema_version() == 17)
+check("新schema版本被数据库记录", db10.current_schema_version() == 18)
 db10.close()
 (proj10 / "config" / "risk_profile.lock.json").write_text("{}", encoding="utf-8")
 for name, payload in {
@@ -586,18 +586,18 @@ for name, payload in {
 
 bundle10 = create_recovery_bundle(proj10, WORK / "bundles10")
 manifest10 = __import__("json").loads((bundle10 / "manifest.json").read_text(encoding="utf-8"))
-check("恢复包含数据库且记录schema=17", manifest10["files"]["database"]["schema_version"] == 17)
+check("恢复包含数据库且记录schema=18", manifest10["files"]["database"]["schema_version"] == 18)
 # 正控：旧代码环境（demo）且 manifest 与 DB 一致时可验证通过
 ok_verify = verify_recovery_bundle(bundle10, expected_environment="demo")
-check("同版本恢复包通过校验", ok_verify["database_schema"] == 17)
+check("同版本恢复包通过校验", ok_verify["database_schema"] == 18)
 
-# 负向：恢复包被旧代码读取，旧代码只认识 schema=16（manifest 被改写为 16），
-# 而 DB 实际是 17 —— 必须 fail-closed 拒绝，而非默认 paper。
-manifest16 = dict(manifest10)
-manifest16["files"] = dict(manifest10["files"])
-manifest16["files"]["database"] = dict(manifest10["files"]["database"])
-manifest16["files"]["database"]["schema_version"] = 16  # 模拟旧代码期望
-(bundle10 / "manifest.json").write_text(__import__("json").dumps(manifest16), encoding="utf-8")
+# 负向：恢复包被旧代码读取，旧代码只认识 schema=17（manifest 被改写为 17），
+# 而 DB 实际是 18 —— 必须 fail-closed 拒绝，而非默认 paper。
+manifest_legacy = dict(manifest10)
+manifest_legacy["files"] = dict(manifest10["files"])
+manifest_legacy["files"]["database"] = dict(manifest10["files"]["database"])
+manifest_legacy["files"]["database"]["schema_version"] = 17  # 模拟旧代码期望
+(bundle10 / "manifest.json").write_text(__import__("json").dumps(manifest_legacy), encoding="utf-8")
 mismatch_rejected = False
 try:
     verify_recovery_bundle(bundle10, expected_environment="demo")

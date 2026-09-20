@@ -344,6 +344,34 @@ def compute_net_pnl(
     return gross_realized - entry_fee - exit_fee + funding_cashflow
 
 
+#: 只有这些收入类型可以进入资金费现金流；COMMISSION/REALIZED_PNL 已由 fill 计入，
+#: 再次加进 funding_cashflow 就是重复计费（U01 DL05）。
+FUNDING_CASHFLOW_TYPES = frozenset({"FUNDING_FEE", "INSURANCE_CLEAR"})
+
+
+def aggregate_funding_cashflow(income_rows: Iterable[Mapping[str, Any]]) -> tuple[Decimal, tuple[str, ...]]:
+    """把收入行折成资金费现金流，并回带被排除的类型（不静默丢弃）。
+
+    ``COMMISSION``/``REALIZED_PNL`` 属于 fill 侧口径，只做交叉核对，不进入本函数
+    返回值；调用方可用第二个返回值把这些行交给 ``exchange.income_reconciliation``
+    的会话勾稽去核对，而不是加进 ``compute_net_pnl`` 的 ``funding_cashflow``。
+    """
+    total = ZERO
+    excluded: list[str] = []
+    for row in income_rows:
+        income_type = str(row.get("incomeType") or row.get("income_type") or "").strip().upper()
+        if income_type not in FUNDING_CASHFLOW_TYPES:
+            if income_type:
+                excluded.append(income_type)
+            continue
+        raw = row.get("income", row.get("amount"))
+        value = _decimal(raw, "income")
+        if value is None:
+            raise InvalidExecutionFill(f"资金费行缺少 income 金额: {income_type}")
+        total += value
+    return total, tuple(dict.fromkeys(excluded))
+
+
 def quantity_is_flat(remaining_qty: Decimal, step_size: Decimal | None) -> bool:
     """使用合约步长判断是否真正归零，不使用经验百分比。"""
     tolerance = (step_size / Decimal("2")) if step_size and step_size > ZERO else Decimal("0.000000001")
