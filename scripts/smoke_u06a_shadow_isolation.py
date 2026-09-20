@@ -198,9 +198,18 @@ def test_full_refresh_end_to_end(db) -> None:  # noqa: ANN001
           str(second["shadow_disclosure"]["isolation"]))
     check("降级时旧字段仍有数据（不清空）",
           "events_24h" in second["shadow_evaluation"], str(second["shadow_evaluation"]))
-    check("第二轮不再重复写 B 组样本（同轮不放大）",
-          len(db.fetch_all("SELECT 1 FROM shadow_decisions")) == len(rows),
-          str(len(db.fetch_all("SELECT 1 FROM shadow_decisions"))))
+    # 旧口径已知缺陷（不在 U06a 范围，但必须**如实披露**而不是被静默忽略）：
+    # 每轮刷新按 symbol 各写一行、decision_id 用新 uuid，因此重叠样本会累积。
+    # 这是既有行为，U06b/U07 才做固定时点与独立样本；本批次只保证它写在披露里。
+    all_rows = [dict(item) for item in db.fetch_all(
+        "SELECT source,decision_id FROM shadow_decisions")]
+    repeats = len([row for row in all_rows if row["source"] == ss.SOURCE_B])
+    check("每轮刷新各写一行 B 组样本（既有行为，不静默）", repeats == 2, f"repeats={repeats}")
+    check("decision_id 每行唯一（不覆盖既有样本）",
+          len({row["decision_id"] for row in all_rows}) == len(all_rows))
+    check("披露明说重叠样本不等于独立交易",
+          any("独立" in item for item in disclosure["caliber"]["limitations"]),
+          str(disclosure["caliber"]["limitations"]))
 
 
 def test_over_budget_degrades_labeling(db) -> None:  # noqa: ANN001

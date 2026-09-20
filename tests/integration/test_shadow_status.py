@@ -692,13 +692,15 @@ def test_dashboard_shows_legacy_caliber() -> None:
     rendered = fragment.render(wi={"shadow_disclosure": ss.build_disclosure(
         config={"enabled": True, "execution_weight": 2.0})})
     check("披露数据能渲染出权重 0 与 DEFERRED",
-          rendered.startswith("0.0|DEFERRED|"), rendered)
+          rendered.startswith("0|DEFERRED|"), rendered)
     check("渲染出 C=unconfigured", "C=unconfigured" in rendered, rendered)
-    check("渲染出缺陷条数 >= 5", "limits=5" in rendered or rendered.endswith("limits=6")
-          or "limits=" in rendered and int(rendered.split("limits=")[1]) >= 5, rendered)
+    check("渲染出 A/B 已配置", "A=configured" in rendered and "B=configured" in rendered,
+          rendered)
+    check("渲染出缺陷条数 >= 5",
+          int(rendered.split("limits=")[1]) >= 5, rendered)
     empty = fragment.render(wi={})
     check("无披露数据时不崩且不伪造权重",
-          empty.startswith("0.0|DEFERRED|") and "none" in empty, empty)
+          empty.startswith("0|DEFERRED|") and empty.endswith("limits=0"), empty)
 
 
 # --------------------------------------------------------------------------- #
