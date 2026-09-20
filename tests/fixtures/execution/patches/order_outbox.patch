@@ -1,10 +1,18 @@
+diff --git a/src/exchange/order_outbox.py b/src/exchange/order_outbox.py
+index 477374d..ebb0458 100644
 --- a/src/exchange/order_outbox.py
 +++ b/src/exchange/order_outbox.py
-@@ -8,7 +8,16 @@
+@@ -8,7 +8,23 @@ from datetime import datetime, timedelta, timezone
  from typing import Any
  
  from audit.database import AuditDatabase, utc_now
-+from core.contracts import OrderQuantity, decimal_text
++from decimal import Decimal
++from core.contracts import (
++    DuplicateFillError,
++    OrderQuantity,
++    decimal_from_float,
++    decimal_text,
++)
  from exchange.event_models import ExchangeEvent
 +from exchange.protection_commands import (
 +    CommandKind,
@@ -13,11 +21,44 @@
 +    classify_endpoint,
 +    classify_row,
 +    ensure_execution_schema,
++    quantities_from_order_payload,
 +)
  
  
  _ACTIVE = {"SUBMITTING", "UNKNOWN", "ACKNOWLEDGED", "NEW", "PARTIALLY_FILLED"}
-@@ -40,6 +49,9 @@
+@@ -21,6 +37,31 @@ _RANK = {
+ }
+ 
+ 
++#: 交易所状态别名 -> OrderQuantity 词表（``EXPIRED_IN_MATCH`` 归入 ``EXPIRED``）。
++_STATUS_ALIASES = {"EXPIRED_IN_MATCH": "EXPIRED"}
++#: 终态集合（OrderQuantity 词表口径）。
++_QUANTITY_TERMINAL = {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}
++
++
++def _component_status(*, accepted: Decimal, filled: Decimal, stored_status: str) -> str:
++    """由三分量推导 ``OrderQuantity`` 状态（终态保留原状态，迟到成交不复活订单）。
++
++    V1 用"白名单外的状态一律当 ``PARTIALLY_FILLED``"兜底，而 ``PARTIALLY_FILLED``
++    要求 ``0 < filled < accepted``——于是 ``SUBMITTING``/``ACKNOWLEDGED``/``UNKNOWN``
++    这些真实前置状态与 ``filled == 0`` 的第一笔成交全部抛 ``STATUS_FILL_MISMATCH``。
++    这里改为**由分量推导**：``filled == 0 -> NEW``、``0 < filled < accepted ->
++    PARTIALLY_FILLED``、``filled == accepted -> FILLED``，终态保留原状态。
++    """
++    stored = _STATUS_ALIASES.get(str(stored_status or "").upper(), "")
++    if stored in _QUANTITY_TERMINAL:
++        return stored
++    if filled <= 0:
++        return "NEW"
++    if filled < accepted:
++        return "PARTIALLY_FILLED"
++    return "FILLED"
++
++
+ class PendingOrderConflict(RuntimeError):
+     """同一业务键已有未决开仓命令。"""
+ 
+@@ -40,6 +81,9 @@ class OrderOutbox:
                   max_reconcile_per_cycle: int = 5) -> None:
          self.db = db
          self.environment = str(environment)
@@ -27,7 +68,7 @@
          self.last_event_at: float | None = None
          self.last_reconcile_at: float | None = None
          self.last_error: str | None = None
-@@ -55,9 +67,18 @@
+@@ -55,9 +99,20 @@ class OrderOutbox:
      def prepare(self, *, client_order_id: str, symbol: str, side: str,
                  position_side: str | None, order_type: str, purpose: str,
                  qty: float, price: float | None, reduce_only: bool,
@@ -39,16 +80,18 @@
 +        """在交易所 POST 前记录 SUBMITTING；重复 ID 或未决开仓会直接拒绝。
 +
 +        ``command_kind`` 显式声明普通订单或 Algo 保护命令（R07）：缺省时按端点判定，
-+        端点未知直接拒绝，不默认成普通订单。``qty_text`` 用十进制文本保存受理量，
-+        避免 ``float`` 在 0.0047 这类数量上的尾差（U04/DC04）。
++        端点未知直接拒绝，不默认成普通订单。``qty_text`` 用十进制文本保存受理量：
++        缺省时的 ``str(qty)`` 是 float 的 repr，会把 ``str(0.1+0.2)`` 这类尾差写进
++        "精确"列，所以这里统一经 ``decimal_from_float`` 归一（U04/DC04）。
 +        """
          now = utc_now()
 +        kind = CommandKind(command_kind) if command_kind else classify_endpoint(endpoint)
-+        accepted_qty_text = str(qty_text) if qty_text is not None else str(qty)
++        accepted_qty_text = (str(qty_text) if qty_text is not None
++                             else decimal_text(decimal_from_float(qty)))
          key = self.business_key(symbol=symbol, side=side,
                                  position_side=position_side, purpose=purpose)
          with self.db.lock:
-@@ -82,14 +103,17 @@
+@@ -82,14 +137,17 @@ class OrderOutbox:
                      """INSERT INTO order_outbox(
                          client_order_id,release_id,environment,business_key,symbol,side,position_side,
                          order_type,purpose,qty,price,reduce_only,endpoint,status,request_json,
@@ -69,10 +112,22 @@
                  )
                  self.db.conn.commit()
              except sqlite3.IntegrityError as exc:
-@@ -138,6 +162,79 @@
-         """记录可确定未被交易所接受的订单失败。"""
+@@ -135,18 +193,115 @@ class OrderOutbox:
+             self.db.conn.commit()
+ 
+     def reject(self, client_order_id: str, exc: BaseException) -> None:
+-        """记录可确定未被交易所接受的订单失败。"""
++        """记录可确定未被交易所接受的订单失败。
++
++        K04 要求 ``REJECTED`` 的 ``accepted/filled`` 必须为 0：``prepare`` 在 POST 前
++        写入的是**请求量**（此时受理未知），既然交易所已明确拒绝，这里必须把
++        ``accepted_qty_text`` 清零，否则该行永远无法构造出合法的 ``OrderQuantity``
++        （``REJECTED_WITH_ACCEPTED``），后续任何成交/对账路径都会炸。
++        """
          self._update(client_order_id, status="REJECTED",
-                      error_type=type(exc).__name__, resolved_at=utc_now())
+-                     error_type=type(exc).__name__, resolved_at=utc_now())
++                     error_type=type(exc).__name__, resolved_at=utc_now(),
++                     zero_quantities=True)
 +
 +    def apply_exchange_quantities(
 +        self, client_order_id: str, *, accepted_qty: str, filled_qty: str,
@@ -97,6 +152,12 @@
 +        fill 级幂等由 ``applied_fill_ids_json`` 保证：同一 ``fill_id`` 重复投递抛
 +        ``DuplicateFillError``；终态订单只修订累计成交与终态余量，状态不变。缺少
 +        三分量记录的旧行返回 ``None``，由调用方先落一次交易所回报。
++
++        **状态由分量推导，不靠"白名单之外的都当 PARTIALLY_FILLED"兜底**：V1 的兜底
++        把 ``SUBMITTING``/``ACKNOWLEDGED``/``UNKNOWN`` 这些真实前置状态（以及
++        ``filled == "0"`` 的 ``PARTIALLY_FILLED``）都强行映射成 ``PARTIALLY_FILLED``，
++        而该状态要求 ``0 < filled < accepted``，于是**第一笔成交永远抛
++        ``STATUS_FILL_MISMATCH``**。
 +        """
 +        with self.db.lock:
 +            row = self.db.conn.execute(
@@ -109,16 +170,26 @@
 +            if "accepted_qty_text" not in keys or not row["accepted_qty_text"]:
 +                return None
 +            applied = json.loads(str(row["applied_fill_ids_json"] or "[]"))
-+            stored_status = str(row["status"])
++            stored_status = str(row["status"] or "SUBMITTING").upper()
++            accepted = Decimal(str(row["accepted_qty_text"]))
++            filled = Decimal(str(row["cumulative_filled_qty_text"] or "0"))
++            status = _component_status(
++                accepted=accepted, filled=filled, stored_status=stored_status)
++            if status in _QUANTITY_TERMINAL and status != "FILLED":
++                # 终态：working 必须为 0，余量 = 受理 - 累计成交（K04 终态语义）。
++                working, terminal = Decimal(0), accepted - filled
++            elif status == "FILLED":
++                working, terminal = Decimal(0), Decimal(0)
++            else:
++                # 工作态：余量随成交推进，终态余量为 0（与 apply_fill 同口径）。
++                working, terminal = accepted - filled, Decimal(0)
 +            quantity = OrderQuantity.checked(
 +                order_id=str(row["exchange_order_id"] or client_order_id),
-+                accepted_qty=row["accepted_qty_text"],
-+                cumulative_filled_qty=row["cumulative_filled_qty_text"] or "0",
-+                working_leaves_qty=row["working_leaves_qty_text"] or "0",
-+                terminal_unfilled_qty=row["terminal_unfilled_qty_text"] or "0",
-+                status=stored_status if stored_status in {
-+                    "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "EXPIRED",
-+                    "REJECTED"} else "PARTIALLY_FILLED",
++                accepted_qty=accepted,
++                cumulative_filled_qty=filled,
++                working_leaves_qty=working,
++                terminal_unfilled_qty=terminal,
++                status=status,
 +                revision=int(row["quantity_revision"] or 0),
 +            )
 +            revision = apply_late_fill(
@@ -149,56 +220,119 @@
  
      def _update(self, client_order_id: str, *, status: str,
                  exchange_order_id: str | None = None,
-@@ -201,7 +298,8 @@
-         """限量查询到期 UNKNOWN；只查询、不重发，失败按指数退避。"""
-         now = utc_now()
-         rows = self.db.fetch_all(
--            "SELECT client_order_id,symbol,endpoint,query_attempt_count FROM order_outbox "
-+            "SELECT client_order_id,symbol,endpoint,command_kind,query_attempt_count "
-+            "FROM order_outbox "
-             "WHERE environment=? AND status='UNKNOWN' "
-             "AND (next_retry_at IS NULL OR next_retry_at<=?) "
-             "ORDER BY COALESCE(unknown_since,updated_at) LIMIT ?",
-@@ -211,7 +309,9 @@
-         for row in rows:
-             try:
-                 client_id = str(row["client_order_id"])
--                if str(row["endpoint"]).endswith("/algoOrder"):
-+                # R07：按显式种类分派查单入口，绝不用普通订单查询去收口 Algo 命令。
-+                kind = classify_row(row)
-+                if kind is CommandKind.ALGO:
-                     response = broker.query_algo_order(client_id)
-                     found = isinstance(response, dict) and response.get("algoId")
-                 else:
-@@ -285,6 +385,18 @@
-             "SELECT COUNT(*) AS count FROM order_outbox WHERE environment=? "
-             "AND status='UNKNOWN' AND (next_retry_at IS NULL OR next_retry_at<=?)",
-             (self.environment, utc_now()))
-+        # 按命令种类分开计数：普通订单的「未知已清零」不代表 Algo 保护命令已覆盖（R07）。
-+        status_counts_by_kind: dict[str, dict[str, int]] = {}
-+        for row in self.db.fetch_all(
-+                "SELECT command_kind,endpoint,status,COUNT(*) AS count FROM order_outbox "
-+                "WHERE environment=? GROUP BY command_kind,endpoint,status",
-+                (self.environment,)):
+                 response: dict[str, Any] | None = None,
+                 error_type: str | None = None,
+-                resolved_at: str | None = None) -> None:
++                resolved_at: str | None = None,
++                zero_quantities: bool = False) -> None:
+         with self.db.lock:
+             previous = self.db.conn.execute(
+-                "SELECT status FROM order_outbox WHERE client_order_id=?",
++                "SELECT * FROM order_outbox WHERE client_order_id=?",
+                 (client_order_id,),
+             ).fetchone()
+             if not previous:
+@@ -156,18 +311,46 @@ class OrderOutbox:
+                     previous_status not in _TERMINAL and
+                     _RANK.get(status, 0) < _RANK.get(previous_status, 0)):
+                 return
++            # 状态转到终态时同步三分量：终态的 working 必须为 0、余量等于
++            # accepted - filled（K04 终态语义）。不同步的话，一行 CANCELED/EXPIRED
++            # 会带着 working == accepted 永久失配，之后任何成交修订都会因
++            # VIOLATION_WORKING_WHILE_TERMINAL 抛错而**再也修不回来**。
++            quantity_texts: dict[str, str] | None = None
++            if "accepted_qty_text" in set(previous.keys()):
++                accepted_raw = previous["accepted_qty_text"]
++                if zero_quantities:
++                    quantity_texts = {
++                        "accepted": "0", "filled": "0", "working": "0", "terminal": "0"}
++                elif accepted_raw not in (None, ""):
++                    try:
++                        accepted = Decimal(str(accepted_raw))
++                        filled = Decimal(str(previous["cumulative_filled_qty_text"] or "0"))
++                        if status in _QUANTITY_TERMINAL and filled <= accepted:
++                            quantity_texts = {
++                                "accepted": str(accepted), "filled": str(filled),
++                                "working": "0", "terminal": str(accepted - filled)}
++                    except (ArithmeticError, TypeError, ValueError):
++                        quantity_texts = None
+             self.db.conn.execute(
+                 """UPDATE order_outbox SET status=?,
+                     exchange_order_id=COALESCE(?,exchange_order_id),
+                     response_json=COALESCE(?,response_json),error_type=?,
+                     updated_at=?,resolved_at=COALESCE(?,resolved_at),
+                     next_retry_at=CASE WHEN ? IS NOT NULL THEN NULL ELSE next_retry_at END,
+-                    last_query_error=CASE WHEN ? IS NOT NULL THEN NULL ELSE last_query_error END
++                    last_query_error=CASE WHEN ? IS NOT NULL THEN NULL ELSE last_query_error END,
++                    accepted_qty_text=COALESCE(?,accepted_qty_text),
++                    cumulative_filled_qty_text=COALESCE(?,cumulative_filled_qty_text),
++                    working_leaves_qty_text=COALESCE(?,working_leaves_qty_text),
++                    terminal_unfilled_qty_text=COALESCE(?,terminal_unfilled_qty_text)
+                     WHERE client_order_id=?""",
+                 (status, exchange_order_id,
+                  json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+                  if response is not None else None,
+                  error_type, utc_now(), resolved_at, resolved_at, resolved_at,
++                 (quantity_texts or {}).get("accepted"),
++                 (quantity_texts or {}).get("filled"),
++                 (quantity_texts or {}).get("working"),
++                 (quantity_texts or {}).get("terminal"),
+                  client_order_id),
+             )
+             self.db.conn.commit()
+@@ -193,6 +376,26 @@ class OrderOutbox:
+         self._update(client_id, status=status,
+                      exchange_order_id=str(order.get("i") or "") or None,
+                      response=order, error_type=None, resolved_at=resolved)
++        # U04 接线：私有流的每一笔成交（``l`` 本次成交量、``t`` 成交 ID）落到三分量
++        # 与 ``applied_fill_ids_json``。这是 ``apply_fill_revision`` 的**唯一生产调用
++        # 点**——没有它，DC04 的"重启后按 fill_id 重放不二次计账"只是内存里的证明。
++        last_fill_qty = order.get("l")
++        trade_id = str(order.get("t") or "")
++        if last_fill_qty not in (None, "", 0, "0") and trade_id:
 +            try:
-+                kind = classify_row(row).value
-+            except ExecutionCommandError:
-+                kind = "UNCLASSIFIED"
-+            bucket = status_counts_by_kind.setdefault(kind, {})
-+            bucket[str(row["status"])] = bucket.get(str(row["status"]), 0) + int(row["count"])
-         return {
-             "enabled": True,
-             "environment": self.environment,
-@@ -297,4 +409,12 @@
-             "submitting_orders": int(counts.get("SUBMITTING", 0)),
-             "reconciled_unknown": self.reconciled_unknown,
-             "status_counts": counts,
-+            "status_counts_by_kind": status_counts_by_kind,
-+            "unknown_orders_by_kind": {
-+                kind: int(bucket.get("UNKNOWN", 0))
-+                for kind, bucket in status_counts_by_kind.items()
-+            },
-+            # 普通 Outbox 的覆盖结论只适用于 STANDARD 命令；Algo 保护命令必须由
-+            # Algo 记录与 algoOrder 查询单独证明，不能被本状态冒充（R07）。
-+            "algo_covered_by_standard_outbox": False,
-         }
++                self.apply_fill_revision(
++                    client_id, fill_qty=str(last_fill_qty), fill_id=trade_id)
++            except DuplicateFillError:
++                # 重复投递是 at-least-once 的正常形态，不是故障（幂等生效）。
++                pass
++            except Exception as exc:  # noqa: BLE001 - 入账失败不得中断事件流
++                self.last_error = type(exc).__name__
++                if self.db:
++                    self.db.log_risk_event(
++                        event_type="futures_order_error", severity="warn",
++                        details=(f"{client_id}: 私有流成交未能落库 "
++                                 f"{type(exc).__name__} {exc}"),
++                        action_taken="fill revision skipped")
+         self.last_event_at = time.time()
+         self.last_error = None
+         return True
+@@ -219,6 +422,28 @@ class OrderOutbox:
+                     found = isinstance(response, dict) and response.get("orderId")
+                 if found:
+                     self.acknowledge(str(row["client_order_id"]), response)
++                    # U04 接线：把交易所回报的三分量落到十进制文本列，供重启后
++                    # 重放/续算（``apply_fill_revision`` 依赖这套列）。畸形或种类
++                    # 不匹配的回报只跳过落库，不影响本次收口结果。
++                    try:
++                        reading = quantities_from_order_payload(
++                            dict(response), kind=classify_row(row))
++                        self.apply_exchange_quantities(
++                            client_id,
++                            accepted_qty=decimal_text(reading.accepted_qty),
++                            filled_qty=decimal_text(reading.cumulative_filled_qty),
++                            working_leaves_qty=decimal_text(reading.working_leaves_qty),
++                            terminal_unfilled_qty=decimal_text(reading.terminal_unfilled_qty),
++                            revision=reading.revision)
++                    except Exception as exc:  # noqa: BLE001 - 只跳过数量落库
++                        # 注意：必须在这里吞掉，否则会被外层 except 当成"查单失败"
++                        # 记入退避与重试计数，把一个落库问题伪装成网络问题。
++                        if self.db:
++                            self.db.log_risk_event(
++                                event_type="futures_order_error", severity="warn",
++                                details=(f"{client_id}: 交易所三分量未能落库 "
++                                         f"{type(exc).__name__} {exc}"),
++                                action_taken="quantity persist skipped")
+                     resolved += 1
+                 else:
+                     raise LookupError("交易所查询未返回订单标识")

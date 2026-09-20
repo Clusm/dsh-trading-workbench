@@ -1,6 +1,9 @@
 {
   "case_id": "F21-U04",
-  "fault_refs": ["F21", "F01"],
+  "fault_refs": [
+    "F21",
+    "F01"
+  ],
   "scenario": "同一 Outbox 账本里同时存在一条普通订单（POST /fapi/v1/order）与一条 Algo 保护命令（POST /fapi/v1/algoOrder），两条都处于 UNKNOWN。必须按端点/种类分别用对应查询入口收口：普通命令只能用 query_order，Algo 命令只能用 query_algo_order；Algo 命令不得被普通订单记录的「已覆盖」结论代表。同时验证保护替换产生的重复单与健康故障不得触发全平。",
   "fixture_version": "u04-execution-v1",
   "synthetic_data": true,
@@ -28,8 +31,19 @@
       }
     ],
     "query_results": {
-      "query_order": {"orderId": "SYNTH_ORDER_1", "status": "NEW", "origQty": "1.0", "executedQty": "0.0"},
-      "query_algo_order": {"algoId": "SYNTH_ALGO_1", "algoStatus": "NEW", "quantity": "1.0", "actualQty": "0.0", "triggerPrice": "90.00"}
+      "query_order": {
+        "orderId": "SYNTH_ORDER_1",
+        "status": "NEW",
+        "origQty": "1.0",
+        "executedQty": "0.0"
+      },
+      "query_algo_order": {
+        "algoId": "SYNTH_ALGO_1",
+        "algoStatus": "NEW",
+        "quantity": "1.0",
+        "actualQty": "0.0",
+        "triggerPrice": "90.00"
+      }
     },
     "kind_conflict_row": {
       "client_order_id": "synth-u04-conflict",
@@ -40,23 +54,88 @@
     "coverage_claim": {
       "claimed_kind": "ALGO",
       "rows_offered_as_proof": [
-        {"client_order_id": "synth-u04-ord-1", "endpoint": "/fapi/v1/order", "status": "FILLED"}
+        {
+          "client_order_id": "synth-u04-ord-1",
+          "endpoint": "/fapi/v1/order",
+          "status": "FILLED"
+        }
       ],
       "note": "用普通订单记录声明 Algo 覆盖，属非法代表"
     },
     "algo_submit_result_lost": {
       "post_attempts": 1,
       "post_outcome": "HTTP_503",
-      "recovery_query": {"endpoint": "GET /fapi/v1/algoOrder?clientAlgoId=synth-u04-algo-1", "found": true, "algoId": "SYNTH_ALGO_2"}
+      "recovery_query": {
+        "endpoint": "GET /fapi/v1/algoOrder?clientAlgoId=synth-u04-algo-1",
+        "found": true,
+        "algoId": "SYNTH_ALGO_2"
+      }
     },
     "health_faults": [
-      {"fault": "WS_DISCONNECT", "proposed_action": "SKIP_CYCLE_AND_RESUBSCRIBE"},
-      {"fault": "QUERY_FAILED", "proposed_action": "BACKOFF_AND_REQUERY"},
-      {"fault": "HEALTH_DEGRADED", "proposed_action": "ALERT_ONLY"}
+      {
+        "fault": "WS_DISCONNECT",
+        "proposed_action": "SKIP_CYCLE_AND_RESUBSCRIBE"
+      },
+      {
+        "fault": "QUERY_FAILED",
+        "proposed_action": "BACKOFF_AND_REQUERY"
+      },
+      {
+        "fault": "HEALTH_DEGRADED",
+        "proposed_action": "ALERT_ONLY"
+      }
     ],
-    "forbidden_proposal": {"fault": "WS_DISCONNECT", "proposed_action": "CLOSE_ALL"},
-    "state_flags_before": {"paused": false, "emergency": false, "kill_switch": false, "live_enabled": false},
-    "state_flags_after_expected": {"paused": false, "emergency": false, "kill_switch": false, "live_enabled": false}
+    "forbidden_proposal": {
+      "fault": "WS_DISCONNECT",
+      "proposed_action": "CLOSE_ALL"
+    },
+    "unregistered_health_like_faults": [
+      {
+        "fault": "PROTECTION_MIRROR_STALE",
+        "proposed_action": "CLOSE_ALL"
+      },
+      {
+        "fault": "ALGO_ORDER_QUERY_FAILED",
+        "proposed_action": "CLOSE_ALL"
+      },
+      {
+        "fault": "ProtectionOrderHealthCheck",
+        "proposed_action": "EMERGENCY_CLOSE"
+      },
+      {
+        "fault": "SOMETHING_NEW",
+        "proposed_action": "FLATTEN"
+      },
+      {
+        "fault": "HTTP_503",
+        "proposed_action": "CLOSE_ALL"
+      },
+      {
+        "fault": "TIMEOUT",
+        "proposed_action": "CLOSE_ALL"
+      },
+      {
+        "fault": "INSUFFICIENT_MARGIN",
+        "proposed_action": "CANCEL_ALL_PROTECTION"
+      }
+    ],
+    "flat_close_authorized_fault": {
+      "fault": "PROTECTION_FAILED",
+      "proposed_action": "CLOSE_ALL",
+      "rule": "只有已确证的保护挂单失败才允许兜底平仓，且审计计划必须如实记录 triggers_flat_close=True"
+    },
+    "state_flags_before": {
+      "paused": false,
+      "emergency": false,
+      "kill_switch": false,
+      "live_enabled": false
+    },
+    "state_flags_after_expected": {
+      "paused": false,
+      "emergency": false,
+      "kill_switch": false,
+      "live_enabled": false
+    }
   },
   "derived_golden": {
     "dispatch": {
@@ -65,7 +144,10 @@
       "cross_calls": 0,
       "submit_calls": 0
     },
-    "kind_conflict": {"rejected": true, "reason": "command_kind 与端点矛盾，禁止把 Algo 命令降级成普通订单"},
+    "kind_conflict": {
+      "rejected": true,
+      "reason": "command_kind 与端点矛盾，禁止把 Algo 命令降级成普通订单"
+    },
     "coverage": {
       "standard_covered": true,
       "algo_covered": false,
@@ -78,6 +160,11 @@
       "touches_emergency_state": false,
       "changes_risk_profile": false,
       "flat_close_proposal": "REJECTED"
+    },
+    "flat_close_fail_closed": {
+      "unregistered_health_like_all_blocked": true,
+      "authorized_class": "PROTECTION",
+      "rule": "故障类不在 FLAT_CLOSE_AUTHORIZED 内时一律拒绝全平（白名单 fail-closed），未登记的健康类不得落入 UNKNOWN 后被放行"
     }
   },
   "expected_invariants": [
