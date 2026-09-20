@@ -1533,7 +1533,7 @@
       "title": "影子最小隔离与口径修正",
       "owner_role": "D",
       "actual_assignee": "U06a 作者会话",
-      "status": "IN_PROGRESS",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -1559,6 +1559,38 @@
           "state_at_failure": "**零提交**（跑了约 40 分钟）；src/intel/shadow_status.py 已存在但未完成（23413 字节，停在 _refresh 的 load-budget/metrics-cache/disclosure 阶段）；tests/integration/test_shadow_status.py 不存在；无补丁包；无冒烟；src/intel/service.py（**共享文件**）被改 +220/-25 并混入 WIP",
           "handling": "保全为 WIP f0c0e48（标注 INCOMPLETE）；派续做会话，要求**先导出 service.py 的共享适配补丁、再用 git checkout <base> -- src/intel/service.py 从分支还原**，然后完成任务并**每步提交**",
           "lesson": "该会话违反增量提交 -> 40 分钟工作几乎全在未提交状态。增量提交是此环境唯一可靠的损失上限。"
+        },
+        {
+          "type": "author_delivery_r1_continuation",
+          "head_commit": "ebbe1e9",
+          "base": "59660b2",
+          "commits": [
+            "cd9c2a4",
+            "d6d293f",
+            "77e15de",
+            "5fff863",
+            "be2ea21",
+            "5a4355e",
+            "d91cf00",
+            "3f4935f",
+            "ebbe1e9"
+          ],
+          "stall_recovery": "首轮 agent stall + **零提交** -> WIP f0c0e48 保全 -> 接续会话**增量提交 10 次**；且**先把共享文件改动导出为补丁、再还原**：`git diff 59660b2 -- src/intel/service.py src/dashboard/templates/decisions.html src/core/service.py scripts/smoke_intel_sidecar.py` = **0 行**，分支仅含独占文件 + 补丁目录",
+          "orchestrator_verified": {
+            "patches": "docs/dispatch/patches/U06a/cd9c2a4/（3 diff + README）；两种 git 配置下 apply --check 3/3 OK",
+            "branch_contents": "仅 src/intel/shadow_status.py、tests/integration/test_shadow_status.py、scripts/smoke_u06a_shadow_isolation.py、补丁目录",
+            "tests": "测试 200/0（补丁态 239/0）、冒烟 10/0（补丁态 46/0）、smoke_contracts_v3 173/0、smoke_intel_sidecar 19/0、smoke_ui 52/0",
+            "delta": "pristine 沙箱 OFFLINE REGRESSION OK scripts=80 vs 补丁沙箱 OK scripts=80 -> **差集 ∅**"
+          },
+          "must_haves": "①旧口径明确展示+权重恒 0（配置写 0.9 也不生效）②C 未配置零样本（真实库证明旧实现确实生成被计数的绩效行 -> 新闸门拦下，skipped_emissions>=1）③侧车隔离（AST 证明无网络/LLM/DB/线程导入；readonly-intel-sidecar 独立目标；汇总指标缓存）④V2_LABELS_STATE=DEFERRED 三处一致 ⑤门禁口径直接读 release_evidence.DEFAULT_THRESHOLDS，B/C 标 research_only，未建第二套 GO",
+          "known_limits": [
+            "新增冒烟未登记会让 run_offline_regression 清单校验直接 raise —— 必须与登记行原子落地",
+            "scripts/smoke_intel_sidecar.py 不在任务卡三个集成目标内，但其两处断言与必达②直接冲突，已作补丁并写偏差声明",
+            "CD 工作区 check_quality 红：14 条 ruff 全在**前会话遗留的未跟踪目录** _scratch_author_r2/r3/r4（本任务文件 0 条）；干净沙箱 QUALITY CHECK OK files=264",
+            "每轮刷新按 symbol 各写一行 B 样本（既有行为，非本任务引入），已入披露缺陷清单，归 U06b/U07",
+            "首轮超预算时 shadow_evaluation 为空 {}，metrics.state=UNAVAILABLE 可区分"
+          ],
+          "unfinished": "U09 的 200 候选来源过滤（本任务只交事实，未改 release_evidence.py）；v2 固定时点标签属 U06b(DEFERRED)"
         }
       ],
       "blockers": [],
