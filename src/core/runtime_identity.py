@@ -455,10 +455,12 @@ def load_strategy_cards(
 
 
 def verify_strategy_cards_source(source: StrategyCardSource, root: Path | str) -> str:
-    """文件级来源复核：重读声明文件，比对内容哈希（L16）。
+    """文件级来源复核：重读声明文件并重算卡片哈希（L16）。
 
-    内容不一致 → ``StrategySourceMismatchError``：调用方手里的策略卡并非来自
-    所声明的文件（可能是内存改写或换文件加载）。
+    比对两件事：① 文件原文与加载时原文一致（加载后被改动即失败）；
+    ② 由文件原文重算的卡片哈希与 ``source.payload`` 的哈希一致（内存篡改即
+    失败）。任一不一致 → ``StrategySourceMismatchError``：调用方手里的策略卡
+    并非来自所声明的文件，因此身份里的 ``strategy_hash`` 不可采信。
     """
     base = Path(root)
     current = _read_text(base, source.source_file)
@@ -467,7 +469,17 @@ def verify_strategy_cards_source(source: StrategyCardSource, root: Path | str) -
     if hashlib.sha256(current.encode("utf-8")).hexdigest() != \
             hashlib.sha256(source.source_content.encode("utf-8")).hexdigest():
         raise StrategySourceMismatchError(
-            f"strategy cards content differs from declared source {source.source_file}"
+            f"strategy cards file changed after load: {source.source_file}"
+        )
+    try:
+        recomputed = json.loads(current)
+    except json.JSONDecodeError as exc:  # pragma: no cover - 由负例测试覆盖
+        raise StrategySourceMismatchError(
+            f"strategy cards file is not valid json: {source.source_file} ({exc.msg})"
+        ) from exc
+    if hash_strategy(recomputed) != hash_strategy(source.payload):
+        raise StrategySourceMismatchError(
+            f"strategy cards payload differs from declared source {source.source_file}"
         )
     return hash_strategy(source.payload)
 
@@ -846,21 +858,21 @@ def model_route_blockers(
 
 def _flatten_into(
     target: dict[str, Any], prefix: str, value: Mapping[str, Any],
-    dropped: list[str], *, prefix_path: str = "",
+    dropped: list[str], *, origin: str = "",
 ) -> None:
     """把嵌套非敏感标量扁平化为点分键；命中敏感标记的键只登记不取值。"""
     for key, item in value.items():
         name = str(key)
         path = f"{prefix}{name}" if not prefix else f"{prefix}.{name}"
-        label = path if not prefix_path else f"{prefix_path}.{path}"
+        label = path if not origin else f"{origin}.{path}"
         if is_sensitive_name(name):
             dropped.append(label)
             continue
         if isinstance(item, Mapping):
-            _flatten_into(target, path, item, dropped, prefix_path=prefix_path)
+            _flatten_into(target, path, item, dropped, origin=origin)
             continue
         if isinstance(item, (list, tuple, set)):
-            raise CredentialLeakError([f"effective_config.{label} (non-scalar)"])
+            raise CredentialLeakError([label if origin else f"effective_config.{label} (non-scalar)"])
         if item is None or item == "":
             continue
         target[path] = item
@@ -946,13 +958,13 @@ def collect_effective_config(
             raise ExecutionModeError(f"unknown profile {profile!r}")
         section = _dig(settings, f"profiles.{profile}")
         if isinstance(section, Mapping):
-            _flatten_into(overrides, "", section, dropped, prefix=f"profiles.{profile}")
+            _flatten_into(overrides, "", section, dropped, origin=f"profiles.{profile}")
     for key, value in dict(extra_profile_overrides or {}).items():
         if is_sensitive_name(key):
             dropped.append(f"extra_profile_overrides.{key}")
             continue
         if isinstance(value, Mapping):
-            _flatten_into(overrides, "", value, dropped, prefix=f"extra_profile_overrides.{key}")
+            _flatten_into(overrides, "", value, dropped, origin=f"extra_profile_overrides.{key}")
             continue
         if isinstance(value, (list, tuple, set)):
             raise CredentialLeakError([f"effective_config.profile_overrides.{key} (non-scalar)"])
@@ -1334,11 +1346,17 @@ def authorize_new_entry(
 
 
 def is_loopback_host(host: str | None) -> bool:
-    """来源是否为本机环回（控制接口只允许环回）。"""
+    """来源是否为本机环回（控制接口只允许环回）。
+
+    接受 ``127.0.0.1`` / ``::1`` / ``localhost`` 与 IPv4-mapped IPv6
+    （``::ffff:127.0.0.1``）；``0.0.0.0``、私有网段与任意域名一律拒绝。
+    """
     text = _text(host).strip().lower()
     if not text:
         return False
     text = text.strip("[]")
+    if text.startswith("::ffff:") and text.count(":") == 3:
+        text = text[len("::ffff:"):]
     return text in LOOPBACK_HOSTS
 
 
@@ -1402,12 +1420,13 @@ def authorize_control_request(
         return PermissionDecision(False, ("UNKNOWN_ROLE",), 403)
     if action_text not in CONTROL_ACTION_ROLES:
         return PermissionDecision(False, ("UNKNOWN_CONTROL_ACTION",), 400)
-    if not _role_allows(role_text, action_text):
-        return PermissionDecision(False, ("ROLE_NOT_PERMITTED",), 403)
-    reasons: list[str] = []
-    status = 403
-    if action_text in ("set_control", "emergency_stop", "set_control_severity_up",
-                       "set_control_severity_down"):
+
+    state_actions = ("set_control", "emergency_stop", "set_control_severity_up",
+                     "set_control_severity_down")
+    target = ""
+    current = ""
+    lowering = False
+    if action_text in state_actions:
         target = _text(requested_state) or ("emergency" if action_text == "emergency_stop" else "")
         if not target:
             return PermissionDecision(False, ("CONTROL_STATE_REQUIRED",), 400)
@@ -1416,21 +1435,32 @@ def authorize_control_request(
         current = _text(current_state) or "normal"
         if current not in CONTROL_STATE_SEVERITY:
             return PermissionDecision(False, ("UNKNOWN_CONTROL_STATE",), 400)
-        if target == "emergency" and _text(confirm_secret) != "emergency":
-            reasons.append("EMERGENCY_CONFIRM_REQUIRED")
-            status = 400
-        if CONTROL_STATE_SEVERITY[target] < CONTROL_STATE_SEVERITY[current]:
-            # 放宽方向：人工禁用优先，自动流程永远不得自动恢复。
+        lowering = CONTROL_STATE_SEVERITY[target] < CONTROL_STATE_SEVERITY[current]
+        if lowering:
+            # 放宽方向：自动流程永远不得自动恢复（人工禁用优先）；
+            # 只有 operator 能经显式二次确认放宽。
             if role_text == AUTO_ACTOR:
                 return PermissionDecision(
                     False, ("AUTO_RECOVERY_BLOCKED_BY_MANUAL_DISABLE",), 409)
-            if not confirm_manual_reenable:
-                reasons.append("MANUAL_REENABLE_NOT_CONFIRMED")
-                status = 409
-            if CONTROL_STATE_SEVERITY[current] == CONTROL_STATE_SEVERITY["emergency"] \
-                    and _text(confirm_secret) != "emergency":
-                reasons.append("EMERGENCY_EXIT_NOT_CONFIRMED")
-                status = 409
+            if role_text != "operator":
+                return PermissionDecision(False, ("ROLE_NOT_PERMITTED",), 403)
+
+    if not _role_allows(role_text, action_text):
+        return PermissionDecision(False, ("ROLE_NOT_PERMITTED",), 403)
+
+    reasons: list[str] = []
+    status = 403
+    if target == "emergency" and _text(confirm_secret) != "emergency":
+        reasons.append("EMERGENCY_CONFIRM_REQUIRED")
+        status = 400
+    if lowering:
+        if not confirm_manual_reenable:
+            reasons.append("MANUAL_REENABLE_NOT_CONFIRMED")
+            status = 409
+        if CONTROL_STATE_SEVERITY[current] == CONTROL_STATE_SEVERITY["emergency"] \
+                and _text(confirm_secret) != "emergency":
+            reasons.append("EMERGENCY_EXIT_NOT_CONFIRMED")
+            status = 409
     if reasons:
         return PermissionDecision(False, tuple(dict.fromkeys(reasons)), status)
     return PermissionDecision(True, ())
