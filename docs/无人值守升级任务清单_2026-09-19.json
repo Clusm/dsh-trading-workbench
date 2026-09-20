@@ -703,8 +703,8 @@
       "id": "U04",
       "title": "部分成交、保护和重放验收",
       "owner_role": "B",
-      "actual_assignee": null,
-      "status": "PLANNED",
+      "actual_assignee": "U04 作者会话（B 角色）",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -712,7 +712,8 @@
       "owned_paths": [
         "tests/acceptance/test_execution_faults.py",
         "tests/fixtures/execution/",
-        "src/exchange/protection_commands.py"
+        "src/exchange/protection_commands.py",
+        "scripts/smoke_u04_execution_faults.py"
       ],
       "contracts": [
         "K01",
@@ -725,7 +726,55 @@
         "F04",
         "F21"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "8eb0480c6bb78c4e527abfd301209fdaf11ef6e5",
+          "commits": [
+            "3a7d541",
+            "53a8fb9",
+            "df11595",
+            "06b353d",
+            "434a192",
+            "8eb0480"
+          ],
+          "new_files": [
+            "src/exchange/protection_commands.py (1342行, 新增)",
+            "tests/acceptance/test_execution_faults.py (834行)",
+            "tests/fixtures/execution/*.json (4 个 fixture)",
+            "scripts/smoke_u04_execution_faults.py"
+          ],
+          "shared_files_untouched": true,
+          "contract_untouched": true,
+          "scope_clean": true,
+          "orchestrator_verified": {
+            "test_execution_faults": "exit 0（作者称 92 通过/0 失败）",
+            "smoke_contracts_v3": "PASS 173 / FAIL 0"
+          },
+          "self_reported": {
+            "三分量守恒": "CANCELED 后迟到 fill -> filled 0.0094/terminal 0.0006，accepted==filled+working+terminal 精确；apply_fill_revision 持久化",
+            "精度": "0.01->0.0047 用 Decimal 精确 0.0053/0.0006；float 累减得 0.0005999999999999998；parse_qty 拒绝浮点直传",
+            "UNKNOWN 不重发": "查询集合=原 clientId、submit_calls==0；预算耗尽 -> MANUAL_RECOVERY+告警+仍阻断新开仓；重启后同 ID 被 DuplicateOrderSubmission 阻断",
+            "保护": "PLACE 严格先于 CANCEL；撤最后保护拒；归零未确认不清理；PLACE 失败 cancel_skipped=True",
+            "R07 分账": "显式 kind、端点矛盾拒绝、交叉查单 0 次、CrossKindCoverageClaim",
+            "请求成功!=成交": "NEW 只算受理、avgPrice=0 不算成交",
+            "健康故障": "健康类只告警，但保护确证失败仍按 P0 兜底平仓；pause/emergency 快照不变"
+          },
+          "patches": [
+            "order_outbox.patch",
+            "protection_mirror.decimal_text.patch",
+            "binance_futures.u04_adaptation.patch",
+            "run_offline_regression.register_u04.patch"
+          ],
+          "patches_verified": "4 个 patch git apply --check 通过；临时树应用后探针 6/6 PASS、OFFLINE REGRESSION OK scripts=70、契约仍 173/0",
+          "known_limits": [
+            "契约层/迁移号未动（列由 ensure_execution_schema 幂等补齐，避免 schema_version 影响 GO）",
+            "trade_reconciliation 称无需改动（fill_key 幂等已覆盖迟到成交）",
+            "[10] 严格断言在未打补丁分支标 PENDING（打补丁树 95/0）",
+            "未做真机/在线验证"
+          ]
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "A",
@@ -758,12 +807,23 @@
       "dl_work_packages": [
         "DL05"
       ],
-      "task_base_commit": null,
-      "contract_commit": null,
+      "task_base_commit": "ffdab443cae45c1451b5cc13b24e3e73c22038ff",
+      "contract_commit": "ffdab443cae45c1451b5cc13b24e3e73c22038ff",
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r1",
+          "stage": "初审",
+          "candidate": "8eb0480",
+          "sessions": [
+            "A (reviews/U04/A/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U04/8eb0480/"
+        }
+      ],
       "qa_runs": []
     },
     {
@@ -2359,10 +2419,19 @@
         "owner": "I",
         "blocks": "集成 U01 时必须遵守",
         "note": "只应用 02 会使 scripts/check_binance_request_policy.py 失败（审查者已复现）；04 应用后 demo-fapi.binance.com 也 strict=True。03 可直接接受。01 需先按审查意见改 5 处。"
+      },
+      {
+        "id": "W1-MANIFEST-TRANSIENT-U04",
+        "title": "U04 冒烟未登记（同 U01/U03 的 I 侧原子登记项）",
+        "status": "OWNED_BY_I",
+        "owner": "I",
+        "blocks": "无（集成时原子解决）",
+        "note": "已把 scripts/smoke_u04_execution_faults.py 补入 U04 owned_paths；登记补丁 run_offline_regression.register_u04.patch 与冒烟脚本须同批落地。非作者缺陷。"
       }
     ],
     "contract_candidate": "71f8109",
-    "handover": "docs/dispatch/交接说明_2026-09-21.md"
+    "handover": "docs/dispatch/交接说明_2026-09-21.md",
+    "w1_status": "四线作者全部交付；U01/U03/U15 已初审并进入 r2；U04 初审已派发"
   },
   "dispatch_version": "v1.1",
   "increment_scope": [
