@@ -1175,8 +1175,8 @@
       "id": "U05",
       "title": "真实耗时、模型降级和决策原因",
       "owner_role": "C",
-      "actual_assignee": null,
-      "status": "PLANNED",
+      "actual_assignee": "U05 作者会话（C 角色）",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -1197,7 +1197,55 @@
         "F07",
         "F20"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "04a2c30",
+          "commits": [
+            "f22ec8f",
+            "f83bd39",
+            "0b153ba",
+            "f2d07ba",
+            "6c8fdd6",
+            "cc38768",
+            "deba08e",
+            "7dbbb0c",
+            "294bfa0",
+            "04a2c30"
+          ],
+          "scope_clean": "**未越界**：与 base 的差异全部为新增文件，无一处 M 共享文件（对比 U13 曾把共享文件提交进分支）",
+          "self_tested": {
+            "test_decision_trace": "95/0",
+            "test_model_route_safety": "54/0",
+            "test_background_refresh_budget": "48/0",
+            "test_cross_process_llm_admission": "45/0",
+            "patches_apply_check": "15/15 OK（基线树独立 git 沙箱）"
+          },
+          "patches": "docs/dispatch/patches/U05/cc38768/（15 diff + README）；批次约束：13+14 同批、4 个冒烟须与 15 同批、02 须与 16 同批",
+          "migration_schema": "**无**：15 diff 对 schema_migrations/current_schema_version/range(1, 零命中；既有版本断言两态都通过 -> 无伴随补丁（主动避开了 U01 的坑）",
+          "delta": "pristine(task_base) scripts=73 failed=1{KI02}；基线树+15 补丁 scripts=77 failed=1{同一 KI02} -> **新增失败 = ∅**",
+          "ki01": "patches 13/14 引入 registered_false_positives 机制，应用后 `SECRET SCAN OK files=432 registered_false_positives=3`（**该机制是否削弱密钥检测需 B 初审专项判定**）",
+          "known_limits": [
+            "4 个冒烟仅在作者 worktree 与'基线+补丁'沙箱两态验证，未在真正集成树上跑",
+            "15 未应用前作者 worktree 的统一入口必红（manifest）",
+            "background_refresh 预算约束'是否发起'而非中断在途调用",
+            "供应商'不可达'与'超时'同码 MODEL_DEADLINE（需 K05 新码）",
+            "跨 span 期限谓词落在执行侧（K05 无 cycle_deadline_ms，未改契约）",
+            "check_quality 仍红（5 处 ruff 在 U15 文件=已由 I 修复；4 处密钥误报由 13/14 修）",
+            "record_decision_trace/graph.model_deadline 尚无生产调用方（属 U08/U12 接线）",
+            "未联网、未接真实 LLM"
+          ],
+          "rollback": "git revert 04a2c30..f22ec8f"
+        },
+        {
+          "type": "cross_task_coupling",
+          "title": "U03 的 test_market_evidence_quality 事实上冻结了 src/data/market_query.py，阻塞其它任务适配",
+          "detail": "U05 因该测试用 resolve_patch_states() 读**现网** market_query.py 并正反向打补丁，任何改动都会触发 `ValueError: patch context mismatch at line 100`，故**撤回了 patch 10（market_query 适配）**，改以 API reason_from_source_errors 替代。",
+          "impact": "S03 的 market_query 侧适配未落地（U05 称有替代 API）；后续任何需要动 market_query.py 的任务都会被同一约束挡住。",
+          "owner": "U12（或 U03 后续）",
+          "action": "应让该测试改用**固定的 pristine 基线**（如 git show <base>:<file>）或自带 fixture 副本，而不是读现网文件；否则 market_query 成为事实上不可改的共享文件。"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "B",
@@ -1243,7 +1291,7 @@
         "DL06",
         "DL07"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "0e522b13472cdff3757547752089f5a8d97ca8f8",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
