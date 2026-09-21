@@ -2088,7 +2088,7 @@
       "title": "可运行发布包与准确运维说明",
       "owner_role": "F",
       "actual_assignee": "U10a 作者会话",
-      "status": "IN_PROGRESS",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -2109,7 +2109,35 @@
         "F14",
         "F15"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "23bfe88",
+          "base": "f5e4790",
+          "commits": [
+            "1fef223",
+            "8581adb",
+            "d75becf",
+            "78d1cd8",
+            "89541df",
+            "cb3ccff",
+            "23bfe88"
+          ],
+          "fixed_real_bugs": "**修掉两处真实漏包**：①旧实现把 `data` 当任意层排除 -> 实测旧版丢 src/data/*.py(13) + templates/*.html(8) + knowledge/ + PROVENANCE.md + .env.example + start_web.bat（旧 261 项 vs 新 214 runtime/376 source）②`git ls-files` 未加 `-z` 漏中文名文档",
+          "must_haves": "①不漏包：--self-check --kind runtime -> ok=True files=214，inventory{tracked_total:559,included:214,source_only:162,excluded:183,unclassified:0}；冒烟对照 150 个应有文件逐项在包 ②凭据/状态不入包：扫 216 成员 -> forbidden-path []；credentials_absent/runtime_state_absent/dotenv_absent/forbidden_paths_absent 全 PASS；独立正则 3 处命中均为类型注解 ③解压自检+链接：--verify 13 项全 PASS（doc_links_resolve 37 篇 / python_syntax_ok 140 文件 / release_identity_matches），二次 --verify 仍 0（修了 __pycache__ 自我污染）；负例（篡改哈希/未登记状态/缺策略卡/断链/明文凭据/未归类）全部按预期失败 ④历史标记旧版：文档索引新增版本约定 + 12 篇逐条'旧版：'+免责声明（DL06）⑤不写未实现能力：14 条逐条指认（13 条落本仓代码）+ 新增自动门禁（§3.1 runtime 清单与 RUNTIME_SCRIPTS 逐项比对）",
+          "patches": "docs/dispatch/patches/U10a/89541df/（01 run_web.py --verify-package / 02 windows_service.py is_release_package_root 等（默认关闭）/ 03 登记行）；**三种 git 配置 apply --check 全 OK**，并在集成 HEAD `f5e4790` 干净检出上再次全 OK",
+          "delta": "pristine OFFLINE REGRESSION OK scripts=82；head 未打补丁 -> 仅因未登记冒烟在 manifest 中止（属 W1-MANIFEST-TRANSIENT，I 的原子项）；head+三补丁 -> MANIFEST OK included=79 / **OFFLINE REGRESSION OK scripts=83** / exit 0 -> **新增失败 0**；受影响入口复跑全绿（windows_service_plan 24/0、service_lifecycle 12/0、u13_supervision 166 checks、test_runtime_identity、test_control_boundary、test_alert_delivery 262/0、contracts_v3 173/0）；check_quality **OK files=287**",
+          "known_limits": [
+            "--verify-package 需已装锁文件依赖（在模块级重依赖导入之后）",
+            "未加'启动即校验发布包'自动闸门（无法离线取证，刻意不做，手册已注明）",
+            "run_web.py 混合行尾（U13 遗留）在 autocrlf=true 重新检出里 02/03 上下文会失败（本仓 autocrlf=false 不受影响）",
+            "包内 docs/无人值守升级任务清单…json 命中 KI04 范围豁免，运维自备扫描器可能告警",
+            "src/core/runtime_identity.py 的 decl-11 note 已过期（SAFE_DOCS 已不存在），属 U15 文件未改，请 I 处置",
+            "U01-R3-FU1（历史文档内嵌 schema==16 字面量）仅在索引标旧版，正文未改，留 U10b"
+          ],
+          "unfinished": "未部署真实宿主、未执行 sc.exe、未启动真实服务 —— 全部为离线/夹具证据，宿主项归 U12"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "E",
