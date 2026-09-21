@@ -4634,7 +4634,31 @@
         "MODEL_ROUTE_MOCK：需配置真实模型路由后重铸 manifest 并复验身份/门禁",
         "U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER（运行代占位符判据）"
       ],
-      "note": "首批 14 项任务全部 INTEGRATED（U00–U15 中 14 项首批必需 + U09/U12）。W4 观察窗与 D01–D05 外部待决项结构性不可在本窗口完成。"
+      "note": "首批 14 项任务全部 INTEGRATED（U00–U15 中 14 项首批必需 + U09/U12）。W4 观察窗与 D01–D05 外部待决项结构性不可在本窗口完成。",
+      "deferred_lines_started": {
+        "U06b": {
+          "status": "IN_PROGRESS",
+          "branch": "task/U06b",
+          "worktree": "mat-wt/D2",
+          "base": "0706db1",
+          "note": "U12 集成后依赖就绪。风险已内联：不得改动 shadow_status 的 COHORTS/SOURCE_*/GATE_ROLE_*/release_gate_role 语义（release_evidence 的 200 分母单一口径来源）；不得伪称 F11 已通过。"
+        },
+        "U10b": {
+          "status": "IN_PROGRESS",
+          "branch": "task/U10b",
+          "worktree": "mat-wt/F2",
+          "base": "0706db1",
+          "note": "U12 集成后依赖就绪。最大风险已内联：_validate_smoke_manifest 强制 scripts/smoke_*.py 恰好登记一次，移动/改名须同批交 run_offline_regression 登记补丁；移出 scripts/ 顶层 = 削减回归覆盖，不得静默做；改后必须复跑 smoke_u10a_release_package。"
+        },
+        "U07": {
+          "status": "BLOCKED",
+          "note": "等待 U06b"
+        },
+        "U11": {
+          "status": "BLOCKED",
+          "note": "等待 U10b"
+        }
+      }
     },
     "contract_erratum": {
       "id": "CONTRACT-ERRATUM-1",

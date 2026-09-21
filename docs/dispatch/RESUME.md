@@ -140,6 +140,20 @@
 
 ## 2. next_action（按顺序）
 
+> **W1 / W2 / W3 工程侧全部完成** —— **首批 14 项任务全部 INTEGRATED**（U00–U15 中全部首批必需项 + U09 + U12）。**仅剩 W4，而 W4 结构性不可在本窗口完成**（7 天挂钟 + D01–D05 外部待决 + 实盘授权）。
+> **当前在做的是「后置线」（非首批必需，P2）**：U06b 与 U10b 已派发（U12 集成后二者依赖就绪）。
+
+### 后置线进行中（勿重复派发）
+- **`U06b` 影子 v2 固定时点标签**：工作树 `mat-wt/D2`（`task/U06b` @ `0706db1`）。**已内联两条关键约束**：①`src/intel/shadow_status.py` 现在是**发布门禁的单一口径来源**（`release_evidence.py` 经 `release_gate_role` 决定 200 方向候选分母），**不得改动 `COHORTS`/`SOURCE_A|B|C`/`GATE_ROLE_*` 语义**，若必须动则要证明门禁结果**逐字不变**；②首批**不得伪称 F11 已通过**（`F11:v2_labels=DEFERRED` 记录不变）。
+- **`U10b` 旧脚本与历史文档整理**：工作树 `mat-wt/F2`（`task/U10b` @ `0706db1`）。**已内联最大坑**：`_validate_smoke_manifest()` 强制 `scripts/` 下每个 `smoke_*.py` 恰好登记一次 → 移动/改名必须**同时**交 `run_offline_regression.py` 登记补丁；且移出 `scripts/` 顶层 = **削减回归覆盖，不得静默做**；改完必须复跑 `smoke_u10a_release_package.py` 证明打包仍绿。
+- **两者均在运行，勿重复派发。**
+- 依赖它们的：`U07`（等 U06b）、`U11`（等 U10b）。
+
+### 后置线完成后
+- **W4 不可在窗口内完成**（7 天挂钟观察窗 / 200 方向候选 / 30 完整闭合；D01–D05 外部待决；实盘启用须用户另行授权）—— 须如实报告，**不得标记为通过**。
+- **RC 冻结仍待四项**：`D05`（SLO 时限冻结）、观察窗三项 `NOT_STARTED`、`MODEL_ROUTE_MOCK`（须配真实模型路由后重铸 manifest）、`U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER`。
+
+<!-- W3 起点记录，保留备查
 > **W0 / W1 / W2 均已完成**（W1 5/5、W2 7/7 全部 INTEGRATED）。以下为 W3 起点。
 
 1. **W3 第一步：U09（✅ 已 INTEGRATED）** —— 工作树 `mat-wt/W3`，分支 `task/U09`，base `448a4e9`。
