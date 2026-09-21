@@ -202,9 +202,13 @@ def manifest(release_id: str, environment: str, account_ref: str, *,
 def build(path: Path, meta: dict[str, Any], *, since: Any = None, until: Any = None,
           thresholds: dict[str, Any] | None = None,
           declaration: dict[str, Any] | None = None) -> dict[str, Any]:
+    # ``declaration`` 是 U09 新增入参：基线态不得传，否则 TypeError（两态可跑的代价）。
+    extra: dict[str, Any] = {}
+    if declaration is not None and APPLIED:
+        extra["declaration"] = declaration
     return evidence.build_release_readiness_report(
         path, meta, environment=str(meta["environment"]), since=since, until=until,
-        thresholds=thresholds, declaration=declaration)
+        thresholds=thresholds, **extra)
 
 
 BASE_THRESHOLDS = {"min_observation_days": 0.0, "min_eligible_closed_trades": 0}
@@ -345,12 +349,14 @@ def test_no_edge_excluded() -> None:
               "execution_decision_copy" in after["gates"]["directional_candidates"]["reason"],
               after["gates"]["directional_candidates"]["reason"])
     else:
-        # 基线的 SQL 已按 signal IN (bullish,bearish) 过滤，但 NO_EDGE 标记无效。
-        check("基线态：非方向信号被 SQL 过滤（分母不变）",
-              block["directional_candidates"] == baseline, block["directional_candidates"])
-        check("基线态：NO_EDGE 标记的 bullish 行仍被计入（缺陷证据）",
-              block["shadow_source_rows"].get(shadow_status.SOURCE_A) > 200,
+        # 基线的 SQL 已按 signal IN (bullish,bearish) 过滤非方向信号，但**不认**
+        # NO_EDGE 标记：240 条"明确方向但无边际"的样本照样进分母。
+        check("基线态：非方向信号被 SQL 过滤（240 条 neutral/unknown 未计）",
+              block["shadow_source_rows"].get(shadow_status.SOURCE_A) == 440,
               block["shadow_source_rows"])
+        check("基线态：NO_EDGE 标记的 bullish 行被计入分母（200 → 440，记录缺陷）",
+              block["directional_candidates"] == baseline + 240 == 440,
+              (baseline, block["directional_candidates"]))
     db.close()
 
 
@@ -404,15 +410,19 @@ def test_window_boundaries() -> None:
               clock_only["state"] == "FAIL" and "WINDOW_MISSING" in clock_only["reason_codes"]
               and clock_only["until_source"] == "report_clock", clock_only)
     else:
-        check("基线态：窗口被自动截到首末健康记录（expected==observed，缺陷证据）",
-              coverage["expected_count"] == coverage["observed_count"] == 26, coverage)
         check("基线态：首尾断档被静默吸收（不披露 head/tail 缺失）",
-              "head_missing_count" not in coverage, sorted(coverage))
-        check("基线态：未声明窗口时自动取首末健康记录（规格 §12 明令禁止）",
-              build(path, manifest("rel-acc", "demo", "demo:acc", db=db),
-                    thresholds=BASE_THRESHOLDS)["gates"]["observation_coverage"]["state"]
-              in {"PASS", "FAIL"},
-              "基线自动成窗")
+              "head_missing_count" not in coverage and "tail_missing_count" not in coverage,
+              sorted(coverage))
+        # 未声明窗口时基线**自动**把窗口截到首末观察记录：3 分钟头部与 2 分钟尾部
+        # 断档被吸收，覆盖率虚报 100%（规格 §12 明令禁止）。
+        undeclared = build(path, manifest("rel-acc", "demo", "demo:acc", db=db),
+                           thresholds=BASE_THRESHOLDS)
+        undeclared_coverage = undeclared["release_evidence"]["observation_coverage"]
+        check("基线态：未声明窗口时自动截到首末观察记录，覆盖率虚报 100%（记录缺陷）",
+              undeclared["gates"]["observation_coverage"]["state"] == "PASS"
+              and undeclared_coverage["expected_count"]
+              == undeclared_coverage["observed_count"] == 26,
+              undeclared_coverage)
     db.close()
 
 
@@ -492,18 +502,23 @@ def test_lifecycle_revision_and_identity() -> None:
           block["eligible_closed_lifecycles"] == 30
           and block["current_closed_lifecycles"] == 30, block["current_closed_lifecycles"])
     expected_net = 29 * (1.0 - 0.1 - 0.1) + (1.0 - 0.1 - 0.1 + 0.05)
-    check("净收益按 gross - entry_fee - exit_fee + funding 重算",
-          abs(block["eligible_net_realized_total"] - round(expected_net, 10)) < 1e-9,
-          block["eligible_net_realized_total"])
-    check("零资金费被当作 0（不是缺证据）；未知成本另行计数",
-          block["net_realized_unknown_lifecycles"] == 0, block)
+    if APPLIED:
+        check("净收益按 gross - entry_fee - exit_fee + funding 重算",
+              abs(block["eligible_net_realized_total"] - round(expected_net, 10)) < 1e-9,
+              block["eligible_net_realized_total"])
+        check("零资金费被当作 0（不是缺证据）；未知成本另行计数",
+              block["net_realized_unknown_lifecycles"] == 0, block)
+    else:
+        check("基线态：净收益与修订口径字段不存在（U09 新证据；记录缺陷）",
+              "eligible_net_realized_total" not in block
+              and "revised_lifecycles" not in block, sorted(block))
     ids = {item["lifecycle_id"] for item in block["eligible_closed_rows"]}
     check("双向仓 LONG/SHORT/BOTH 各计一次，不因方向合并",
           {"lc-5", "lc-6", "lc-0"}.issubset(ids) and len(ids) == 30, len(ids))
     if not APPLIED:
-        check("基线态：迟到修订行会被当成两笔（缺陷证据）",
-              _baseline_duplicates_revision(db, path, meta, start, end, thresholds),
-              "见 _baseline_duplicates_revision")
+        check("基线态：迟到修订被静默取一条、无修订/冲突披露（记录缺陷）",
+              _baseline_silent_revision(db, path, meta, start, end, thresholds),
+              "见 _baseline_silent_revision")
         db.close()
         return
 
@@ -594,15 +609,24 @@ def _revision_row(lifecycle_id: str, outcome_id: str, *, pnl: float = 1.0,
     }
 
 
-def _baseline_duplicates_revision(db: AuditDatabase, path: Path, meta: dict[str, Any],
-                                  start: datetime, end: datetime,
-                                  thresholds: dict[str, Any]) -> bool:
-    """基线态：同 lifecycle 两条 outcome 行会被当成两笔（缺陷证据）。"""
+def _baseline_silent_revision(db: AuditDatabase, path: Path, meta: dict[str, Any],
+                              start: datetime, end: datetime,
+                              thresholds: dict[str, Any]) -> bool:
+    """基线态：同 lifecycle 的迟到修订被静默取一条，且不可证明取的是哪一版。
+
+    基线把 ``position_lifecycles ⟕ trade_outcomes`` 的多行按 ``lifecycle_id`` 去重成
+    **集合**，因此不会重复计数——但它既没有修订顺序（取哪一行取决于 SQL 行序），
+    也没有任何"这条值来自哪个修订"的证据字段，迟到/被修订的成本证据无法复核。
+    """
     add_closed_lifecycle(db, 1, closed_at=start + timedelta(minutes=10), lifecycle_id="lc-1",
                          exit_fee=0.4, outcome_id="outcome-lc-1-revised",
                          recorded_at=iso(start + timedelta(hours=3)))
     report = build(path, meta, since=iso(start), until=iso(end), thresholds=thresholds)
-    return report["release_evidence"]["eligible_closed_lifecycles"] == 31
+    block = report["release_evidence"]
+    rows = [item for item in block["eligible_closed_rows"] if item["lifecycle_id"] == "lc-1"]
+    return (block["eligible_closed_lifecycles"] == 30
+            and "revised_lifecycles" not in block
+            and all("evidence_revision_hash" not in item for item in rows))
 
 
 def _unknown_net_is_none(db: AuditDatabase, path: Path, meta: dict[str, Any],
@@ -653,6 +677,15 @@ def test_ack_is_not_recovery() -> None:
             VALUES('inc-acked-open','risk','account','critical','OPEN','t0','t0',1,
                    '2026-01-01T00:10:00+00:00',NULL,'{}')""")
     report = build(path, meta, since=iso(start), until=iso(end), thresholds=BASE_THRESHOLDS)
+    if not APPLIED:
+        check("基线态：报告没有事件恢复/送达真相块（ACK≠恢复 未实现；记录缺陷）",
+              "event_recovery" not in report and "run_continuity" not in report,
+              sorted(report))
+        check("基线态：critical_open 门禁不披露 acked-but-unresolved",
+              "acknowledged_but_unresolved" not in report["gates"]["critical_open_incidents"],
+              sorted(report["gates"]["critical_open_incidents"]))
+        db.close()
+        return
     if not HW_PATCHED:
         check("基线态：共享补丁未应用时 release_evidence 明确报 NO_DATA + 原因码（不猜）",
               report.get("evidence_version") == EV_VERSION

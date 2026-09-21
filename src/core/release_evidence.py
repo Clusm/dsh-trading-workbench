@@ -940,8 +940,10 @@ def build_event_recovery(
             # 不在本层另造一套"送达"话术。
             if str(item) not in reason_codes:
                 reason_codes.append(str(item))
+    # 状态只看真实阻断证据（已 ACK 未送达/未恢复）是 FAIL；"没有告警行"这类
+    # **缺证据**一律 NO_DATA——缺证据不得读成失败，也不得读成通过。
     states = [delivery.get("state"), incident_block.get("state")]
-    if FAIL in states or reason_codes:
+    if FAIL in states:
         state = FAIL
     elif NO_DATA in states:
         state = NO_DATA
