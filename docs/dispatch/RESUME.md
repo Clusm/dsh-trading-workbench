@@ -163,6 +163,14 @@
    - U12 待裁决项 A1–A13 已全部登记台账（含 **A12 = D05 阻断 RC_FREEZE**）。
    - **RC 冻结前置阻断项（三条）**：`U12-BUILD-F1`（在修）、`D05`（SLO 时限冻结，需外部决策）、观察窗三项 `NOT_STARTED`（结构性不可压缩）。
 
+### W3 收尾修复（并行）
+- **`U13-FU2`（作者已交付 → Q 复验中）**：head `2ac0d6f`，补丁包 `docs/dispatch/patches/U13-FU2/ce412fa/`（3 diff）。
+  - **N1 修好**：状态根**没有账本文件** / **没有 `order_outbox` 表** 两种形态由 `allowed=True`（fail-open）变为 `allowed=False / EVIDENCE_UNVERIFIED`；四态对照无回归无误伤；**复用** `EVIDENCE_UNVERIFIED` 无新码；before exit=1(4/3) → after exit=0(7/0)。
+  - **N2 修好（接线形态）**：启动期 2 次调用由"1 次裸"变"0 次裸"并注入账本事实；`set_control` 由裸变注入。**作者如实说明：无"可达的行为翻转证据"**（服务开库即创建 `-shm`，把门禁读取从 `immutable` 切成 WAL 感知，行为结果两态相同）。**已要求 Q 独立判定这条"无行为差异"是否属实**——若构造得出可区分窗口即为重要发现。
+  - **N3 修好**（README 与代码措辞一致）。副作用：`tests/acceptance/test_supervision.py` 的 [7]/[7b] 补了 `_make_gate_ledger()`，**断言原文一行未改**（已要求 Q 逐行核对是否算"放宽断言"）。
+  - **未收紧的口子（已登记）**：`complete_reconcile` 在账本不可读时仍可自声明 `CLEARED`（N1 之后该 CLEARED 不产生放行能力，但状态位会被写脏）；完全收紧需在 `complete_reconcile` 侧也拒绝 → 下一轮。
+  - 复验已派发：Q（`reviews/U13-FU2/R1/q`，detached @ `2ac0d6f`）。**仍在运行，勿重复派发。**
+
 <!-- U12 首次派发记录，保留备查
 2. **U12 BUILD（已派发，进行中）**：RC 集成、故障矩阵（F01–F25）、真实宿主/渠道验收（**依赖 D01/D02 决策**）。
    - 工作树 `mat-wt/W3-rc`（`task/U12` @ `7885e6a`）。交付：`docs/releases/unattended_rc/`（RC 说明 + F01–F25 矩阵 + `observed_status`）、`tests/acceptance/test_unattended_release.py`、CI 补丁、`docs/dispatch/patches/U12/<head>/`。

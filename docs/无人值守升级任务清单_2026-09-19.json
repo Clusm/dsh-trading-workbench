@@ -4419,6 +4419,47 @@
           ]
         },
         "integration_commit": "acf9ced"
+      },
+      "U13-FU2": {
+        "title": "恢复门禁生产接线收口（N1 裸形态 fail-open + N2 service.py 未注入 + N3 文档）",
+        "owner_role": "E线",
+        "status": "READY_FOR_REVIEW",
+        "head_commit": "2ac0d6f",
+        "base": "7885e6a",
+        "branch": "task/U13-FU2（worktree mat-wt/W3-fix2）",
+        "changed_in_branch": [
+          "src/core/ops/recovery.py(+37/-8，独占)",
+          "scripts/ops/verify_u13f1_recovery_gate.py(+230/-2，独占)",
+          "src/core/service.py(+17/-6，共享，另出 .diff)",
+          "tests/acceptance/test_supervision.py(+21/-0，共享，另出 .diff)"
+        ],
+        "patch_package": "docs/dispatch/patches/U13-FU2/ce412fa/（01 service 启动与 set_control 注入账本事实、02 acceptance 门禁夹具加账本、03 N3 文档措辞）+ README + evidence/",
+        "author_claims": {
+          "N1": "before exit=1（4通过/3失败）-> after exit=0（7/0）。场景逐条：状态根**没有账本文件**：allowed=True/GATE_CLEARED(fail-open) -> allowed=False/EVIDENCE_UNVERIFIED；账本在但**没有 order_outbox 表**：source='not_applicable' -> allowed=True 变 allowed=False/EVIDENCE_UNVERIFIED；注入 source='not_applicable' 同样由放行变阻断；账本有未收口/干净/注入干净/注入脏四态**不变**（无回归无误伤）。实现：新增 `_facts_unreadable()`，删掉『按 ledger_snapshot_present() 决定要不要复验』这条口子；**复用** EVIDENCE_UNVERIFIED，无新码。",
+          "N2": "before exit=1（7/2）-> after exit=0（9/0）。启动期调用由『2 次、1 次裸』变『2 次、0 次裸』并注入 {unknown:0,submitting:0,unresolved_entry:1}；set_control 由裸变注入；控制状态与干净账本对照不误伤。**作者如实说明**：服务开库即创建 -shm，把门禁读取从 immutable 切成 WAL 感知，故该场景下**行为结果两态相同**；N2 可验证的增量是**接线形态**（spy 观测）与不再依赖门禁的 sidecar/快照启发式。",
+          "N3": "before exit=1（1/2）-> after exit=0（3/0）；README 已登记 assert_environment_bound('demo') 会抛；台账 tradeoff 原文口径已改。",
+          "verifier": "扩展后验证器单跑：pristine 45通过/7失败 exit1 -> patched 52通过/0失败 exit0（7 条失败恰为 N1x3 + N2 接线x4，两态可跑、非 ImportError）",
+          "delta": "沙箱（解包后立刻 git init）逐脚本 85/85 同一集合；pristine 0/85 非零、patched 0/85 非零；**NEW_FAIL=∅**；官方入口 patched `OFFLINE REGRESSION OK scripts=85` exit 0",
+          "gates": "check_quality **QUALITY CHECK OK files=295 untracked=0** + SECRET SCAN OK files=601，exit 0，**未新增任何 ruff exclude**；补丁 3 配置 x 3 = 9/9 rc=0、Checking>=1、Skipped=0"
+        },
+        "tradeoffs": [
+          "缺账本判为『未 CLEARED』（EVIDENCE_UNVERIFIED 阻断），不采用『要求必须注入事实』的写法——后者会让调用方只要不传 facts 就回到裸形态，更易被绕过",
+          "唯一副作用：合成夹具（门禁放在无账本临时目录）现在会被阻断，故 tests/acceptance/test_supervision.py 的 [7]/[7b] 补了 _make_gate_ledger()；**断言原文一行未改**（改夹具前提，非放宽断言），这是唯一共享测试文件改动"
+        ],
+        "unfinished": [
+          "**N2 无可达的行为翻转证据**（服务开库即创建 -shm），只证明了接线形态与不误伤",
+          "`complete_reconcile` 在账本不可读时仍可自声明 CLEARED（U13-FU1 原取舍）；N1 之后该 CLEARED 不产生放行能力，但状态位会被写脏 —— 完全收紧需在 complete_reconcile 侧也拒绝，属下一轮",
+          "U13-FU1 已登记边界仍在：门禁文件+安装戳同时删 -> GATE_NOT_INSTALLED 放行；篡改 order_outbox 行不可挡",
+          "未做真实交易所/断电撕裂写/多账户凭据/SCM 双 profile 验证",
+          "未改台账里 U13FU1-BARE-BEFORE_ENTRY-FAILOPEN / U13FU1-README-VS-CODE-N3 两条的状态（留 I/U12 流转）"
+        ],
+        "verification": {
+          "session": "Q (reviews/U13-FU2/R1/q)",
+          "candidate": "2ac0d6f",
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U13-FU2/2ac0d6f/",
+          "focus": "重点：N2 的『无行为差异』判定是否属实（作者自认）；绕过尝试（尤其 complete_reconcile 自声明 CLEARED 是否真不产生放行能力）；test_supervision.py 改动是否算放宽断言（逐行核对）。"
+        }
       }
     },
     "w3_status": {
@@ -4431,8 +4472,8 @@
         "U12（RC DRAFT，head 044fccf）"
       ],
       "in_flight": {
-        "U13-FU2": "修 N1+N2（gate 接线）",
-        "U12-BF1": "修 U12-BUILD-F1（RELEASE 阻断）"
+        "U12-BF1": "修 U12-BUILD-F1（RELEASE 阻断）—— 进行中",
+        "U13-FU2-verify": "Q 复验进行中（candidate 2ac0d6f）"
       },
       "gates": {
         "offline_regression": "OFFLINE REGRESSION OK scripts=85",
