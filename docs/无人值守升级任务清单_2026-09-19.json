@@ -1762,7 +1762,7 @@
       "title": "影子v2固定时点标签",
       "owner_role": "D",
       "actual_assignee": null,
-      "status": "PLANNED",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": false,
       "depends_on": [
         "U00",
@@ -1785,7 +1785,39 @@
         "F11",
         "F17"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "8ae0f65",
+          "base": "0706db1",
+          "branch": "task/U06b（worktree mat-wt/D2）",
+          "changed_files": [
+            "src/intel/shadow_v2/models.py(+353)",
+            "src/intel/shadow_v2/sampler.py(+370)",
+            "src/intel/shadow_v2/labels.py(+328)",
+            "src/intel/shadow_v2/__init__.py(+169)",
+            "tests/integration/test_shadow_labels.py(+722)",
+            "tests/fixtures/shadow/labels/fixed_point_cases.json(+157)",
+            "tests/fixtures/shadow/labels/whitelist_plan.json(+25)",
+            "docs/dispatch/patches/U06b/0f1f21c/（2 diff + README + evidence）"
+          ],
+          "shared_patches": "01_audit_database_shadow_v2_labels.diff（database.py +168/-0）、02_intel_service_shadow_v2_readonly_status.diff（service.py +20/-1）。共享文件**已从分支还原**，只在补丁包内。",
+          "delivered": "固定目标时点取价（目标=decided_at+horizon，容差 ±90s 可配且有上界夹逼）；缺失原因**逐条**标签 NOT_MATURED/NO_PRICE/OVER_TOLERANCE/DATA_GAP/CLOCK_UNTRUSTED（legacy v1 只能给总数）；独立全白名单采样（计划=白名单全量×目标时刻，不受轮转命中影响，超预算**计数披露**不静默丢弃）；实验版本隔离 (version, release_id, config_fingerprint, horizon) 四段键 + 主键 + INSERT OR IGNORE ⇒ 同版本标签不可被后续轮次改写（杜绝未来价回填）；无未来信息回填（assert_no_future 抛 LeakageError，路径只取 [decided_at, target) + 入场 + 退出）；时钟可信度 F17（墙钟回拨/monotonic 倒退/boot 变化 -> 整批 CLOCK_UNTRUSTED，判定为相对增量不含绝对日期）。共享适配：shadow_v2_labels 表 + 写/读/覆盖率三方法；服务侧只读 shadow_v2_status()。",
+          "not_done": [
+            "**未把 v2 接入采集循环**（_refresh 不调用 v2 标签，默认开关 False）—— 后置线不改已部署 RC 的运行行为",
+            "未实现 v2 的采集调度/取价任务编排（复用既有 mark_price_samples，调度属运行接线）",
+            "未做配对实验与独立样本统计（U07 范围）；未做影子权重讨论",
+            "未改 shadow_status.py 一个字符；未改任何既有 SQL/方法体；未新增 schema_migrations 版本号（current_schema_version() 仍 17，避让 list(range(1,N)) 断言）；未新增 ruff exclude",
+            "未新增 scripts/smoke_u06b_*.py ⇒ 用 tests/integration/*.py 命名，**不触发** _validate_smoke_manifest，无需登记"
+          ],
+          "gate_invariance": "作者证据：写入 50 条 v2 标签后 directional_candidates 3->3、release_readiness NO_GO->NO_GO、**门禁报告除 generated_at 外逐字相同**；schema_migrations 最高版本仍 17；隔离沙箱复跑 smoke_u09_release_evidence 60/0、test_release_evidence_v2 78/0，**pristine 与 patched 同值**。",
+          "two_state": "未打共享补丁 PASS=89 FAIL=0；打完共享补丁 PASS=100 FAIL=0。两态各自断言应有语义（未接线时断言本体已提供共享适配消费的全部符号与行字段，不空转），无 SKIP 掩盖。",
+          "delta": "沙箱（解包后立刻 git init）：pristine 与 patched 均 OFFLINE REGRESSION OK scripts=85 exit 0，失败集合 ∅，**NEW_FAIL=∅**；tests/**/*.py 16/16 -> 17/17（差值=本任务新增套件）；smoke_contracts_v3 173/0；smoke_u06a_shadow_isolation 52/0；check_quality QUALITY CHECK OK files=301（ruff 绿，未新增 exclude）",
+          "patches_applicability": "2 个补丁 x 3 种 git 配置 = 6/6 干净（Checking=1、Skipped=0）。database.py 原文件本身 mixed 行尾，已用**字节级插入**保持行尾不变，故 diff 仅 +168/-0 无整文件重写。",
+          "integration_order": "**必须先合 `src/intel/shadow_v2/`（分支已提交），再应用两个补丁** —— 否则 service.py 的 `from intel import shadow_status, shadow_v2` 会 ImportError。",
+          "f11_note": "**首批记录不变**：F11:v2_labels=DEFERRED 仍是首批口径；U06b 是后置线交付，不得伪称首批 F11 已通过。"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "C",
@@ -1815,12 +1847,24 @@
       "dl_work_packages": [
         "DL08"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "0706db1",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r1",
+          "stage": "独立审查",
+          "candidate": "8ae0f65",
+          "sessions": [
+            "Q (reviews/U06b/R1/q)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U06b/8ae0f65/",
+          "focus": "重点：用**自建夹具**独立复现『发布门禁不受影响』（不得采信作者的 evidence 脚本）；F11 反例 OVER_TOLERANCE；未来信息回填 LeakageError；版本隔离不可改写；F17 时钟可信；未越界（shadow_status/schema 版本/ruff exclude）。"
+        }
+      ],
       "qa_runs": []
     },
     {
