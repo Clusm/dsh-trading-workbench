@@ -171,6 +171,17 @@ def case_reason_code_consistency() -> None:
         refused = True
     check("拒绝型闸门不带细分码即拒绝登记（不允许静默原因）", refused)
 
+    doc = ROOT / "docs" / "策略扫描原因码.md"
+    if doc.exists():
+        text = doc.read_text(encoding="utf-8")
+        undocumented = [code for code in sorted(DETAIL_REASON)
+                        if f"`{code}`" not in text]
+        check("文档登记了全部细分码（注册表不漂移）", not undocumented, undocumented)
+        missing_stage = [name for name in STAGE_ORDER if f"`{name}`" not in text]
+        check("文档登记了全部漏斗闸门", not missing_stage, missing_stage)
+    else:
+        check("文档 docs/策略扫描原因码.md 已交付", False, str(doc))
+
 
 def case_round_reasons_are_distinguishable() -> None:
     """必达要点 1：未触发与全部跳过原因可区分；不得只报 ok。"""
@@ -495,6 +506,24 @@ def case_management_priority_budget() -> None:
           not ManagementPriorityPlan.from_total(0, reserve_ratio=0.5).research_starved)
 
 
+def patch_fetch(frame):
+    """把 ``fetch_klines`` 换成离线桩；用 contextmanager 保证一定还原。"""
+    import contextlib
+
+    import signal_engine.scanner as scanner_module
+
+    @contextlib.contextmanager
+    def _cm():
+        original = scanner_module.fetch_klines
+        scanner_module.fetch_klines = lambda *a, **k: frame
+        try:
+            yield
+        finally:
+            scanner_module.fetch_klines = original
+
+    return _cm()
+
+
 def case_scanner_wiring() -> None:
     """共享适配接线（scanner）：两态各按当前事实断言。"""
     print("\n[8] 扫描器接线（两态各自断言，不假定补丁是否已应用）")
@@ -546,12 +575,8 @@ def case_scanner_wiring() -> None:
         scanner._features_mod = Feats
         frame = synthetic_ohlcv()
         now = (frame.index[-1] + pd.Timedelta(hours=1)).to_pydatetime()
-        original_fetch = scanner_module.fetch_klines
-        scanner_module.fetch_klines = lambda *a, **k: frame
-        try:
+        with patch_fetch(frame):
             tickets = scanner.scan(now=now, scan_symbols=["BTCUSDT", "ETHUSDT"])
-        finally:
-            scanner_module.fetch_klines = original_fetch
         check("扫描真实路径产出 1 张 ticket（未打补丁时同样成立）",
               len(tickets) == 1 and tickets[0]["strategy_id"] == "card_a", tickets)
         state = json.loads((root / "state.json").read_text(encoding="utf-8"))
@@ -578,13 +603,38 @@ def case_scanner_wiring() -> None:
                   bool(last_scan.get("no_open_reason"))
                   and last_scan["no_open_reason"] in trace.REASON_CODES,
                   last_scan.get("no_open_reason"))
-            check("注入的漏斗实例收到同一批逐项原因（执行侧可继续追加）",
-                  injected is not None and injected.total_candidates == len(details)
+            check("注入的漏斗实例就是状态文件里那一个（执行侧可继续往同一实例追加）",
+                  injected is not None and report.get("round_id") == "scan-round"
                   and injected.tickets_emitted == 1, None if injected is None else
                   injected.as_dict())
-            check("候选计数不含'本轮没有票据'的轮级条目（不虚增候选）",
+            check("漏斗守恒：候选 = 被闸门拒绝的 + 成功发射的（6 = 5 + 1）",
                   injected is not None
-                  and injected.throughput.get(Stage.TICKET_ACTIVE.value, 0) == 1)
+                  and injected.total_candidates == 6
+                  and sum(injected.stopped_at.values()) == 5
+                  and injected.tickets_emitted == 1
+                  and sum(injected.reached.values()) == 1,
+                  None if injected is None else injected.as_dict())
+            # 再扫一轮"完全无可扫标的"：轮级条目不得被算成新候选
+            round_funnel = ScanFunnel(round_id="scan-empty")
+            scanner.funnel = round_funnel
+            with patch_fetch(frame):
+                empty_tickets = scanner.scan(now=now, scan_symbols=[])
+            check("白名单为空时不请求行情且没有票据（既有行为不变）",
+                  empty_tickets == [])
+            check("轮级'本轮没有票据'条目被单独分类（NO_TICKETS_AVAILABLE）",
+                  round_funnel.detail_counts.get(
+                      funnel_mod.DETAIL_NO_TICKETS_AVAILABLE) == 1,
+                  round_funnel.as_dict())
+            check("候选计数只认扫描来源，不含轮级/恢复条目（不虚增候选）",
+                  round_funnel.total_candidates == sum(
+                      1 for item in round_funnel.as_dict()["items"]
+                      if item["origin"] == funnel_mod.ORIGIN_SCAN),
+                  (round_funnel.total_candidates,
+                   [item["origin"] for item in round_funnel.as_dict()["items"]]))
+            check("完全没扫到东西时也不报 ok：轮次带 blocked/no_edge 之外的显式原因",
+                  bool(round_funnel.no_open_explanation()["primary_reason"])
+                  and round_funnel.no_open_explanation()["verdict"] != "opened",
+                  round_funnel.no_open_explanation())
         else:
             check("未打补丁时状态文件里没有 funnel 段（接线确实缺席，不冒充已接线）",
                   funnel_mod.FUNNEL_REPORT_KEY not in last_scan, sorted(last_scan))
