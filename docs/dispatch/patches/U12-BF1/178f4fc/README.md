@@ -176,12 +176,25 @@ pristine 沙箱 **10 FAIL**（含"真实根默认工件扫描不抛错"、"真�
 
 ---
 
-## 8. 全量离线回归 pristine vs patched
+## 8. 全量离线回归 pristine vs patched（失败集合增量）
 
-`scripts/run_offline_regression.py`（pristine 沙箱 vs patched 沙箱）
-失败集合增量见 `evidence/07_offline_regression_delta.txt`。
+`scripts/run_offline_regression.py`，pristine 沙箱 vs patched 沙箱，
+完整记录：`evidence/07_offline_regression_delta.txt`。
 
-**结论：本包引入的新失败 = ∅。**
+| | 退出码 | 总判定 |
+|---|---|---|
+| pristine `7885e6a` | **0** | `OFFLINE REGRESSION OK scripts=85` |
+| patched `178f4fc` | **0** | `OFFLINE REGRESSION OK scripts=85` |
+
+失败集合增量（`grep FAIL` 归一化后 `comm`）：
+
+- patched 新增失败（本包引入的新失败）：**∅**
+- pristine 独有失败：**∅**
+
+两侧各匹配到 10 行 `FAIL`，**逐字相同**，来源是
+`scripts/smoke_u02_strategy_position_manager.py` 的**负向对照 N2**
+（故意喂入"重复退出反向开仓"损坏场景并逐条列出 detectors；脚本自报
+`PASS=156 FAIL=2`，既有，与本题无关）。
 
 ---
 

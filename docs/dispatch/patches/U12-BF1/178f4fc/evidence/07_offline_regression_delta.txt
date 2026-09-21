@@ -1,0 +1,37 @@
+# U12-BF1 全量离线回归 pristine vs patched（失败集合增量）
+
+## 环境
+- pristine 沙箱 = git archive 7885e6a 解包后 git init（未打补丁）
+- patched  沙箱 = 同 base + git apply 01/02（head 178f4fc）
+- 命令：PYTHONUTF8=1 <venv>/python.exe scripts/run_offline_regression.py
+- 两者各自独立目录，串行/并行跑完（互不影响）
+
+## 退出码
+pristine: EXIT=0 -> OFFLINE REGRESSION OK scripts=85
+patched : EXIT=0 -> OFFLINE REGRESSION OK scripts=85
+
+## 失败集合增量
+```
+$ grep -E "^\s*(FAIL|FAILED)" reg_pristine.log | sed "s/[0-9]\+/N/g" | sort > fail_pristine.txt
+$ grep -E "^\s*(FAIL|FAILED)" reg_patched.log  | sed "s/[0-9]\+/N/g" | sort > fail_patched.txt
+$ wc -l fail_pristine.txt fail_patched.txt
+  10 fail_pristine.txt
+  10 fail_patched.txt
+  20 total
+
+$ comm -13 fail_pristine.txt fail_patched.txt   # patched 新增（= 本包引入的新失败）
+(空 = 新增失败 = ∅)
+
+$ comm -23 fail_pristine.txt fail_patched.txt   # pristine 独有（= 本包修好的）
+(空)
+```
+
+## 那 10 行 "FAIL" 是什么（两侧逐字相同，非本包引入）
+来源 scripts/smoke_u02_strategy_position_manager.py 的**负向对照 N2**
+（故意喂入"重复退出反向开仓"的损坏场景，逐条列出 detectors）。
+该脚本自报 U02 strategy position manager: PASS=156 FAIL=2（既有，与本题无关），
+且离线回归总判定为 OK。
+
+## 回归总判定
+SMOKE MANIFEST OK included=81 excluded=1
+OFFLINE REGRESSION OK scripts=85
