@@ -37,12 +37,14 @@
 | EF | U13 托管/单实例/备份恢复 | `task/U13` | **✅ INTEGRATED** | 初审 P1×3 → r2 修（安装戳 fail-closed、`submit_recovery_reconcile()` 接线、KI02 收口）→ Q r2 **PASS-with-notes** → r3 按集成 HEAD **重生成 7 个补丁**（其余 5 文件零差异，因合并已带入 r1 共享改动）→ 7/7 干净应用 → **跨任务验收全绿**（U15/U01/U04 的套件均 exit 0）→ **KI02 消除：`smoke_windows_service_plan` 24/0**，**官方单命令入口首次端到端成功 `OFFLINE REGRESSION OK scripts=75`** |
 | B | U02 策略仓管理与有界退出 | `task/U02` | **✅ INTEGRATED** | A 初审 P0×1 → r2 闭 P0+P1（迁移方案升级为"可执行"）→ r3 闭 3 条 P2（`_consumed_ids` 事实判重 / `release()` 幂等 / `confirm_exit` 结算使声明成真）→ **Q r3 PASS-with-notes** → 集成：6 补丁在 U13/U05 集成后**仍 6/6 干净应用**、登记冒烟（MANIFEST OK 76）、158/0、**check_quality OK files=280**、**OFFLINE REGRESSION OK scripts=80**。**残余（重要）**：`_consumed_ids` 是**纯内存 set** → "已消费不可重发"**仅在进程内成立**，重启后同 `exit_key` 会再次 `SUBMIT_REDUCE`（已登记 P2-9） |
 | CD | U06a 影子最小隔离与口径修正 | `task/U06a` | **✅ INTEGRATED** | 初审硬结论：**影子样本确实会进发布门槛**（200→300）→ 登记为 **U09 硬前置**（`S08-SHADOW-GATE-LEAK`）。r2 修 P2-1（陈旧当新值）/P2-2（披露渲染）→ **Q r3 PASS-with-notes**（两项真闭合、13/13；漂移测试非空转；边界 11 全 A/0 M、共享文件与 `release_evidence.py` 逐文件 SAME）→ 集成：3 补丁、登记冒烟（77）、264/0、**check_quality OK files=283**、**OFFLINE REGRESSION OK scripts=81** |
-| EF | U14 外部告警送达与主机失联 | `task/U14` | **r3 修复完成 → r4 复验中** | r3 复验发现 P1-1 只闭合一半 → **P1-4**（隔离 `except` 捕获集合小于需防集合）→ r3 修：单条隔离改为**对任意异常 fail-closed**。三向量前后对照：`TimeoutError` 每轮 `escaped:True`/`{'UNKNOWN':3}` → `submitted=2/failed=1` 且后 2 条送达、坏行有退避；空白回执裸 `ValueError` 穿出 → `RECEIPT_EMPTY`；`delivered_at_ms` 非数值 → `RECEIPT_TYPE_INVALID`。兜底桶 `None`→`AttributeError` 亦收敛；**`KeyboardInterrupt` 仍穿出（不过度捕获）**；`_isolate_failure` 保证连"记失败"都失败也不中断整批。P3-6/P3-7 已修。head `2722efe`（修复 `ad2c57d`）；补丁在两基线两配置 **16/16 OK**；验收 244/0→262/0；**delta ∅**。**登记**：兜底桶会把新 bug 表现为"该条持续退避"而非崩溃 → 接线时须监控 `errors` |
+| EF | U14 外部告警送达与主机失联 | `task/U14` | **✅ INTEGRATED** | r3 闭 **P1-4**（单条隔离改为对任意异常 fail-closed；三向量 + 兜底桶全收敛，`KeyboardInterrupt` 仍穿出，`_isolate_failure` 用 SQLite 触发器验证）→ **Q r4 PASS-with-notes**（七行混合批无早退；全模块仅 4 处 `except Exception`；delta 四树全 ∅）→ 集成：4 补丁、登记冒烟（78）、262/0、**check_quality OK files=286**、**OFFLINE REGRESSION OK scripts=82**。**残余（须传达 U12）**：`AlertQueue` **无生产消费者** → 门禁全绿 ≠ 无人值守告警可用；兜底桶把新 bug 表现为"该条持续退避"而非崩溃 → 接线须监控 `errors`（且 `PERSIST_FAILED` **不在** `errors`，有计数盲区） |
 | CD | U08 策略漏斗与管理责任展示 | `task/U08` @ `2ed2e5d` | **作者进行中** | 依赖 U00+U05 已满足（CD 线串行 U03→U05→U06a→U08）。新建 `src/core/strategy_funnel.py`；**额外承担 U05 遗留的接线缺口**（U05 明写"接线归 U08（漏斗/保护优先/原因码）与 U08/U12"）；原因码须与 U05 九码一致、不得自造平行体系 |
-| EF | U10a 可运行发布包与运维说明 | — | 待派发 | 线内串行：U14 → U10a |
+| EF | U10a 可运行发布包与运维说明 | `task/U10a` @ `f5e4790` | **作者进行中** | 依赖 U00+U15 已满足（EF 线串行 U15→U13→U14→U10a）。改 `scripts/create_release_package.py` + 三份运维文档；必达"凭据/运行状态不入包、解压自检与相对链接可达、文档不得写未实现能力"。派发前已清理 EF 遗留 scratch（原 1177 个未跟踪 .py 会触发 Windows 命令行上限使本地 `check_quality` 无法运行） |
 
-**W2 门禁状态：两个 RC 门禁首次同时全绿** —— `OFFLINE REGRESSION OK scripts=79`、`check_quality QUALITY CHECK OK files=261`。
-达成路径：U13 修好 KI02（解释器解析层）→ 官方单命令回归不再中止；KI04 给密钥扫描器加**范围豁免**（仅审查报告与台账，代码/config 照扫）；清理 U04 补丁引入的 4 个 lint；修正扫描器自测的登记数断言。
+**W2 门禁状态：两个 RC 门禁持续全绿** —— `OFFLINE REGRESSION OK scripts=82`、`check_quality QUALITY CHECK OK files=286`。
+达成路径：U13 修好 KI02（解释器解析层）→ 官方单命令回归不再中止；KI04 给密钥扫描器加**范围豁免**（仅审查报告与台账，代码/config 照扫）；清理 U04 补丁引入的 4 个 lint；修正扫描器自测的登记数断言；I 自身在 RESUME 里留下的 KI01 式字面量也已改写。
+
+**集成进度：10/12 已 INTEGRATED**（U00 · U01 · U02 · U03 · U04 · U05 · U06a · U13 · U14 · U15）。**剩余**：U08（作者进行中）、U10a（作者进行中）、U09、U12（W3，尚未开始）。
 
 **W2 派发已内联 W1 的 7 条血教训**（见 §「复验范围经验」与 §「派发新任务时的强制要求」）：两态可跑的测试、迁移版本推进必须带伴随补丁并给 delta、禁止 SKIP/直接注入内部字段、共享适配必须交付 diff 文件、冒烟须登记、增量提交、自证 pristine delta。
 
