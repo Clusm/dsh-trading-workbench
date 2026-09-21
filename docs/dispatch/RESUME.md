@@ -151,7 +151,14 @@
   - 集成实测：shadow v2 套件 **100/0**、`smoke_u06a` 52/0、`smoke_u09` 60/0、契约 173/0、`check_quality OK files=301`、**`OFFLINE REGRESSION OK scripts=85`**。
   - **集成顺序已核实为真且必要**（Q 复现了单独打补丁 02 的 `ImportError`）。
   - 新登记 `U06B-P3-CLUSTER`（补丁 02 缺空行 / `autocrlf=true` 下整文件转 CRLF / `sampler.clock_verdict_for_window()` 死代码）。
-- **`U07` 配对实验与独立样本统计**：**已派发（U06b 集成后依赖就绪）**。工作树 `mat-wt/D3`（`task/U07` @ `c2f1bab`）。已内联：不得改动 `shadow_status` 口径、必须证明统计产物**同样不进任何门禁分母**、不得伪称 F11 已通过。
+- **`U07` 配对实验与独立样本统计**：**作者已交付 → Q 复验中**。工作树 `mat-wt/D3`，head `e610319`（base `c2f1bab`）。**纯增量 +2497/−0，分支内无共享文件改动**；补丁包 `docs/dispatch/patches/U07/f9e3094/`（01 只读研究表 `shadow_v2_statistics`（门禁/权重/晋升三列强制归零、主键含 digest ⇒ 重放 0 新增、不占迁移版本号）+ 02 **必需**的 `test_shadow_labels.py` 模块集断言从"相等"改"包含"）。
+  - **门禁不倒性**：smoke_u09 60/0、test_release_evidence_v2 78/0、test_shadow_labels 100/0、契约 173/0、smoke_u06a 52/0 —— **前后同值**；套件内还有逐字段断言（灌统计快照后门禁报告除 `generated_at` 外相同、`directional_candidates` 3→3、来源过滤仍 `[SOURCE_A]`）。delta `NEW_FAIL=∅`；`check_quality OK files=303`。
+  - **待 Q 裁决的关键一条**：补丁 02 把**别人（U06b）的**模块集断言由"集合相等"改为"集合包含"。**已要求 Q 做反向测试**：删掉 U06b 四模块之一必须立刻变红，否则=真削弱。另要求审**统计口径本身**（`naive_understates` 真假、独立块数手算、二项符号检验 p 值独立核对、费用压力区间外是否拒绝外推）。
+- **`U11` 核心模块渐进拆分**：**作者已交付 → Q 复验中**。工作树 `mat-wt/F3`，head `00a49a8`（base `03967e9`）。**仅两个新增文件、未触碰任何 `src/`、0 个共享补丁**：`docs/重构接口映射.md`(356) + 补丁包 README。
+  - 方案：拆 `decision_trace`(P1)/`strategy_funnel`(P2)/`runtime_identity`(P3，需 U15 作者在场)；**明确建议"不拆" `service.py`（最大模块）**，理由是它是 I 集成面 + N1/N2/N3 账本事实注入链路、无独立套件可证行为不变。另给 16 项"不动清单"与**公开面 SHA-256 快照**断言工具及基线。
+  - **I 已抽查行数**（1799/2138/2464/1826）**与文档逐字相符**。
+  - **待 Q 复验**：逐条重跑文档所列命令比对 exit code；**独立重新实现** V1 快照并与文档基线哈希比对；**独立枚举"绝不能动"清单找漏项**；核对拆分建议是否写清责任归属（`strategy_funnel` 属 U08、`runtime_identity` 属 U15，拆后谁复跑）。
+- **两个复验会话均在运行，勿重复派发。**
 
 <!-- 以下为 U06b 派发/交付时的记录，保留备查
 - **`U06b` 影子 v2 固定时点标签**：工作树 `mat-wt/D2`，head `8ae0f65`（base `0706db1`），**共享文件已从分支还原**、只在补丁包 `docs/dispatch/patches/U06b/0f1f21c/`（2 diff）内。
