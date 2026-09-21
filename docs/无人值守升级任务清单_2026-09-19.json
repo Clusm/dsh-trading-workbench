@@ -1577,7 +1577,7 @@
       "title": "影子最小隔离与口径修正",
       "owner_role": "D",
       "actual_assignee": "U06a 作者会话",
-      "status": "READY_FOR_REVIEW",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -1682,6 +1682,20 @@
             "_cursor 无锁自增为既有问题"
           ],
           "negative_finding": "CD 工作树 check_quality 红：**全部来自其它会话遗留的未跟踪 scratch**（_scratch_author_r2/r3/r4，含沙箱副本）。其交付路径与自身 scratch `ruff check` = All checks passed。未删他人证据，建议 I 清理后复跑门禁"
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "e8f0873",
+          "verdict": "Q r3 PASS-with-notes",
+          "code_identity": "git diff e8f0873 HEAD -- <U06a 路径> 为空",
+          "patches": "a01d088/ 3 个补丁干净应用（含 smoke_intel_sidecar 的正当改动）",
+          "i_registration": "smoke_u06a_shadow_isolation.py 已写入 SCRIPTS -> MANIFEST OK included=77",
+          "tests": "test_shadow_status **264/0**（未打补丁 205/0）；smoke_u06a 52/0；smoke_intel_sidecar 19/0；契约 173/0；smoke_ui 52/0；check_quality **OK files=283**",
+          "offline_regression": "**OFFLINE REGRESSION OK scripts=81**（exit 0）",
+          "v3_verification": "两项修复真闭合（13/13 判定 + 严格可见区=剔除全部 <details> 后 caveat 出现 3 处）；漂移测试非空转（篡改 DEFAULT_THRESHOLDS 或单边改副本必红）；边界成立（11 全 A、0 M；5 共享文件 + release_evidence.py + run_offline_regression.py 逐文件 SAME）",
+          "residual": "S08-SHADOW-GATE-LEAK **仍开放**：影子样本会进方向候选分母（release_evidence.py 未按 source 过滤，实测 200→300）-> **U09 硬前置**；release_evidence.py 零改动、未建第二套 GO（只写披露 + 机器可读 residual_gap）",
+          "new_p3": "6 条全 P3（Markdown ** 泄漏进 HTML 可见区 2 处；P3-8 中间态今日不可达；失败后未到期轮 stale 翻回 False 但年龄继续增长不误导）",
+          "unfinished": "U09 source 过滤；v2 标签（U06b）；真机放大倍数与真实并发注入未测"
         }
       ],
       "blockers": [],
@@ -1718,7 +1732,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "2ed2e5d",
       "review_assignments": [
         {
           "round": "r2",
@@ -1877,8 +1891,8 @@
       "id": "U08",
       "title": "策略漏斗与管理责任展示",
       "owner_role": "C",
-      "actual_assignee": null,
-      "status": "PLANNED",
+      "actual_assignee": "U08 作者会话",
+      "status": "IN_PROGRESS",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -1929,7 +1943,7 @@
         "DL03",
         "DL07"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "2ed2e5d",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
