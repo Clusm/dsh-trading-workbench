@@ -2753,7 +2753,7 @@
       "title": "核心模块渐进拆分",
       "owner_role": "F",
       "actual_assignee": null,
-      "status": "PLANNED",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": false,
       "depends_on": [
         "U10b",
@@ -2775,7 +2775,39 @@
         "F09",
         "F14"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "00a49a8",
+          "base": "03967e9",
+          "branch": "task/U11（worktree mat-wt/F3）",
+          "commits": 4,
+          "changed_files": [
+            "docs/重构接口映射.md(356)",
+            "docs/dispatch/patches/U11/00706d5/README.md"
+          ],
+          "scope_discipline": "**仅两个新增文件，未触碰任何 `src/`**；**0 个共享文件补丁**。任务卡口径即『映射/设计交付』，作者未越界做真实拆分。",
+          "plan": {
+            "P1": "core/decision_trace.py(1799) -> decision_reason / decision_deadline / decision_recording + 原位门面再导出；关键边界：原因码九码顺序与 PERCENTILE_METHOD 字面量冻结；DecisionTraceSpan/Counters 留在 core.contracts 不搬",
+            "P2": "core/strategy_funnel.py(2138) -> funnel_taxonomy / funnel_report / ticket_ledger / position_attribution + 门面；关键边界：票据账本**磁盘 JSON 键名/锁超时/错误语义不变**；PositionClass 跨任务同源引用原样保留",
+            "P3": "core/runtime_identity.py(2464) -> 仅给边界，**落地需 U15 作者在场**；凭据守卫族整块不动",
+            "not_split": "**core/service.py(1826，最大) 明确建议不拆** —— 理由：I 集成面 + N1/N2/N3 账本事实注入链路；无独立套件可证行为不变。"
+          },
+          "dont_touch_list": "§5 共 16 项：contracts + golden（tag contract-v3.0 冻结）、release_evidence.py + intel/shadow_status.py（200 分母单一口径）、ops/recovery.py + service.py 账本注入（纵深防御）、scripts/ 顶层 81 个 smoke_*.py（禁移动/改名）、run_offline_regression.py（I 独占）、pyproject.toml ruff 配置（禁新增 exclude）、docs/archive/*。",
+          "assertion_tool": "§7 V1：对 4 个模块做 `dir()` 公开面 SHA-256 快照，拆分前后必须逐行相同。基线（作者实测）：decision_trace 86 项/1e96c448b313、strategy_funnel 158 项/9ec72c643e4b、runtime_identity 117 项/9616373d6147、contracts 118 项/8172c604e1b2。",
+          "verified_exits": "作者称全部实跑：run_offline_regression exit 0（MANIFEST 81/1、scripts=85）、check_quality exit 0（files=301 untracked=0）、smoke_contracts_v3 173/0 golden 160、check_execution_boundaries 0、smoke_u05_decision_trace 0、smoke_u05_cross_process_admission 0、smoke_u08_strategy_funnel 0（91/0）、smoke_u02 0、smoke_u06a 0、smoke_u10a 0（43 篇 md 链接可达）。",
+          "i_spotcheck": "**I 已抽查行数**：decision_trace 1799 / strategy_funnel 2138 / runtime_identity 2464 / service.py 1826 —— **与文档逐字相符**。",
+          "not_verified": [
+            "**拆分本身未发生** —— V1/V2 的『拆分后相同』是待实施者断言；基线快照已给出",
+            "V3（TicketLedger 落盘键名逐字节不变）**未实跑**，只给方法",
+            "扇出仅按 **import 静态扫描**，未覆盖 getattr/字符串反射路径",
+            "runtime_identity 的边界**未经 U15 作者确认**（§4.3 是不完整映射）",
+            "行号是 03967e9 时点值，U12 后必漂移，**以符号名为准**",
+            "service.py『不拆』是基于 C5/C6 与验证成本的**判断**，非形式化证明"
+          ],
+          "gates": "改动后 check_quality exit 0（files=301，未新增 exclude）；run_offline_regression exit 0（scripts=85、manifest 81/1）—— 纯文档改动未把门禁弄红；smoke_u10a exit 0（新文档相对链接在构建期 doc_links_resolve 下全部可达）；未新增 scripts/smoke_u11_*.py，故 run_offline_regression.py **一行未改**。"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "A",
@@ -2804,12 +2836,24 @@
       "dl_work_packages": [
         "DL09"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "03967e9",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r1",
+          "stage": "独立审查",
+          "candidate": "00a49a8",
+          "sessions": [
+            "Q (reviews/U11/R1/q)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U11/00a49a8/",
+          "focus": "**本交付是规划文档，无 src/ 改动 —— 验证重点是其对代码库的断言是否属实、不动清单有无漏项。** 重点：①逐条重跑文档列出的命令比对 exit code/数字；②**独立重新实现 V1 公开面快照**并与文档基线哈希比对；③独立枚举『拆分绝不能动』清单与文档 §5 对照找漏项（含 CONTRACT-ERRATUM-1、200 分母单一口径、N1/N2/N3 与 before_entry(facts) 替换语义、smoke_* 禁移动、pyproject E402 豁免、docs/archive 规则 3 已被证伪、跨任务共享断言）；④拆分建议是否写清**责任归属**（strategy_funnel 属 U08、runtime_identity 属 U15，拆后谁复跑）；⑤行数等事实抽查。"
+        }
+      ],
       "qa_runs": []
     },
     {
