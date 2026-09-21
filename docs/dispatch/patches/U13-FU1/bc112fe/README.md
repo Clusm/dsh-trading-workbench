@@ -1,4 +1,8 @@
-# U13-FU1 补丁包（head `bc112fe`）
+# U13-FU1 补丁包（目录名 `bc112fe`）
+
+> 目录名 = **引入本补丁包内容的提交** `bc112fe`（其后的提交只往本目录追加
+> `README.md` 正文与 `evidence/` 归档，`.diff` 从未被改动）。分支最终 head 见
+> 交付报告，`git log --oneline -- docs/dispatch/patches/U13-FU1/` 可回溯。
 
 本目录是 **U13-FU1（E 线托管/恢复修复）** 的补丁包。四条 P1 的**核心修复**已在
 分支 `task/U13-FU1` 内直接提交（独占路径：`src/core/ops/recovery.py`、
@@ -56,3 +60,49 @@ git -c core.autocrlf=true apply --check --verbose <patch>
   把已采集的账本事实注入，避免依赖活动 WAL 库的只读快照语义。
 - **P1-4**（`STATE_ROOT_MISSING` 不可达）→ 分支内改 `validate()`；`03`/`04`
   提供启动期/部署前的**可观测**消费者。
+
+## 复验证据（`evidence/`）
+
+| 文件 | 内容 |
+|---|---|
+| `before_drill_f14.log` / `after_drill_f14.log` | 评审方原始探针 `drill_f14.py`：修复前 19 通过 / 0 失败（exit 0，即缺陷全在），修复后 **16 / 3**（exit 1），新失败的三条**正是缺陷断言**（P1-1 未装门禁、两条恢复路径行为不一致、P1-3 手写 CLEARED 放行）。 |
+| `before_drill_f18.log` / `after_drill_f18.log` | 评审方原始探针 `drill_f18.py`：修复前 31 / 0（exit 0），修复后 **29 / 2**（exit 1），两条新失败即 P1-4 的 `STATE_ROOT_MISSING` 不可达断言。 |
+| `before_probe_live_layout.log` / `after_probe_live_layout.log` | 评审方原始探针 `probe_live_restore_layout.py`：修复前 live 档"状态 JSON 平铺 `data/`、门禁在 `data/live/ops/`"；修复后 live 档四个状态 JSON + 库 + 门禁**全部**在 `data/live/` 之下，空 profile 档全部在 `data/` 之下。 |
+| `before_u13f1_verify.log` / `after_u13f1_verify.log` | 本任务新增的 `scripts/ops/verify_u13f1_recovery_gate.py` 在 **pristine base（`git archive 943d839`）**= 44 失败 / exit 1；在修复后 = **39 通过 / 0 失败 / exit 0**。两态可跑：符号缺失时逐条判失败，不 ImportError。 |
+| `after_drill_f14_e2e.log` | 评审方原始端到端探针 `drill_f14_e2e.py`（真实 `TradingService`，paper）在**打上全部补丁**的树上：11 通过 / 4 失败。4 条失败**同源**——根因是 [3] 段仍按旧语义预期"门禁可在账本还有未收口 ENTRY 时被证据收口"；[3] 的另外 1 条与 [4] 的 2 条都是它的下游。见下一节。 |
+| `delta_pristine.log` / `delta_patched.log` | 全量离线回归（84 脚本，逐脚本 rc）pristine vs patched 的失败集合增量对比：两边非零都是同 2 个（`smoke_u10a_release_package.py`、`test_secret_scanner.py`），**均为 `git archive` 导出无 `.git` 导致的 `git ls-files` 失败**，与本次改动无关。**NEW_FAIL = ∅**。 |
+| `after_official_regression.tail.log` | 官方入口 `scripts/run_offline_regression.py` 在工作树内实测：`OFFLINE REGRESSION OK scripts=84`，exit 0。 |
+| `quality_evidence.log` | `check_quality.py` 的 ruff 现状（见 05 一节）。 |
+
+## 预期行为变更（F14 端到端）：先"真对账"，再收口
+
+`drill_f14_e2e.py` 的 [3] 段在**旧**实现下可以"operator + 二次确认 + 新鲜结构化
+证据"直接把门禁从 `RECONCILE_REQUIRED` 拨到 `CLEARED`——**即使账本里那颗
+"交易所已成交、本地未收口"的 ENTRY 单还在**。P1-3 之后这条路被有意关掉：
+`complete_reconcile` 先读账本真实事实，未收口 ENTRY 仍在时返回
+`RECONCILE_REQUIRED_BEFORE_ENTRY`。
+
+正确顺序因此变成 **先让对账真的发生**（快循环的 `reconcile_unknown` 把
+UNKNOWN 拉成终态 / 或人工收口）**→ 再提交证据**。这与 F14 必达原话
+"先对账再开仓"一致，且是**收紧**而非放宽。探针里那 2 条失败是这个收紧的
+直接证据，不是回归。
+
+## 未尽事项（如实登记）
+
+1. **`scripts/create_recovery_bundle.py` 的 profile 支持只在 `02` 里**。未应用
+   `02` 时，生产建包脚本仍写 `epoch.profile=""`，live 档 DR 只能靠 core 的
+   `create_epoch_bundle` 建包。
+2. **恢复目标只按"旧布局 `<target>/data`"落地**。若 live 部署用绝对
+   `MTA_STATE_ROOT`（例如 `D:/mta-state`），运维必须把恢复目标放在状态基座的
+   父目录，或另行搬迁；`restore_to_new_directory` 未提供 `state_base` 覆盖参数。
+3. **live 服务热路径的实时事实**靠 `01` 注入。未应用 `01` 时门禁会退化为
+   "自己按只读快照读一次账本"（活动 WAL 库走 `mode=ro`，能看见最新已提交事实，
+   但每轮多一次连接）。行为仍 fail-closed，只是开销更高。
+4. **未做真实交易所侧验证**：全部证据来自进程内假 broker / 合成状态根；真实
+   `query_order` 回执、真实断电/撕裂写、真实多账户凭据、SCM 双 profile 注册、
+   真实告警均未涉及。
+5. **P1-3 的证据仍由"进程内账本"复验**。能挡住"手写 JSON"和"删/改门禁文件"，
+   挡不住"同时篡改账本 `order_outbox` 行"——那已超出"手写门禁 JSON 即放行"
+   这一缺陷范围（账本篡改属另一类威胁模型）。已在此显式登记。
+6. **`check_quality.py` 在 base 即为红**（见 05 一节）；本任务未把 `05` 提交进
+   分支，因此本分支上它仍然红。是否接受 `05` 由 owner 决定。
