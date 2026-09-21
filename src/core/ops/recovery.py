@@ -276,6 +276,21 @@ def _facts_block_unresolved(facts: Mapping[str, Any] | None) -> bool:
     canonical = _canonical_facts(facts)
     return any(canonical.get(key, -1) != 0 for key in FACTS_KEYS)
 
+
+def _facts_unreadable(facts: Mapping[str, Any] | None) -> bool:
+    """事实**读不出/不适用** → 不能当"干净"（U13-FU2/N1）。
+
+    ``None`` = 账本读不出（文件缺失 / 打不开 / SQL 失败）；
+    ``source == "not_applicable"`` = 这个库根本没有 ``order_outbox`` 表，
+    因此"库是干净的"这件事**无法证明**（见 :func:`ledger_reconcile_facts`
+    自己写的"不适用，不是干净"）。
+
+    两者都必须按"不可证明"处理：安全控制宁可多阻断，绝不把"读不到"当成"已收口"。
+    """
+    if facts is None:
+        return True
+    return str(facts.get("source") or "") == "not_applicable"
+
 #: 同 epoch 容差：DB 快照与全部 JSON 的 ``snapshot_at_ms`` 必须落在同一窗口。
 DEFAULT_EPOCH_TOLERANCE_MS = 5000
 #: 对账证据可接受的最大年龄（默认 15 分钟）：过期证据必须重新对账。
@@ -969,6 +984,14 @@ class RecoveryGate:
            已经采集到的事实，避免判定时再打开一次账本。
 
         账本不可读时**不**假定干净：见 :func:`ledger_reconcile_facts`。
+
+        **U13-FU2/N1（裸形态不再 fail-open）**：``facts`` **未注入**时，若账本
+        根本读不出事实（状态根里没有账本文件 / 打不开 / SQL 失败 → ``None``），
+        或账本里没有 ``order_outbox`` 表（``source="not_applicable"``，**不适用
+        不等于干净**），一律返回 ``EVIDENCE_UNVERIFIED`` 阻断 —— 只要证据自带
+        自洽摘要就放行的旧行为与"读不出即不假定干净"的契约相悖，已删除。
+        调用方（服务运行代）应通过 ``facts=`` 注入**本进程账本的真实事实**：
+        注入形态同样不接受 ``source="not_applicable"``。
         """
         now = now_ms if now_ms is not None else _now_ms()
         if self.state == GATE_STATE_CORRUPT:
@@ -1001,17 +1024,18 @@ class RecoveryGate:
         # (2) 用当前账本的**真实事实**复验（调用方注入的实时事实优先）。
         if isinstance(facts, Mapping):
             live: Mapping[str, Any] | None = facts
-            live_required = True
         else:
             live = self.live_reconcile_facts()
-            # 干净快照（账本在、没有活动写者的 -shm 边车）下"读不出事实"只能是
-            # 账本损坏 → 阻断；活动库（服务正在写）不做自动复验，由服务注入。
-            live_required = self.ledger_snapshot_present()
-        if live is not None and _facts_block_unresolved(live):
+        # U13-FU2/N1：**读不出账本事实就不得放行**。旧实现在这里按"是不是停写
+        # 快照"决定要不要复验，于是"状态根没有账本文件""账本没有 order_outbox
+        # 表"两条路径都 fail-open——只要证据摘要自洽就放行（Q1/Q2 实测），与
+        # :func:`ledger_reconcile_facts` 的契约相悖。现在无论注入与否，只要事实
+        # 读不出/不适用就按"未 CLEARED"处理（宁可多阻断，绝不假定干净）。
+        if _facts_unreadable(live):
+            return RecoveryGateDecision(False, (EVIDENCE_UNVERIFIED,), self.state)
+        if _facts_block_unresolved(live):
             return RecoveryGateDecision(
                 False, (RECONCILE_REQUIRED_BEFORE_ENTRY,), self.state)
-        if live is None and live_required:
-            return RecoveryGateDecision(False, (EVIDENCE_UNVERIFIED,), self.state)
         return RecoveryGateDecision(True, (GATE_CLEARED,), self.state)
 
     def gate_state_root(self) -> Path:
@@ -1022,7 +1046,12 @@ class RecoveryGate:
         return self.gate_state_root() / "agent_trader.sqlite"
 
     def ledger_snapshot_present(self) -> bool:
-        """账本是"停写快照"（文件在且没有活动写者的 ``-shm`` 边车）。"""
+        """账本是"停写快照"（文件在且没有活动写者的 ``-shm`` 边车）。
+
+        U13-FU2/N1 之后 :meth:`before_entry` 的判定**不再**依赖本方法：裸形态
+        读不出事实一律阻断，不再区分"停写快照"与"活动库"。保留它作为
+        **诊断/报告**用的介质判定（活动 WAL 库 vs 停写快照），不参与放行。
+        """
         db = self.ledger_file()
         if not db.is_file():
             return False

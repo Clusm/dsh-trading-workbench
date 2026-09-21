@@ -38,7 +38,11 @@ from data.rate_limit import (
 )
 from core.intel_cache import IntelCache
 from core.instance_lock import InstanceLock
-from core.ops.recovery import RecoveryGate
+from core.ops.recovery import (
+    FACTS_KEYS,
+    UNRESOLVED_ORDER_STATUSES,
+    RecoveryGate,
+)
 from core.ops.supervision import RunRegistry
 from core.quotas import TradeQuotaManager
 from core.runtime_paths import RuntimePaths
@@ -311,15 +315,21 @@ class TradingService:
             account_ref=str(getattr(self.run_generation, "account_ref", "") or ""),
             runtime_instance_id=str(self.runtime_instance_id or ""),
         )
-        gate_decision = self.recovery_gate.before_entry()
-        if gate_decision.allowed:
+        # U13-FU2/N2：启动路径**必须注入本进程账本的真实事实**（与就绪链共用
+        # ``_recovery_gate_facts`` 这一个入口），不得退回裸 ``before_entry()``：
+        # 裸形态不读本进程账本，无法证明"未收口 ENTRY 单真的清完了"。读不出账本
+        # 或门禁异常时 ``_recovery_gate_facts``/``_recovery_gate_ledger_facts``
+        # 各自 fail-closed，因此这里没有"判定失败就放行"的口子。
+        gate_facts = self._recovery_gate_facts(self._recovery_gate_ledger_facts())
+        if gate_facts.get("recovery_gate_allowed") is True:
             self.db.resolve_risk_incidents_by_type("recovery_reconcile_required")
         else:
+            gate_reasons = list(gate_facts.get("recovery_gate_reason_codes") or [])
             self.db.log_risk_event(
                 event_type="recovery_reconcile_required", severity="critical",
                 details=(f"epoch={self.recovery_gate.epoch_id} "
                          f"account_ref={self.recovery_gate.account_ref} "
-                         f"reasons={','.join(gate_decision.reason_codes)}"),
+                         f"reasons={','.join(gate_reasons)}"),
                 action_taken="fail closed to close_only; reconcile before new entry",
             )
             if self.control.state == "normal":
@@ -882,31 +892,80 @@ class TradingService:
             return bool(row["matched"])
         return bool(row["matched"] or row["initialized"])
 
-    def _recovery_gate_ledger_facts(self, facts: dict[str, Any] | None = None
-                                    ) -> dict[str, int]:
-        """恢复门禁需要的**账本真实事实**（U13-FU1/P1-3）。
+    def _ledger_outbox_counts(self) -> dict[str, int] | None:
+        """本进程账本 ``order_outbox`` 的门禁三元组计数（U13-FU3/N2）。
 
-        ``unknown_orders``/``submitting_orders`` 复用本轮已采集的 outbox 计数；
-        ``unresolved_entry_orders`` 是本进程账本里"尚未收口的 ENTRY 单"数
-        （SUBMITTING/UNKNOWN/ACKNOWLEDGED/NEW/PARTIALLY_FILLED）。**读不到就按
-        未收口处理**（返回非零），门禁因此维持阻断——不把"读不到"当成"已收口"。
+        与门禁 :func:`core.ops.recovery.ledger_reconcile_facts` **同一口径**：
+        直接复用它的 ``FACTS_KEYS``/``UNRESOLVED_ORDER_STATUSES`` 常量，而不是
+        另抄一份——
+
+        - ``unknown_orders``/``submitting_orders``：**不分 purpose** 全表计数，
+          所以"账本里还挂着一颗 UNKNOWN 的 EXIT/PROTECTIVE 单"同样算未收口；
+        - ``unresolved_entry_orders``：只数 ``purpose='ENTRY'`` 的未收口单。
+
+        读不出来（无该表 / 连接不可用 / SQL 失败）→ ``None``；调用方必须
+        fail-closed，绝不把"读不到"当成"已收口"。
         """
-        source = facts or {}
-        try:
-            unknown = int(source.get("unknown_orders") or 0)
-            submitting = int(source.get("submitting_orders") or 0)
-        except (TypeError, ValueError):
-            unknown = submitting = 1
+        statuses = ",".join("?" for _ in UNRESOLVED_ORDER_STATUSES)
         try:
             row = self.db.fetch_one(
-                "SELECT COUNT(*) AS n FROM order_outbox WHERE "
-                "UPPER(COALESCE(purpose,''))='ENTRY' AND status IN "
-                "('SUBMITTING','UNKNOWN','ACKNOWLEDGED','NEW','PARTIALLY_FILLED')")
-            unresolved = int(row["n"]) if row else 1
+                "SELECT "
+                " SUM(CASE WHEN status='UNKNOWN' THEN 1 ELSE 0 END) AS unknown_orders, "
+                " SUM(CASE WHEN status='SUBMITTING' THEN 1 ELSE 0 END) "
+                "   AS submitting_orders, "
+                f" SUM(CASE WHEN status IN ({statuses}) "
+                "          AND UPPER(COALESCE(purpose,''))='ENTRY' THEN 1 ELSE 0 END) "
+                "   AS unresolved_entry_orders "
+                "FROM order_outbox", tuple(UNRESOLVED_ORDER_STATUSES))
         except Exception:
-            unresolved = 1
-        return {"unknown_orders": unknown, "submitting_orders": submitting,
-                "unresolved_entry_orders": unresolved}
+            return None
+        if row is None:
+            return None
+        counts: dict[str, int] = {}
+        for key in FACTS_KEYS:
+            try:
+                counts[key] = max(0, int(row[key] or 0))
+            except (KeyError, IndexError, TypeError, ValueError):
+                return None
+        return counts
+
+    def _recovery_gate_ledger_facts(self, facts: dict[str, Any] | None = None
+                                    ) -> dict[str, Any]:
+        """恢复门禁需要的**账本真实事实**（U13-FU1/P1-3；U13-FU3/N2 修正）。
+
+        **N2 回归（已修）**：本方法曾把 ``unknown_orders``/``submitting_orders``
+        **只**取自 ``facts`` 形参、缺省硬编码 ``0``；而启动、``set_control``、
+        冷启动快照三条路径都是**无参调用** → 这两列恒为 0，等于把门禁对这两列的
+        账本读取整个绕过（门禁的 ``ledger_reconcile_facts`` 对这两列是**不分
+        purpose 全表计数**）。后果：账本里唯一未收口的是非 ENTRY 单时，裸形态
+        阻断而注入形态放行——方向是**放松**，对 U13/F14"恢复未收口不得拨回
+        normal"构成回退。
+
+        现在三列**一律**从本进程账本实读（:meth:`_ledger_outbox_counts`），与
+        门禁同一口径；``facts`` 形参降级为**额外下界**（逐列取 max）：调用方多
+        报的未收口单照样生效，少报 / 漏报 / 不报都不再能放宽判定。本进程账本
+        读不出来时退回门禁自己的账本读取（与裸 ``before_entry()`` 同源），仍读
+        不出则按未收口处理（三元组全 1）——不把"读不到"当成"已收口"。
+        """
+        live: dict[str, Any] | None = self._ledger_outbox_counts()
+        if live is None:
+            gate = getattr(self, "recovery_gate", None)
+            live = gate.live_reconcile_facts() if gate is not None else None
+        if live is None:
+            return {key: 1 for key in FACTS_KEYS}
+        source = facts if isinstance(facts, dict) else {}
+        result: dict[str, Any] = {}
+        for key in FACTS_KEYS:
+            try:
+                declared = max(0, int(source.get(key) or 0))
+            except (TypeError, ValueError):
+                declared = 1
+            result[key] = max(int(live.get(key) or 0), declared)
+        if str(live.get("source") or "") == "not_applicable":
+            # 账本里没有 order_outbox 表 = "不适用"，**不等于干净**：把来源原样
+            # 传给门禁，由 ``_facts_unreadable`` 判阻断（与裸形态同结论）。
+            result["source"] = "not_applicable"
+        return result
 
     def _recovery_gate_facts(self, ledger_facts: dict[str, Any] | None = None
                              ) -> dict[str, Any]:
@@ -1413,12 +1472,17 @@ class TradingService:
         if str(new_state) == "normal":
             # U13/F14 接线：恢复门禁未收口时不允许把控制面拨回 normal，
             # 否则"恢复完先对账"可以被控制台一步绕过。
-            gate_decision = self.recovery_gate.before_entry()
-            if not gate_decision.allowed:
+            # U13-FU2/N2：与启动、就绪链同一个入口——注入本进程账本真实事实。
+            # 裸 ``before_entry()`` 不读账本，"账本里还有未收口单"挡不住把控制面
+            # 拨回 normal。判定设施自身异常时 ``_recovery_gate_facts`` 返回
+            # RECOVERY_GATE_UNPROVEN（allowed 非 True）→ 一样被拒。
+            gate_facts = self._recovery_gate_facts(self._recovery_gate_ledger_facts())
+            if gate_facts.get("recovery_gate_allowed") is not True:
+                gate_reasons = list(gate_facts.get("recovery_gate_reason_codes") or [])
                 return {
                     "ok": False,
                     "error": "recovery gate blocked: "
-                             + ",".join(gate_decision.reason_codes)
+                             + ",".join(gate_reasons)
                              + "（先提交对账证据 /api/recovery/reconcile）",
                 }
         if not self.control.set_state(new_state):

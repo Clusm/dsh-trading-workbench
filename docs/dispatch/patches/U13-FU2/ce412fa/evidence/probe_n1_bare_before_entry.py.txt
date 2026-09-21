@@ -1,0 +1,160 @@
+"""U13-FU2 探针 N1：``before_entry()`` **裸形态**（未注入 facts）在"读不出账本事实"
+时到底是放行还是阻断。
+
+用法：``python probe_n1_bare_before_entry.py <tree_root>``
+（``<tree_root>`` = 被测树的根，脚本把 ``<tree_root>/src`` 插到 sys.path 最前。）
+
+全程离线：只写系统临时目录里的合成状态根，不读 ``.env``/真实 ``data``/密钥、
+不联网、不下单、不启动服务。
+
+判定矩阵（每条独立造一个状态根）：
+
+| # | 状态根里的账本 | 期望（修后） |
+|---|---|---|
+| S1 | **没有账本文件** | 阻断 ``EVIDENCE_UNVERIFIED`` |
+| S2 | 账本在、**没有 order_outbox 表** | 阻断 ``EVIDENCE_UNVERIFIED`` |
+| S3 | 账本在、有未收口 ENTRY 单 | 阻断 ``RECONCILE_REQUIRED_BEFORE_ENTRY`` |
+| S4 | 账本在、order_outbox 为空 | 放行 ``GATE_CLEARED``（不得误伤） |
+| S5 | 注入 ``source="not_applicable"`` 的事实 | 阻断 ``EVIDENCE_UNVERIFIED`` |
+| S6 | 注入干净事实 | 放行 ``GATE_CLEARED`` |
+| S7 | 注入"读不出"事实（``unresolved_entry_orders=1``） | 阻断 |
+"""
+from __future__ import annotations
+
+import json
+import shutil
+import sqlite3
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+TREE = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(TREE / "src"))
+
+from core.ops.recovery import (  # noqa: E402
+    RecoveryGate,
+    facts_digest,
+    ledger_reconcile_facts,
+)
+
+PASS = 0
+FAIL: list[str] = []
+
+
+def check(name: str, ok: bool, detail: str = "") -> None:
+    global PASS
+    if ok:
+        PASS += 1
+        print(f"  PASS  {name}")
+    else:
+        FAIL.append(name)
+        print(f"  FAIL  {name}  {detail}")
+
+
+def _sqlite(path: Path, statements: tuple[str, ...]) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        for statement in statements:
+            connection.execute(statement)
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def make_root(base: Path, kind: str) -> Path:
+    """按 kind 造一个"门禁所在状态根"；账本形态是唯一变量。"""
+    root = base / kind
+    (root / "ops").mkdir(parents=True, exist_ok=True)
+    db = root / "agent_trader.sqlite"
+    if kind == "no_ledger":
+        pass
+    elif kind == "no_outbox":
+        _sqlite(db, ("CREATE TABLE risk_events(ts REAL, event_type TEXT)",))
+    elif kind == "dirty":
+        _sqlite(db, ("CREATE TABLE order_outbox(status TEXT, purpose TEXT, environment TEXT)",
+                     "INSERT INTO order_outbox VALUES('SUBMITTING','ENTRY','demo')"))
+    elif kind == "clean":
+        _sqlite(db, ("CREATE TABLE order_outbox(status TEXT, purpose TEXT, environment TEXT)",))
+    else:  # pragma: no cover
+        raise AssertionError(kind)
+    return root
+
+
+def forge_gate(gate_file: Path, facts: dict | None = None) -> None:
+    """手写一份"自洽摘要"的 CLEARED 门禁（= Q1/Q2 的绕过形态）。"""
+    payload = facts if facts is not None else {
+        "unknown_orders": 0, "submitting_orders": 0, "unresolved_entry_orders": 0}
+    gate_file.write_text(json.dumps({
+        "schema": 1, "state": "CLEARED",
+        "reconciled_at_ms": int(time.time() * 1000),
+        "epoch_id": "forged", "account_ref": "", "runtime_instance_id": "",
+        "evidence": {"facts": payload, "facts_digest": facts_digest(payload)},
+    }), encoding="utf-8")
+
+
+def bare_case(base: Path, kind: str, expect_block: bool, expect_code: str) -> None:
+    root = make_root(base, kind)
+    gate_file = root / "ops" / "recovery_gate.json"
+    forge_gate(gate_file)
+    raw = ledger_reconcile_facts(root / "agent_trader.sqlite")
+    decision = RecoveryGate.load(gate_file).before_entry()
+    print(f"  [{kind}] ledger_reconcile_facts={raw}")
+    print(f"           before_entry() -> allowed={decision.allowed} "
+          f"codes={decision.reason_codes} state={decision.state}")
+    check(f"[{kind}] 裸 before_entry() 阻断={expect_block}",
+          bool(not decision.allowed) == expect_block
+          and (expect_code in decision.reason_codes or not expect_block),
+          f"allowed={decision.allowed} codes={decision.reason_codes}")
+
+
+def injected_case(base: Path, kind: str, facts: dict, expect_block: bool) -> None:
+    root = base / f"inj_{kind}"
+    (root / "ops").mkdir(parents=True, exist_ok=True)
+    _sqlite(root / "agent_trader.sqlite",
+            ("CREATE TABLE order_outbox(status TEXT, purpose TEXT, environment TEXT)",))
+    gate_file = root / "ops" / "recovery_gate.json"
+    forge_gate(gate_file)
+    decision = RecoveryGate.load(gate_file).before_entry(facts=facts)
+    print(f"  [injected:{kind}] before_entry(facts={facts}) -> allowed={decision.allowed} "
+          f"codes={decision.reason_codes}")
+    check(f"[injected:{kind}] 注入事实后阻断={expect_block}",
+          bool(not decision.allowed) == expect_block,
+          f"allowed={decision.allowed} codes={decision.reason_codes}")
+
+
+def main() -> int:
+    tmp = Path(tempfile.mkdtemp(prefix="u13fu2-n1-"))
+    print(f"probe N1 tree = {TREE}")
+    print(f"probe N1 tmp  = {tmp}")
+    try:
+        print("\n[S1] 门禁所在状态根**没有账本文件**")
+        bare_case(tmp, "no_ledger", expect_block=True, expect_code="EVIDENCE_UNVERIFIED")
+        print("\n[S2] 账本在、**没有 order_outbox 表**（不适用 != 干净）")
+        bare_case(tmp, "no_outbox", expect_block=True, expect_code="EVIDENCE_UNVERIFIED")
+        print("\n[S3] 账本在、有未收口 ENTRY 单")
+        bare_case(tmp, "dirty", expect_block=True,
+                  expect_code="RECONCILE_REQUIRED_BEFORE_ENTRY")
+        print("\n[S4] 账本在、order_outbox 为空（**不得误伤**）")
+        bare_case(tmp, "clean", expect_block=False, expect_code="GATE_CLEARED")
+        print("\n[S5-S7] 注入形态")
+        injected_case(tmp, "not_applicable",
+                      {"unknown_orders": 0, "submitting_orders": 0,
+                       "unresolved_entry_orders": 0, "source": "not_applicable"},
+                      expect_block=True)
+        injected_case(tmp, "clean",
+                      {"unknown_orders": 0, "submitting_orders": 0,
+                       "unresolved_entry_orders": 0}, expect_block=False)
+        injected_case(tmp, "unreadable",
+                      {"unknown_orders": 0, "submitting_orders": 0,
+                       "unresolved_entry_orders": 1}, expect_block=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f"\nPROBE N1: {PASS} 通过 / {len(FAIL)} 失败")
+    for name in FAIL:
+        print(f"  FAILED: {name}")
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

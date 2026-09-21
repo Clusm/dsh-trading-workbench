@@ -1,0 +1,42 @@
+diff --git a/docs/dispatch/patches/U13-FU1/bc112fe/README.md b/docs/dispatch/patches/U13-FU1/bc112fe/README.md
+index abd8370..2079677 100644
+--- a/docs/dispatch/patches/U13-FU1/bc112fe/README.md
++++ b/docs/dispatch/patches/U13-FU1/bc112fe/README.md
+@@ -44,6 +44,24 @@ base `943d839`（归档 W3 F14/F18 演练 + U02 补丁证据）把这些文件
+ `check_quality.py` 只扫描发布白名单。三条都请 owner 拍板；**U13-FU1 的核心
+ 修复不依赖 05**。
+ 
++### N3 口径更正（U13-FU2）：`assert_environment_bound` 对 demo 也会抛
++
++本任务登记 P1-4 取舍时写的"默认部署 demo/paper 仍可启动，**只是被检出并报告**"
++只对**部署入口**成立，对 `RuntimePaths.assert_environment_bound()` **本身**
++不成立，此处更正（原文留在 `docs/无人值守升级任务清单_2026-09-19.json` 的
++U13-FU1 `tradeoffs` 里，已同步改口径）：
++
++- **该 API 会抛**：`assert_environment_bound("demo")` 在"未声明状态根"时抛
++  `RuntimePathsError`，原因码 `STATE_ROOT_MISSING`（来自 P1-4 让 `validate()`
++  可达）。它的语义已从"只拦 live"变成"拦**一切**未声明状态根"。
++- **默认部署仍能启动**，原因是该 API 在生产**零调用点**：`TradingService` 与
++  `scripts/run_web.py` 都不调它，`assert_environment_matches_state_root` 对
++  非 live 早退（`config_loader.py`）。所以"只被报告"描述的是**入口现状**，
++  不是这个 API 的行为。
++- **接线前必须先声明状态根**：若将来把它接到启动期（P1-4 的可观测化方向），
++  未声明状态根的 demo/paper 部署会被它**挡死**——这是"宁可多阻断"的取向，
++  但不该在不打招呼的情况下变成启动期硬拦截。
++
+ ## 应用与复验
+ 
+ ```bash
+diff --git "a/docs/\346\227\240\344\272\272\345\200\274\345\256\210\345\215\207\347\272\247\344\273\273\345\212\241\346\270\205\345\215\225_2026-09-19.json" "b/docs/\346\227\240\344\272\272\345\200\274\345\256\210\345\215\207\347\272\247\344\273\273\345\212\241\346\270\205\345\215\225_2026-09-19.json"
+index a0d5e0a..8a92de8 100644
+--- "a/docs/\346\227\240\344\272\272\345\200\274\345\256\210\345\215\207\347\272\247\344\273\273\345\212\241\346\270\205\345\215\225_2026-09-19.json"
++++ "b/docs/\346\227\240\344\272\272\345\200\274\345\256\210\345\215\207\347\272\247\344\273\273\345\212\241\346\270\205\345\215\225_2026-09-19.json"
+@@ -4323,7 +4323,7 @@
+         "author_claims": "P1-1 修复后原始探针 19/0 -> exit 1/16 通过 3 失败（新失败正是缺陷断言）；新增 verify_u13f1_recovery_gate.py：base 44 失败/exit 1 -> 修复后 39/0/exit 0；verify_recovery_plan 循环证据已删并做非循环性证明。P1-2 两档 before_entry() 均 allowed=False/RECONCILE_REQUIRED_BEFORE_ENTRY；布局收敛到 restored_state_root()/restored_gate_path() 共用。P1-3 手写 JSON -> EVIDENCE_UNVERIFIED；自算摘要但账本有未收口 -> RECONCILE_REQUIRED_BEFORE_ENTRY；摘要不符 -> EVIDENCE_MISMATCH；真收口 -> GATE_CLEARED，之后账本再现未收口 -> 重新阻断。P1-4 legacy.validate('demo') 现返回 ('STATE_ROOT_MISSING',)，同探针 exit 1/29 通过 2 失败。",
+         "tradeoffs": [
+           "resolve_state_base 仍返回 'data'（既有消费者 tests/acceptance/test_supervision.py:426 依赖逐字节兼容），改的是 validate() 判据改用 state_base_source",
+-          "默认部署 demo/paper 仍可启动，只是被检出并报告；只有 environment=live 是硬拦截"
++          "默认部署 demo/paper 仍可启动（生产入口零调用 assert_environment_bound）；但该 API 本身对未声明状态根**会抛** RuntimePathsError（STATE_ROOT_MISSING，不限 live）——口径按实测更正；只有 environment=live 是既有的硬拦截（U13-FU2/N3）"
+         ],
+         "unfinished": [
+           "create_recovery_bundle.py 的 profile 支持只在补丁 02；未应用 02 时 live 档 DR 只能靠 core 的 create_epoch_bundle 建包",

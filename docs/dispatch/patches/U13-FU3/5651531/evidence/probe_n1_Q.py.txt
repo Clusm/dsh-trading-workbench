@@ -1,0 +1,180 @@
+"""Q 独立探针 N1：裸形态 before_entry 是否 fail-open。
+
+唯一变量 = 门禁所在状态根里的账本形态。不联网、不读真实 data/.env。
+用法: python probe_n1.py <tree_root>
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+TREE = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(TREE / "src"))
+
+from core.ops.recovery import (  # noqa: E402
+    RecoveryGate, facts_digest, ledger_reconcile_facts,
+)
+
+RESULTS: list[tuple[bool, str]] = []
+
+
+def check(name: str, ok: bool, detail: str = "") -> None:
+    RESULTS.append((ok, name))
+    print(f"[{'PASS' if ok else 'FAIL'}] {name} {detail}")
+
+
+def _cleared_gate(root: Path) -> RecoveryGate:
+    """手写一份**自洽摘要**的 CLEARED 门禁（复验 Q1/Q2 的绕过形态）。"""
+    ops = root / "ops"
+    ops.mkdir(parents=True, exist_ok=True)
+    facts = {"unknown_orders": 0, "submitting_orders": 0, "unresolved_entry_orders": 0}
+    payload = {
+        "schema": 1, "state": "CLEARED", "epoch_id": "e-q", "reconciled_at_ms": int(time.time() * 1000),
+        "account_ref": "", "runtime_instance_id": "",
+        "evidence": {"observed_at_ms": int(time.time() * 1000),
+                     "positions_verified": True, "open_orders_verified": True,
+                     "facts": facts, "facts_digest": facts_digest(facts)},
+    }
+    gate_path = ops / "recovery_gate.json"
+    gate_path.write_text(json.dumps(payload), encoding="utf-8")
+    # 安装戳：与 save() 行为一致（门禁被写过）
+    (ops / "recovery_gate.json.installed").write_text("{}", encoding="utf-8")
+    return RecoveryGate.load(gate_path)
+
+
+def _mk_ledger(root: Path, *, with_outbox: bool, rows: list[tuple[str, str]]) -> Path:
+    db = root / "agent_trader.sqlite"
+    con = sqlite3.connect(str(db))
+    if with_outbox:
+        con.execute("CREATE TABLE order_outbox (status TEXT, purpose TEXT)")
+        for status, purpose in rows:
+            con.execute("INSERT INTO order_outbox VALUES (?,?)", (status, purpose))
+    else:
+        con.execute("CREATE TABLE something_else (x INTEGER)")
+    con.commit()
+    con.close()
+    return db
+
+
+def scenario(fn, label):
+    with tempfile.TemporaryDirectory(prefix="q_n1_") as td:
+        try:
+            return fn(Path(td))
+        except Exception as exc:  # noqa: BLE001
+            return None, f"EXC {type(exc).__name__}: {exc}", None
+
+
+def main() -> int:
+    print(f"# tree={TREE}  recovery.py mtime={(__import__('os').path.getmtime(TREE/'src/core/ops/recovery.py'))}")
+
+    # S1: 状态根没有账本文件
+    with tempfile.TemporaryDirectory(prefix="q_n1_s1_") as td:
+        root = Path(td)
+        gate = _cleared_gate(root)
+        d = gate.before_entry()
+        check("S1 无账本文件→阻断", not d.allowed and "EVIDENCE_UNVERIFIED" in d.reason_codes,
+              f"allowed={d.allowed} codes={d.reason_codes}")
+        check("S1b live_reconcile_facts 为 None", ledger_reconcile_facts(gate.ledger_file()) is None)
+
+    # S2: 账本在、没有 order_outbox 表
+    with tempfile.TemporaryDirectory(prefix="q_n1_s2_") as td:
+        root = Path(td)
+        gate = _cleared_gate(root)
+        _mk_ledger(root, with_outbox=False, rows=[])
+        live = ledger_reconcile_facts(gate.ledger_file())
+        d = gate.before_entry()
+        check("S2 无 outbox 表→阻断", not d.allowed and "EVIDENCE_UNVERIFIED" in d.reason_codes,
+              f"ledger_reconcile_facts={live} allowed={d.allowed} codes={d.reason_codes}")
+
+    # S3: 账本有未收口 ENTRY
+    with tempfile.TemporaryDirectory(prefix="q_n1_s3_") as td:
+        root = Path(td)
+        gate = _cleared_gate(root)
+        _mk_ledger(root, with_outbox=True, rows=[("SUBMITTING", "ENTRY")])
+        live = ledger_reconcile_facts(gate.ledger_file())
+        d = gate.before_entry()
+        check("S3 未收口 ENTRY→阻断", not d.allowed and "RECONCILE_REQUIRED_BEFORE_ENTRY" in d.reason_codes,
+              f"facts={live} allowed={d.allowed} codes={d.reason_codes}")
+
+    # S4: 账本干净（order_outbox 空）
+    with tempfile.TemporaryDirectory(prefix="q_n1_s4_") as td:
+        root = Path(td)
+        gate = _cleared_gate(root)
+        _mk_ledger(root, with_outbox=True, rows=[])
+        live = ledger_reconcile_facts(gate.ledger_file())
+        d = gate.before_entry()
+        check("S4 干净账本→放行", d.allowed and "GATE_CLEARED" in d.reason_codes,
+              f"facts={live} allowed={d.allowed} codes={d.reason_codes}")
+
+    # S5: 注入干净 facts
+    with tempfile.TemporaryDirectory(prefix="q_n1_s5_") as td:
+        root = Path(td)
+        gate = _cleared_gate(root)  # 无账本
+        d = gate.before_entry(facts={"unknown_orders": 0, "submitting_orders": 0,
+                                     "unresolved_entry_orders": 0, "source": "ledger"})
+        check("S5 注入干净事实→放行", d.allowed, f"allowed={d.allowed} codes={d.reason_codes}")
+
+    # S6: 注入脏 facts
+    with tempfile.TemporaryDirectory(prefix="q_n1_s6_") as td:
+        root = Path(td)
+        gate = _cleared_gate(root)
+        d = gate.before_entry(facts={"unknown_orders": 0, "submitting_orders": 0,
+                                     "unresolved_entry_orders": 1, "source": "ledger"})
+        check("S6 注入脏事实→阻断", not d.allowed and "RECONCILE_REQUIRED_BEFORE_ENTRY" in d.reason_codes,
+              f"allowed={d.allowed} codes={d.reason_codes}")
+
+    # S7: 注入 source="not_applicable"
+    with tempfile.TemporaryDirectory(prefix="q_n1_s7_") as td:
+        root = Path(td)
+        gate = _cleared_gate(root)
+        d = gate.before_entry(facts={"unknown_orders": 0, "submitting_orders": 0,
+                                     "unresolved_entry_orders": 0, "source": "not_applicable"})
+        check("S7 注入 not_applicable→阻断", not d.allowed and "EVIDENCE_UNVERIFIED" in d.reason_codes,
+              f"allowed={d.allowed} codes={d.reason_codes}")
+
+    # S8: 门禁从未安装（无文件无安装戳）→ 必须放行（不误伤正常启动）
+    with tempfile.TemporaryDirectory(prefix="q_n1_s8_") as td:
+        root = Path(td) / "ops"
+        root.mkdir(parents=True)
+        gate = RecoveryGate.load(root / "recovery_gate.json")
+        d = gate.before_entry()
+        check("S8 GATE_NOT_INSTALLED→放行(不误伤)", d.allowed and "GATE_NOT_INSTALLED" in d.reason_codes,
+              f"state={gate.state} allowed={d.allowed} codes={d.reason_codes}")
+
+    # S9: 门禁文件被删但安装戳在 → MISSING 阻断
+    with tempfile.TemporaryDirectory(prefix="q_n1_s9_") as td:
+        root = Path(td)
+        gate = _cleared_gate(root)
+        (root / "ops" / "recovery_gate.json").unlink()
+        _mk_ledger(root, with_outbox=True, rows=[])
+        gate2 = RecoveryGate.load(root / "ops" / "recovery_gate.json")
+        d = gate2.before_entry()
+        check("S9 删门禁文件留安装戳→阻断", not d.allowed and "GATE_MISSING" in d.reason_codes,
+              f"state={gate2.state} allowed={d.allowed} codes={d.reason_codes}")
+
+    # S10: 门禁+安装戳同时删 → NOT_INSTALLED 放行（登记的口子，非本轮范围）
+    with tempfile.TemporaryDirectory(prefix="q_n1_s10_") as td:
+        root = Path(td)
+        gate = _cleared_gate(root)
+        _mk_ledger(root, with_outbox=True, rows=[("SUBMITTING", "ENTRY")])
+        (root / "ops" / "recovery_gate.json").unlink()
+        (root / "ops" / "recovery_gate.json.installed").unlink()
+        gate2 = RecoveryGate.load(root / "ops" / "recovery_gate.json")
+        d = gate2.before_entry()
+        check("S10 门禁+戳同删→放行(已登记口子)", d.allowed and "GATE_NOT_INSTALLED" in d.reason_codes,
+              f"state={gate2.state} allowed={d.allowed} codes={d.reason_codes}")
+
+    passed = sum(1 for ok, _ in RESULTS if ok)
+    failed = [n for ok, n in RESULTS if not ok]
+    print(f"\nPROBE N1: {passed} 通过 / {len(failed)} 失败   exit={1 if failed else 0}")
+    for n in failed:
+        print(f"  FAILED: {n}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -4395,7 +4395,7 @@
         "author_claims": "P1-1 修复后原始探针 19/0 -> exit 1/16 通过 3 失败（新失败正是缺陷断言）；新增 verify_u13f1_recovery_gate.py：base 44 失败/exit 1 -> 修复后 39/0/exit 0；verify_recovery_plan 循环证据已删并做非循环性证明。P1-2 两档 before_entry() 均 allowed=False/RECONCILE_REQUIRED_BEFORE_ENTRY；布局收敛到 restored_state_root()/restored_gate_path() 共用。P1-3 手写 JSON -> EVIDENCE_UNVERIFIED；自算摘要但账本有未收口 -> RECONCILE_REQUIRED_BEFORE_ENTRY；摘要不符 -> EVIDENCE_MISMATCH；真收口 -> GATE_CLEARED，之后账本再现未收口 -> 重新阻断。P1-4 legacy.validate('demo') 现返回 ('STATE_ROOT_MISSING',)，同探针 exit 1/29 通过 2 失败。",
         "tradeoffs": [
           "resolve_state_base 仍返回 'data'（既有消费者 tests/acceptance/test_supervision.py:426 依赖逐字节兼容），改的是 validate() 判据改用 state_base_source",
-          "默认部署 demo/paper 仍可启动，只是被检出并报告；只有 environment=live 是硬拦截"
+          "默认部署 demo/paper 仍可启动（生产入口零调用 assert_environment_bound）；但该 API 本身对未声明状态根**会抛** RuntimePathsError（STATE_ROOT_MISSING，不限 live）——口径按实测更正；只有 environment=live 是既有的硬拦截（U13-FU2/N3）"
         ],
         "unfinished": [
           "create_recovery_bundle.py 的 profile 支持只在补丁 02；未应用 02 时 live 档 DR 只能靠 core 的 create_epoch_bundle 建包",

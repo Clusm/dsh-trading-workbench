@@ -549,10 +549,30 @@ def _rewrite_manifest(bundle: Path, manifest: dict) -> None:
         encoding="ascii", newline="\n")
 
 
+def _make_gate_ledger(state_root: Path) -> None:
+    """给门禁所在状态根补一份**真实形态**的账本（空 ``order_outbox``）。
+
+    U13-FU2/N1 之后，``before_entry()`` 在**读不出账本事实**时一律阻断
+    （账本文件缺失 / SQL 失败 / 没有 ``order_outbox`` 表都算"读不出"，因为
+    "不适用"证明不了"干净"）。生产里门禁所在状态根**总是**带账本
+    （``agent_trader.sqlite`` 由 ``AuditDatabase`` 迁移建表），所以门禁夹具也
+    必须带上账本，否则测到的是"状态根缺账本"这个异常形态，而不是"合法启动"。
+    断言本身未放宽：这里只补夹具前提。
+    """
+    state_root.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(state_root / "agent_trader.sqlite")
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS order_outbox("
+        "status TEXT, purpose TEXT, environment TEXT)")
+    connection.commit()
+    connection.close()
+
+
 def check_reconcile_before_entry() -> None:
     print("\n[7] 恢复后先对账再开仓（F14）")
     with tempfile.TemporaryDirectory(prefix="u13-gate-") as tmp:
         path = Path(tmp) / "gate.json"
+        _make_gate_ledger(Path(tmp))
         gate = RecoveryGate.load(path)
         check("初始状态允许开仓（未恢复）", gate.before_entry(now_ms=1_000_000).allowed)
         gate.require_reconcile(epoch_id="epoch-1", account_ref="demo:acct",
@@ -622,6 +642,7 @@ def check_gate_fail_closed() -> None:
 
     with tempfile.TemporaryDirectory(prefix="u13-gate-fc-") as tmp:
         path = Path(tmp) / "ops" / "recovery_gate.json"
+        _make_gate_ledger(Path(tmp))
         # (a) 从未 restore：文件与安装戳都不存在 → 不阻断（合法"未安装"）
         fresh = RecoveryGate.load(path).before_entry(now_ms=1_000_000)
         check("从未恢复过（无文件无安装戳）才允许开仓",
