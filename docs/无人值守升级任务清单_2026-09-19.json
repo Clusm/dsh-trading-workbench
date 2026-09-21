@@ -2587,7 +2587,7 @@
       "title": "旧脚本与历史文档整理",
       "owner_role": "F",
       "actual_assignee": null,
-      "status": "READY_FOR_REVIEW",
+      "status": "INTEGRATED",
       "required_for_first_release": false,
       "depends_on": [
         "U10a",
@@ -2631,6 +2631,36 @@
             "归档脚本的**端到端可运行性未实测**（多数要真实 data/.env，触碰硬约束）；只做到 ruff 干净 + py_compile 通过 + 项目根深度运行时探针 bad=0",
             "docs/文档索引.md 原先标注的『schema 16 已过期（U10b 统一处理）』：正文未改（历史证据保持原样），改由归档索引给出当前值 17 与唯一口径"
           ]
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "0416408",
+          "verdict": "Q r1 **PASS-with-notes**（无阻塞项）",
+          "report": "docs/dispatch/reviews/U10b/0416408/Q_r1.md",
+          "integration_commit": "26aec59",
+          "coverage_verified": "Q 两树全量跑完：SMOKE MANIFEST OK included=81 excluded=1（前后同值）、OFFLINE REGRESSION OK scripts=85（前后同值）、退出码 0；顶层 smoke_*.py 集合两树 diff 完全相同（82 个），**无任何 smoke_ 被移走**。",
+          "deletion_list_verified": "`--no-renames` 下 D=26 / A=30，**26/26 同名配对，孤儿删除=0**；8 篇文档 R100 逐字节相同；16 个脚本唯一语义差异=加 1 行注释 + parents[1]->parents[2]；`_js_check.py`/`probe_intel_with_proxy.py` 确实无 `__file__` 不需改；保留清单 22/22 在原地且理由均被独立核实。",
+          "root_depth_verified": "Q **自己求值** 17 处 `__file__` 表达式 -> **BAD COUNT: 0**；且全仓 `__file__` 就只有这 17 处，无『本该改而没改』。",
+          "links_verified": "未应用补丁时 `docs/文档索引.md` 恰好 8 条断链；**应用补丁后 = base 的 3 条既有断链（U10b 引入 0 条）**；冻结目录与 `src/core/runtime_paths.py` 无断链。",
+          "packaging_verified": "**关键怀疑点用真实出包证伪**：patched 37/0 exit 0；unpatched 32/5 exit 1 并报 `count: 8` 的 BROKEN_LINK（独立复现作者的『共享边界』主张）。**归档脚本仍在包里**：18 个脚本在 runtime 包中 base/patched 均为 0（本就 source-only），在 **source 包中 18/18 存在**、仅路径变化；8 篇文档仍在 runtime 包。runtime 223->224、source 391->392，**交付物零丢失**。",
+          "delta": "NEW_FAIL = EMPTY（base=12 / patched=12 / common=12，全部来自 smoke_u02 双态快照打印、两树逐行相同）；两树 check_quality OK files=296；pyproject.toml 两版本逐字节相同（无新增 exclude）；补丁 3 配置均 Checking patch、0 Skipped。",
+          "i_fixes_after_verification": {
+            "inline_paths": "Q 的唯一实质 Note（N1）：**应用补丁后仍有现行文档以『反引号内联路径』指向被归档文件** —— `docs/上线前人工检查单_2026-09-16.md:132,156`、`docs/运行与故障恢复手册_2026-09-06.md:387`（非 markdown 链接，故 `doc_links_resolve` 不报）。**I 已修正**为 `docs/archive/…`。",
+            "u12_matrix_paths": "**扫描时另外发现（Q 未报）**：U12 的 `docs/releases/unattended_rc/FAULT_MATRIX_F01_F25.md` 有 **4 处**证据路径写成 `mat-wt/I/docs/...`（从仓库根解析不到）。**I 已去掉前缀**。",
+            "rule3_falsified": "`docs/archive/README.md` 规则 3 原称『只归档出链为 0、且只被文档索引引用的文档』—— **该措辞被证伪**（自检只覆盖 markdown 相对链接，不覆盖内联反引号路径）。**I 已改写**为如实边界，并写明归档流程必须包含一次内联路径人工清查。",
+            "rescan": "全仓内联路径扫描（排除 archive/ 与 dispatch/）复核后仅余 3 条**假阳性**：一个 glob（`docs/dispatch/交接说明_*.md`）与冻结目录 `docs/contracts/README.md` 的花括号写法 `{Q,C,B}`（真实文件存在）。"
+          },
+          "integration_tests": "打包器 `smoke_u10a_release_package` **37/0**；`check_quality OK files=301 untracked=0`；`SMOKE MANIFEST OK included=81 excluded=1`；**`OFFLINE REGRESSION OK scripts=85`**",
+          "new_p3": [
+            "N2 被归档脚本 docstring 仍写旧调用路径（12 个）",
+            "N3 有 3 个脚本同时被 CRLF->LF 归一（_js_check.py / probe_exchange_positions.py / run_phase0.py），故『逐字节相同』对它们不字面成立但语义零改动",
+            "N4 docs/dispatch/** 历史记录里的旧路径属冻结证据，预期保留"
+          ],
+          "not_verified": [
+            "未在真实运行目录 multi-agent-trader 上执行任何东西",
+            "未跑 tests/ 全量（无 pytest，只做静态引用 grep）",
+            "未验证 CI 在 GitHub 上的真实执行"
+          ]
         }
       ],
       "blockers": [],
@@ -2660,7 +2690,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "0416408",
       "review_assignments": [
         {
           "round": "r1",
@@ -2669,7 +2699,7 @@
           "sessions": [
             "Q (reviews/U10b/R1/q)"
           ],
-          "verdict": "PENDING",
+          "verdict": "Q r1 PASS-with-notes（无阻塞项；7 条结构性主张全部独立复现，关键打包怀疑点用真实出包证伪）",
           "reports_dir": "docs/dispatch/reviews/U10b/0416408/",
           "focus": "重点：①覆盖未减少必须实测（N/M/K 前后值）；②空删除清单独立核验（每个 D 都有同名新增配对、18 个脚本新路径内容逐字节同）；③每个改过的 parents[...] **自己算**是否解析到仓库根（不采信作者 bad=0）；④**应用补丁后**是否仍有断链（含冻结目录与 src/ 字面路径）；⑤**归档脚本是否还在发布包内**（若被排除 = 静默削减交付物）。"
         }
@@ -4501,6 +4531,14 @@
         "owner": "U07/U12",
         "blocks": "无",
         "note": "①补丁 02 缺空行（ruff E3xx 未启用故不报）②`core.autocrlf=true` 下 git apply 会把整文件转 CRLF（worktree 侧，提交归一化回 LF；不影响 check/导入/测试，但字节比较会全文件差异）③`sampler.clock_verdict_for_window()` 死代码（全仓无调用方且未导出）。"
+      },
+      {
+        "id": "U10B-P3-CLUSTER",
+        "title": "U10b 三条非阻塞观察（P3）",
+        "status": "OPEN",
+        "owner": "U11/U12",
+        "blocks": "无",
+        "note": "①被归档脚本 docstring 仍写旧调用路径（12 个）②3 个脚本同时被 CRLF->LF 归一（_js_check.py / probe_exchange_positions.py / run_phase0.py），『逐字节相同』对它们不字面成立但语义零改动 ③docs/dispatch/** 历史记录里的旧路径属冻结证据，预期保留。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -4781,8 +4819,8 @@
           "note": "U06b 集成后依赖就绪。风险已内联：不得改动 shadow_status 的 COHORTS/SOURCE_*/GATE_ROLE_*/release_gate_role 语义（release_evidence 的 200 分母单一口径来源）；必须证明统计产物同样不进任何门禁分母（复跑 smoke_u09 60/0 与 test_release_evidence_v2 78/0 前后同值）；不得伪称 F11 已通过。"
         },
         "U11": {
-          "status": "BLOCKED",
-          "note": "等待 U10b"
+          "status": "READY（依赖 U10b 已集成）",
+          "note": "U10b 已 INTEGRATED -> U11 依赖就绪，可派发。"
         }
       }
     },
