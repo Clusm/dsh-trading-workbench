@@ -1892,7 +1892,7 @@
       "title": "策略漏斗与管理责任展示",
       "owner_role": "C",
       "actual_assignee": "U08 作者会话",
-      "status": "READY_FOR_REVIEW",
+      "status": "CHANGES_REQUESTED",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -1950,6 +1950,25 @@
           ],
           "unfinished": "①run_protection_first 步骤排序装配未做 ②轨迹落审计与 graph.model_deadline() 注入未做 ③数据侧 reason_from_errors 包装仍 0 消费者 ④生产首次跑批观测量未验证",
           "i_incident": "I 建该审查 worktree 时用相对路径 `../mat-wt/...` 而 cwd 在 mat-wt/I -> 错误创建了嵌套目录 mat-wt/mat-wt 并致 worktree add 失败（已清理）；因 && 链断，台账更新亦被跳过。已用**绝对路径**重建并回读确认 @ c147895。教训：mkdir/git 路径统一用绝对路径，不要依赖 cwd。"
+        },
+        {
+          "type": "review_r1_B",
+          "candidate": "c147895",
+          "verdict": "CHANGES_REQUESTED",
+          "counts": "P0 x4 / P1 x3 / P2 x4 / P3 x6",
+          "archived_path": "docs/dispatch/reviews/U08/c147895/B_r1.md",
+          "keystone": "**'故障是否会被读成 no_edge' —— 会。** 三条独立通路：①细分码映射本身：CARD_NOT_INDICATORIZED（卡片配置缺陷）、NO_TICKETS_AVAILABLE（票据读取失败）-> NO_EDGE -> verdict=no_edge ②round_explanation() 自相矛盾：顶层 primary_reason=DATA_UNAVAILABLE/RESEARCH_INCOMPLETE，内嵌 no_open.verdict='no_edge' ③轮级前置失败无任何表达：load_cards() 读不到卡、_load_strategy_lab() 抛错、strategy_trader 进循环前的批量静默过滤与 min_notional<=0 早退 全部落成 no_candidates/NO_EDGE。**17 道闸门没有穷尽实际拒绝路径**。反向也有一处：SYMBOL_NOT_IN_SCOPE -> READINESS_BLOCKED 使真的 no_edge 被判 blocked",
+          "u05_wiring_claim": "**计数属实、可达性不属实**：classify_cycle/reason_from_source_errors/classify_evidence_report 的唯一 U08 调用点都在 round_explanation() 内，而 `round_explanation(` **全仓唯一调用者是作者自己的测试**，src/ 内生产调用方 0 -> 把'不可达'记成'已接'。（graph.model_deadline() 0 调用方一条属实）",
+          "p0": [
+            "P0-1 共享适配 5 条补丁**未提交**：c147895 的 tree 无 patches/U08，src/ 零处 import core.strategy_funnel，4 个集成目标一个没接 -> '120/0、43/0、补丁 5/5' 在该候选上**无法复现**（测试自打'未应用'）；文档 §6/§7 的 last_scan.funnel、ticket_skip_detail()、GET /funnel 均为未实现能力。**I 已把磁盘上的真实补丁保全为 CD 提交 2c90642**（未接线状态未改）",
+            "P0-2 候选打断统一离线回归入口：smoke_u08 未登记 -> _validate_smoke_manifest() 直接 RuntimeError，官方入口退出非 0（本树 len(SCRIPTS)==81 vs 声称基线 82）-> **I 的原子登记项**",
+            "P0-3 **跨进程重复消费**：确定性构造竞态窗口，4 个子进程对同一 ticket **全部拿到 CONSUMED**（consume 不重读文件、无跨进程锁；save() 的 tmp 名确定性 -> 并发 PermissionError）",
+            "P0-4（报告列 4 条，其余见归档报告）"
+          ],
+          "p1": "损坏账本可被 register()+save() 洗白致旧消费事实丢失（可再次消费）；release() 无任何门禁；模块内无'已消费未落库'查询 API",
+          "verified_ok": "必达③④⑤经独立核验成立（attribute_position 与 U02 classify_position 6 例逐例一致；validate_detail_table() 非空转；预留池不被研究触碰三条断言复算通过）——**但 position_class 是字符串字面量巧合一致而非同源 import，meets_management_demand() 恒真空转**",
+          "delta": "git archive 双树 + 同一 81 条清单 + 同一 env，逐条非 fail-fast 跑满 162 次 -> base_fail=0/head_fail=0/**NEW_FAIL=∅ / FIXED=∅**；日志里 78 处 FAIL 字样全是 rc=0 脚本的负向对照，未误报",
+          "next": "U08 r2：①提交补丁包并**真正接线 4 个集成目标**（src/ 从 0 处 import 变为可见调用）②修 P0-3 跨进程重复消费（跨进程锁 + tmp 名去冲突 + 重读语义）③修'故障读成 no_edge'三通路与反向误标 ④position_class 改为同源 import、meets_management_demand() 去空转 ⑤I 侧登记冒烟"
         }
       ],
       "blockers": [],
