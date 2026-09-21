@@ -56,7 +56,6 @@ DB_PATCHED = bool(getattr(database_module, "U07_INTEGRATION", ""))
 #: 合成时间基准（相对运算，不含真实日期语义）。
 T0 = datetime(2026, 1, 5, 0, 0, tzinfo=timezone.utc)
 HORIZON = 5
-TARGET = T0 + timedelta(minutes=HORIZON)
 #: 研究成本假设（与 U06b legacy 同口径）：10bps 往返手续费 + 4bps 滑点。
 FEE_BPS = 10.0
 SLIP_BPS = 4.0
@@ -117,13 +116,6 @@ def result(decision_id: str, *, symbol: str = "BTCUSDT", signal: str = "bullish"
            else T0 + timedelta(seconds=decided_offset_seconds + horizon * 60 + 300.0))
     return v2.label_request(request, samples, now=now,
                             round_trip_fee_bps=FEE_BPS, slippage_bps=SLIP_BPS)
-
-
-def expected_net(exit_price: float, reference: float = 100.0, *,
-                 direction: float = 1.0, funding_pct: float = 0.0) -> float:
-    """独立算式：``net = gross - fee_pct - slip_pct - funding_pct``（定义式）。"""
-    gross = (exit_price / reference - 1.0) * 100.0 * direction
-    return gross - FEE_PCT - SLIP_PCT - funding_pct
 
 
 def make_pair(treatment_exit: float, control_exit: float, *, index: int = 0,
