@@ -3436,7 +3436,7 @@
       "title": "RC集成、故障验收和观察交付",
       "owner_role": "I",
       "actual_assignee": null,
-      "status": "IN_PROGRESS",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": true,
       "depends_on": [
         "U01",
@@ -3529,6 +3529,53 @@
             "live 档端到端",
             "台账现存'真实 TradingService 端到端 40/40'的证据在提交测试集中不存在（test_supervision.py 内 0 处 TradingService，check_gate_production_wiring 仅源码文本匹配），已由自建隔离-root 端到端（paper，15/0）替代"
           ]
+        },
+        {
+          "type": "rc_build_delivery",
+          "head_commit": "044fccf",
+          "base": "7885e6a",
+          "branch": "task/U12（worktree mat-wt/W3-rc）",
+          "commits": 9,
+          "changed_files": "16 文件（+1298/-2）：docs/releases/unattended_rc/{README.md,FAULT_MATRIX_F01_F25.md,observed_status.md,observed_status.json,release_manifest.json}、tests/acceptance/test_unattended_release.py(335 行,两态可跑)、.github/workflows/ci.yml(+11/-2)、docs/dispatch/patches/U12/fb411ef/（01_ci_wire_official_regression.diff + README + evidence 7 份）",
+          "status_flag": "**DRAFT** —— RC 未冻结、未部署、观察窗未启动；`observed_status` 三项显式 `NOT_STARTED`（7天/200方向候选/30完整闭合）。I 保留冻结决定权。",
+          "matrix_coverage": "F01-F25 共 25 条：COVERED_OFFLINE 4（F08/F09/F10/F16）、PARTIAL_OFFLINE 20、DEFERRED 1（F11，逐字记 `F11:v2_labels=DEFERRED`）、NOT_VERIFIABLE_NOW 0（**但明确声明不等于达标**）。25/25 有离线证据；**15 条带 ⚠**（离线范围内有已知未修缺陷）。",
+          "missing_capability_9": [
+            "D-1 真实交易所交互",
+            "D-2 真实宿主（挂起/断电/重启/外部探针/真实 HTTP 控制面，D01）",
+            "D-3 真实告警通道+异地探针（D02）",
+            "D-4 真实账号身份与风险约束（D03/D04）",
+            "D-5 观察窗样本（7天/200/30 未启动）",
+            "D-6 真实断电/撕裂写/独立卷/ENOSPC",
+            "D-7 SLO 时限冻结（D05，**阻断 RC_FREEZE**）",
+            "D-8 U03×U15 联合接线（W1-JOINT-WIRING 未执行）",
+            "D-9 U08 整轮接线（U08-U12-WIRING 未执行）"
+          ],
+          "f14_f18_handling": "已引用两份报告（drill_F14_F18/REPORT.md + U13-FU1/af76443/Q_r1.md），写明 4 条 P1 FIXED 并集成（acf9ced），**但仍有两条 U12 待裁决**，**未记作『完全通过』**。",
+          "self_run": "check_quality.py **exit 0**（QUALITY CHECK OK files=296 untracked=0，**未新增 ruff exclude**）；run_offline_regression.py **3 轮**——第 1 轮 **FAIL**（smoke_u10a 报 5 项 = 其自身尚未落盘的 3 个相对链接，**门禁真实生效**），第 2/3 轮 **exit 0 scripts=85**；6 个既有验收套件逐个 exit 0（168/0、78/0、166 checks、262/0、identity PASS、control PASS）；test_unattended_release **exit 0 PASS=46 FAIL=0**；build_release_manifest 铸 release_id=rel-e6a3f138c8b9e326be72",
+          "cited_not_rerun": "F14/F18 的两份报告（矩阵逐条标注 引用/自跑）",
+          "note_scripts_count": "Q 在 U13-FU1 候选树记 scripts=84，U12 本树实测 85，以本树实测为准",
+          "pending_decisions_A1_A13": [
+            "A1 裸 before_entry() fail-open + service.py:314/:1416 未接线（N1+N2，**U13-FU2 在修**）",
+            "A2 assert_environment_bound('demo') 实测会抛 vs README（N3）",
+            "A3 门禁读 outcome 快照非 lifecycle 权威态",
+            "A4 净收益未知样本计 30 且零门槛",
+            "A5 thresholds= 可调低 required",
+            "A6 U03×U15 联合接线（S05）",
+            "A7 graph.py 注入 funnel/ledger",
+            "A8 U08-R5-FU1/FU2 同处收口",
+            "A9 U04-R4-FU1",
+            "A10 MTA_ACCOUNT_REF 前置迁移",
+            "A11 U09-P3-CLUSTER",
+            "A12 **D05 阻断 RC_FREEZE**",
+            "A13 见 U12-BUILD-F1"
+          ],
+          "unfinished": [
+            "RC 未冻结、未部署、观察窗未启动",
+            "U12-BUILD-F1（新发现，阻断 RELEASE，见 known_issues）",
+            "W1-JOINT-WIRING / U08-U12-WIRING 未执行 -> 执行侧逐票原因与跨进程去重生产不可达",
+            "未修任何 src/ 缺陷（只读约束）；release_manifest.json 的 schema_version=0 表示未提供账本，部署侧必须重铸",
+            "本交付物为 DRAFT 且由同模型会话产出"
+          ]
         }
       ],
       "blockers": [],
@@ -3591,7 +3638,7 @@
       "dl_work_packages": [
         "DL10"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "7885e6a",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
@@ -4273,6 +4320,14 @@
         "owner": "U12",
         "blocks": "无（该 API 生产零调用点，默认部署仍可启动）",
         "note": "文档与代码行为不一致，属交付物卫生问题。"
+      },
+      {
+        "id": "U12-BUILD-F1",
+        "title": "身份采集在真实 src/ 树必然抛 CredentialLeakError -> release_readiness 永远不可能 GO（**RELEASE 阻断**）",
+        "status": "OPEN",
+        "owner": "U15 线修复会话 U12-BF1（worktree mat-wt/W3-bfix）",
+        "blocks": "**整个首批发布**：身份 NO_DATA -> release_readiness 不可能为 GO",
+        "note": "**I 已独立复现**（集成树 7885e6a，sys.path 加 src）：`from core.contracts.common import SENSITIVE_KEY_MARKERS` -> 含 'authorization'；`collect_artifact_files('.')` -> `CredentialLeakError: credential-bearing fields rejected: artifacts.src/core/management_authorization.py`。机理：`runtime_identity.py:547-552` 的 relatives 缺省为 `src/**/*.py`，每个路径过 `_safe_artifact_name()`，后者用 SENSITIVE_KEY_MARKERS 做**子串**匹配；U02 交付的模块名 `src/core/management_authorization.py` 命中 'authorization'。后果链：身份采集失败 -> `release_manifest.py:41/224` 记 IDENTITY_COLLECT_FAILED -> service.py 启动路径降级，runtime_instance_id/effective_config_hash/model_route_hash 全空 -> 身份 NO_DATA -> release_readiness 不可能 GO。**U15 验收套件对此全盲**（只用合成根/显式 relatives，从不跑真实 src/ 树）—— 这是『单元已验证、适配未落地』的又一例。修法取向：SENSITIVE_KEY_MARKERS 是**键名/载荷字段名**守卫（契约 L1），拿它做**文件名**子串匹配属过度匹配；应给文件名一条独立守卫，只拒凭据文件形态（.env*、*.pem、id_rsa*、含 secret/credential/apikey/private_key/password 的容器词），且**冻结契约一个字不许改**。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -4372,15 +4427,23 @@
         "U09",
         "U13-FU1"
       ],
-      "remaining_first_release": [
-        "U12"
+      "delivered_pending_integration": [
+        "U12（RC DRAFT，head 044fccf）"
       ],
+      "in_flight": {
+        "U13-FU2": "修 N1+N2（gate 接线）",
+        "U12-BF1": "修 U12-BUILD-F1（RELEASE 阻断）"
+      },
       "gates": {
         "offline_regression": "OFFLINE REGRESSION OK scripts=85",
         "quality": "QUALITY CHECK OK files=295 untracked=0",
         "contracts": "PASS 173 / FAIL 0 (golden 160)"
       },
-      "note": "U13-FU1 的 4 条 P1 全部 FIXED 并集成；W3 剩余仅 U12（RC 集成 + F01–F25 矩阵 + 7 天观察窗启动）。"
+      "rc_freeze_blockers": [
+        "U12-BUILD-F1（身份采集失败 -> release_readiness 不可能 GO）",
+        "D05（SLO 时限冻结）",
+        "观察窗三项 NOT_STARTED（7天/200/30）—— 结构性不可压缩"
+      ]
     }
   },
   "dispatch_version": "v1.1",

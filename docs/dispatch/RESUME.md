@@ -158,6 +158,12 @@
    - 交付：`src/core/release_evidence.py`（扩展，不重写）＋ `tests/acceptance/test_release_evidence_v2.py` ＋ `scripts/smoke_u09_release_evidence.py` ＋ 补丁包 `docs/dispatch/patches/U09/<head>/`（含 `database.py`/`health_watch.py`/`report_release_readiness.py` 适配 + `run_offline_regression.py` 登记）。
    - 已内联进提示词：S08 泄漏的具体行号与修法（**从 `src.intel.shadow_status` 导入 gate_role 口径，禁止硬编码第二份 source 名单**）、NO_EDGE 不计分母、**窗口首尾缺失计入分母**（现 `observation_coverage` 自动取首尾健康行 = 规格 §12 明禁）、lifecycle 去重 + 晚到成本重算、ACK≠恢复、重启 vs 换版、不建第二套 GO 判断器、F10/F12/F16/F23/F24 证据、3 种 git 配置补丁可应用、两态测试、禁止硬编码迁移版本集合。
    - **作者会话仍在运行 → 本回合不要重复派发 U09。**
+2. **U12 BUILD（作者已交付 · DRAFT，待集成）**：RC 交付物与 F01–F25 矩阵已产出（head `044fccf`，16 文件 +1298/−2，9 提交），**RC 未冻结**。矩阵覆盖：COVERED_OFFLINE 4 · PARTIAL_OFFLINE 20 · **DEFERRED 1（F11，逐字 `F11:v2_labels=DEFERRED`）** · 缺能力 9 类（§D 逐条列出），**25/25 有离线证据但 15 条带 ⚠**；`observed_status` 三项显式 `NOT_STARTED`。
+   - **⚠ 新发现的 RELEASE 阻断 —— `U12-BUILD-F1`（I 已独立复现）**：`collect_artifact_files('.')` 在真实 `src/` 树抛 `CredentialLeakError: ... artifacts.src/core/management_authorization.py` —— U02 的模块名命中冻结契约里 `SENSITIVE_KEY_MARKERS` 的 **`"authorization"` 子串**。后果：身份采集失败 → `IDENTITY_COLLECT_FAILED` → 身份三字段全空 → **`release_readiness` 永远不可能 GO**。**U15 验收套件对此全盲**（只用合成根/显式 relatives）。**修复已派发**：`U12-BF1`（工作树 `mat-wt/W3-bfix`，`task/U12-BF1` @ `7885e6a`）—— 取向：给**文件名**一条独立守卫，只拒凭据文件形态，**冻结契约一个字不改**，且必须给出"凭据文件名仍被拒"的**反向证据**。
+   - U12 待裁决项 A1–A13 已全部登记台账（含 **A12 = D05 阻断 RC_FREEZE**）。
+   - **RC 冻结前置阻断项（三条）**：`U12-BUILD-F1`（在修）、`D05`（SLO 时限冻结，需外部决策）、观察窗三项 `NOT_STARTED`（结构性不可压缩）。
+
+<!-- U12 首次派发记录，保留备查
 2. **U12 BUILD（已派发，进行中）**：RC 集成、故障矩阵（F01–F25）、真实宿主/渠道验收（**依赖 D01/D02 决策**）。
    - 工作树 `mat-wt/W3-rc`（`task/U12` @ `7885e6a`）。交付：`docs/releases/unattended_rc/`（RC 说明 + F01–F25 矩阵 + `observed_status`）、`tests/acceptance/test_unattended_release.py`、CI 补丁、`docs/dispatch/patches/U12/<head>/`。
    - 已内联：**F11 必须逐字记 `F11:v2_labels=DEFERRED`**；缺能力的**不得写 N/A**；F14/F18 引原始演练报告与 U13-FU1 复验报告、**不得记为"完全通过"**；必须逐条消费台账里的跨任务挂账；状态写 **DRAFT**，**冻结 RC 由 I 决定**。
@@ -264,5 +270,7 @@ export PYTHONUTF8=1
 - **D01–D05 外部待决项**阻断 DEPLOY_DEMO / OPS / RELEASE（D01 宿主托管、D03 账户风险覆盖需用户决策）
 - 实盘启用需用户**另行明确授权**
 - 真实宿主/渠道验收（U12 OPS）需 D01/D02 决策后才能进行
+
+-->
 
 -->
