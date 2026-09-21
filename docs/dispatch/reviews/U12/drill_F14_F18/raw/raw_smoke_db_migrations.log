@@ -1,0 +1,21 @@
+
+[1] 旧库首次升级
+  PASS  补齐order_source列
+  PASS  补齐margin_mode列
+  PASS  记录迁移版本1到17
+  PASS  新增成交/生命周期/补账表
+  PASS  trade_outcomes含生命周期与成本状态
+  PASS  核心审计表含发布上下文
+  PASS  发布观察表按分钟建立
+  PASS  发布观察表含门禁字段
+
+[2] 重启后迁移不重复
+  PASS  版本记录保持唯一
+  PASS  旧B组名称已归一
+
+[3] 迁移执行器失败回滚且不写版本
+  PASS  注入失败向上抛出
+  PASS  迁移写入完整回滚
+  PASS  失败版本没有登记
+
+结果: 13 通过 / 0 失败

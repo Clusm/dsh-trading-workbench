@@ -3370,7 +3370,7 @@
       "title": "RC集成、故障验收和观察交付",
       "owner_role": "I",
       "actual_assignee": null,
-      "status": "PLANNED",
+      "status": "IN_PROGRESS",
       "required_for_first_release": true,
       "depends_on": [
         "U01",
@@ -3424,7 +3424,47 @@
         "F23",
         "F24"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "w3_isolation_recovery_drill",
+          "artifact": "docs/dispatch/reviews/U12/drill_F14_F18/REPORT.md",
+          "raw": "docs/dispatch/reviews/U12/drill_F14_F18/raw/（7 个可复跑探针 + 22 份原始输出）",
+          "tree": "448a4e9（mat-wt/W3-drill，detached）",
+          "verdict": {
+            "F14": "PASS-with-notes（有条件的）",
+            "F18": "PASS-with-notes"
+          },
+          "f14_reproduced": "生产恢复路径 + 真实 TradingService 端到端：先对账再开仓成立、不重复下单成立（broker.posts 全程未增加；二次 clientOrderId 抛 DuplicateOrderSubmission；未决 ENTRY 时新 ENTRY 抛 PendingOrderConflict）",
+          "f18_reproduced": "显式状态根下换代码根不换锁/不换身份（同 lock_file/lock_scope/runtime_instance_id/generation_id，new=False）；PID 复用仍拒启动且不删他人锁；死 PID 安全接管；live 无 profile -> STATE_ROOT_PROFILE_UNLOCKED；demo+live profile -> ENVIRONMENT_STATE_ROOT_MISMATCH；迁移事务回滚 + 回退到 v9 再推进不损坏（quick_check=ok、版本序列唯一到顶）",
+          "p1": [
+            "P1-1 core 演练恢复后不装门禁（drill_epoch_bundle 只写 restore_receipt.json 的 entry_gate 字符串，从不写 ops/recovery_gate.json）-> 还原根 before_entry()=allowed=True/GATE_NOT_INSTALLED；且 scripts/ops/verify_recovery_plan.py:90 的验收是循环证据（门禁装在另建目录再断言）。I 已独立核对源码证实（require_reconcile 生产调用点仅 restore_recovery_bundle.py:252）",
+            "P1-2 live 档门禁装错位置 -> fail-open（create_recovery_bundle 恒写 epoch.profile=''，门禁落 data/ops/ 而 live 读 data/live/ops/）；已登记于 U13 Q r2 P2-5 未修",
+            "P1-3 门禁证据是操作者自证裸布尔且读取时不复验 -> 手写 JSON 即放行（CLEARED 可伪造）",
+            "P1-4 未声明状态根时 resolve_state_base 返回字面量 'data' 作为 state_base_declared -> validate() 判为已声明 -> STATE_ROOT_MISSING 不可达（I 已独立核对源码证实：runtime_paths.py:154-156 与 :428）"
+          ],
+          "p2": [
+            "P2-1 两套恢复包单向不互通（生产脚本读不了 core 的 schema-3 包）",
+            "P2-2 check_writer_stopped 对损坏锁静默判写者已停 -> 仍建包",
+            "P2-3 InstanceLock 对截断锁文件单方接管 -> 实测双持锁（既有缺陷，0cbdb20 起）",
+            "P2-4 同一状态根两账户覆盖 runtime_instance_id 基线",
+            "P2-5 恢复包不含 runtime_generation.json -> 恢复即换运行代"
+          ],
+          "p3": [
+            "P3-1 冷启动 readiness 硬编码 unknown/submitting=0（既有）",
+            "P3-2 门禁文件+安装戳同时删除即放行",
+            "P3-3 Windows 建文件窗口内竞争抛未捕获 PermissionError（fail-closed 但形态不在契约内）",
+            "P3-4 单账户互斥实为 (state_base, profile) 互斥，账户级互斥靠部署约定"
+          ],
+          "ki02_check": "该工作树无 .venv，smoke_windows_service_plan.py 仍 24/0 无 ValueError；OFFLINE REGRESSION OK scripts=84 exit 0 -> KI02 修复在此树成立",
+          "not_verified": [
+            "真实交易所侧成交/回执（全程进程内假 broker）",
+            "真实断电/撕裂写/独立卷灾难恢复",
+            "真实多账户凭据/SCM 双 profile/真实宿主托管/真实告警",
+            "live 档端到端",
+            "台账现存'真实 TradingService 端到端 40/40'的证据在提交测试集中不存在（test_supervision.py 内 0 处 TradingService，check_gate_production_wiring 仅源码文本匹配），已由自建隔离-root 端到端（paper，15/0）替代"
+          ]
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "Q"
@@ -4067,6 +4107,46 @@
         "owner": "U12/I",
         "blocks": "无（既有形态，U08 未引入未扩大）",
         "note": "Q r5 N12 实测：strategy_trader.py 的 db.signal_ticket_has_order()/db.log_risk_event()/db.update_signal_ticket() 未包 except；审计库抛 sqlite3.OperationalError: database is locked 时异常穿出整个执行器、decision=None，与 N6 同形。pristine 树逐字相同 -> 属既有形态。建议 U12 与 U08-R5-FU1 合并处置（同一处收口）。"
+      },
+      {
+        "id": "F14-DRILL-GATE-NOT-INSTALLED",
+        "title": "core 恢复演练不安装恢复门禁（P1-1）",
+        "status": "OPEN",
+        "owner": "E线（U13 后续）/U12",
+        "blocks": "F14 必达结果在 core 路径上不成立；该路径的验收证据是循环证据",
+        "note": "drill_epoch_bundle()（src/core/ops/recovery.py:525+）还原后只写 restore_receipt.json，其中 entry_gate 仅是字符串声明，从不写 ops/recovery_gate.json；还原根 before_entry() 返回 allowed=True / GATE_NOT_INSTALLED。全仓 require_reconcile 生产调用点只有 scripts/restore_recovery_bundle.py:252。scripts/ops/verify_recovery_plan.py:90 把门禁装在自己另建的目录再断言其阻断 = 循环证据。I 已独立核对源码证实。处置：钉住生产恢复脚本为唯一入口，或给 drill_epoch_bundle 补装门禁；并修 verify_recovery_plan 的循环断言。"
+      },
+      {
+        "id": "F14-LIVE-GATE-LAYOUT",
+        "title": "live 档恢复门禁布局 fail-open（P1-2；即 U13 Q r2 的 P2-5 未修项）",
+        "status": "OPEN",
+        "owner": "U12（须在集成前定案）+ E线",
+        "blocks": "实盘档 F14 未达成",
+        "note": "create_recovery_bundle 恒写 epoch.profile=''，门禁落 data/ops/；live 服务 RuntimePaths.state_root=data/live 读 data/live/ops/ 找不到门禁 -> GATE_NOT_INSTALLED -> 允许开仓。反向：若 epoch.profile='live'，门禁去 data/live/ops/ 但四个必需状态 JSON 仍平铺在 data/ -> live 状态根缺全部必需状态文件。U12 必须先定义 live 恢复布局再谈通过。"
+      },
+      {
+        "id": "F14-GATE-EVIDENCE-SELFASSERTED",
+        "title": "恢复门禁证据是操作者自证裸布尔、读取时不复验（P1-3）",
+        "status": "OPEN",
+        "owner": "E线（U13 后续）",
+        "blocks": "F14 的“先对账”是流程约束而非 enforced 事实",
+        "note": "positions_verified/open_orders_verified 从未由 TradeReconciliationBook/OrderOutbox 的真实对账结果推导；before_entry() 只看 state + reconciled_at_ms。手写 {\"state\":\"CLEARED\",\"reconciled_at_ms\":<now>,\"evidence\":{}} 即 allowed=True。建议：门禁读取时按当前账本事实复验，或要求证据哈希绑定对账结果。"
+      },
+      {
+        "id": "F18-STATE-ROOT-MISSING-UNREACHABLE",
+        "title": "未声明状态根时 STATE_ROOT_MISSING 原因码不可达 -> 静默新建错误基线（P1-4）",
+        "status": "OPEN",
+        "owner": "E线（U13 后续）/U12",
+        "blocks": "F18 必达“不得当成全新环境而新建错误基线”在默认部署下无拦截信号",
+        "note": "resolve_state_base fallback 分支返回字面量 'data' 作为 state_base_declared（runtime_paths.py:154-156），validate() 的 if not _text(state_base_declared) 因此恒不成立（:428）-> STATE_ROOT_MISSING 不可达；唯一探测口 state_base_explicit 在 src/ 内零消费者。后果：两个代码根 legacy 各得不同 lock 与不同 runtime_instance_id（=新建基线）。I 已独立核对源码证实。"
+      },
+      {
+        "id": "RECOVERY-BUNDLE-P2-CLUSTER",
+        "title": "恢复/锁 相关 P2 簇（U13 遗留 + 既有）",
+        "status": "OPEN",
+        "owner": "E线/U12",
+        "blocks": "无（不阻断，但需在 RC 运维风险清单中列明）",
+        "note": "①两套恢复包单向不互通（生产脚本读不了 core 的 schema-3 包，ValueError: 不支持的恢复包版本）；②check_writer_stopped 对损坏锁静默 return -> 仍建包（停写前提不可证）；③InstanceLock 对截断为 0 字节的锁文件单方接管 -> 实测双持锁（**既有缺陷**，0cbdb20 起，U13 仅加 metadata）；④同一状态根两账户 -> RunRegistry.load_or_mint 直接 persist，先启动账户 runtime_instance_id 被覆盖；⑤恢复包不含 runtime_generation.json 且校验器拒白名单外文件 -> DR 后 runtime_instance_id/generation_id 必变（运行代跨重启稳定在“恢复”场景断裂）。"
       }
     ],
     "contract_candidate": "71f8109",

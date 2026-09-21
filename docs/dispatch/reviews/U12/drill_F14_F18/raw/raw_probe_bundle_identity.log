@@ -1,0 +1,7 @@
+registry file exists: True -> runtime_generation.json
+bundle members: ['account_risk_state.json', 'capital_state.json', 'channel_state.json', 'control_state.json', 'database']
+runtime_generation.json in bundle: False
+restored registry file exists: False
+before iid: 7a639e13df2a
+after  iid: 7b98fae2cea3 new_minted: True
+identity_continuous: False

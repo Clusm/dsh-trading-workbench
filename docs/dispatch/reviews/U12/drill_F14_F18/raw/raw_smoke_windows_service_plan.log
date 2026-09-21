@@ -1,0 +1,36 @@
+
+[1] 正式配置与SCM命令只读构造
+  PASS  正式配置通过本机文件存在性校验
+  PASS  安装命令使用唯一windows_service_host入口
+  PASS  安装命令没有foreground降级参数
+  PASS  安装计划不包含代理或凭据
+
+[2] 托管边界fail-closed
+  PASS  非回环绑定被拒绝
+  PASS  正式配置不得关闭后台循环
+  PASS  日志路径必须位于data目录
+  PASS  凭据字段被拒绝
+  PASS  停机时限上界被校验
+  PASS  非统一Web入口被拒绝
+
+[3] 解释器解析（KI02：可注入/可回退）与配置不完整时安装前失败
+  PASS  解释器缺失时回退而不是硬失败（KI02）
+  PASS  回退来源被记录（非 config）
+  PASS  解释器可显式注入
+  PASS  strict 模式下解释器缺失仍然失败（fail-closed 未被削弱）
+  PASS  声明路径存在时来源为 config
+  PASS  require-files=False 不做存在性解析（发布包语义不变）
+  PASS  入口缺失时require-files失败
+
+[4] 日志达到上限时有限轮转
+  PASS  超限日志滚动到编号备份
+  PASS  轮转后重新打开当前日志
+
+[5] KI02 回退面收口：显式声明必须有效 / 安装期禁止猜测性回退
+  PASS  显式MTA_PYTHON指向不存在路径被拒绝
+  PASS  显式MTA_PYTHON有效时仍被接受
+  PASS  安装期(allow_fallback=False)解释器缺失时失败而不是回退
+  PASS  安装期显式声明存在时解析成功且来源为config
+  PASS  宿主脚本安装期强制allow_fallback=False且不再是仅告警
+
+结果: 24 通过 / 0 失败

@@ -1,0 +1,11 @@
+net: 未配置代理，沿用启动进程的环境变量
+
+[1] SCM stop_event驱动统一Web入口有界退出
+  PASS  统一入口已创建服务和Uvicorn实例
+  PASS  托管运行调用后台循环
+console: http://127.0.0.1:18000 profile=legacy
+  PASS  server进入运行态
+  PASS  stop_event触发server退出
+  PASS  Web退出后最终关闭TradingService
+
+结果: 5 通过 / 0 失败
