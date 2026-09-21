@@ -1,0 +1,272 @@
+diff --git a/src/core/health_watch.py b/src/core/health_watch.py
+index 06ba977..ccf6d84 100644
+--- a/src/core/health_watch.py
++++ b/src/core/health_watch.py
+@@ -19,10 +19,26 @@ Broker / LLM 客户端、不读取也不使用 ``BINANCE_*`` 等交易密钥，
+ 
+ 告警通道：仅复用项目里「已批准」的外部通道；未配置时明确为 ``unverified``，绝不假装
+ 无人值守告警已完成。
++
++U14（F06/F12/F22、R13/R14）在此文件上的接线有三条，都是**加法**（不改变既有原因码
++与判定顺序；未声明状态根时路径逐字节兼容）：
++
++1. **路径单一事实源**：``data_root`` 改由 :class:`core.runtime_paths.RuntimePaths`
++   解析（消费清单里的 ``health_watch_state`` 由 ``planned`` 变 ``migrated``）。
++   未声明状态根（无 ``MTA_STATE_ROOT``/``paths.state_root``）时结果与升级前完全相同。
++2. **交易证据时间**（R13）：新增探针 :func:`probe_trading_evidence`，只读汇总
++   ``release_observations``/``execution_fills``/``protection_reconciliations`` 的
++   最新持久化时刻，交给 :func:`core.ops.alert_delivery.classify_outage` 与
++   "心跳进程活着" 一起判别，避免把进程存活当交易健康。
++3. **两类失联成因分开**：``process_missing``（本机主进程故障，宿主一直在运行）与
++   新增的 ``host_down``（证据缺口跨越了宿主重启/断电）由 host uptime 与证据年龄
++   的判别式分开给出，两者**不**混为一类；无法证明宿主连续性时给
++   ``host_continuity_unknown``（不猜）。
+ """
+ from __future__ import annotations
+ 
+ import json
++import os
+ import sqlite3
+ import time
+ from dataclasses import dataclass, field
+@@ -30,12 +46,47 @@ from datetime import datetime, timezone
+ from pathlib import Path
+ from typing import Any
+ 
+-# 这两个导入都不触碰任何交易密钥，也不构造交易服务：
++# 这三个导入都不触碰任何交易密钥，也不构造交易服务：
+ # - core.instance_lock 仅用其 PID 存活判定（与实例锁同语义）。
+ # - dashboard.health 提供时效原因码与阈值口径（与看板同一套）。
++# - core.ops.alert_delivery（U14 独占）提供交易证据读取与"主进程故障 vs 主机关机"
++#   的成因判别（只读纯函数 + 只读 SQL，不写任何文件）；core.runtime_paths 提供
++#   与 U13 一致的路径解析（换代码根不改状态根）。
+ from core.instance_lock import InstanceLock
++from core.ops.alert_delivery import (
++    HOST_CONTINUITY_UNKNOWN,
++    HOST_DOWN,
++    HOST_JUST_BOOTED,
++    HOST_REBOOT_OBSERVED,
++    OUTAGE_HEALTHY,
++    PROCESS_MISSING,
++    TRADING_STALLED,
++    TradingEvidence,
++    classify_outage,
++    host_uptime_seconds,
++    trading_evidence_timestamp,
++)
++from core.runtime_paths import RuntimePaths, resolve_state_base
+ from dashboard.health import freshness_health_reasons
+ 
++#: U14 接线标记：下游（含 U14 验收套件）据此判断共享补丁是否已应用，
++#: 从而在"作者 worktree"与"集成树"两态下各自断言各自应有的行为。
++U14_INTEGRATION = "u14.health_watch.v1"
++
++#: 失联成因 → ``HealthResult.categories`` 里的类别名。
++#: 类别名与原因码沿用既有小写风格（``process_missing`` / ``disk_unavailable``）；
++#: ``PROCESS_MISSING`` 与 ``OUTAGE_HEALTHY`` 映射到既有语义（前者已由
++#: ``process_missing`` 表达、后者表示"无新增异常"），因此**不新增**原因码，
++#: 既有 smoke 的期望集合保持不变。
++OUTAGE_CATEGORY_NAMES: dict[str, str] = {
++    PROCESS_MISSING: "",
++    OUTAGE_HEALTHY: "",
++    HOST_DOWN: "host_down",
++    TRADING_STALLED: "trading_stalled",
++    HOST_CONTINUITY_UNKNOWN: HOST_CONTINUITY_UNKNOWN,
++    HOST_JUST_BOOTED: "host_booted",
++}
++
+ 
+ def _json_loads(value: Any) -> dict[str, Any]:
+     if value is None:
+@@ -78,13 +129,31 @@ class HealthWatchConfig:
+     alert_channel: str = "unverified"
+     alert_channel_status: str = "unverified"
+     alert_channel_note: str = ""
++    #: 显式声明的状态基座（``MTA_STATE_ROOT`` / ``paths.state_root`` 解析结果）。
++    #: 空串 = 未声明 → 退回 ``<project_root>/data``（升级前的行为，逐字节兼容）。
++    state_root_declared: str = ""
++
++    @property
++    def state_root_source(self) -> str:
++        """``declared``（换代码根不改状态根）或 ``fallback``（旧布局）。"""
++        return "declared" if self.state_root_declared.strip() else "fallback"
++
++    @property
++    def paths(self) -> RuntimePaths:
++        """RuntimePaths 单一事实源（U13/U14 共用同一解析口径）。
++
++        ``env={}``：本类**不**隐式读 ``os.environ``；环境注入只在
++        :meth:`from_settings`（真实入口）里发生一次，避免直接构造
++        ``HealthWatchConfig(...)`` 的调用方被环境变量悄悄改变行为。
++        """
++        return RuntimePaths.resolve(
++            self.project_root, profile=self.profile,
++            state_root=(self.state_root_declared or None), env={})
+ 
+     @property
+     def data_root(self) -> Path:
+-        base = self.project_root / "data"
+-        if self.profile == "live":
+-            return base / "live"
+-        return base
++        """状态根：由 RuntimePaths 解析，未声明时 == 旧的 ``<project_root>/data[/live]``。"""
++        return self.paths.state_root
+ 
+     @property
+     def db_file(self) -> Path:
+@@ -99,8 +168,13 @@ class HealthWatchConfig:
+         cls, project_root: Path, *, profile: str | None = None,
+         observation_stale_seconds: float | None = None,
+         raw_settings: dict[str, Any] | None = None,
++        state_root: str | None = None,
+     ) -> "HealthWatchConfig":
+-        """从 ``config/settings.yaml`` 只读构建；不调用 load_settings（避免 ensure_dirs 写盘）。"""
++        """从 ``config/settings.yaml`` 只读构建；不调用 load_settings（避免 ensure_dirs 写盘）。
++
++        ``state_root`` 是显式注入点（``--state-root`` / ``paths.state_root`` /
++        ``MTA_STATE_ROOT`` 三者的统一解析见 :func:`resolve_state_base`）。
++        """
+         root = Path(project_root)
+         settings = dict(raw_settings or {})
+         if not settings:
+@@ -120,9 +194,18 @@ class HealthWatchConfig:
+             "live" if str(settings.get("profile")) == "live" else None)
+         environment = resolved_profile or str(settings.get("execution", {}).get("default_mode", "demo") or "demo")
+         channel, status, note = resolve_alert_channel(settings)
++        # 状态根解析：显式形参 > settings.paths.state_root > 环境变量 > 旧布局。
++        # 判定委托 resolve_state_base（U13 的唯一口径），这里只把"是否显式声明"
++        # 转成 state_root_declared，供 state_root_source 如实报告。
++        settings_declared = str((settings.get("paths") or {}).get("state_root") or "")
++        declared_input = state_root if state_root is not None else (settings_declared or None)
++        _base, declared_value, origin = resolve_state_base(
++            root, declared=declared_input, env=os.environ)
++        declared = declared_value if origin == "declared" else ""
+         return cls(
+             project_root=root,
+             profile=resolved_profile,
++            state_root_declared=declared,
+             startup_grace_seconds=float(stability.get("startup_grace_seconds", 120)),
+             fast_cycle_stale_seconds=float(stability.get("fast_cycle_stale_seconds", 120)),
+             protection_reconcile_stale_seconds=float(
+@@ -237,6 +320,20 @@ def probe_latest_observation(
+     }
+ 
+ 
++def probe_trading_evidence(
++    conn: sqlite3.Connection | None, environment: str,
++) -> TradingEvidence:
++    """只读读取"交易证据时间"（R13：心跳必须携带交易证据时间）。
++
++    只发 ``SELECT MAX(...)``，不写任何东西。读不到（表缺失、主库损坏 F22）时
++    返回 ``available=False``——调用方据此把"交易证据缺失"如实报出来，而不是
++    把"心跳进程活着"当成交易健康。
++    """
++    if conn is None:
++        return TradingEvidence(False, None, {}, ("TRADING_DB_UNAVAILABLE",))
++    return trading_evidence_timestamp(conn, environment=environment)
++
++
+ def probe_protection(conn: sqlite3.Connection, environment: str) -> dict[str, Any]:
+     """读取最新一次保护单对账事实（时间戳 / 是否匹配 / 错误）。"""
+     try:
+@@ -330,6 +427,19 @@ class HealthResult:
+     alert_channel_note: str = ""
+     read_only: bool = True
+     generated_at: float = field(default_factory=lambda: time.time())
++    # ---- U14 新增（全部为**加法**字段，既有消费者不受影响）----
++    #: 交易证据时间（POSIX 秒）：交易路径最后一条**持久化**证据的时刻。
++    trading_evidence_at: float | None = None
++    trading_evidence_age_seconds: float | None = None
++    trading_evidence_sources: dict[str, Any] = field(default_factory=dict)
++    #: 失联成因（``HEALTHY``/``PROCESS_MISSING``/``HOST_DOWN``/
++    #: ``TRADING_STALLED``/``HOST_CONTINUITY_UNKNOWN``/``HOST_JUST_BOOTED``）。
++    outage_kind: str = ""
++    outage_reason_codes: list[str] = field(default_factory=list)
++    host_uptime_seconds: float | None = None
++    state_root: str = ""
++    state_root_source: str = "fallback"
++    u14_integration: str = U14_INTEGRATION
+ 
+     def to_dict(self) -> dict[str, Any]:
+         return {
+@@ -346,6 +456,15 @@ class HealthResult:
+             "alert_channel_note": self.alert_channel_note,
+             "read_only": self.read_only,
+             "generated_at": self.generated_at,
++            "trading_evidence_at": self.trading_evidence_at,
++            "trading_evidence_age_seconds": self.trading_evidence_age_seconds,
++            "trading_evidence_sources": dict(self.trading_evidence_sources),
++            "outage_kind": self.outage_kind,
++            "outage_reason_codes": list(self.outage_reason_codes),
++            "host_uptime_seconds": self.host_uptime_seconds,
++            "state_root": self.state_root,
++            "state_root_source": self.state_root_source,
++            "u14_integration": self.u14_integration,
+         }
+ 
+ 
+@@ -354,6 +473,7 @@ def evaluate_health(config: HealthWatchConfig, *, now: float | None = None) -> H
+     now = float(now if now is not None else time.time())
+     categories: dict[str, list[str]] = {}
+     observed_at: float | None = None
++    evidence = TradingEvidence(False, None, {}, ("TRADING_DB_UNAVAILABLE",))
+ 
+     disk = probe_disk(config.data_root, config.db_file)
+     if not disk["available"]:
+@@ -375,6 +495,8 @@ def evaluate_health(config: HealthWatchConfig, *, now: float | None = None) -> H
+             disk = {"available": False, "detail": f"{type(exc).__name__}: {exc}"}
+         if conn is not None:
+             try:
++                # R13：交易证据时间必须独立于"心跳/进程存活"被读出来。
++                evidence = probe_trading_evidence(conn, config.environment)
+                 obs = probe_latest_observation(conn, config.environment)
+                 if obs is not None:
+                     observed_at = obs.get("observed_at")
+@@ -411,6 +533,34 @@ def evaluate_health(config: HealthWatchConfig, *, now: float | None = None) -> H
+             finally:
+                 conn.close()
+ 
++    # ---- U14：把"本机主进程故障"与"主机关机"按成因分开（F06/F12/F22）----
++    # 判别式只看宿主连续运行时长与交易证据年龄（core.ops.alert_delivery 的纯函数）。
++    up = host_uptime_seconds()
++    evidence_at_seconds = None if evidence.at_ms is None else evidence.at_ms / 1000.0
++    outage = classify_outage(
++        now_seconds=now,
++        process_alive=(True if proc.get("alive") is True else
++                       (False if (proc["present"] and proc.get("alive") is False) else None)),
++        trading_evidence_at_seconds=evidence_at_seconds,
++        host_uptime_seconds=up,
++        startup_grace_seconds=config.startup_grace_seconds,
++        trading_evidence_max_age_seconds=config.fast_cycle_stale_seconds,
++    )
++    category = OUTAGE_CATEGORY_NAMES.get(outage.kind, "")
++    if outage.kind == HOST_DOWN:
++        # 证据缺口跨越了一次宿主重启：**不得**再同时报 process_missing（两类成因不混）。
++        categories.pop("process_missing", None)
++        categories[category] = [category]
++    elif outage.kind == TRADING_STALLED:
++        categories[category] = [category]
++    elif outage.kind == HOST_CONTINUITY_UNKNOWN:
++        # 进程确已消失这一条仍成立；只是"宿主是否也停过"不可证明，如实标出。
++        categories.setdefault(category, []).append(HOST_CONTINUITY_UNKNOWN)
++    elif outage.kind == HOST_JUST_BOOTED:
++        reboot_codes = [code for code in outage.reason_codes if code == HOST_REBOOT_OBSERVED]
++        if reboot_codes:
++            categories[category] = reboot_codes
++
+     reasons: list[str] = []
+     for codes in categories.values():
+         reasons.extend(codes)
+@@ -428,4 +578,12 @@ def evaluate_health(config: HealthWatchConfig, *, now: float | None = None) -> H
+         alert_channel=config.alert_channel,
+         alert_channel_status=config.alert_channel_status,
+         alert_channel_note=config.alert_channel_note,
++        trading_evidence_at=evidence_at_seconds,
++        trading_evidence_age_seconds=outage.trading_evidence_age_seconds,
++        trading_evidence_sources=dict(evidence.sources),
++        outage_kind=outage.kind,
++        outage_reason_codes=list(outage.reason_codes),
++        host_uptime_seconds=up,
++        state_root=str(config.data_root),
++        state_root_source=config.state_root_source,
+     )
