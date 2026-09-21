@@ -102,7 +102,7 @@
 | `scripts/verify_close_reconcile_live.py` | 在线验证工具，与离线冒烟 `scripts/smoke_close_reconcile.py` 成对使用 |
 | `scripts/start_web_detached.py` / `scripts/run_web_service.py` | README 与运行手册的过渡启动方式；且 `scripts/smoke_detached_profiles.py`（在离线回归清单里）引用了它们 |
 | `scripts/test_*.py` | `test_` 前缀本就是 source-only 归类；其中两个在离线回归清单里 |
-| `scripts/probe_*` 之外的 `scripts/smoke_*.py` | 全部在离线回归清单里；移动即削减覆盖（见上文规则） |
+| 全部 `scripts/smoke_*.py`（含 `smoke_p0c.py`） | 要么在离线回归 SCRIPTS 清单里，要么在 `EXCLUDED_SMOKE_SCRIPTS` 里被显式排除；无论哪种，移动/改名都会让 `_validate_smoke_manifest()` 直接 RuntimeError（见上文规则）。**一个都没动** |
 | `docs/策略扫描原因码.md` | `tests/integration/test_strategy_funnel.py` **断言该路径存在**，移动会让测试失败 |
 | `docs/项目问题盘点与优化计划_2026-09-07.md`、`docs/USD-M合约系统稳定性与AI情报升级开发计划_2026-09-05.md`、`docs/WorkBuddy_DeepSeek_V4.1_实盘决策适配说明_2026-09-16.md`、`docs/决策链路专项评估与优化报告_2026-09-19.md`、`docs/模拟盘复审与上线优化总方案_2026-09-19.md`、`docs/无人值守交付与多Agent执行规格_2026-09-19.md`、`docs/无人值守方案细审与修订记录_2026-09-19.md` | 被 README / 项目说明书 / 技术报告 / `docs/contracts/README.md`（**冻结目录，不得改**）/ 分派手册以**相对链接**引用。归档它们必须同批改至少一篇不在本任务独占路径内的文档；本任务只做**不动别人的**那一档，故不归档 |
 | `docs/CHANGES_2026-09-01.md`、`docs/dual_agent_design.md` | 出链为 0，但被[技术报告](../技术报告.md)与[项目说明书](../项目说明书.md)以相对链接引用（两篇均为现行文档） |
