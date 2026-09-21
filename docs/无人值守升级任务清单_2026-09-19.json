@@ -4535,10 +4535,11 @@
       {
         "id": "U08-R5-FU2",
         "title": "执行器内审计库调用无护栏（db.* 抛 OperationalError 会穿出整轮）",
-        "status": "OPEN",
+        "status": "FIX_PENDING_VERIFICATION",
         "owner": "U12/I",
         "blocks": "无（既有形态，U08 未引入未扩大）",
-        "note": "Q r5 N12 实测：strategy_trader.py 的 db.signal_ticket_has_order()/db.log_risk_event()/db.update_signal_ticket() 未包 except；审计库抛 sqlite3.OperationalError: database is locked 时异常穿出整个执行器、decision=None，与 N6 同形。pristine 树逐字相同 -> 属既有形态。建议 U12 与 U08-R5-FU1 合并处置（同一处收口）。"
+        "note": "Q r5 N12 实测：strategy_trader.py 的 db.signal_ticket_has_order()/db.log_risk_event()/db.update_signal_ticket() 未包 except；审计库抛 sqlite3.OperationalError: database is locked 时异常穿出整个执行器、decision=None，与 N6 同形。pristine 树逐字相同 -> 属既有形态。建议 U12 与 U08-R5-FU1 合并处置（同一处收口）。",
+        "fix": "U08-FU2 @ 7746605（补丁包 docs/dispatch/patches/U08-FU2/7746605/）；去重读 fail-closed（AUDIT_UNAVAILABLE 跳过、不烧票）+ 纯审计写局部化；待 Q 复验通过后置 FIXED 并集成。"
       },
       {
         "id": "F14-DRILL-GATE-NOT-INSTALLED",
@@ -5082,7 +5083,7 @@
           "integration_tests": "集成态实测：U09 冒烟 **67/0**、U09 验收 **86/0**、`smoke_release_acceptance` **17/0**、契约 **173/0**、`check_quality OK files=303 untracked=0`、`SMOKE MANIFEST OK included=81 excluded=1`、**`OFFLINE REGRESSION OK scripts=94`**"
         },
         "U08-FU2": {
-          "status": "IN_PROGRESS",
+          "status": "READY_FOR_REVIEW",
           "branch": "task/U08-FU2",
           "worktree": "mat-wt/U08F2",
           "base": "b0c61ba",
@@ -5090,7 +5091,40 @@
           "defect": "src/agents/strategy_trader.py 对审计库 db.* 调用无护栏：:184 db.signal_ticket_has_order 位于顶部普通 for 循环内、无 try/except；:227/:235/:245 db.log_risk_event、:237 db.update_signal_ticket 同类。审计库抛 sqlite3.OperationalError 时异常穿出整个执行器、本轮 intents 全部作废 -> 无人值守下审计库一抖动就丢整轮入场。与已修的 N6 同形（N6 只覆盖 ledger.*）。",
           "i_verified_exists": "I 复核（b0c61ba）：`grep -n db\\.signal_ticket_has_order|db\\.log_risk_event|db\\.update_signal_ticket src/agents/strategy_trader.py` 命中 :184/:227/:235/:237/:245；`:170-215` 该循环内确无 try/except。",
           "direction_requirement": "**去重读取必须 fail-closed** —— 读不出『是否已下单』时不得当成『没下过』（会重复下单），必须**跳过该票并如实披露**（如 AUDIT_UNAVAILABLE）；纯审计写入失败局部化 + 留痕；不得吞 KeyboardInterrupt/SystemExit；异常名进 note；正常路径行为逐字不变。",
-          "note_on_my_earlier_stop": "**I 更正自己先前的『停止点』判断**：那一步基于『剩余项多为 P3』的归纳而未逐条查看；逐条核对后发现本条是**活路径上的真缺陷**（非 P3 卫生），故恢复有限度的修复工作。其余 23 条仍按三类不动（P3 卫生 / 显式延期的功能接线 / 需外部条件）。"
+          "note_on_my_earlier_stop": "**I 更正自己先前的『停止点』判断**：那一步基于『剩余项多为 P3』的归纳而未逐条查看；逐条核对后发现本条是**活路径上的真缺陷**（非 P3 卫生），故恢复有限度的修复工作。其余 23 条仍按三类不动（P3 卫生 / 显式延期的功能接线 / 需外部条件）。",
+          "code_head": "7746605",
+          "tip": "dcb87bc",
+          "changed_in_branch": [
+            "src/agents/strategy_trader.py(+57/-12：去重读护栏 + _audit_write 助手 + 三处写点)",
+            "src/core/strategy_funnel.py(+7/-0：DETAIL_AUDIT_UNAVAILABLE -> READINESS_BLOCKED/fault/ticket_fresh)",
+            "docs/策略扫描原因码.md(+1)",
+            "scripts/smoke_u08_strategy_funnel.py(+151，第 [10] 节两态可跑)"
+          ],
+          "untouched": "src/core/signal_ticket.py **未动**；补丁包 docs/dispatch/patches/U08-FU2/7746605/（3 diff + README + 18 份 evidence，探针 .py.txt）",
+          "before_after": {
+            "A 去重读抛 OperationalError": "修前 escaped=sqlite3.OperationalError、decision 未返回、intents 丢失、funnel {} -> 修后 escaped=None、decision=no_trade、0 intent、AUDIT_UNAVAILABLE=1、note 带异常名；**ledger.is_consumed=False（不烧票）**",
+            "A2 只坏一张票": "修前整轮穿出 -> 修后 open、1 intent（好票照开）",
+            "B 纯审计写抛错（已构造 1 笔 intent）": "修前整轮穿出、**已构造的 intent 随栈丢失** -> 修后 open、**1 intent 保住**、note 说明审计写入失败且本轮继续",
+            "C KeyboardInterrupt": "两态均**穿出**（except Exception）"
+          },
+          "direction_argument": "`:184` 是『这张票是否已下过单』的**跨进程唯一权威**。fail-open（读不出->当没下过）-> **重复下单**，订单已落交易所、**不可逆**，且在无人值守下静默绕过『一票只开一次』的全部护栏；fail-closed（读不出->跳过）-> 少开一笔，票据**未被账本消费、仍 open**，审计库恢复后下一轮照常评估，**可逆**且漏斗上有 AUDIT_UNAVAILABLE 可查。故取 fail-closed。**刻意不复用 `TICKET_ALREADY_CONSUMED`**：那会把『无法断定』谎报成『已下过单』、误导排查方向，且 `verdict` 会落 `handled` 而非 `blocked`。纯审计写方向相反（不参与决策，局部化 + 继续），与 N6 的 `ledger.save()` 同构。",
+          "reverse_evidence": "smoke_u08_strategy_funnel 91/0 -> **101/0**（+10 全为新增断言）；同脚本两态（含新断言）旧代码 **94 PASS/7 FAIL**（干净失败非崩溃）-> 新代码 101/0；`tests/integration/test_strategy_funnel.py` **208/0 两态不变**；KeyboardInterrupt 两态均穿出。",
+          "delta": "沙箱（b0c61ba 解包 + 立刻 git init）**94 脚本**：pristine `OK scripts=94`、patched `OK scripts=94`；**NEW_FAIL=∅、FIXED=∅、CHANGED=∅**；唯一数字变化是 smoke 91->101。check_quality `OK files=303 untracked=0`（未新增 exclude）；契约 **173/0**（golden 160）。补丁 3 配置 x 3 = 全 `Checking patch`、**0 Skipped/0 error**。",
+          "unfinished": [
+            "`db.*` 与 `ledger.*` 仍是两个独立权威，极端时序窗口只收紧、未归零（沿用 N4/N6 口径）",
+            "`AUDIT_UNAVAILABLE` 是**逐票**跳过、非轮级熔断（审计库长时段不可用会有 N 条记录）",
+            "纯审计写失败只落 note、不入漏斗/无结构化细分码 —— 因为本轮仍 open，登记为轮级故障会让 verdict 在『仓位照开』的一轮里变成 blocked、失去区分力；若看板需要计数需另立轮级码",
+            "未碰 U08-R5-FU1、U13FU3-INJECTION-TRUST、U09-K06-*",
+            "`:231` 的 `_not_expired` 分支在当前真值表下不可达；按『不放宽语义』只加护栏未删，留给清理任务"
+          ],
+          "env_note": "作者环境备注（归入既有 N11 同类教训）：沙箱 `git init` 后再 `git add -A && git commit`，全局 `core.autocrlf=true` 会归一化 index，使 `-c core.autocrlf=false -c core.eol=lf` 的 `--check` **误失败**；那是沙箱自造环境而非补丁缺陷。按规格只 `git init` 重测三配置全绿。",
+          "verification": {
+            "session": "Q (reviews/U08-FU2/R1/q)",
+            "candidate": "dcb87bc",
+            "verdict": "PENDING",
+            "reports_dir": "docs/dispatch/reviews/U08-FU2/dcb87bc/",
+            "focus": "重点：①四场景自建探针复现；②**方向确为 fail-closed**（构造『票据其实已下过单、但审计库读不出』-> 必须仍**跳过**，若放行则判阻塞，因涉重复下单；并确认**不烧票**、verdict 为 blocked、披露码不是 TICKET_ALREADY_CONSUMED）；③正常路径逐字不变 + 新增 10 条断言**扣旧实现应变红**且 7 条失败全来自第 [10] 节；④KeyboardInterrupt 仍穿出；⑤既有原因码表一字未动。"
+          }
         }
       }
     },
