@@ -231,6 +231,12 @@ DETAIL_TICKET_SOURCE_UNAVAILABLE = "TICKET_SOURCE_UNAVAILABLE"
 DETAIL_ROUND_EXCEPTION = "ROUND_EXCEPTION"
 #: 研究预算总额为 0/负（"没有预算可谈"与"预算被管理占用"是两件事，B-r1 P2-3）。
 DETAIL_RESEARCH_BUDGET_ZERO = "RESEARCH_BUDGET_ZERO"
+#: 执行器收尾的**合并落盘**没做成（B-r3 N3）：取不到跨进程锁，或盘上账本已被判定损坏。
+#: 注意它**不是**"某张票没被消费"——每张票的消费事实在 :meth:`TicketLedger.consume`
+#: 返回前就已单独落盘；这里推迟的是"本轮消费/释放事实的合并写"。之所以仍登记为
+#: **轮级故障**：本轮之后盘上账本与内存不再一致，跨进程可见性被推迟到下一次成功写入，
+#: 必须让"为什么这轮的状态文件看起来不对"有结构化的答案，而不是只剩一句异常堆栈。
+DETAIL_LEDGER_SAVE_DEFERRED = "LEDGER_SAVE_DEFERRED"
 
 #: 细分码 -> 九码之一。**这是本模块唯一的分类轴**；任何细分码都必须在此登记，
 #: 未登记码在 :func:`detail_reason` 处 fail-closed（:class:`UnknownDetailCode`）。
@@ -286,6 +292,7 @@ DETAIL_REASON: dict[str, str] = {
     DETAIL_TICKET_SOURCE_UNAVAILABLE: REASON_DATA_UNAVAILABLE,
     DETAIL_ROUND_EXCEPTION: REASON_VALIDATION_REJECTED,
     DETAIL_RESEARCH_BUDGET_ZERO: REASON_MODEL_DEADLINE,
+    DETAIL_LEDGER_SAVE_DEFERRED: REASON_READINESS_BLOCKED,
 }
 
 DETAIL_CODES: frozenset[str] = frozenset(DETAIL_REASON)
@@ -363,6 +370,7 @@ DETAIL_NATURE: dict[str, str] = {
     DETAIL_TICKET_SOURCE_UNAVAILABLE: NATURE_FAULT,
     DETAIL_ROUND_EXCEPTION: NATURE_FAULT,
     DETAIL_RESEARCH_BUDGET_ZERO: NATURE_FAULT,
+    DETAIL_LEDGER_SAVE_DEFERRED: NATURE_FAULT,
 }
 
 #: 九码 -> 性质（外部码没有细分码可查时用；同码冲突时以 `FAULT` 为准）。
@@ -425,6 +433,7 @@ DETAIL_STAGES: dict[str, tuple[str, ...]] = {
     DETAIL_STRATEGY_LAB_DRIFT: (),
     DETAIL_TICKET_SOURCE_UNAVAILABLE: (),
     DETAIL_ROUND_EXCEPTION: (),
+    DETAIL_LEDGER_SAVE_DEFERRED: (),
     DETAIL_EVIDENCE_GATE_FAILED: (),
     DETAIL_EVIDENCE_DATA_UNAVAILABLE: (),
     DETAIL_EVIDENCE_VALIDATION_REJECTED: (),
@@ -545,6 +554,13 @@ def classify_no_open(*, details: Iterable[str] = (), codes: Iterable[str] = (),
        主因取故障码里优先级最高者；
     3. 一个候选都没**评估**过（全部停在前置筛，或本轮根本没有候选）→
        ``no_candidates``，主因取当前码里优先级最高者（**不**硬塞 ``NO_EDGE``）；
+       **已知留白（B-r3 N5，P3）**：九码集合冻结在 U05，"候选集为空"**没有**自己的
+       九码，所以"本轮一张票都没有"（轮级 ``NO_TICKETS_AVAILABLE``）只能落到它
+       自己登记的九码 ``NO_EDGE`` 上 → ``no_candidates`` + 主因字面像"没信号"。
+       区分方式是**结构化的**、不在主因字符串里：``verdict=no_candidates``（不是
+       ``no_edge``）＋ ``round_faults`` 里的事实＋ ``details`` 计数。此处**不改**
+       注册表：把 ``NO_TICKETS_AVAILABLE`` 改挂别的九码只会把"没有票"说成别的
+       事实。文档同款说明见 ``docs/策略扫描原因码.md`` §4；
     4. 有"真的没有边际"的观测 → ``no_edge``，主因取边际类码（范围界定类码只做辅因，
        否则"有一张范围外的卡"会让整轮常态变成 ``blocked``，verdict 失去区分力）；
     5. 只有"已在处理"的事实 → ``handled``（已持仓/已消费，**不是**没有信号）；
@@ -558,6 +574,11 @@ def classify_no_open(*, details: Iterable[str] = (), codes: Iterable[str] = (),
     if buckets[NATURE_FAULT]:
         return VERDICT_BLOCKED, choose_primary(sorted(buckets[NATURE_FAULT]))
     if int(evaluated) <= 0:
+        # 主因取"当前所有码"里优先级最高者，而不是硬塞 NO_EDGE。唯一例外是
+        # `everything` 里**只有** NO_EDGE 时（典型：本轮连票都没有，轮级
+        # NO_TICKETS_AVAILABLE 登记的九码就是 NO_EDGE）——九码集合冻结在 U05，
+        # "候选集为空"没有专属九码，此时靠 `verdict=no_candidates` + `round_faults`
+        # 区分，不靠主因字面（B-r3 N5）。
         everything = sorted(set().union(*buckets.values()))
         return VERDICT_NO_CANDIDATES, choose_primary(everything or [REASON_NO_EDGE])
     if buckets[NATURE_EDGE]:
@@ -2029,6 +2050,7 @@ __all__ = [
     "ROUND_ONLY_DETAILS",
     "REASON_NATURE",
     "RoundFault",
+    "DETAIL_LEDGER_SAVE_DEFERRED",
     "VERDICTS",
     "VERDICT_BLOCKED",
     "VERDICT_HANDLED",
