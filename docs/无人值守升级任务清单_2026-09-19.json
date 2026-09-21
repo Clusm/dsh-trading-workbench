@@ -1892,7 +1892,7 @@
       "title": "策略漏斗与管理责任展示",
       "owner_role": "C",
       "actual_assignee": "U08 作者会话",
-      "status": "IN_PROGRESS",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -1912,7 +1912,46 @@
         "F09",
         "F19"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "c147895",
+          "base": "2ed2e5d",
+          "commits": [
+            "9aae901",
+            "c88e8c5",
+            "5c229c5",
+            "af350e6",
+            "4b08d29",
+            "9fa1f7e",
+            "ec3a0f7",
+            "c147895"
+          ],
+          "changed_files": [
+            "src/core/strategy_funnel.py(1298)",
+            "tests/integration/test_strategy_funnel.py(881)",
+            "scripts/smoke_u08_strategy_funnel.py(506)",
+            "docs/策略扫描原因码.md(180)"
+          ],
+          "shared_files_untouched": "git diff 2ed2e5d..HEAD -- <4 目标文件> 为空；共享适配只交 5 个补丁",
+          "must_haves": "①原因可区分：17 闸门 x 37 细分码全映射九码；拒绝型闸门缺细分码抛 ValueError；verdict∈{opened,no_edge,blocked,no_candidates}（行情/校验类故障不读成'没有信号'）②TicketLedger 原子落盘；同轮/跨轮/重载均 ALREADY_CONSUMED；consumed 为独立布尔不依赖时钟；损坏 -> LEDGER_CORRUPT fail-closed ③每仓 manager+position_class（与 U02 LEGACY_UNATTRIBUTED 同口径）+rule_version=rv1:<卡内容hash>@<K01 strategy_hash>；GET /funnel 200 ④直接 import U05 的 REASON_CODES/classify_cycle，REASON_ALL==frozenset(trace.REASON_CODES) ⑤claim_research 永不碰预留池，对抗交错下三条不变量成立",
+          "u05_wiring": "**接了**：classify_cycle 0->1、reason_from_source_errors 0->1、classify_evidence_report 经 round_explanation(evidence_report=) 可达、DecisionReason/choose_primary/九码常量。**仍留 U12**：run_protection_first、graph.model_deadline()（唯一命中 0 调用方）、AgentRecorder 轨迹落审计、ModelRouteGuard/LeaseRegistry/background_refresh、macro/onchain.reason_from_errors —— 均不在 U08 集成目标",
+          "patches": "docs/dispatch/patches/U08/c147895/（01-05）；两 git 配置各 5/5 OK；批次约束：01-04 依赖漏斗模块已合入、05 必须与冒烟同批",
+          "delta": "pristine scripts=81 -> patched 82；**失败行集合与 pristine 逐字相同 => 新增 ∅ / 修复 ∅**",
+          "shared_columns": "positions.strategy_id/ticket_id、positions.source、signal_tickets.status、orders.ticket_id、last_scan.* 全部**只读**；funnel 是新增键；**未新增列/枚举/迁移**；全仓 7 个 range(1,18) 断言脚本两态逐字相同且全绿",
+          "tests": "集成测试 82/0<->120/0；冒烟 26/0<->43/0；check_quality（干净树）OK files=286；SECRET SCAN OK files=494",
+          "known_limits": [
+            "ScanFunnel 是'一轮'实例",
+            "candidates 含前三道闸门即被拒的卡",
+            "账本与审计库两者都要非替代",
+            "账本损坏需人工 reset_corrupt()",
+            "run_protection_first/轨迹落审计留 U12",
+            "未做真实跑批"
+          ],
+          "unfinished": "①run_protection_first 步骤排序装配未做 ②轨迹落审计与 graph.model_deadline() 注入未做 ③数据侧 reason_from_errors 包装仍 0 消费者 ④生产首次跑批观测量未验证",
+          "i_incident": "I 建该审查 worktree 时用相对路径 `../mat-wt/...` 而 cwd 在 mat-wt/I -> 错误创建了嵌套目录 mat-wt/mat-wt 并致 worktree add 失败（已清理）；因 && 链断，台账更新亦被跳过。已用**绝对路径**重建并回读确认 @ c147895。教训：mkdir/git 路径统一用绝对路径，不要依赖 cwd。"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "B",
