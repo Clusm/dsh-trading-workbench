@@ -65,7 +65,8 @@ git apply docs/dispatch/patches/U10b/273892c/01_docs_index_archive_links.diff
 ## 应用后的整链复验（patched 沙箱）
 
 沙箱 = `git archive <task/U10b HEAD>` 解包 + `git init` + `git add -A` + 应用本补丁
-（已跟踪文件 735 个，比 pristine 多出的 1 个即新增的 `docs/archive/README.md`）：
+（已跟踪文件 738 个，比 pristine 的 734 个多出 `docs/archive/README.md` 与本补丁目录的
+3 个文件）：
 
 | 入口 | pristine | patched |
 |---|---|---|
@@ -74,6 +75,7 @@ git apply docs/dispatch/patches/U10b/273892c/01_docs_index_archive_links.diff
 | `scripts/check_quality.py` | `QUALITY CHECK OK files=296 untracked=0` | `QUALITY CHECK OK files=296 untracked=0` |
 
 `check_quality.py` 结果未新增任何 ruff exclude；`pyproject.toml` 未改动。
+原始输出摘要见 `evidence/out_verification.txt`。
 
 全量离线回归失败集合增量对比（按"失败签名"归一化后取 `patched - pristine`）：
 

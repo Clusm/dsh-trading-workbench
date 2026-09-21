@@ -7,6 +7,9 @@ U10b 复验原始输出摘要（全部只读/离线；沙箱位于系统临时�
           git -c core.autocrlf=false -c core.eol=lf apply --check -v <diff>
           git -c core.autocrlf=true apply --check -v <diff>
 
+  被测补丁文件与仓库内交付件逐字节相同：
+    sha256 = d41a42b1afc821f3…  size = 6478 bytes
+
   == config1 default
   Checking patch "docs/\346\226\207\346\241\243\347\264\242\345\274\225.md"...
   == config2 LF
@@ -62,7 +65,7 @@ U10b 复验原始输出摘要（全部只读/离线；沙箱位于系统临时�
 [4] 发布包冒烟 scripts/smoke_u10a_release_package.py
 
   pristine: 结果: 37 通过 / 0 失败   （沙箱已跟踪文件 734 个）
-  patched : 结果: 37 通过 / 0 失败   （沙箱已跟踪文件 735 个）
+  patched : 结果: 37 通过 / 0 失败   （沙箱已跟踪文件 738 个）
   两侧均退出码 0；patched 尾段节选：
     PASS  缺失必需策略卡后自检失败
     PASS  新增相对断链后自检失败
@@ -79,10 +82,11 @@ U10b 复验原始输出摘要（全部只读/离线；沙箱位于系统临时�
   pristine: QUALITY CHECK OK files=296 untracked=0
             SECRET SCAN OK files=655 registered_false_positives=2
   patched : QUALITY CHECK OK files=296 untracked=0
-            SECRET SCAN OK files=656 registered_false_positives=2
+            SECRET SCAN OK files=659 registered_false_positives=2
 
   两侧均退出码 0；pyproject.toml 未改动，未新增任何 ruff exclude。
-  （SECRET SCAN 656 vs 655 = 新增 docs/archive/README.md 一个被扫描文本。）
+  （SECRET SCAN 659 vs 655 = 新增 docs/archive/README.md 与本补丁目录的
+    README.md / evidence 文本被扫描，全部通过。）
 
 
 [6] 归档脚本项目根深度：运行时探针（不是目测）
