@@ -34,17 +34,28 @@ U05 明确留给 U08 的那一层——漏斗状态枚举（K05 README §12 C#13
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
 import os
 import threading
 import time
+import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+
+try:  # pragma: no cover - 平台分支（Windows）
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None  # type: ignore[assignment]
+try:  # pragma: no cover - 平台分支（POSIX）
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 from core.decision_trace import (
     REASON_CHANNEL_CONFLICT,
@@ -1045,14 +1056,69 @@ LEDGER_SCHEMA_VERSION = "u08-ticket-ledger-1"
 CONSUMED = "CONSUMED"
 ALREADY_CONSUMED = "ALREADY_CONSUMED"
 LEDGER_CORRUPT = "LEDGER_CORRUPT"
+#: 取不到跨进程独占锁（另一进程正在写）：fail-closed，**不**消费。
+LEDGER_BUSY = "LEDGER_BUSY"
 UNSEEN = "UNSEEN"
 
 #: 账本保留窗口：超过这个时长仍未结算的 old 条目会被修剪（防止文件无限增长）。
 DEFAULT_RETENTION_MS = 14 * 24 * 3600 * 1000
 
+#: 跨进程独占锁的默认等待上限（秒）。U13 单实例锁在生产上限制了多写者，
+#: 这里兜住"崩溃后人工重启与旧进程重叠""双实例误启"这两种真金白银的场景。
+DEFAULT_LOCK_TIMEOUT_S = 10.0
+
 
 class LedgerCorrupt(RuntimeError):
     """账本文件不可解析：拒绝新消费（fail-closed，宁可不追单也不重复消费）。"""
+
+
+class LedgerLockTimeout(RuntimeError):
+    """跨进程独占锁等待超时（另一个进程长时间持有账本）。"""
+
+
+@contextlib.contextmanager
+def exclusive_file_lock(path: str | Path, *, timeout_s: float = DEFAULT_LOCK_TIMEOUT_S,
+                        poll_s: float = 0.02):
+    """**跨进程**独占锁（Windows ``msvcrt.locking`` / POSIX ``fcntl.flock``）。
+
+    锁文件是账本旁的 ``<name>.lock``（sidecar）。``self._lock``（RLock）只覆盖
+    进程内线程，**不能**代替本函数——B-r1 P0-3 的核心就是这两者的区别。
+    取不到锁时抛 :class:`LedgerLockTimeout`，由调用方决定是 fail-closed 还是报错。
+    """
+    lock_path = Path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    locked = False
+    try:
+        if msvcrt is not None:  # pragma: no cover - Windows
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            deadline = time.monotonic() + float(timeout_s)
+            while True:
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    locked = True
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise LedgerLockTimeout(
+                            f"取不到跨进程锁（{timeout_s}s 超时）: {lock_path}") from None
+                    time.sleep(poll_s)
+        elif fcntl is not None:  # pragma: no cover - POSIX
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            locked = True
+        yield
+    finally:
+        try:
+            if locked:
+                if msvcrt is not None:  # pragma: no cover - Windows
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                elif fcntl is not None:  # pragma: no cover - POSIX
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 @dataclass(frozen=True)
@@ -1099,6 +1165,10 @@ class TicketRecord:
     consumed: bool = False
     consumed_at_ms: int = 0
     consumed_round_id: str = ""
+    #: 撤销留痕（B-r1 P1-2：``release()`` 原先"没有审计留痕"）。
+    released_at_ms: int = 0
+    release_round_id: str = ""
+    release_count: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1109,6 +1179,9 @@ class TicketRecord:
             "consumed": bool(self.consumed),
             "consumed_at_ms": self.consumed_at_ms,
             "consumed_round_id": self.consumed_round_id,
+            "released_at_ms": self.released_at_ms,
+            "release_round_id": self.release_round_id,
+            "release_count": self.release_count,
         }
 
     @classmethod
@@ -1128,6 +1201,9 @@ class TicketRecord:
             consumed=consumed,
             consumed_at_ms=int(payload.get("consumed_at_ms") or 0),
             consumed_round_id=str(payload.get("consumed_round_id") or ""),
+            released_at_ms=int(payload.get("released_at_ms") or 0),
+            release_round_id=str(payload.get("release_round_id") or ""),
+            release_count=int(payload.get("release_count") or 0),
         )
 
 
@@ -1139,51 +1215,92 @@ class TicketLedger:
       之后任何一轮/任何进程都返回 ``ALREADY_CONSUMED``（不回带 intent）。
     - :meth:`recover`：重启后列出"仍然有效且尚未消费"的 ticket —— 跨轮恢复。
     - 文件损坏（含被截断/被手工改写）时 :meth:`consume` 一律返回 ``LEDGER_CORRUPT``
-      并**拒绝**新消费，而不是把损坏读成空账本（后者会让同一 ticket 被消费第二次）。
+      并**拒绝**新消费；**写路径也不洗白**：:meth:`register` / :meth:`save` 在损坏态
+      直接抛 :class:`LedgerCorrupt`（B-r1 P1-1：原先"损坏 → 重新登记 → 落盘"会把
+      损坏文件覆盖成一份只有新票的合法账本，旧消费事实一次性丢失）。
       真的要在损坏后继续，必须显式 :meth:`reset_corrupt`（会记 ``reset_at_ms`` 留痕）。
 
-    线程安全：所有读写走 ``self._lock``；进程安全：写用 ``tmp + os.replace`` 原子替换。
+    线程安全：所有读写走 ``self._lock``（RLock，进程内）。
+    **进程安全**（B-r1 P0-3，必达②原文要求）：跨进程写走
+    :func:`exclusive_file_lock`（Windows ``msvcrt.locking`` / POSIX ``fcntl.flock``），
+    ``consume`` 是"取锁 → 重读文件 → 判定 → 落盘"的**读-改-写原子**操作，
+    因此两个进程不会同时拿到 ``CONSUMED``。落盘用 **pid+uuid 命名的临时文件** +
+    ``os.replace``（原子替换；原先确定性 tmp 名在并发下直接 ``PermissionError``）。
     """
 
     def __init__(self, path: str | Path, *, clock: Any = None,
-                 retention_ms: int = DEFAULT_RETENTION_MS) -> None:
+                 retention_ms: int = DEFAULT_RETENTION_MS,
+                 lock_timeout_s: float = DEFAULT_LOCK_TIMEOUT_S) -> None:
         self.path = Path(path)
         # 缺省钟用**墙钟毫秒**（与 ticket 的 ``expires_at`` 同一时基）；测试与
         # 离线重放一律显式传 ``at_ms``/``now_ms``，不读墙钟。
         self._clock = clock or (lambda: int(time.time() * 1000))
         self.retention_ms = int(retention_ms)
+        self.lock_timeout_s = float(lock_timeout_s)
         self._lock = threading.RLock()
         self._records: dict[str, TicketRecord] = {}
         self._corrupt: str = ""
         self._reset_at_ms: int = 0
+        self._release_counts: Counter[str] = Counter()
         self.load()
 
     # -- 持久化 -------------------------------------------------------- #
 
+    def _read_file_records(self) -> tuple[dict[str, TicketRecord], str, int]:
+        """读盘（**不加锁**，必须在 :func:`exclusive_file_lock` 内或只读场景调用）。
+
+        返回 ``(records, corrupt_reason, reset_at_ms)``；损坏时 ``records`` 为空且
+        ``corrupt_reason`` 非空——调用方必须先看 corrupt 再决定怎么用。
+        """
+        if not self.path.exists():
+            return {}, "", 0
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or int(raw.get("schema_version_ms", 0)) < 0:
+                raise ValueError("ledger root 形态非法")
+            records = raw.get("records")
+            if not isinstance(records, list):
+                raise ValueError("records 非列表")
+            parsed = {
+                str(item["ticket_id"]): TicketRecord.from_dict(item)
+                for item in records if isinstance(item, Mapping) and item.get("ticket_id")
+            }
+            return parsed, "", int(raw.get("reset_at_ms") or 0)
+        except Exception as exc:  # noqa: BLE001 - 损坏必须被兜住并可见
+            return {}, f"{type(exc).__name__}: {exc}"[:200], 0
+
     def load(self) -> bool:
         """读盘；返回是否可解析。损坏时置 :attr:`corrupt_reason` 且**不**清空。"""
         with self._lock:
-            if not self.path.exists():
-                self._records = {}
-                self._corrupt = ""
-                return True
-            try:
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
-                if not isinstance(raw, dict) or int(raw.get("schema_version_ms", 0)) < 0:
-                    raise ValueError("ledger root 形态非法")
-                records = raw.get("records")
-                if not isinstance(records, list):
-                    raise ValueError("records 非列表")
-                self._records = {
-                    str(item["ticket_id"]): TicketRecord.from_dict(item)
-                    for item in records if isinstance(item, Mapping) and item.get("ticket_id")
-                }
-                self._reset_at_ms = int(raw.get("reset_at_ms") or 0)
-                self._corrupt = ""
-                return True
-            except Exception as exc:  # noqa: BLE001 - 损坏必须被兜住并可见
-                self._corrupt = f"{type(exc).__name__}: {exc}"[:200]
+            records, corrupt, reset_at = self._read_file_records()
+            if corrupt:
+                self._corrupt = corrupt
                 return False
+            self._records = records
+            self._reset_at_ms = reset_at
+            self._corrupt = ""
+            return True
+
+    def _reload_locked(self) -> None:
+        """跨进程锁内重读：文件里的**已消费事实**是权威（合并，不丢本进程新登记）。
+
+        一旦判定损坏就**不再**自动复活——要恢复必须显式 :meth:`reset_corrupt`。
+        """
+        records, corrupt, reset_at = self._read_file_records()
+        if corrupt:
+            self._corrupt = corrupt
+            return
+        if self._corrupt:
+            return
+        for ticket_id, record in records.items():
+            mine = self._records.get(ticket_id)
+            if mine is None:
+                self._records[ticket_id] = record
+            elif record.consumed and not mine.consumed:
+                # 另一个进程已经消费过：采纳它的事实（这才是"跨进程只消费一次"）。
+                self._records[ticket_id] = record
+        if reset_at > self._reset_at_ms:
+            self._reset_at_ms = reset_at
 
     def _dump(self) -> dict[str, Any]:
         return {
@@ -1193,13 +1310,36 @@ class TicketLedger:
             "records": [record.as_dict() for record in self._records.values()],
         }
 
-    def save(self) -> None:
-        with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+    def _save_locked(self) -> None:
+        """原子落盘（必须在跨进程锁内）。临时文件名带 pid+uuid，避免并发互踩。"""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(
+            f"{self.path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
             tmp.write_text(json.dumps(self._dump(), ensure_ascii=False, sort_keys=True),
                            encoding="utf-8")
             os.replace(tmp, self.path)
+        finally:
+            with contextlib.suppress(OSError):
+                if tmp.exists():
+                    tmp.unlink()
+
+    def _locked(self):
+        return exclusive_file_lock(self.path.with_name(self.path.name + ".lock"),
+                                   timeout_s=self.lock_timeout_s)
+
+    def save(self) -> None:
+        """合并盘上事实后原子落盘。**损坏态拒绝写**（B-r1 P1-1）。"""
+        with self._lock:
+            if self._corrupt:
+                raise LedgerCorrupt(
+                    f"账本已判定损坏，拒绝落盘（需显式 reset_corrupt()）: {self._corrupt}")
+            with self._locked():
+                self._reload_locked()
+                if self._corrupt:
+                    raise LedgerCorrupt(
+                        f"账本已判定损坏，拒绝落盘（需显式 reset_corrupt()）: {self._corrupt}")
+                self._save_locked()
 
     # -- 属性 ---------------------------------------------------------- #
 
@@ -1222,12 +1362,19 @@ class TicketLedger:
 
     def register(self, ticket: Mapping[str, Any], *, round_id: str = "",
                  at_ms: int | None = None) -> TicketRecord:
-        """登记"这张 ticket 已被发射"。已存在的记录只补空字段，**不**重置消费事实。"""
+        """登记"这张 ticket 已被发射"。已存在的记录只补空字段，**不**重置消费事实。
+
+        损坏态直接抛 :class:`LedgerCorrupt`：不允许用"重新登记本轮新票"把损坏文件
+        洗成一份只有新票的合法账本（那会让旧消费事实静默丢失 → 同一 ticket 再消费）。
+        """
         ticket_id = str(ticket.get("ticket_id") or "")
         if not ticket_id:
             raise ValueError("ticket_id 不能为空")
         stamp = int(self._clock() if at_ms is None else at_ms)
         with self._lock:
+            if self._corrupt:
+                raise LedgerCorrupt(
+                    f"账本已判定损坏，拒绝登记新票据（需显式 reset_corrupt()）: {self._corrupt}")
             existing = self._records.get(ticket_id)
             record = TicketRecord(
                 ticket_id=ticket_id,
@@ -1240,13 +1387,22 @@ class TicketLedger:
                 consumed=bool(existing.consumed) if existing else False,
                 consumed_at_ms=int(existing.consumed_at_ms if existing else 0),
                 consumed_round_id=str(existing.consumed_round_id if existing else ""),
+                released_at_ms=int(existing.released_at_ms if existing else 0),
+                release_round_id=str(existing.release_round_id if existing else ""),
+                release_count=int(existing.release_count if existing else 0),
             )
             self._records[ticket_id] = record
             return record
 
     def consume(self, ticket_id: str, *, round_id: str = "",
                 at_ms: int | None = None) -> TicketConsumption:
-        """消费（下单前）这张 ticket；幂等且跨轮/跨进程。"""
+        """消费（下单前）这张 ticket；幂等且跨轮/**跨进程**。
+
+        实现是"取跨进程锁 → 重读文件 → 判定 → 落盘"的读-改-写原子操作：
+        两个进程同时消费同一张票时，**恰好一个**拿到 ``CONSUMED``，另一个拿到
+        ``ALREADY_CONSUMED``（B-r1 P0-3）。取不到锁返回 ``LEDGER_BUSY``（fail-closed，
+        不消费），损坏返回 ``LEDGER_CORRUPT``。
+        """
         key = str(ticket_id or "")
         stamp = int(self._clock() if at_ms is None else at_ms)
         with self._lock:
@@ -1255,25 +1411,42 @@ class TicketLedger:
                                          round_id=round_id)
             if not key:
                 return TicketConsumption(ticket_id="", state=UNSEEN, round_id=round_id)
-            existing = self._records.get(key)
-            if existing is not None and existing.consumed:
-                return TicketConsumption(
-                    ticket_id=key, state=ALREADY_CONSUMED, round_id=round_id,
-                    first_round_id=existing.consumed_round_id,
-                    first_at_ms=existing.consumed_at_ms,
-                )
-            self._records[key] = TicketRecord(
-                ticket_id=key,
-                signal_id=existing.signal_id if existing else "",
-                strategy_id=existing.strategy_id if existing else "",
-                symbol=existing.symbol if existing else "",
-                expires_at=existing.expires_at if existing else "",
-                emitted_at_ms=int(existing.emitted_at_ms if existing else stamp),
-                emitted_round_id=str(existing.emitted_round_id if existing else round_id),
-                consumed=True, consumed_at_ms=stamp, consumed_round_id=str(round_id),
+            try:
+                with self._locked():
+                    return self._consume_locked(key, stamp, round_id)
+            except LedgerLockTimeout:
+                return TicketConsumption(ticket_id=key, state=LEDGER_BUSY,
+                                         round_id=round_id)
+
+    def _consume_locked(self, key: str, stamp: int, round_id: str) -> TicketConsumption:
+        self._reload_locked()
+        if self._corrupt:
+            return TicketConsumption(ticket_id=key, state=LEDGER_CORRUPT,
+                                     round_id=round_id)
+        existing = self._records.get(key)
+        if existing is not None and existing.consumed:
+            return TicketConsumption(
+                ticket_id=key, state=ALREADY_CONSUMED, round_id=round_id,
+                first_round_id=existing.consumed_round_id,
+                first_at_ms=existing.consumed_at_ms,
             )
-            return TicketConsumption(ticket_id=key, state=CONSUMED, round_id=round_id,
-                                     first_round_id=str(round_id), first_at_ms=stamp)
+        self._records[key] = TicketRecord(
+            ticket_id=key,
+            signal_id=existing.signal_id if existing else "",
+            strategy_id=existing.strategy_id if existing else "",
+            symbol=existing.symbol if existing else "",
+            expires_at=existing.expires_at if existing else "",
+            emitted_at_ms=int(existing.emitted_at_ms if existing else stamp),
+            emitted_round_id=str(existing.emitted_round_id if existing else round_id),
+            consumed=True, consumed_at_ms=stamp, consumed_round_id=str(round_id),
+            released_at_ms=int(existing.released_at_ms if existing else 0),
+            release_round_id=str(existing.release_round_id if existing else ""),
+            release_count=int(existing.release_count if existing else 0),
+        )
+        # 消费事实必须在下单前**落盘**，否则崩溃窗口里"已消费"只活在内存里。
+        self._save_locked()
+        return TicketConsumption(ticket_id=key, state=CONSUMED, round_id=round_id,
+                                 first_round_id=str(round_id), first_at_ms=stamp)
 
     def register_and_consume(self, ticket: Mapping[str, Any], *, round_id: str = "",
                              at_ms: int | None = None) -> TicketConsumption:
@@ -1282,25 +1455,75 @@ class TicketLedger:
         return self.consume(str(ticket.get("ticket_id") or ""), round_id=round_id,
                             at_ms=at_ms)
 
-    def release(self, ticket_id: str, *, at_ms: int | None = None) -> bool:
-        """撤销一次**尚未下单**的消费（intent 构建失败等）。返回是否真的撤销了。
+    def release(self, ticket_id: str, *, round_id: str = "", at_ms: int | None = None,
+                force: bool = False) -> bool:
+        """撤销一次**尚未下单**的消费（建意图失败等）。返回是否真的撤销了。
 
-        只允许撤销当次消费：一旦离开进程（或已成交）就没有"撤销"语义，
-        因此本方法不提供跨进程/跨轮的撤回，调用方必须在下单前调用。
+        门禁（B-r1 P1-2，原先"没有任何前置校验"，任何拿到账本对象的调用方都能撤销
+        一次已落库的消费 → 二次下单）：
+
+        - 损坏态一律 ``False``（fail-closed）；
+        - 未消费 → ``False``；
+        - **必须**给出 ``round_id``，且必须与 ``consumed_round_id`` 一致——
+          跨轮/跨进程的撤销被拒绝。真的要在崩溃后人工撤销，必须显式
+          ``force=True``（并会留下 ``released_at_ms``/``release_count`` 留痕）。
+
+        ``consumed_round_id`` 为空（消费时没给轮次）时只要求给出 ``round_id``，
+        因为"当次"已无法从账本自证；审计以留痕为准。
         """
         key = str(ticket_id or "")
+        stamp = int(self._clock() if at_ms is None else at_ms)
         with self._lock:
+            if self._corrupt:
+                return False
             existing = self._records.get(key)
             if existing is None or not existing.consumed:
                 return False
+            if not force:
+                if not str(round_id or "").strip():
+                    return False
+                if (existing.consumed_round_id
+                        and str(round_id) != existing.consumed_round_id):
+                    return False
             self._records[key] = TicketRecord(
                 ticket_id=existing.ticket_id, signal_id=existing.signal_id,
                 strategy_id=existing.strategy_id, symbol=existing.symbol,
                 expires_at=existing.expires_at, emitted_at_ms=existing.emitted_at_ms,
                 emitted_round_id=existing.emitted_round_id,
                 consumed=False, consumed_at_ms=0, consumed_round_id="",
+                released_at_ms=stamp, release_round_id=str(round_id),
+                release_count=int(existing.release_count) + 1,
             )
+            self._release_counts[str(round_id)] += 1
+            try:
+                with self._locked():
+                    self._save_locked()
+            except LedgerLockTimeout:
+                return True  # 内存已撤销；落盘留给下一次成功写入
             return True
+
+    def orphan_consumed(self, ticket_has_order: Any = None) -> list[TicketRecord]:
+        """**已消费但（据权威判定）没有对应订单**的票 —— 崩溃窗口里的"待补单"集合。
+
+        B-r1 P1-2：模块原先没有这个查询，所以"审计库是已落库的权威、只补不重发"
+        在模块内**不可验证**。``ticket_has_order`` 是审计库侧的权威判定
+        （``AuditDatabase.signal_ticket_has_order`` 形态：``ticket_id -> bool``）；
+        给了就只返回"消费了但查不到订单"的票，没给就返回全部已消费票
+        （调用方自行用审计库收敛，模块**不**假装自己能判定）。
+        """
+        out: list[TicketRecord] = []
+        with self._lock:
+            for record in self._records.values():
+                if not record.consumed:
+                    continue
+                if callable(ticket_has_order):
+                    try:
+                        if bool(ticket_has_order(record.ticket_id)):
+                            continue
+                    except Exception:  # noqa: BLE001 - 查不动就不敢宣称"没订单"
+                        continue
+                out.append(record)
+        return sorted(out, key=lambda item: (item.consumed_at_ms, item.ticket_id))
 
     def recover(self, *, round_id: str = "", now_ms: int | None = None,
                 is_expired: Any = None) -> list[TicketRecord]:
@@ -1331,12 +1554,17 @@ class TicketLedger:
         return removed
 
     def reset_corrupt(self, *, at_ms: int | None = None) -> None:
-        """显式放弃损坏账本（会留痕）；调用方应先确认 DB 侧 ``signal_ticket_has_order``
-        能兜住去重，否则会把同一 ticket 消费第二次。"""
+        """显式放弃损坏账本（会留痕并**立即落盘**，否则下一次读盘又会看到损坏文件）。
+
+        调用方应先确认 DB 侧 ``signal_ticket_has_order`` 能兜住去重，否则会把同一
+        ticket 消费第二次。
+        """
         with self._lock:
             self._corrupt = ""
             self._records = {}
             self._reset_at_ms = int(self._clock() if at_ms is None else at_ms)
+            with self._locked():
+                self._save_locked()
 
     def as_dict(self) -> dict[str, Any]:
         with self._lock:
@@ -1345,6 +1573,8 @@ class TicketLedger:
                 "path": str(self.path),
                 "records": len(self._records),
                 "consumed": sum(1 for record in self._records.values() if record.consumed),
+                "orphan_consumed": len(self.orphan_consumed()),
+                "releases": int(sum(self._release_counts.values())),
                 "corrupt_reason": self._corrupt,
                 "reset_at_ms": int(self._reset_at_ms),
             }
@@ -1750,9 +1980,12 @@ __all__ = [
     "bucket_reason_codes",
     "classify_no_open",
     "FunnelItem",
+    "LEDGER_BUSY",
     "LEDGER_CORRUPT",
     "LEDGER_SCHEMA_VERSION",
     "LedgerCorrupt",
+    "LedgerLockTimeout",
+    "exclusive_file_lock",
     "MANAGER_AI",
     "MANAGER_GUARDIAN",
     "MANAGER_LEGACY",
