@@ -107,6 +107,24 @@ STAGE_ORDER: tuple[str, ...] = tuple(item.value for item in Stage)
 #: 终态闸门：到达它才代表"这一轮这一项真的开仓了"。
 TERMINAL_STAGE: str = Stage.INTENT_READY.value
 
+#: **通过型**阶段（不是"闸门"）：到达即代表成功，不是"被拒绝"。
+#: - ``CARD_LOADED``：候选入口（只有前缀计数用它，从不单独 record）；
+#: - ``TICKET_EMITTED``：扫描侧全部闸门通过、票据已落库；
+#: - ``TICKET_ACTIVE``：跨轮/重启恢复出一张仍有效的票据；
+#: - ``INTENT_READY``：执行侧真的产出了开仓意图（终态）。
+#: 其余阶段都是**拒绝型闸门**：到达即停止，必须带细分码说明为什么。
+SUCCESS_STAGES: frozenset[str] = frozenset({
+    Stage.CARD_LOADED.value,
+    Stage.TICKET_EMITTED.value,
+    Stage.TICKET_ACTIVE.value,
+    TERMINAL_STAGE,
+})
+
+#: 拒绝型闸门（= 全部阶段减去通过型）。"为什么没开"只统计这些。
+GATE_STAGES: tuple[str, ...] = tuple(
+    name for name in STAGE_ORDER if name not in SUCCESS_STAGES
+)
+
 #: 漏斗阶段分组（看板折叠显示用；不影响计数）。
 STAGE_GROUPS: dict[str, tuple[str, ...]] = {
     "scan": (Stage.CARD_LOADED.value, Stage.CARD_INDICATORIZED.value,
@@ -158,6 +176,7 @@ DETAIL_TICKET_SHAPE_INVALID = "TICKET_SHAPE_INVALID"
 DETAIL_TICKET_EXPIRED = "TICKET_EXPIRED"
 DETAIL_TICKET_EXPIRING_BEFORE_USE = "TICKET_EXPIRING_BEFORE_USE"
 DETAIL_TICKET_ALREADY_CONSUMED = "TICKET_ALREADY_CONSUMED"
+DETAIL_TICKET_LEDGER_UNAVAILABLE = "TICKET_LEDGER_UNAVAILABLE"
 DETAIL_TICKET_SYMBOL_NOT_IN_SCOPE = "TICKET_SYMBOL_NOT_IN_SCOPE"
 DETAIL_ENTRY_ZONE_INVERTED = "ENTRY_ZONE_INVERTED"
 
@@ -206,6 +225,7 @@ DETAIL_REASON: dict[str, str] = {
     DETAIL_TICKET_EXPIRED: REASON_VALIDATION_REJECTED,
     DETAIL_TICKET_EXPIRING_BEFORE_USE: REASON_VALIDATION_REJECTED,
     DETAIL_TICKET_ALREADY_CONSUMED: REASON_HOLD_EXISTING,
+    DETAIL_TICKET_LEDGER_UNAVAILABLE: REASON_READINESS_BLOCKED,
     DETAIL_TICKET_SYMBOL_NOT_IN_SCOPE: REASON_READINESS_BLOCKED,
     DETAIL_ENTRY_ZONE_INVERTED: REASON_VALIDATION_REJECTED,
     # -- 执行侧 -------------------------------------------------------- #
@@ -262,6 +282,14 @@ def validate_detail_table() -> None:
 # --------------------------------------------------------------------------- #
 # 三、漏斗本身
 # --------------------------------------------------------------------------- #
+#: 明细来源：扫描候选 / 跨轮恢复的票据 / 执行侧 / 轮级结论。
+#: 只有 ``scan`` 来源参与"漏斗收窄"的前缀计数，避免把恢复出来的票据算成新候选。
+ORIGIN_SCAN = "scan"
+ORIGIN_RECOVER = "recover"
+ORIGIN_EXECUTE = "execute"
+ORIGIN_ROUND = "round"
+
+
 @dataclass(frozen=True)
 class FunnelItem:
     """一个候选的结局：停在哪道闸门、为什么。"""
@@ -273,6 +301,7 @@ class FunnelItem:
     timeframe: str = ""
     ticket_id: str = ""
     reason: str = ""
+    origin: str = ORIGIN_SCAN
 
     def __post_init__(self) -> None:
         stage = str(self.stage or "")
@@ -288,10 +317,20 @@ class FunnelItem:
             object.__setattr__(self, "reason", code[0])
         object.__setattr__(self, "stage", stage)
         object.__setattr__(self, "detail", str(self.detail or ""))
+        origin = str(self.origin or ORIGIN_SCAN)
+        if origin not in (ORIGIN_SCAN, ORIGIN_RECOVER, ORIGIN_EXECUTE, ORIGIN_ROUND):
+            origin = ORIGIN_SCAN
+        object.__setattr__(self, "origin", origin)
+        # 只有**通过型**阶段允许"没有细分码"；拒绝型阶段没有细分码是程序错误
+        # （会让"为什么没开"重新变成自由文本），因此 fail-closed。
+        if not self.detail and stage not in SUCCESS_STAGES:
+            raise ValueError(
+                f"拒绝型闸门 {stage!r} 必须带细分码（未登记的原因不允许静默）")
 
     @property
     def passed(self) -> bool:
-        return self.stage == TERMINAL_STAGE
+        """通过型阶段 + 无细分码 = 成功；其余都是"被这道闸门拒绝"。"""
+        return not self.detail and self.stage in SUCCESS_STAGES
 
     @property
     def key(self) -> str:
@@ -303,6 +342,7 @@ class FunnelItem:
             "stage": self.stage, "detail": self.detail, "reason": self.reason,
             "card_id": self.card_id, "symbol": self.symbol,
             "timeframe": self.timeframe, "ticket_id": self.ticket_id,
+            "origin": self.origin,
         }
 
 
@@ -316,8 +356,14 @@ class ScanFunnel:
 
     round_id: str
     items: list[FunnelItem] = field(default_factory=list)
+    #: 拒绝型闸门上的计数（"为什么没开"的直方图）。
     stopped_at: Counter[str] = field(default_factory=Counter)
+    #: 通过型阶段的计数（``ticket_emitted``/``ticket_active``/``intent_ready``）。
+    reached: Counter[str] = field(default_factory=Counter)
+    #: 扫描侧候选的漏斗收窄（只统计 ``origin=scan`` 的项）。
     passed_stages: Counter[str] = field(default_factory=Counter)
+    #: 每个项落在哪个阶段（不分来源），用于"这一轮处理了多少张票"的吞吐视图。
+    throughput: Counter[str] = field(default_factory=Counter)
     detail_counts: Counter[str] = field(default_factory=Counter)
     reason_counts: Counter[str] = field(default_factory=Counter)
     round_ids: list[str] = field(default_factory=list)
@@ -328,29 +374,37 @@ class ScanFunnel:
 
     def record(self, stage: str, detail: str = "", *, card_id: str = "",
                symbol: str = "", timeframe: str = "", ticket_id: str = "",
-               round_id: str = "", reason: str = "") -> FunnelItem:
+               round_id: str = "", reason: str = "", origin: str = ORIGIN_SCAN) -> FunnelItem:
         """登记一个候选的结局。
 
         ``stage`` 是**它停下的那道闸门**（未通过）或 :data:`TERMINAL_STAGE`
         （通过全部闸门）。``detail`` 必须是已登记的细分码；未登记码 fail-closed
         （宁愿报错也不让自由文本冒充原因）。
+
+        ``origin=scan`` 的项参与"漏斗收窄"前缀计数（它们确实从第一道闸门走起）；
+        ``recover``/``execute``/``round`` 来源的项只进 :attr:`throughput` 与原因计数，
+        否则"重启后恢复的票据"会被算成"本轮新候选"，把候选数虚增。
         """
         item = FunnelItem(stage=stage, detail=detail, card_id=card_id, symbol=symbol,
-                          timeframe=timeframe, ticket_id=ticket_id, reason=reason)
+                          timeframe=timeframe, ticket_id=ticket_id, reason=reason,
+                          origin=origin)
         rid = str(round_id or self.round_id)
         if rid not in self.round_ids:
             self.round_ids.append(rid)
-        if not item.passed:
+        if item.passed:
+            self.reached[item.stage] += 1
+        else:
             self.stopped_at[item.stage] += 1
             if item.detail:
                 self.detail_counts[item.detail] += 1
             if item.reason:
                 self.reason_counts[item.reason] += 1
+        self.throughput[item.stage] += 1
         # 到达/通过停下的那一道闸门即计入该闸门；终态项计入全部闸门（含
-        # ``INTENT_READY``），因此 ``passed_stages[TERMINAL_STAGE]`` 就是开仓数。
-        # **只在这里累加一次**——重复累加会让"开了几仓"翻倍。
-        for name in STAGE_ORDER[:STAGE_ORDER.index(item.stage) + 1]:
-            self.passed_stages[name] += 1
+        # ``INTENT_READY``）。**只在这里累加一次**——重复累加会让收窄数翻倍。
+        if item.origin == ORIGIN_SCAN:
+            for name in STAGE_ORDER[:STAGE_ORDER.index(item.stage) + 1]:
+                self.passed_stages[name] += 1
         if len(self.items) < MAX_ITEMS_IN_REPORT:
             self.items.append(item)
         else:
@@ -366,10 +420,22 @@ class ScanFunnel:
 
     @property
     def opened(self) -> int:
-        return int(self.passed_stages.get(TERMINAL_STAGE, 0))
+        """本轮真的产出开仓意图的数量（终态项，含执行侧来源）。"""
+        return int(self.reached.get(TERMINAL_STAGE, 0))
+
+    @property
+    def tickets_emitted(self) -> int:
+        """扫描侧新发射的票据数。"""
+        return int(self.reached.get(Stage.TICKET_EMITTED.value, 0))
+
+    @property
+    def tickets_recovered(self) -> int:
+        """跨轮/重启恢复出来的仍有效票据数。"""
+        return int(self.reached.get(Stage.TICKET_ACTIVE.value, 0))
 
     @property
     def total_candidates(self) -> int:
+        """本轮**扫描侧**候选数（到达第一道闸门的 ``(卡, symbol, timeframe)`` 项）。"""
         return int(self.passed_stages.get(STAGE_ORDER[0], 0))
 
     def primary_reason(self) -> str:
@@ -444,8 +510,10 @@ class ScanFunnel:
                 {"detail": code, "reason": DETAIL_REASON.get(code, ""), "count": count}
                 for code, count in self.detail_counts.most_common()
             ],
-            "stopped_at": {stage: self.stopped_at[stage] for stage in STAGE_ORDER
+            "stopped_at": {stage: self.stopped_at[stage] for stage in GATE_STAGES
                            if self.stopped_at.get(stage)},
+            "reached": {stage: self.reached[stage] for stage in STAGE_ORDER
+                        if self.reached.get(stage)},
         }
 
     def as_dict(self) -> dict[str, Any]:
@@ -456,8 +524,14 @@ class ScanFunnel:
             "rounds": list(self.round_ids[-8:]),
             "opened": self.opened,
             "candidates": self.total_candidates,
-            "stopped_at": {stage: self.stopped_at[stage] for stage in STAGE_ORDER
+            "tickets_emitted": self.tickets_emitted,
+            "tickets_recovered": self.tickets_recovered,
+            "stopped_at": {stage: self.stopped_at[stage] for stage in GATE_STAGES
                            if self.stopped_at.get(stage)},
+            "reached": {stage: self.reached[stage] for stage in STAGE_ORDER
+                        if self.reached.get(stage)},
+            "throughput": {stage: self.throughput[stage] for stage in STAGE_ORDER
+                           if self.throughput.get(stage)},
             "passed_stages": {stage: self.passed_stages[stage] for stage in STAGE_ORDER
                               if self.passed_stages.get(stage)},
             "reason_codes": [{"reason": code, "count": count}
@@ -491,9 +565,15 @@ def funnel_from_report(payload: Mapping[str, Any] | None) -> ScanFunnel:
     funnel.stopped_at.update({
         str(stage): int(count or 0) for stage, count in (data.get("stopped_at") or {}).items()
     })
+    funnel.reached.update({
+        str(stage): int(count or 0) for stage, count in (data.get("reached") or {}).items()
+    })
     funnel.passed_stages.update({
         str(stage): int(count or 0)
         for stage, count in (data.get("passed_stages") or {}).items()
+    })
+    funnel.throughput.update({
+        str(stage): int(count or 0) for stage, count in (data.get("throughput") or {}).items()
     })
     funnel.round_ids.extend(str(item) for item in data.get("rounds") or [])
     funnel.notes.extend(str(item) for item in data.get("notes") or [])
@@ -551,7 +631,12 @@ class TicketConsumption:
 
 @dataclass(frozen=True)
 class TicketRecord:
-    """账本里的 ticket：发射事实 + 消费事实（两件事分开记）。"""
+    """账本里的 ticket：发射事实 + 消费事实（两件事分开记）。
+
+    ``consumed`` 是一个**独立的布尔事实**，不是从 ``consumed_at_ms > 0`` 推出来的：
+    调用方给的钟可能是 0（离线重放/测试替身），让"已消费"依赖时间戳的值会把
+    "消费一次"悄悄退化成"每次都能再消费一次"——正是本账本要防的那件事。
+    """
 
     ticket_id: str
     signal_id: str = ""
@@ -560,12 +645,9 @@ class TicketRecord:
     expires_at: str = ""
     emitted_at_ms: int = 0
     emitted_round_id: str = ""
+    consumed: bool = False
     consumed_at_ms: int = 0
     consumed_round_id: str = ""
-
-    @property
-    def consumed(self) -> bool:
-        return int(self.consumed_at_ms) > 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -573,12 +655,17 @@ class TicketRecord:
             "strategy_id": self.strategy_id, "symbol": self.symbol,
             "expires_at": self.expires_at, "emitted_at_ms": self.emitted_at_ms,
             "emitted_round_id": self.emitted_round_id,
+            "consumed": bool(self.consumed),
             "consumed_at_ms": self.consumed_at_ms,
             "consumed_round_id": self.consumed_round_id,
         }
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "TicketRecord":
+        # 兼容没有显式 ``consumed`` 字段的旧账本文件：那时用时间戳>0 推断。
+        produced = payload.get("consumed")
+        consumed = bool(produced) if produced is not None else (
+            int(payload.get("consumed_at_ms") or 0) > 0)
         return cls(
             ticket_id=str(payload.get("ticket_id") or ""),
             signal_id=str(payload.get("signal_id") or ""),
@@ -587,6 +674,7 @@ class TicketRecord:
             expires_at=str(payload.get("expires_at") or ""),
             emitted_at_ms=int(payload.get("emitted_at_ms") or 0),
             emitted_round_id=str(payload.get("emitted_round_id") or ""),
+            consumed=consumed,
             consumed_at_ms=int(payload.get("consumed_at_ms") or 0),
             consumed_round_id=str(payload.get("consumed_round_id") or ""),
         )
@@ -698,6 +786,7 @@ class TicketLedger:
                 expires_at=str(ticket.get("expires_at") or (existing.expires_at if existing else "")),
                 emitted_at_ms=int(existing.emitted_at_ms if existing else stamp),
                 emitted_round_id=str(existing.emitted_round_id if existing else round_id),
+                consumed=bool(existing.consumed) if existing else False,
                 consumed_at_ms=int(existing.consumed_at_ms if existing else 0),
                 consumed_round_id=str(existing.consumed_round_id if existing else ""),
             )
@@ -730,7 +819,7 @@ class TicketLedger:
                 expires_at=existing.expires_at if existing else "",
                 emitted_at_ms=int(existing.emitted_at_ms if existing else stamp),
                 emitted_round_id=str(existing.emitted_round_id if existing else round_id),
-                consumed_at_ms=stamp, consumed_round_id=str(round_id),
+                consumed=True, consumed_at_ms=stamp, consumed_round_id=str(round_id),
             )
             return TicketConsumption(ticket_id=key, state=CONSUMED, round_id=round_id,
                                      first_round_id=str(round_id), first_at_ms=stamp)
@@ -758,7 +847,7 @@ class TicketLedger:
                 strategy_id=existing.strategy_id, symbol=existing.symbol,
                 expires_at=existing.expires_at, emitted_at_ms=existing.emitted_at_ms,
                 emitted_round_id=existing.emitted_round_id,
-                consumed_at_ms=0, consumed_round_id="",
+                consumed=False, consumed_at_ms=0, consumed_round_id="",
             )
             return True
 
@@ -782,7 +871,8 @@ class TicketLedger:
         removed = 0
         with self._lock:
             for key, record in list(self._records.items()):
-                if not record.consumed:
+                if not record.consumed or record.consumed_at_ms <= 0:
+                    # 未结算的、或没有可信结算时间的，一律不修剪（宁可不删也不误删）。
                     continue
                 if stamp and stamp - record.consumed_at_ms > self.retention_ms:
                     self._records.pop(key, None)
