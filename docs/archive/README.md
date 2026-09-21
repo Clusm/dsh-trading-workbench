@@ -110,6 +110,19 @@
 | `docs/测试与验收矩阵_2026-09-16.md`、`docs/当前状态与剩余工作矩阵_2026-09-16.md`、`docs/上线前人工检查单_2026-09-16.md` | [文档索引](../文档索引.md) 把这三篇列为**现行**（质量门禁/当前状态/人工确认），不属于历史材料 |
 | `docs/dispatch/**` | 编排流程记录，是否随包只由 `scripts/create_release_package.py` 的 `EXCLUDED_PATH_PREFIXES` 决定，不归本目录管 |
 
+## 删除清单（本任务不删除任何文件）
+
+| 项 | 数量 | 核验方式 |
+|---|---|---|
+| 删除的文件 | **0** | `git diff --name-status --no-renames 0706db1 <U10b HEAD>`：`D(消失)=26`、`A(新增)=30`，且**每个消失路径都有同名文件在新路径存在**（26/26 配对，孤儿删除 = 0）。另 4 个新增是 `docs/archive/README.md` 与本任务补丁目录的 3 个文本，无对应删除 |
+| 删除的能力 / 入口 | **0** | 归档的 18 个脚本仍在 Git 索引内，仍被 `scripts/check_quality.py` 的 `ruff` + `py_compile` 覆盖；8 篇文档正文逐字节未改（`git diff -M` 全部为 `R100`） |
+| 复制的 `.py.txt` 之类降级件 | 0 | 本任务没有把可运行脚本降级成文本存档；归档件保持可运行（并已修正项目根深度） |
+
+被引用的策略注册表与来源**全部保留未动**：`knowledge/strategy_cards.json`、
+`knowledge/backup_strategy_cards.json`、`knowledge/策略报告_整理版.md`、
+`config/*`、`src/strategy_runtime/PROVENANCE.md` 在 `0706db1 → U10b HEAD` 的 diff 里
+零命中。
+
 ## 复验入口
 
 - 离线回归（含 `SMOKE MANIFEST OK` 与 `OFFLINE REGRESSION OK scripts=N`）：
