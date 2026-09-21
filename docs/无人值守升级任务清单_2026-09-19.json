@@ -3436,7 +3436,7 @@
       "title": "RC集成、故障验收和观察交付",
       "owner_role": "I",
       "actual_assignee": null,
-      "status": "READY_FOR_REVIEW",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [
         "U01",
@@ -3576,6 +3576,15 @@
             "未修任何 src/ 缺陷（只读约束）；release_manifest.json 的 schema_version=0 表示未提供账本，部署侧必须重铸",
             "本交付物为 DRAFT 且由同模型会话产出"
           ]
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "044fccf",
+          "integration_commit": "9d0211a（含 U12 验收不变量更正）；merge 提交见 git log",
+          "code_identity": "git diff 044fccf HEAD -- docs/releases/unattended_rc/ tests/acceptance/test_unattended_release.py .github/workflows/ci.yml = 0 行（更正前的 merge 态）；更正后仅 test_unattended_release.py 一处断言按证据收窄",
+          "rc_status": "**RC 仍为 DRAFT** —— 冻结由 I 决定；`observed_status` 三项仍 `NOT_STARTED`",
+          "integration_tests": "U12 验收 **47/0**（集成后因身份链路修复暴露一处断言过严，已按证据收窄，见下）；契约 173/0；check_quality **OK files=296 untracked=0**；**OFFLINE REGRESSION OK scripts=85**（MANIFEST OK included=81）",
+          "invariant_correction": "原 §8 断言『身份完整 -> 不得带任何阻断码』。该断言只在 `collect_artifact_files` 于真实 src/ 树抛错（U12-BUILD-F1）时成立；hop1+hop2 修复后身份**真正完整**（artifact_hash/runtime_instance_id/effective_config_hash/model_route_hash 全部非空），余下阻断是 `MODEL_ROUTE_MOCK`（runtime_identity.py:1200，配置的是 Mock 模型路由）= **环境级**阻断，与『身份采集失败』是两回事。原断言把两者混为一谈，会把合法的 Mock 路由阻断误报为失败。已收窄为『完整身份不得带 IDENTITY_COLLECT_FAILED』；下方两态扫描/一致性断言未动，故钉住 U12-BUILD-F1 的那部分仍在。诊断行实测 `src/ 默认工件扫描成功=True`。"
         }
       ],
       "blockers": [],
@@ -3642,7 +3651,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "044fccf",
       "review_assignments": [],
       "qa_runs": []
     }
@@ -4361,6 +4370,14 @@
         "owner": "U12",
         "blocks": "无（唯一生产注入点 service.py:988 已核实正确）",
         "note": "Q r1 的非回归发现：`before_entry(facts=...)` 用传入事实**替换**（而非叠加）门禁自己的账本读取，因此只要调用方传了事实，门禁就不再自己核账本。当前唯一生产注入点是 service.py:988（已核实正确），故不构成缺陷；Q 建议改为 `max(injected, live)` 的纵深防御写法（probe_bypass B9 已演示该差异）。U12 可裁决是否采纳。"
+      },
+      {
+        "id": "U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER",
+        "title": "`runtime_instance_id` 为字面量占位符 'unknown'，但 U12 验收的 `complete` 判据把它当『非空=完整』",
+        "status": "OPEN",
+        "owner": "U12/U15",
+        "blocks": "无（不阻断集成）；影响『身份完整』的判据精度",
+        "note": "实测：`build_release_manifest(...).to_dict()['runtime_instance_id'] == 'unknown'`（字面量，非空）。U12 验收的 `complete = bool(artifact_hash) and bool(runtime_instance_id)` 因此判为『完整』。真值语义：`runtime_instance_id` 是运行代标识，服务启动若未能持久化运行代会降级为占位值（service.py 记 `run_generation_error` / 'identity evidence incomplete'）。**静默把占位符当完整身份**是口径缺口（方向 fail-open）。建议 U12/U15 在 RC 收口时明确：`'unknown'` 应视为『运行代缺失』而非完整身份（例如纳入 blockers 或改用显式 `runtime_instance_id_known` 标志）。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -4596,16 +4613,15 @@
       }
     },
     "w3_status": {
-      "state": "IN_PROGRESS",
+      "state": "COMPLETE（工程侧）",
       "integrated_in_w3": [
         "U09",
         "U13-FU1",
-        "U13-FU2+FU3（恢复门禁 N1/N2/N3 全闭）",
-        "U12-BF1(hop1) + CONTRACT-ERRATUM-1(hop2)"
+        "U13-FU2+FU3",
+        "U12-BF1 + CONTRACT-ERRATUM-1",
+        "U12（RC 交付物，DRAFT）"
       ],
-      "delivered_pending_integration": [
-        "U12（RC DRAFT，head 044fccf）"
-      ],
+      "delivered_pending_integration": [],
       "in_flight": {},
       "gates": {
         "offline_regression": "OFFLINE REGRESSION OK scripts=85",
@@ -4613,11 +4629,12 @@
         "contracts": "PASS 173 / FAIL 0 (golden 160)"
       },
       "rc_freeze_blockers": [
-        "U12 的 RC 交付物尚未集成（DRAFT）",
         "D05（SLO 时限冻结，需外部决策）",
         "观察窗三项 NOT_STARTED（7天/200/30）—— 结构性不可压缩",
-        "MODEL_ROUTE_MOCK：身份三字段在未配置真实模型路由时仍为 None（环境条件，须在真实路由下复验）"
-      ]
+        "MODEL_ROUTE_MOCK：需配置真实模型路由后重铸 manifest 并复验身份/门禁",
+        "U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER（运行代占位符判据）"
+      ],
+      "note": "首批 14 项任务全部 INTEGRATED（U00–U15 中 14 项首批必需 + U09/U12）。W4 观察窗与 D01–D05 外部待决项结构性不可在本窗口完成。"
     },
     "contract_erratum": {
       "id": "CONTRACT-ERRATUM-1",
@@ -4629,7 +4646,8 @@
       "change": "新增 _structured_path_mapping() 供路径键映射（artifact_files / dependency lock files）使用：保留 ensure_structured_payload（原始文本、KEY=value 行列表照旧拒绝）与 Mapping 形态检查，**去掉**字段名守卫（文件名级凭据守卫由 runtime_identity._safe_artifact_name 承担）。字段名键的映射（effective_config / strategy / model_route）守卫**不变**。",
       "freeze_note": "**这是对冻结契约的修改**，属 I 的独占范围；已作为**显式勘误**记录，而非静默改动。行为保持性：它只把一次**误报的抛错**变成正确行为 —— 契约冒烟仍 PASS 173 / FAIL 0、golden 160 **逐字未变**。",
       "reverse_evidence": "hash_effective_config({api_key: ...}) 仍拒绝；hash_artifact(API_KEY=abc 原始文本) 仍拒绝；collect_artifact_files(.) = 125 文件含 management_authorization.py",
-      "honest_limit": "修完后 build_release_manifest 的 identity_blockers 只剩 (MODEL_ROUTE_MOCK,)，身份三字段仍为 None（**环境条件：未配置真实模型路由**）。故本条**不能**单独推出『release_readiness 可达 GO』；真实路由配置下须另验。"
+      "honest_limit": "**更正（I 先前写错，以实测为准）**：本条先前写『身份三字段仍为 None』——**错误**。当时我读的是 `manifest['identity']` 这个**并不存在**的嵌套键，取到空 dict 才得到 None。实测：修复后 `build_release_manifest` 的**顶层** `artifact_hash=9bd477f4…`、`effective_config_hash=3cdc7708…`、`model_route_hash=e3704987…`、`runtime_instance_id='unknown'` **均已非空，身份是完整的**。唯一剩余的 `identity_blockers=('MODEL_ROUTE_MOCK',)` 是**环境条件**（未配置真实模型路由）。结论更正为：U12-BUILD-F1 已真正修复；因身份带环境级阻断，`release_readiness` 在 Mock 路由下仍不可达 GO —— 这是**正确行为**（不该用 Mock 路由发布），不是缺陷。",
+      "residual": "`runtime_instance_id` 实测值为字面量 `'unknown'`（占位符），见 known_issues 的 U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER。"
     }
   },
   "dispatch_version": "v1.1",
