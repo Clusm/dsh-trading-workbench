@@ -135,13 +135,20 @@
 
 > **W0 / W1 / W2 均已完成**（W1 5/5、W2 7/7 全部 INTEGRATED）。以下为 W3 起点。
 
-1. **W3 第一步：派发 U09**（发布门禁口径与影子隔离收口；作者 C 或 D，审查 A/B + Q）。
-   派发前必读：`S08-SHADOW-GATE-LEAK`（**硬前置**：`release_evidence.py` 未按 `source` 过滤，50+50 影子样本使方向候选 200→300）。
-   - `task_base_commit` 取**当时已审核的集成 HEAD**（`17b1d6f` 或其后），并在提示词写明该 base 已含哪些任务（W1 5 个 + W2 7 个）。
-   - 提示词内联约束：只读契约实现与目标源文件；**必须**交付完整 unified diff 到 `docs/dispatch/patches/U09/<head>/`；**尽早写代码、尽早提交**；测试两态可跑、不硬编码迁移版本集合、冒烟须登记。
+1. **W3 第一步：U09（已派发，作者会话运行中）** —— 工作树 `mat-wt/W3`，分支 `task/U09`，base `448a4e9`。
+   - 交付：`src/core/release_evidence.py`（扩展，不重写）＋ `tests/acceptance/test_release_evidence_v2.py` ＋ `scripts/smoke_u09_release_evidence.py` ＋ 补丁包 `docs/dispatch/patches/U09/<head>/`（含 `database.py`/`health_watch.py`/`report_release_readiness.py` 适配 + `run_offline_regression.py` 登记）。
+   - 已内联进提示词：S08 泄漏的具体行号与修法（**从 `src.intel.shadow_status` 导入 gate_role 口径，禁止硬编码第二份 source 名单**）、NO_EDGE 不计分母、**窗口首尾缺失计入分母**（现 `observation_coverage` 自动取首尾健康行 = 规格 §12 明禁）、lifecycle 去重 + 晚到成本重算、ACK≠恢复、重启 vs 换版、不建第二套 GO 判断器、F10/F12/F16/F23/F24 证据、3 种 git 配置补丁可应用、两态测试、禁止硬编码迁移版本集合。
+   - **作者会话仍在运行 → 本回合不要重复派发 U09。**
 2. **U09 集成后 → U12 BUILD**：RC 集成、故障矩阵（F01–F25）、隔离恢复演练（F14/F18）、真实宿主/渠道验收（**依赖 D01/D02 决策**）。
    U12 必须一并消费的跨任务挂账：`W1-JOINT-WIRING`（U03 接线 × U15 身份，解开开仓 fail-closed）、`U08-U12-WIRING`（graph.py 整轮聚合）、`U08-R5-FU1`（N10 更正）、`AlertQueue` 无生产消费者（监控 `errors`，注意 `PERSIST_FAILED` 不在其中）。
 3. **W4 不可在窗口内完成**（7 天挂钟观察窗、D01–D05 外部待决、实盘启用须用户另行授权）——须如实报告，**不得标记为通过**。
+
+### 并行进行中（与本回合同时运行，勿重复派发）
+- **U09 作者会话**：工作树 `mat-wt/W3`（`task/U09` @ `448a4e9`）。
+- **W3 隔离恢复演练会话（F14/F18）**：工作树 `mat-wt/W3-drill`（**detached @ `448a4e9`**，只做验证、只写报告）。报告将落在其工作树内 `docs/dispatch/reviews/U12/drill_F14_F18/`，由 I 归档进 `mat-wt/I`。
+  - F14 = 从恢复包启动期间有交易所已成交订单 → **先全量对账/增量回拉再开仓，不重复下单**。
+  - F18 = 新代码目录/旧状态根/PID 复用/两账户同 profile·同账户不同 profile → **状态路径与身份一致、单账户互斥、不新建错误基线、迁移可回滚**。
+  - 注意：该工作树**没有 `.venv`**，正好检验 **KI02**（解释器解析）是否真的修好。
 
 **W1/W2 已完成动作（存档，勿重做）**：建 A/B/CD/EF 四个 worktree → W1 派发 U01/U04/U03/U15 → 交叉审查 → 修复轮 → Q 验收 → 集成；W2 派发 B线U02、CD线U05→U06a→U08、EF线U13/U14→U10a。
 
