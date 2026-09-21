@@ -4819,8 +4819,11 @@
           "note": "U06b 集成后依赖就绪。风险已内联：不得改动 shadow_status 的 COHORTS/SOURCE_*/GATE_ROLE_*/release_gate_role 语义（release_evidence 的 200 分母单一口径来源）；必须证明统计产物同样不进任何门禁分母（复跑 smoke_u09 60/0 与 test_release_evidence_v2 78/0 前后同值）；不得伪称 F11 已通过。"
         },
         "U11": {
-          "status": "READY（依赖 U10b 已集成）",
-          "note": "U10b 已 INTEGRATED -> U11 依赖就绪，可派发。"
+          "status": "IN_PROGRESS",
+          "branch": "task/U11",
+          "worktree": "mat-wt/F3",
+          "base": "03967e9",
+          "note": "U10b 集成后依赖就绪。**本任务是映射/设计交付（独占路径 docs/重构接口映射.md），不是代码重构** —— 已明确禁止真的去拆 src/。已内联 7 条现实约束逐条需在文档体现：冻结契约与 CONTRACT-ERRATUM-1 先例、run_offline_regression 的 smoke 清单强制、release_evidence 的 shadow_status 单一口径与 7/200/30 不得降低、共享文件由 I 合入与历史集成级缺陷、恢复门禁 N1/N2/N3 与 before_entry(facts) 替换语义、pyproject 的 scripts/*.py E402 豁免、U10b 归档布局与已被证伪的归档规则 3。"
         }
       }
     },
