@@ -1,0 +1,419 @@
+diff --git a/src/signal_engine/scanner.py b/src/signal_engine/scanner.py
+index 3cee847..bbac0b6 100644
+--- a/src/signal_engine/scanner.py
++++ b/src/signal_engine/scanner.py
+@@ -21,6 +21,37 @@ import pandas as pd
+ 
+ from audit.database import AuditDatabase
+ import strategy_runtime
++from core.strategy_funnel import (
++    DETAIL_BAR_ALREADY_SEEN,
++    DETAIL_CARD_NOT_INDICATORIZED,
++    DETAIL_CARDS_INVALID,
++    DETAIL_CARDS_UNAVAILABLE,
++    DETAIL_FEATURES_INCOMPLETE,
++    DETAIL_KLINE_FETCH_FAILED,
++    DETAIL_KLINE_QUALITY_REJECTED,
++    DETAIL_KLINE_ROWS_INSUFFICIENT,
++    DETAIL_MARKET_BUDGET_DEFERRED,
++    DETAIL_MARKET_TRANSPORT_OUTAGE,
++    DETAIL_NO_SIGNAL_ON_CLOSED_BAR,
++    DETAIL_NO_TICKETS_AVAILABLE,
++    DETAIL_SCAN_EXCEPTION,
++    DETAIL_SIDE_NOT_ALLOWED_BY_CARD,
++    DETAIL_SIGNAL_ALREADY_PERSISTED,
++    DETAIL_SIGNAL_FN_MISSING,
++    DETAIL_SIGNAL_FN_OUTPUT_INVALID,
++    DETAIL_STRATEGY_LAB_DRIFT,
++    DETAIL_STRATEGY_LAB_UNAVAILABLE,
++    DETAIL_SYMBOL_NOT_IN_SCOPE,
++    DETAIL_SYMBOL_NOT_USDT,
++    DETAIL_TICKET_EXPIRING_BEFORE_USE,
++    DETAIL_TICKET_SOURCE_UNAVAILABLE,
++    DETAIL_TICKET_SYMBOL_NOT_IN_SCOPE,
++    DETAIL_TIMEFRAME_UNSUPPORTED,
++    FUNNEL_REPORT_KEY,
++    ORIGIN_RECOVER,
++    ScanFunnel,
++    Stage,
++)
+ from data.binance_public import _get_json
+ from data.kline_store import (
+     KlineDataQualityError,
+@@ -187,7 +218,8 @@ class SignalScanner:
+                  state_file: Path, db: AuditDatabase | None = None,
+                  kline_limit: int = 500, ticket_valid_bars: int = 2,
+                  universal_cards: bool = False,
+-                 max_scan_symbols_per_cycle: int = 8):
++                 max_scan_symbols_per_cycle: int = 8,
++                 funnel: ScanFunnel | None = None):
+         self.knowledge_dir = Path(knowledge_dir)
+         # 参数保留至一次兼容发布结束，避免外部运行脚本的构造调用失效。运行时不再
+         # 从这个路径加载模块；策略研究仓库可以独立移动、归档或不存在。
+@@ -198,10 +230,21 @@ class SignalScanner:
+         self.ticket_valid_bars = int(ticket_valid_bars)
+         self.universal_cards = bool(universal_cards)
+         self.max_scan_symbols_per_cycle = int(max_scan_symbols_per_cycle)
++        # 可选注入的漏斗：整轮（扫描 + 执行）共用同一个实例时，调用方拿到的
++        # 就不只是"扫描的漏斗"，而是"这一轮为什么没开仓"的完整答复。
++        self.funnel = funnel
+         self._registry: dict[str, Any] | None = None
+         self._features_mod: Any | None = None
+ 
+-    def _load_strategy_lab(self) -> None:
++    def _load_strategy_lab(self, cards: list[dict[str, Any]] | None = None) -> None:
++        """校验运行时注册表覆盖卡册所需的 ``signal_fn``。
++
++        ``cards`` 由 :meth:`scan` 传入**已经读过一遍**的卡册：卡册损坏必须在
++        "卡册"这件事上留痕（``CARDS_INVALID``），不能在这里再解析一次而先抛
++        ``JSONDecodeError``、被外层按"注册表在不在"误判成运行时漂移
++        （B-r3 N1）。未传时（既有调用方，如 smoke_signal_scanner_integration）
++        仍自行读卡册，行为不变。
++        """
+         if self._registry is not None:
+             return
+         registry = getattr(strategy_runtime, "REGISTRY", None)
+@@ -209,9 +252,11 @@ class SignalScanner:
+             raise RuntimeError("strategy_runtime.REGISTRY 缺失或类型错误")
+         if not callable(getattr(strategy_runtime, "build_features", None)):
+             raise RuntimeError("strategy_runtime.build_features 缺失")
++        if cards is None:
++            cards = load_cards(self.knowledge_dir)
+         required = {
+             str(card.get("signal_fn") or "")
+-            for card in load_cards(self.knowledge_dir)
++            for card in cards
+             if card.get("indicatorized") and card.get("signal_fn")
+         }
+         missing = sorted(required - set(registry))
+@@ -219,6 +264,44 @@ class SignalScanner:
+             raise RuntimeError(f"strategy_runtime 缺少策略卡所需 signal_fn: {', '.join(missing)}")
+         self._registry = registry
+         self._features_mod = strategy_runtime
++
++    def _load_cards_or_fault(self, funnel: ScanFunnel) -> list[dict[str, Any]]:
++        """读卡册；**缺失/损坏都是轮级故障**，不再静默返回空列表（B-r1 P0-4③）。
++
++        原先 ``load_cards()`` 在文件不存在时返回 ``[]``、JSON 损坏时直接抛
++        ``JSONDecodeError``——两者都在第一道闸门之前，漏斗里**一条记录都没有**，
++        于是"卡册读不到"被压成 ``verdict=no_candidates`` 甚至 ``no_edge``。
++        """
++        cards_path = self.knowledge_dir / "strategy_cards.json"
++        try:
++            cards = load_cards(self.knowledge_dir)
++        except Exception as exc:  # noqa: BLE001 - 损坏必须变成可见的轮级故障
++            funnel.record_round_fault(
++                DETAIL_CARDS_INVALID,
++                note=f"{type(exc).__name__}: {exc}"[:160])
++            return []
++        if not cards and not cards_path.exists():
++            funnel.record_round_fault(
++                DETAIL_CARDS_UNAVAILABLE,
++                note=f"策略卡册不存在: {cards_path.name}")
++        return cards
++
++    def _persist_fault_state(self, funnel: ScanFunnel, detail: str) -> None:
++        """轮级故障导致整轮中断时，仍把漏斗写进状态文件（否则故障只在内存里）。"""
++        try:
++            state = self._load_state()
++            state["last_scan"] = {
++                "at": utc_now().isoformat(),
++                "status": "error",
++                "error": detail[:400],
++                "tickets": 0,
++                FUNNEL_REPORT_KEY: funnel.as_dict(),
++                "no_open_reason": funnel.no_open_explanation()["primary_reason"],
++                "no_open_verdict": funnel.no_open_explanation()["verdict"],
++            }
++            self._save_state(state)
++        except Exception:  # noqa: BLE001 - 落盘失败不得掩盖原始异常
++            pass
+ 
+     def _load_state(self) -> dict[str, Any]:
+         if self.state_file.exists():
+@@ -264,12 +347,34 @@ class SignalScanner:
+     def scan(self, now: datetime | None = None,
+              scan_symbols: list[str] | None = None) -> list[dict[str, Any]]:
+         """扫描全部 final 策略卡，并返回本轮所有仍可评估的 ticket。"""
+-        self._load_strategy_lab()
+         now = now or utc_now()
++        # 扫描漏斗（U08/DL07/C#13）：每一项**停在哪道闸门、为什么**都留痕，
++        # 因此"本轮没开仓"永远有结构化的答案，而不是只剩一个 status=ok。
++        # 调用方注入的实例会被复用（扫描 + 执行共用同一个漏斗）。
++        funnel = self.funnel or ScanFunnel(round_id=now.isoformat())
++        # **先读卡册**：卡册缺失/损坏是"卡册"的事实，必须记成
++        # ``CARDS_UNAVAILABLE``/``CARDS_INVALID``。原先把 ``_load_strategy_lab()``
++        # 放在前面，而它内部自己 ``load_cards()``——卡册 JSON 损坏
++        # （``JSONDecodeError``）会从这里先抛出，被外层按"REGISTRY 是不是 dict /
++        # build_features 可不可调用"推断成 ``STRATEGY_LAB_UNAVAILABLE`` 或
++        # ``STRATEGY_LAB_DRIFT``，于是 ``CARDS_INVALID`` 在**主路径上不可达**
++        # （B-r3 N1：故障被标成了另一种故障）。读到的卡册再传给
++        # ``_load_strategy_lab()``，不重复解析。
++        cards = self._load_cards_or_fault(funnel)
++        try:
++            self._load_strategy_lab(cards)
++        except Exception as exc:  # noqa: BLE001 - 轮级故障必须留痕后再抛出
++            registry = getattr(strategy_runtime, "REGISTRY", None)
++            detail = (DETAIL_STRATEGY_LAB_UNAVAILABLE
++                      if not isinstance(registry, dict)
++                      or not callable(getattr(strategy_runtime, "build_features", None))
++                      else DETAIL_STRATEGY_LAB_DRIFT)
++            funnel.record_round_fault(detail, note=f"{type(exc).__name__}: {exc}"[:160])
++            self._persist_fault_state(funnel, f"{type(exc).__name__}: {exc}")
++            raise
+         state = self._load_state()
+         seen = dict(state.get("seen") or {})
+         tickets: list[dict[str, Any]] = []
+-        cards = load_cards(self.knowledge_dir)
+         cycle_symbols = self._select_cycle_symbols(scan_symbols, state)
+         allowed_symbols = {
+             str(symbol).upper().strip() for symbol in (scan_symbols or []) if symbol
+@@ -290,22 +395,49 @@ class SignalScanner:
+         expired_tickets = int(expire(now.isoformat())) if callable(expire) else 0
+         fetch_open = getattr(self.db, "fetch_open_signal_tickets", None)
+         if callable(fetch_open):
+-            active = fetch_open(now.isoformat())
++            try:
++                active = fetch_open(now.isoformat())
++            except Exception as exc:  # noqa: BLE001
++                # 票据源读取失败与"本轮没有票据"是两件事：前者是轮级故障
++                # （DATA_UNAVAILABLE），后者才是"本轮票据集合为空"。
++                funnel.record_round_fault(
++                    DETAIL_TICKET_SOURCE_UNAVAILABLE,
++                    note=f"{type(exc).__name__}: {exc}"[:160])
++                active = []
+             # scan_symbols 是业务开仓白名单；历史 ticket 也不能绕过它。
+-            tickets.extend(
+-                ticket for ticket in active
+-                if scan_symbols is None
+-                or str(ticket.get("symbol") or "").upper().strip() in allowed_symbols
+-            )
++            for ticket in active:
++                symbol = str(ticket.get("symbol") or "").upper().strip()
++                if scan_symbols is not None and symbol not in allowed_symbols:
++                    funnel.record(
++                        Stage.SYMBOL_IN_SCOPE.value, DETAIL_TICKET_SYMBOL_NOT_IN_SCOPE,
++                        symbol=symbol, ticket_id=str(ticket.get("ticket_id") or ""),
++                        timeframe=str(ticket.get("timeframe") or ""),
++                        card_id=str(ticket.get("strategy_id") or ""),
++                        origin=ORIGIN_RECOVER,
++                    )
++                    continue
++                tickets.append(ticket)
++                funnel.record(
++                    Stage.TICKET_ACTIVE.value,
++                    card_id=str(ticket.get("strategy_id") or ""), symbol=symbol,
++                    timeframe=str(ticket.get("timeframe") or ""),
++                    ticket_id=str(ticket.get("ticket_id") or ""),
++                    origin=ORIGIN_RECOVER,
++                )
+         active_ticket_ids = {
+             str(ticket.get("ticket_id") or "") for ticket in tickets if ticket.get("ticket_id")
+         }
+ 
+         for card in cards:
++            card_id = str(card.get("id") or "")
+             if not card.get("indicatorized"):
++                funnel.record(Stage.CARD_INDICATORIZED.value,
++                              DETAIL_CARD_NOT_INDICATORIZED, card_id=card_id)
+                 continue
+             signal_fn = str(card.get("signal_fn") or "")
+             if signal_fn not in self._registry:
++                funnel.record(Stage.SIGNAL_FN_REGISTERED.value, DETAIL_SIGNAL_FN_MISSING,
++                              card_id=card_id)
+                 if self.db:
+                     self.db.log_risk_event(
+                         event_type="signal_fn_missing", severity="warn",
+@@ -322,8 +454,13 @@ class SignalScanner:
+                 for raw in card.get("symbols", []):
+                     symbol = str(raw).upper().strip()
+                     if not symbol.endswith("USDT"):
++                        funnel.record(Stage.SYMBOL_IN_SCOPE.value, DETAIL_SYMBOL_NOT_USDT,
++                                      card_id=card_id, symbol=symbol)
+                         continue
+                     if scan_symbols is not None and symbol not in allowed_symbols:
++                        funnel.record(Stage.SYMBOL_IN_SCOPE.value,
++                                      DETAIL_SYMBOL_NOT_IN_SCOPE,
++                                      card_id=card_id, symbol=symbol)
+                         continue
+                     if symbol not in symbols_to_scan:
+                         symbols_to_scan.append(symbol)
+@@ -332,11 +469,18 @@ class SignalScanner:
+                     scanned_symbols.append(symbol)
+                 for tf in card.get("timeframes", []):
+                     if tf not in TF_MINUTES:
++                        funnel.record(Stage.TIMEFRAME_SUPPORTED.value,
++                                      DETAIL_TIMEFRAME_UNSUPPORTED, card_id=card_id,
++                                      symbol=symbol, timeframe=str(tf))
+                         continue
+                     market_key = (symbol, tf)
++                    market_detail = ""
+                     if market_key not in cycle_klines:
+                         if transport_outage is not None:
++                            # 本轮已判定为整轮传输故障：后续行情不再请求，但**必须**
++                            # 逐项留痕，否则"没扫到信号"会把基础设施故障洗成没信号。
+                             cycle_klines[market_key] = None
++                            market_detail = DETAIL_MARKET_TRANSPORT_OUTAGE
+                         else:
+                             try:
+                                 cycle_klines[market_key] = _completed(
+@@ -346,43 +490,70 @@ class SignalScanner:
+                             except Exception as e:
+                                 cycle_klines[market_key] = None
+                                 detail = f"market_data {symbol} {tf}: {type(e).__name__} {e}"
++                                if isinstance(e, KlineDataQualityError):
++                                    # K 线质量/最终性不合格：与"拉取失败"分开记。
++                                    market_detail = DETAIL_KLINE_QUALITY_REJECTED
+                                 if _is_market_deferred(e):
+                                     # 全局健康接口已经精确暴露冷却剩余时间和预算水位。
+                                     # 这里静默让步，避免每轮把正常熔断累计成扫描风险事件。
+                                     deferred_reason = type(e).__name__
++                                    market_detail = DETAIL_MARKET_BUDGET_DEFERRED
+                                 else:
+                                     scan_had_error = True
+                                     scan_errors.append(detail)
++                                    market_detail = (
++                                        market_detail or DETAIL_KLINE_FETCH_FAILED)
+                                 if _is_market_transport_outage(e):
+                                     # DNS、TLS、限流冷却等故障会影响整轮。首次失败后立即
+                                     # 短路剩余 K 线请求，避免 8 组请求把慢循环拖住 1~2 分钟。
+                                     transport_outage = detail
++                                    market_detail = DETAIL_MARKET_TRANSPORT_OUTAGE
+                     cached_df = cycle_klines[market_key]
+                     if cached_df is None:
++                        funnel.record(Stage.MARKET_DATA_READY.value,
++                                      market_detail or DETAIL_KLINE_FETCH_FAILED,
++                                      card_id=card_id, symbol=symbol, timeframe=tf)
+                         continue
+                     try:
+                         df = cached_df.copy()
+                         if len(df) < 210:
++                            funnel.record(Stage.MARKET_DATA_READY.value,
++                                          DETAIL_KLINE_ROWS_INSUFFICIENT, card_id=card_id,
++                                          symbol=symbol, timeframe=tf)
+                             continue
+                         df = df[["open", "high", "low", "close", "volume"]].copy()
+                         fn = self._registry[signal_fn]
+                         out = fn(df, card.get("params") or {})
+                         if out is None or len(out) != len(df):
++                            funnel.record(Stage.SIGNAL_TRIGGERED.value,
++                                          DETAIL_SIGNAL_FN_OUTPUT_INVALID,
++                                          card_id=card_id, symbol=symbol, timeframe=tf)
+                             continue
+                         last = out.iloc[-1]
+                         if not bool(last.get("signal", 0)):
++                            funnel.record(Stage.SIGNAL_TRIGGERED.value,
++                                          DETAIL_NO_SIGNAL_ON_CLOSED_BAR,
++                                          card_id=card_id, symbol=symbol, timeframe=tf)
+                             continue
+                         side = str(last.get("side") or "")
+                         if not self._card_allows(card, side):
++                            funnel.record(Stage.SIDE_ALLOWED.value,
++                                          DETAIL_SIDE_NOT_ALLOWED_BY_CARD,
++                                          card_id=card_id, symbol=symbol, timeframe=tf)
+                             continue
+                         f = self._features_mod.build_features(df)
+                         need = ["adx_14", "rsi_14", "ema_200", "macd_signal", "atr_14"]
+                         if f[need].iloc[-1].isna().any():
++                            funnel.record(Stage.FEATURES_COMPLETE.value,
++                                          DETAIL_FEATURES_INCOMPLETE, card_id=card_id,
++                                          symbol=symbol, timeframe=tf)
+                             continue
+ 
+                         bar_open_ms = int(df.index[-1].value // 1_000_000)
+                         dedup_key = f"{card['id']}|{symbol}|{tf}|{bar_open_ms}"
+                         if dedup_key in seen:
++                            funnel.record(Stage.BAR_UNSEEN.value, DETAIL_BAR_ALREADY_SEEN,
++                                          card_id=card_id, symbol=symbol, timeframe=tf)
+                             continue
+ 
+                         signal_id = f"sig-{card['id']}-{symbol}-{tf}-{bar_open_ms}"
+@@ -392,6 +563,11 @@ class SignalScanner:
+                                                    signal_id, signal_price,
+                                                    signal_time, bar_open_ms, f)
+                         if ticket is None or datetime.fromisoformat(ticket["expires_at"]) <= now:
++                            # 票据在有效期内来不及使用 = 停在 ticket_fresh 这道闸门
++                            # （通过型闸门不允许带细分码，否则会被静默算成"被拒绝"）。
++                            funnel.record(Stage.TICKET_FRESH.value,
++                                          DETAIL_TICKET_EXPIRING_BEFORE_USE,
++                                          card_id=card_id, symbol=symbol, timeframe=tf)
+                             continue
+ 
+                         if self.db:
+@@ -428,6 +604,10 @@ class SignalScanner:
+                             else:
+                                 # 已有信号只能由上面的 open 查询回灌，不能重建已关闭票据。
+                                 seen[dedup_key] = {"signal_id": signal_id, "ts": utc_now().isoformat()}
++                                funnel.record(Stage.BAR_UNSEEN.value,
++                                              DETAIL_SIGNAL_ALREADY_PERSISTED,
++                                              card_id=card_id, symbol=symbol, timeframe=tf,
++                                              ticket_id=str(ticket.get("ticket_id") or ""))
+                                 continue
+                             seen[dedup_key] = {"signal_id": signal_id, "ts": utc_now().isoformat()}
+                             state["seen"] = seen
+@@ -437,11 +617,16 @@ class SignalScanner:
+                         if str(ticket.get("ticket_id") or "") not in active_ticket_ids:
+                             tickets.append(ticket)
+                             active_ticket_ids.add(str(ticket.get("ticket_id") or ""))
++                            funnel.record(Stage.TICKET_EMITTED.value, card_id=card_id,
++                                          symbol=symbol, timeframe=tf,
++                                          ticket_id=str(ticket.get("ticket_id") or ""))
+                     except Exception as e:
+                         scan_had_error = True
+                         scan_errors.append(
+                             f"{card.get('id')} {symbol} {tf}: {type(e).__name__} {e}"
+                         )
++                        funnel.record(Stage.SIGNAL_TRIGGERED.value, DETAIL_SCAN_EXCEPTION,
++                                      card_id=card_id, symbol=symbol, timeframe=tf)
+ 
+         try:
+             cutoff = (utc_now() - timedelta(days=14)).isoformat()
+@@ -453,6 +638,20 @@ class SignalScanner:
+             state["seen"] = cleaned
+         except Exception:
+             state["seen"] = seen
++        # 一个 ticket 都没有时，本轮结局**必须**有一条可区分的原因，而不是
++        # "status=ok, tickets=0"。轮级条目用 record_round_fault 登记：它**不**进候选
++        # 计数、**不**进闸门直方图，只回答"这一轮为什么连票都没有"。
++        if not tickets:
++            funnel.record_round_fault(
++                DETAIL_NO_TICKETS_AVAILABLE,
++                note=f"expired={expired_tickets} cards={len(cards)}")
++        if expired_tickets:
++            funnel.note(f"expired_tickets={expired_tickets}")
++        if deferred_reason:
++            funnel.note(f"market_deferred={deferred_reason}")
++        if scan_errors:
++            funnel.note(f"scan_errors={len(scan_errors)}")
++        no_open = funnel.no_open_explanation()
+         state["last_scan"] = {
+             "at": now.isoformat(),
+             "mode": "universal_rotation" if self.universal_cards else "validated_card_symbols",
+@@ -467,6 +666,11 @@ class SignalScanner:
+             "deferred_reason": deferred_reason,
+             "tickets": len(tickets),
+             "expired_tickets": expired_tickets,
++            # U08 漏斗：逐项"停在哪道闸门、为什么"+ 九码主因/辅因/verdict。
++            # 兼容性：新增键，既有消费者只读自己认识的键，不会因它缺席而失败。
++            FUNNEL_REPORT_KEY: funnel.as_dict(),
++            "no_open_reason": no_open["primary_reason"],
++            "no_open_verdict": no_open["verdict"],
+         }
+         self._save_state(state)
+         if self._features_mod is not None and hasattr(self._features_mod, "clear_feature_cache"):
+@@ -539,12 +743,14 @@ def run_signal_scan(*, knowledge_dir: Path, strategy_lab_src: str,
+                     now: datetime | None = None,
+                     scan_symbols: list[str] | None = None,
+                     universal_cards: bool = False,
+-                    max_scan_symbols_per_cycle: int = 8) -> list[dict[str, Any]]:
++                    max_scan_symbols_per_cycle: int = 8,
++                    funnel: ScanFunnel | None = None) -> list[dict[str, Any]]:
+     scanner = SignalScanner(
+         knowledge_dir=knowledge_dir, strategy_lab_src=strategy_lab_src,
+         state_file=state_file, db=db, kline_limit=kline_limit,
+         ticket_valid_bars=ticket_valid_bars,
+         universal_cards=universal_cards,
+         max_scan_symbols_per_cycle=max_scan_symbols_per_cycle,
++        funnel=funnel,
+     )
+     return scanner.scan(now=now, scan_symbols=scan_symbols)

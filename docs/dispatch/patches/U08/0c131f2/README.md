@@ -1,3 +1,13 @@
+> # SUPERSEDED —— 请勿使用本包（2026-09-21 r4 起）
+>
+> - 本包的 5 个 diff 曾对集成 HEAD `32ecf635` 验证有效，但**内容已被 r4 取代**：
+>   `../9195782/` 把 `03` 里的收尾 `save()` 从"只吞 `LedgerLockTimeout`/`LedgerCorrupt`"
+>   扩为**全异常局部化**（`OSError`/`PermissionError`/`sqlite3.OperationalError` 等不再
+>   穿出执行器），并给认领/撤销加了同样的兜底（B-r4 N6，单点阻塞项）。
+> - 取代链：`../9195782/`（r4，现行）→ `./`（r3）→ `../ec8fd1c/`（r2）→ `../c147895/`（r1）。
+> - 本文以下内容保留为 r3 的原始留档（含当时的自证数据与笔误更正记录）。
+>   其中 §六 N4 行的 `exec:<iso>` 已在 r4 更正为 `exec-<iso>`（见 r4 包 README §六 N7）。
+
 # U08 共享适配补丁包（r3 · 作者 C-U08 / 交 I 应用）
 
 - **补丁基线 = 集成 HEAD `32ecf635`（`mat-wt/I`）** <sub>（r3 交付时点的集成 HEAD；
@@ -170,7 +180,7 @@
 |---|---|
 | **N1** | 卡册损坏与运行时漂移**可区分**，且 `CARDS_INVALID` 在**主路径**（注册表尚未加载）上可达。改法：`scan()` **先** `_load_cards_or_fault()` 再 `_load_strategy_lab(cards)`（后者不再自己 `load_cards()`）。 |
 | **N3** | 执行器收尾 `ledger.save()` 的 `LedgerLockTimeout`（以及 `LedgerCorrupt`）**局部化**：本轮照常返回已构造的 intents，落盘推迟登记为轮级故障 `LEDGER_SAVE_DEFERRED`，票据仍在 `orphan_consumed` 的可审计路径上。 |
-| **N4** | 未注入漏斗（`funnel=None`）时也给一个非空 `round_id`（`exec:<iso>`），使建意图失败的**同轮 `release()` 真的生效**，票据不被永久占死。 |
+| **N4** | 未注入漏斗（`funnel=None`）时也给一个非空 `round_id`（**`exec-<iso>`**，连字符；r4 更正笔误：本行曾写作 `exec:<iso>`），使建意图失败的**同轮 `release()` 真的生效**，票据不被永久占死。 |
 | **N5** | 如实登记（P3）：见 §五末条 + `docs/策略扫描原因码.md` §4。 |
 | **D1** | `c147895/` 标注 SUPERSEDED（README 顶部 + `SUPERSEDED.md`）；`ec8fd1c/` 顶部标注 SUPERSEDED；目录命名口径在本 README 顶部写明。 |
 
