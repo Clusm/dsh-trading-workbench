@@ -72,11 +72,26 @@ cd C:\Users\Tao\Desktop\币安\mat-wt\W3-rc
 & $py -c "import sys; sys.path.insert(0,'src'); from pathlib import Path; from core.release_manifest import build_release_manifest; m=build_release_manifest(Path('.'), environment='demo', db_file=None); print(m.release_id); print(m.content_hash)"
 ```
 
-铸造结果逐字记录在 `release_manifest.json`（含 `artifact_hash`/`content_hash`/
-`dependency_hash`/`config_hashes` 等，均为**实测**值）。
-注意：`release_manifest.json` 本身随后被提交，故清单里的 `git_dirty` 表示铸造时工作区
-含未跟踪的交付物文件；因 `content_hash` 只覆盖 `src/**/*.py`，**交付物提交不改变
-`artifact_hash`**。
+铸造结果逐字记录在同目录 `release_manifest.json`（**全部为实测值，非手写**）。
+
+### 2.1 铸造实测值（口径与限制）
+
+| 字段 | 实测值 | 说明 |
+|---|---|---|
+| `release_id` | 见 `release_manifest.json` | 由上述种子哈希派生；种子含 `git_commit`，故**每提交一次即变** |
+| `artifact_hash` = `content_hash` | 见清单 | `src/**/*.py` 的归一化集合哈希；**本 RC 交付物不碰 `src/`，故与候选 `7885e6a` 一致** |
+| `dependency_hash` | 见清单 | `DEPENDENCY_FILES` 集合哈希（锁文件被改即变） |
+| `config_hashes` | 6 个配置文件的 sha256 | 含 `config/risk_profile.lock.json`（与 `check_quality` 的 `PROFILE LOCK OK` 同源） |
+| `schema_version` | **0** | **未提供账本**（`db_file=None`）——本交付物**不读运行目录真实 `data/`**，故无法取真实迁移版本。**部署时必须由真实账本重铸** |
+| `environment` / `account_ref` | `demo` / `demo:unknown` | 脱敏派生，**不含账户标识原文** |
+| `runtime_instance_id` / `effective_config_hash` / `model_route_hash` | **空** | **`U12-BUILD-F1`（§5.1）**：`identity_blockers = ["IDENTITY_COLLECT_FAILED"]` |
+| `dependency_comparison_status` | `UNAVAILABLE` | 上述降级的连带结果 |
+
+**限制（必须如实登记）**：
+1. `release_id` 的种子含 `git_commit` ⇒ **只在铸造提交上稳定**；后续任何提交都会改变它。
+   本清单记录的是**铸造时的 `git_commit`**，其后仅追加该清单文件本身（不改 `content_hash`/`artifact_hash`）。
+2. `schema_version=0` 表示"未提供账本"，**不是**真实迁移版本；部署侧必须重铸。
+3. 身份字段为空是**缺陷后果**，不是"无需身份"：见 §5.1。
 
 ## 3. 故障矩阵
 
