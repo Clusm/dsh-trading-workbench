@@ -172,6 +172,72 @@ def build_cli(target: Path, output: Path, kind: str) -> subprocess.CompletedProc
     )
 
 
+#: 在隔离子进程里探测 `core.windows_service` 的**运行时行为**（不看源码文本）：
+#: 是否支持 require_in_root / require_package_interpreter，以及四种场景的结论。
+#: 结果以 JSON 单行输出在最后一行，便于双态判定。
+_SERVICE_GUARD_PROBE = r'''
+import json, shutil, sys, tempfile
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+sys.path.insert(0, str(repo / "src"))
+result = {"supported": False}
+try:
+    import inspect
+    from core.windows_service import (
+        load_windows_service_config, resolve_python_executable,
+    )
+    result["supported"] = (
+        "require_in_root" in inspect.signature(resolve_python_executable).parameters
+        and "require_package_interpreter"
+        in inspect.signature(load_windows_service_config).parameters
+    )
+    if not result["supported"]:
+        print(json.dumps(result))
+        raise SystemExit(0)
+
+    tmp = Path(tempfile.mkdtemp(prefix="mta-guard-probe-"))
+    try:
+        for name in ("config", "scripts", "data"):
+            (tmp / name).mkdir()
+        (tmp / "scripts" / "run_web.py").write_text("# fixture", encoding="utf-8")
+        (tmp / "config" / "windows_service.json").write_text(json.dumps({
+            "service_name": "MultiAgentTrader", "host": "127.0.0.1", "port": 8000,
+            "python_executable": ".venv/Scripts/python.exe",
+            "entrypoint": "scripts/run_web.py", "working_directory": ".",
+            "stop_timeout_seconds": 30, "restart_delay_seconds": 30,
+            "log_path": "data/web_console.log",
+        }), encoding="utf-8")
+        config = tmp / "config" / "windows_service.json"
+        # (1) 开发检出面（无 package_manifest.json）：保持旧的回退行为
+        dev = load_windows_service_config(config, project_root=tmp, require_files=True)
+        result["dev_unaffected"] = dev.python_executable.is_file()
+        # (2) 发布包面（有清单、包内无解释器）：必须 fail-closed
+        (tmp / "package_manifest.json").write_text("{}", encoding="utf-8")
+        try:
+            load_windows_service_config(config, project_root=tmp, require_files=True)
+            result["package_blocked"] = False
+        except ValueError as exc:
+            result["package_blocked"] = "发布包内没有可用解释器" in str(exc)
+        # (3) 显式覆盖：允许外置解释器时照常解析
+        outside = load_windows_service_config(
+            config, project_root=tmp, require_files=True,
+            python_executable=sys.executable, require_package_interpreter=False,
+        )
+        result["optout_ok"] = outside.python_executable == Path(sys.executable).resolve()
+        # (4) 包内确有配置声明的解释器：来源必须是 config
+        (tmp / ".venv" / "Scripts").mkdir(parents=True)
+        (tmp / ".venv" / "Scripts" / "python.exe").write_bytes(b"fixture")
+        inside = load_windows_service_config(config, project_root=tmp, require_files=True)
+        result["in_package_ok"] = inside.python_executable_source == "config"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+except Exception as exc:  # pragma: no cover - 探针自身故障要能被看见
+    result["probe_error"] = f"{type(exc).__name__}: {exc}"
+print(json.dumps(result))
+'''
+
+
 tmp = Path(tempfile.mkdtemp(prefix="mta-u10a-smoke-"))
 try:
     sandbox = tmp / "repo"
@@ -367,28 +433,55 @@ try:
           and not any(name.startswith("data/") or name == ".env" for name in src_content))
 
     # --- [5] 共享适配（两态，运行时行为探测） ------------------------
-    print("\n[5] 共享适配 scripts/run_web.py --verify-package（运行时行为探测）")
+    print("\n[5] 共享适配（运行时行为探测；不以补丁是否已应用为前提）")
     probe = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "run_web.py"),
          "--verify-package", str(extracted)],
         cwd=ROOT, check=False, capture_output=True, text=True,
         encoding="utf-8", errors="replace",
     )
-    unsupported = (
-        "unrecognized arguments" in (probe.stderr + probe.stdout)
-        or "--verify-package" in probe.stderr and probe.returncode == 2
-    )
+    unsupported = "unrecognized arguments" in (probe.stderr + probe.stdout)
     if probe.returncode == 0:
-        check("已接线：run_web.py 能对解压包做启动前自检并退出 0", True)
-        payload = json.loads(probe.stdout) if probe.stdout.strip().startswith("{") else {}
-        check("自检结论为 ok=true（未启动服务、未绑定端口）", payload.get("ok") is True,
-              probe.stdout[:200])
+        # 启动入口会先打印 net/state 横幅，JSON 报告在其后：取第一个 '{' 起解析。
+        start = probe.stdout.find("{")
+        payload = {}
+        if start >= 0:
+            try:
+                payload = json.loads(probe.stdout[start:])
+            except json.JSONDecodeError:
+                payload = {}
+        # 报告里的 file_count 是清单登记的文件数（不含两份 manifest 自身）。
+        check("已接线：run_web.py --verify-package 对解压包自检并退出 0",
+              payload.get("ok") is True
+              and payload.get("file_count") == len(members) - 2,
+              probe.stdout[-300:])
     elif unsupported:
-        note("共享适配未应用：scripts/run_web.py 尚无 --verify-package；"
-             "本脚本按两态约定不以该补丁为前提（见 docs/dispatch/patches/U10a）")
+        note("未接线：scripts/run_web.py 尚无 --verify-package")
     else:
         check("run_web.py --verify-package 非预期失败", False,
               f"rc={probe.returncode} {probe.stderr.strip()[-200:]}")
+
+    guard = subprocess.run(
+        [sys.executable, "-c", _SERVICE_GUARD_PROBE, str(ROOT)],
+        cwd=ROOT, check=False, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    )
+    try:
+        guard_result = json.loads(guard.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        guard_result = {"supported": False, "raw": guard.stdout[-200:] + guard.stderr[-200:]}
+    if not guard_result.get("supported"):
+        note("未接线：core.windows_service 尚无 require_in_root/"
+             "require_package_interpreter")
+    else:
+        check("发布包目录缺解释器时 fail-closed（不再回退到包外解释器）",
+              guard_result.get("package_blocked") is True, guard_result)
+        check("开发检出行为不变（无清单时照旧回退）",
+              guard_result.get("dev_unaffected") is True, guard_result)
+        check("显式 require_package_interpreter=False 可覆盖为外置解释器",
+              guard_result.get("optout_ok") is True, guard_result)
+        check("包内存在配置声明的解释器时按 config 解析",
+              guard_result.get("in_package_ok") is True, guard_result)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
