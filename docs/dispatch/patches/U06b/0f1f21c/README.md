@@ -56,6 +56,21 @@ git apply 02_intel_service_shadow_v2_readonly_status.diff
 * `tests/integration/test_shadow_labels.py` **两态均可跑**（未打补丁 89 PASS，
   打完 100 PASS），不假定补丁是否已应用。
 
+## 验证结果（隔离沙箱，`git archive 0706db1 | tar -x` + `git init`）
+
+| 项 | 结果 |
+|---|---|
+| `git apply --check`（3 种 git 配置） | 全部 `exit=0`、`Skipped=0`、`Checking patch` 覆盖全部文件 |
+| 本套件 `tests/integration/test_shadow_labels.py` | 未打补丁 **89 PASS / 0 FAIL**；打完 **100 PASS / 0 FAIL** |
+| `scripts/smoke_contracts_v3.py` | PASS 173 / FAIL 0（exit 0） |
+| `scripts/smoke_u06a_shadow_isolation.py` | PASS 52 / FAIL 0（exit 0） |
+| `scripts/smoke_u09_release_evidence.py` | 60 通过 / 0 失败（exit 0），pristine 与 patched 同值 |
+| `tests/acceptance/test_release_evidence_v2.py` | 78 通过 / 0 失败（exit 0），pristine 与 patched 同值 |
+| `scripts/run_offline_regression.py`（全量） | pristine `OK scripts=85`；patched `OK scripts=85`；**失败脚本集合 = ∅（两者皆空）→ NEW_FAIL = ∅** |
+| `tests/**/*.py` 全量扫（acceptance + integration） | pristine 16/16 exit 0；patched 17/17 exit 0（差值即本任务新增套件），无新失败 |
+| `scripts/check_quality.py` | `QUALITY CHECK OK files=301`（含 ruff，未新增 exclude） |
+| 门禁不变性 | 见 `evidence/release_gate_invariance.txt`：灌入 50 条 v2 标签前后，`directional_candidates` 3→3，报告（除墙钟 `generated_at`）逐字相同 |
+
 ## 未做（如实登记）
 
 * 未把 v2 标签接入采集循环（`_refresh` 不调用 v2 标签）：默认关闭，后置线不改变
