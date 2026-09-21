@@ -1,0 +1,23 @@
+diff --git a/tests/integration/test_shadow_labels.py b/tests/integration/test_shadow_labels.py
+index 9d59f8e..81ec74a 100644
+--- a/tests/integration/test_shadow_labels.py
++++ b/tests/integration/test_shadow_labels.py
+@@ -669,10 +669,14 @@ def test_release_gate_unchanged() -> None:
+ def test_module_boundaries() -> None:
+     section("14. 模块边界（纯函数、无网络/DB/LLM）")
+     source_files = sorted((ROOT / "src" / "intel" / "shadow_v2").glob("*.py"))
+-    check("独占路径四个模块齐备",
+-          {item.name for item in source_files}
+-          == {"__init__.py", "models.py", "sampler.py", "labels.py"},
+-          [item.name for item in source_files])
++    expected_modules = {"__init__.py", "models.py", "sampler.py", "labels.py"}
++    present_modules = {item.name for item in source_files}
++    # U06b 四个模块必须齐备；同包内由**其他任务**新增的模块（如 U07 的
++    # ``statistics.py``）不算 U06b 缺失——用集合相等会把跨任务的模块集断言变成
++    # 「谁后加文件谁跑红」，与「研究侧车按任务分批交付」的实际排程冲突。
++    check("独占路径四个模块齐备（其他任务在同包新增的模块不视为缺失）",
++          expected_modules <= present_modules,
++          sorted(expected_modules - present_modules))
+     forbidden = ("import httpx", "import requests", "from data.", "import sqlite3",
+                  "from audit", "import openai", "subprocess")
+     offenders = {}
