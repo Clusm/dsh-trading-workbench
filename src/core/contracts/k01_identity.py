@@ -114,14 +114,33 @@ def _structured_mapping(value: Any, *, name: str) -> dict[str, Any]:
     return dict(value)
 
 
+def _structured_path_mapping(value: Any, *, name: str) -> dict[str, Any]:
+    """``相对路径 -> 内容`` 映射的形态守卫。
+
+    键是**文件路径**而非字段名，故**不**施加 :func:`ensure_no_sensitive_fields`
+    —— 那条守卫按字段名口径做子串匹配，会把合法模块名
+    ``src/core/management_authorization.py``（命中 ``authorization``）误判为敏感键，
+    使身份采集在真实 ``src/`` 树上必然失败。文件名级的凭据守卫由调用方承担
+    （``core.runtime_identity._safe_artifact_name``，拒绝 ``.env``/``*.pem``/``id_rsa``
+    等凭据文件形态）。
+
+    仍保留结构化载荷与 Mapping 形态要求（原始文本、行列表照旧拒绝），故
+    "把 ``.env`` 原文或 ``KEY=value`` 行列表当哈希输入"这条路依旧走不通。
+    """
+    ensure_structured_payload(value, name=name)
+    if not isinstance(value, Mapping):
+        raise IdentityCoverageError([name])
+    return dict(value)
+
+
 def hash_artifact(files: Mapping[str, str]) -> str:
     """不可变代码发布目录内容哈希；输入为 相对路径 -> 内容。"""
-    return canonical_hash(_structured_mapping(files, name="artifact_files"))
+    return canonical_hash(_structured_path_mapping(files, name="artifact_files"))
 
 
 def hash_dependencies(lock_files: Mapping[str, str]) -> str:
-    """依赖锁文件哈希；必须覆盖实际 requirements 锁文件。"""
-    return canonical_hash(_structured_mapping(lock_files, name="dependency_lock_files"))
+    """依赖锁文件哈希；必须覆盖实际 requirements 锁文件。输入同为 相对路径 -> 内容。"""
+    return canonical_hash(_structured_path_mapping(lock_files, name="dependency_lock_files"))
 
 
 def hash_effective_config(effective_values: Mapping[str, Any]) -> str:
