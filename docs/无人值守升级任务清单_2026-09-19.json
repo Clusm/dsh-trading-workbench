@@ -4992,6 +4992,30 @@
           "head": "bdd7e49",
           "integration_commit": "2ffc436"
         }
+      },
+      "post_tasklist_fixes": {
+        "U09-FU1": {
+          "status": "IN_PROGRESS",
+          "branch": "task/U09-FU1",
+          "worktree": "mat-wt/U09F1",
+          "base": "4de8666",
+          "scope": "关闭两条**会让发布门禁给出错误结论**的 fail-open：U09-OUTCOME-VS-LIFECYCLE-COST（读 outcome 首写冻结快照而非 lifecycle 当前权威态）、U09-NET-UNKNOWN-PADDING（净收益未知仍计入 30，1 个未知样本可把 29 凑成 30）。",
+          "constraints_inlined": [
+            "方向必须收紧（fail-closed），不得放宽",
+            "7 天 / 200 方向候选 / 30 完整闭合 一个数字不许动",
+            "必须区分『未知（net_realized is None）』与『合法零收益（net_realized == 0.0）』，不得误伤后者",
+            "改动会触碰 U09 自己的测试（其当前编码的是旧行为）—— 必须逐条自证是『跟随新口径』而非『为变绿而放宽』",
+            "全量回归现为 94 个脚本（U11 修复轮已登记 9 个 tests/ 套件）"
+          ],
+          "out_of_scope": [
+            "U13FU3-INJECTION-TRUST",
+            "U08-R5-FU1/FU2",
+            "U09-K06-GREEN-BUT-NO_GO",
+            "RECOVERY-BUNDLE-P2-CLUSTER",
+            "W1-JOINT-WIRING",
+            "U08-U12-WIRING"
+          ]
+        }
       }
     },
     "contract_erratum": {

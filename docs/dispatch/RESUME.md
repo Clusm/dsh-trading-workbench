@@ -184,9 +184,19 @@
   - **复验已派发**：Q（`reviews/U10b/R1/q`，detached @ `0416408`），重点：**自己算**每个改过的 `parents[...]`、**应用补丁后**是否仍有断链、**归档脚本是否还在发布包内**。**仍在运行，勿重复派发。**
 - 依赖它们的：`U07`（等 U06b）、`U11`（等 U10b）。
 
-### 后置线完成后
-- **W4 不可在窗口内完成**（7 天挂钟观察窗 / 200 方向候选 / 30 完整闭合；D01–D05 外部待决；实盘启用须用户另行授权）—— 须如实报告，**不得标记为通过**。
-- **RC 冻结仍待四项**：`D05`（SLO 时限冻结）、观察窗三项 `NOT_STARTED`、`MODEL_ROUTE_MOCK`（须配真实模型路由后重铸 manifest）、`U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER`。
+### 后置线完成后 —— 唯一的实现类工作转为「关闭已登记缺陷」
+
+> 18 项任务清单**已全部集成**；W4 不可在窗口内完成。因此本回合的**唯一实现类工作**是关闭台账里**会发布门禁给出错误结论**的已登记缺陷。
+
+- **`U09-FU1`（进行中）**：工作树 `mat-wt/U09F1`（`task/U09-FU1` @ `4de8666`）—— 修两条 fail-open：
+  1. `U09-OUTCOME-VS-LIFECYCLE-COST`：门禁读 `trade_outcomes` 的**首写即冻结快照**而非 `position_lifecycles` 的**当前权威态**（A 实测：lifecycle=INCOMPLETE + outcome=COMPLETE -> **仍计入 30**）。
+  2. `U09-NET-UNKNOWN-PADDING`：**净收益未知**（`net_realized is None`）的样本仍计入 30 且零门槛 —— **1 个未知样本即可把 29 条真凭证凑成 30**。
+  - 已内联的硬要求：方向必须**收紧**；`7/200/30` 一个数字不许动；**必须**区分"未知"与"合法零收益（`net_realized == 0.0`）"不得误伤；改动会触碰 U09 自己的测试，**必须逐条自证是"跟随新口径"而非"为变绿而放宽"**；全量回归现在是 **94** 个脚本（U11 修复轮已把 9 个 tests/ 套件登记进来）。
+- 其余已登记项（`U13FU3-INJECTION-TRUST` 纵深防御、`U08-R5-FU1/FU2`、`U09-K06-*`、`RECOVERY-BUNDLE-P2-CLUSTER`、`W1-JOINT-WIRING`、`U08-U12-WIRING` 等）**本轮不动**，留后续。
+
+### W4（结构性不可完成，须如实报告）
+- **7 天挂钟观察窗 / 200 方向候选 / 30 完整闭合**；D01–D05 外部待决；实盘启用须用户另行授权 —— **不得标记为通过**。
+- **RC 冻结仍待四项**：`D05`（SLO 时限冻结，需外部决策）、观察窗三项 `NOT_STARTED`、`MODEL_ROUTE_MOCK`（须配真实模型路由后重铸 manifest）、`U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER`。
 
 <!-- W3 起点记录，保留备查
 > **W0 / W1 / W2 均已完成**（W1 5/5、W2 7/7 全部 INTEGRATED）。以下为 W3 起点。
