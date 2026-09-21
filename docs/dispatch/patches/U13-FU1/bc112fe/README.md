@@ -44,6 +44,24 @@ base `943d839`（归档 W3 F14/F18 演练 + U02 补丁证据）把这些文件�
 `check_quality.py` 只扫描发布白名单。三条都请 owner 拍板；**U13-FU1 的核心
 修复不依赖 05**。
 
+### N3 口径更正（U13-FU2）：`assert_environment_bound` 对 demo 也会抛
+
+本任务登记 P1-4 取舍时写的"默认部署 demo/paper 仍可启动，**只是被检出并报告**"
+只对**部署入口**成立，对 `RuntimePaths.assert_environment_bound()` **本身**
+不成立，此处更正（原文留在 `docs/无人值守升级任务清单_2026-09-19.json` 的
+U13-FU1 `tradeoffs` 里，已同步改口径）：
+
+- **该 API 会抛**：`assert_environment_bound("demo")` 在"未声明状态根"时抛
+  `RuntimePathsError`，原因码 `STATE_ROOT_MISSING`（来自 P1-4 让 `validate()`
+  可达）。它的语义已从"只拦 live"变成"拦**一切**未声明状态根"。
+- **默认部署仍能启动**，原因是该 API 在生产**零调用点**：`TradingService` 与
+  `scripts/run_web.py` 都不调它，`assert_environment_matches_state_root` 对
+  非 live 早退（`config_loader.py`）。所以"只被报告"描述的是**入口现状**，
+  不是这个 API 的行为。
+- **接线前必须先声明状态根**：若将来把它接到启动期（P1-4 的可观测化方向），
+  未声明状态根的 demo/paper 部署会被它**挡死**——这是"宁可多阻断"的取向，
+  但不该在不打招呼的情况下变成启动期硬拦截。
+
 ## 应用与复验
 
 ```bash
