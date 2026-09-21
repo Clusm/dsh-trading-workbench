@@ -29,8 +29,8 @@
 | `E6` | `tests/acceptance/test_supervision.py` → **exit 0**，`166 checks` | **自跑**（本树） |
 | `E7` | `tests/acceptance/test_alert_delivery.py` → **exit 0**，`PASS=262 FAIL=0` | **自跑**（本树） |
 | `E8` | `tests/acceptance/test_control_boundary.py` → **exit 0** | **自跑**（本树） |
-| `E9` | `mat-wt/I/docs/dispatch/reviews/U12/drill_F14_F18/REPORT.md`（隔离恢复演练） | **引用**（他人会话） |
-| `E10` | `mat-wt/I/docs/dispatch/reviews/U13-FU1/af76443/Q_r1.md`（修复独立复验） | **引用**（他人会话） |
+| `E9` | `docs/dispatch/reviews/U12/drill_F14_F18/REPORT.md`（隔离恢复演练） | **引用**（他人会话） |
+| `E10` | `docs/dispatch/reviews/U13-FU1/af76443/Q_r1.md`（修复独立复验） | **引用**（他人会话） |
 | `E11` | `scripts/smoke_*.py` / `tests/integration/*.py` —— 全部由 `E1` 一次性运行 | **自跑**（经 E1） |
 
 > **证据口径声明（重要）**：`E11` 的具体脚本名按**台账 `fault_tests` 归属** +
@@ -119,8 +119,8 @@
 
 **两份被引用的报告（均为他人会话产物，本会话未复跑其探针）**：
 
-- 演练（原始发现）：`mat-wt/I/docs/dispatch/reviews/U12/drill_F14_F18/REPORT.md`（`E9`）
-- 修复复验：`mat-wt/I/docs/dispatch/reviews/U13-FU1/af76443/Q_r1.md`（`E10`）
+- 演练（原始发现）：`docs/dispatch/reviews/U12/drill_F14_F18/REPORT.md`（`E9`）
+- 修复复验：`docs/dispatch/reviews/U13-FU1/af76443/Q_r1.md`（`E10`）
 
 ### 4.1 已修复并集成（4 条 P1）
 
