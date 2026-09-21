@@ -1,0 +1,34 @@
+{
+  "manifest_schema": 1,
+  "release_id": "rel-e6a3f138c8b9e326be72",
+  "generated_at": "2026-09-21T14:30:53.773+00:00",
+  "git_commit": "6b574b1b6f0239824bcfb73ecffc6cd4c80efbc4",
+  "content_hash": "544d176a073d00d2ffedd13378c08e3851a455679b78452f3b1ca2b3285f8d26",
+  "dependency_hash": "9fbde85e7a184d76948dd27b552d72a79e86ff6273568033dbceaecb4192b108",
+  "config_hashes": {
+    "config/settings.yaml": "1859bc7ea0b9a85bd51f4c7413d3d2dab46db1e4bdfd22339b07874624cfeea3",
+    "config/decision_policy.yaml": "158886f434cfc5fbb03f072cc1d60dd80db2f13ced4ef19e40a64241a860dd8a",
+    "config/agents.yaml": "8b5079a5dd0cdb5d5de9708128fc64fcae032d7cd70cacf719d2f092b1ac2fe7",
+    "config/risk_learning.yaml": "d98fd1b71dfed58086dab705bb3f415b24c570a03fd6a546ee25696e09ddd9d4",
+    "config/risk_profile.lock.json": "a0e2dd32e0e933a50a603b291152705edae24636dbe65b1734716a9c2e74e8b1",
+    "config/windows_service.json": "72d4c3d6f46af0cd8b219d1547cbe342c85f3e02469c041a809f91949b4f8496"
+  },
+  "strategy_config_hash": "b650d5e0d6c909323f248c76ff6d5bd4100ac41f9d60e3fa5fae241921a87b0b",
+  "model_config_hash": "3476e91b076d9060d5c21dc46908e7e989ca5d18fb579a94ba4f6d4da170c887",
+  "schema_version": 0,
+  "environment": "demo",
+  "account_ref": "demo:unknown",
+  "egress_id": "unknown",
+  "threshold_version": "v1",
+  "artifact_hash": "544d176a073d00d2ffedd13378c08e3851a455679b78452f3b1ca2b3285f8d26",
+  "effective_config_hash": "",
+  "model_route_hash": "",
+  "runtime_instance_id": "",
+  "strategy_cards_hash": "293ee76c87e0cca12cc90152aa8fe3724497f1865ab9f877fe179d816fec1dbd",
+  "dependency_comparison_status": "UNAVAILABLE",
+  "git_dirty": false,
+  "identity_blockers": [
+    "IDENTITY_COLLECT_FAILED"
+  ],
+  "release_id_overridden": false
+}

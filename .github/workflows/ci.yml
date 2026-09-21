@@ -7,6 +7,12 @@ on:
 permissions:
   contents: read
 
+# 统一 UTF-8：仓库脚本与报告含中文，Windows runner 默认代码页（CP1252）会让
+# 通过的逻辑仅因控制台编码被误报为失败。放在工作流层，覆盖所有步骤。
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
 jobs:
   windows-offline-regression:
     runs-on: windows-latest
@@ -25,6 +31,9 @@ jobs:
         env:
           EXECUTION_MODE: paper
           MTA_NO_PROXY: "1"
-          PYTHONUTF8: "1"
-          PYTHONIOENCODING: utf-8
         run: python scripts/run_offline_regression.py
+      # U12 RC 交付物验收（阈值未降低 / observed_status 未写成通过 /
+      # F11 v2_labels=DEFERRED / F01–F25 矩阵完整性 / 报告 fail-closed）。
+      # 两态可跑、只读本仓文档 + 只写系统临时目录。
+      - name: RC deliverables acceptance (U12)
+        run: python tests/acceptance/test_unattended_release.py
