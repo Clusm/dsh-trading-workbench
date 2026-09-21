@@ -145,7 +145,10 @@
 
 ### 并行进行中（与本回合同时运行，勿重复派发）
 - **U09 作者会话**：工作树 `mat-wt/W3`（`task/U09` @ `448a4e9`）。
-- **W3 隔离恢复演练会话（F14/F18）**：工作树 `mat-wt/W3-drill`（**detached @ `448a4e9`**，只做验证、只写报告）。报告将落在其工作树内 `docs/dispatch/reviews/U12/drill_F14_F18/`，由 I 归档进 `mat-wt/I`。
+  - 进度快照：已落**首个提交 `79d5c4a`**（独占产物：扩展后的 `release_evidence.py` 等）。
+  - **注意（中断恢复要点）**：该分支工作树当前**有 4 个共享文件处于未提交修改态** —— `src/audit/database.py`、`src/core/health_watch.py`、`scripts/report_release_readiness.py`、`scripts/run_offline_regression.py`。按规则这些**不得提交进任务分支**。若该会话中断：接续会话必须**先把它们导出为 unified diff 到 `docs/dispatch/patches/U09/<head>/`，再用 `git checkout 448a4e9 -- <这 4 个文件>` 从分支还原**（lesson 13）。
+  - 该分支**当前无作者提交**才走重派；有 `79d5c4a` 则走 §5 接续流程，**不要**重派整条线。
+- **W3 隔离恢复演练会话（F14/F18）**：工作树 `mat-wt/W3-drill`（**detached @ `448a4e9`**，只做验证、只写报告）。已在自树内建出 `docs/dispatch/reviews/U12/`；报告将落在其 `docs/dispatch/reviews/U12/drill_F14_F18/`，由 I 归档进 `mat-wt/I`。
   - F14 = 从恢复包启动期间有交易所已成交订单 → **先全量对账/增量回拉再开仓，不重复下单**。
   - F18 = 新代码目录/旧状态根/PID 复用/两账户同 profile·同账户不同 profile → **状态路径与身份一致、单账户互斥、不新建错误基线、迁移可回滚**。
   - 注意：该工作树**没有 `.venv`**，正好检验 **KI02**（解释器解析）是否真的修好。
