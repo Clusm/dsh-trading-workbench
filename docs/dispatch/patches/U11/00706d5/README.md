@@ -2,8 +2,11 @@
 
 - 任务：U11 核心模块渐进拆分（F 线 / EF 线 / 后置 W4+）
 - 作者分支：`task/U11`，base `03967e9`
-- 承载提交：`00706d5`（`docs(U11): add core-module incremental split interface mapping`）
-- 目录名 `00706d5` = 本任务唯一内容提交的短 hash。
+- 承载提交（内容）：`00706d5`（`docs(U11): add core-module incremental split interface mapping`）
+- 作者分支最终 HEAD：以 `git rev-parse --short HEAD` 为准（本期为 `ce3a880`，其后只增本说明）。
+- 目录名 `00706d5` = 承载**内容**的提交，而非最终 HEAD。这与 U10b
+  （`docs/dispatch/patches/U10b/273892c/`）同一约定：**按内容提交命名目录**，
+  目录名便不随 README/证据的刷新而漂移。
 
 ## 补丁数量：**0**（无需任何共享文件补丁）
 
