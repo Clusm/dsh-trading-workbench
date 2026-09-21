@@ -4587,20 +4587,20 @@
       {
         "id": "U09-OUTCOME-VS-LIFECYCLE-COST",
         "title": "发布门禁读 outcome 成本快照，而非 lifecycle 权威态（P2·fail-open·继承自基线）",
-        "status": "FIX_PENDING_VERIFICATION",
+        "status": "FIXED",
         "owner": "U12（须裁决是否在 RC 前修）",
         "blocks": "『30 完整闭合』的权威性；不影响 U09 集成（既有口径，非 U09 回归）",
         "note": "A r1 实测：`release_evidence.py:1097-1106` 的查询**根本没 SELECT lifecycle 的 cost_status**，`_eligible_lifecycle` 判的是 outcome 行。双向对照：l.INCOMPLETE/o.COMPLETE -> PASS 30；l.COMPLETE/o.INCOMPLETE -> FAIL 29，即门禁完全由 outcome 行决定。权威性依据：`trade_reconciliation.py:625` 是唯一成本重算写方且 UPDATE position_lifecycles；`binance_futures.py:2652/3120` 两处只降级 lifecycle、不碰 outcome；而 `log_trade_outcome` 是 INSERT OR IGNORE（同键复写被静默丢弃，行数 1->1）。=> lifecycle 是可变的当前权威，outcome 是首写即冻结的快照。**基线 base_release_evidence.py:357,373 同样读 o.cost_status => 既有口径，U09 未修**（其 must-haves 未含此项）。离线无法端到端复现真写路径分歧，待真机复核。",
-        "fix": "U09-FU1 @ b03bee4（补丁包 docs/dispatch/patches/U09-FU1/b03bee4/）；待 Q 复验通过后置 FIXED 并集成。"
+        "fix": "U09-FU1 @ b03bee4（补丁包 docs/dispatch/patches/U09-FU1/b03bee4/），集成 9edd2d0。口径：**两表都必须 COMPLETE**（取与而非只认 lifecycle —— 后者会把 l.COMPLETE/o.INCOMPLETE 从 FAIL 变 PASS，属放宽）；新增 `cost_status_snapshot_mismatches`(带 snapshot_more_optimistic) 作交叉校验。Q 复验：l.INCOMPLETE/o.COMPLETE 由 PASS 30 变 FAIL 0；生产写方核实该分歧**真会发生**。"
       },
       {
         "id": "U09-NET-UNKNOWN-PADDING",
         "title": "净收益未知的样本仍计入 30 完整闭合，且无门槛（P2·残余 fail-open）",
-        "status": "FIX_PENDING_VERIFICATION",
+        "status": "FIXED",
         "owner": "U12 / U09 后续",
         "blocks": "无（数据违反 U01 不变量，非现实攻击面），但属发布门禁口径缺口",
         "note": "A r1 最小构造：30 条 `cost_status=COMPLETE` + `funding=NULL` -> 门禁 PASS/actual=30，`net_unknown=30`、`net_total=0.0`、**净收益可算样本 0 个**；**最少 1 个未知样本即可把 29 条真凭证凑成 30 放行**。判 P2 而非 P0：U01 的 `cost_complete`（trade_reconciliation.py:610）与 `finalize_costs` 都要求成本三项齐备才给 COMPLETE，故这种数据违反 U01 不变量。问题是 U09 既不校验该不变量，也对 `net_realized_unknown` **零门槛**，且作者 README §8 的九条未尽事项**未登记此条**。",
-        "fix": "U09-FU1 @ b03bee4（补丁包 docs/dispatch/patches/U09-FU1/b03bee4/）；待 Q 复验通过后置 FIXED 并集成。"
+        "fix": "U09-FU1 @ b03bee4，集成 9edd2d0。口径：`net_realized is None` ⇒ **不计入 30**（原因码 NET_REALIZED_UNKNOWN），**零参数**、只看 `is None` 不看真值，故 `net==0.0` 的**合法零收益照常计入**。Q 复验：30 条全未知由 PASS 30 变 FAIL 0、29 真+1 未知变 FAIL 29；四种零计入、四种未知不计入。"
       },
       {
         "id": "U09-K06-GREEN-BUT-NO_GO",
@@ -4710,6 +4710,14 @@
         "owner": "I",
         "blocks": "无（已闭）",
         "note": "U11-FU1 发现：tests/acceptance 的 alert_delivery/control_boundary/release_evidence_v2/runtime_identity/unattended_release 与 tests/integration 的 shadow_labels/shadow_statistics/shadow_status/strategy_funnel **不被任何 smoke_*.py 调起**。它们只在各任务集成时被手工跑过一次，因此一次静默回归不会有人发现；U12 的 FAULT_MATRIX 里这些条目也只能写『（自跑）』。**I 已登记进 SCRIPTS**（先逐条在 harness 环境下 dry-run 确认 rc=0），常设门禁 85 -> 94。教训：**『全绿』的覆盖范围必须实测，不能由名字推断**。"
+      },
+      {
+        "id": "U09FU1-STRIP-NONMONOTONE",
+        "title": "U09-FU1 的 `_status_of` 用 `.strip()`，带空白的枚举值构成非单调边角（P3·不可达）",
+        "status": "OPEN",
+        "owner": "U09 后续 / U12",
+        "blocks": "无（全仓无写方产出带空白枚举值；且只接受带空白的**肯定值**，不会放行 INCOMPLETE，方向仍 fail-closed）",
+        "note": "Q r1 在枚举集合差时发现：`\" COMPLETE \"` / `\" ATTRIBUTED \"` 这类**带空白**的枚举值会『旧不合格 -> 新合格』（3 例），因此作者『严格单调收紧（0 放宽）』的绝对表述**不完全成立**。方向安全（不会把 INCOMPLETE 读成合格），且生产上不可达，故判 P3 而非阻塞。若后续要绝对保证单调性，可把 `.strip()` 改为精确匹配或对带空白值显式拒绝。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -4997,7 +5005,7 @@
       },
       "post_tasklist_fixes": {
         "U09-FU1": {
-          "status": "READY_FOR_REVIEW",
+          "status": "INTEGRATED",
           "branch": "task/U09-FU1",
           "worktree": "mat-wt/U09F1",
           "base": "4de8666",
@@ -5051,10 +5059,27 @@
           "verification": {
             "session": "Q (reviews/U09-FU1/R1/q)",
             "candidate": "0f7acd7",
-            "verdict": "PENDING",
+            "verdict": "Q r1 **PASS-with-notes**（无阻塞项）",
             "reports_dir": "docs/dispatch/reviews/U09-FU1/0f7acd7/",
-            "focus": "重点：①自建探针复现 6 场景前后对照；②**枚举集合差证明严格收紧**（0 个『旧不合格新合格』）；③**零 vs 未知必须分得清**（0.0/0/Decimal(0)/-0.0 计入；None/\"\"/缺键/nan 不计入）；④逐 hunk 裁决测试改动 + 两个反向测试；⑤裁决 smoke_release_acceptance 夹具改动是『拉回自洽』还是『救活即将变红的断言』；⑥7/200/30 四个数一个不许动。"
-          }
+            "focus": "重点：①自建探针复现 6 场景前后对照；②**枚举集合差证明严格收紧**（0 个『旧不合格新合格』）；③**零 vs 未知必须分得清**（0.0/0/Decimal(0)/-0.0 计入；None/\"\"/缺键/nan 不计入）；④逐 hunk 裁决测试改动 + 两个反向测试；⑤裁决 smoke_release_acceptance 夹具改动是『拉回自洽』还是『救活即将变红的断言』；⑥7/200/30 四个数一个不许动。",
+            "report": "docs/dispatch/reviews/U09-FU1/0f7acd7/Q_r1.md",
+            "six_scenarios_reproduced": "Q 自建探针两态实测，6 场景与作者声称一致：l.INCOMPLETE/o.COMPLETE **30 PASS（错）-> 0 FAIL（COST_AUTHORITY_INCOMPLETE x30）**；30 条全未知 **30 PASS -> 0 FAIL（NET_REALIZED_UNKNOWN x30）**；29 真+1 未知 **30 PASS -> 29 FAIL**；两表都 COMPLETE 与合法零收益 net==0.0 均不变。",
+            "production_writers_verified": "**Q 独立核实生产写方**：`trade_reconciliation.py:625` 是**唯一**把 lifecycle.cost_status 写成 COMPLETE 处（且要求 funding 非空）；`binance_futures.py:2652/3120` **只把 lifecycle 降级为 INCOMPLETE、不碰 outcome** => **生产上真会出现 `l.INCOMPLETE/o.COMPLETE`**，旧口径在此 fail-open（不是造出来的夹具）。",
+            "set_difference": "主网格 4x4x{None,0.0,1.5}=48 样本 + 额外 attr/status 网格 36 样本：**旧不合格新合格 = 0**（规范值域内），旧合格新不合格 = **10 + 5**（收紧）。披露字段隔离实测：mismatch 0<->30 不改变 GO/NO_GO。",
+            "q_correction_to_author": "**Q 纠正了作者『0 放宽』的绝对表述**：新码 `_status_of` 用 `.strip()`，故 `\" COMPLETE \"`/`\" ATTRIBUTED \"` 这类**带空白**的枚举值会『旧不合格 -> 新合格』（3 例）。但全仓**无写方产出带空白枚举值**，且只接受带空白的**肯定值**、不会放行 INCOMPLETE（方向仍 fail-closed）-> 判**非阻塞**，登记为 P3。",
+            "zero_vs_unknown": "Q 实测：`0.0`/`0`/`Decimal(\"0\")`/`-0.0` 四种零**全部计入**；`None`/`\"\"`/缺失键/`nan`（含 `inf`）**全部不计入**且码为 `NET_REALIZED_UNKNOWN`（函数级 + 端到端落库双验证）；nan 未被当合法值放行。",
+            "test_changes_ruled": "**无删/无放宽既有断言**：diff 中被删的仅 4 行变量改名（`cost_status=cost_status -> authority_cost`），`check(`/`assert` 删除数 = **0**；新参默认 `None` ⇒ 与旧行为逐字相同。三个反向测试：新测试 x 旧实现(4de8666) -> smoke **63/4**、acc **82/4**（红，4 条即 FU1 新断言）；新测试 x **448a4e9** -> **31/0 exit=0** 且**主动断言缺陷存在**；旧测试 x 新实现 -> **60/0、78/0**（实现改动未破坏任何既有断言）。",
+            "fixture_ruled": "**Q 独立裁定该夹具确系自相矛盾、patch02 非放宽**：`trade_reconciliation.cost_complete` 要求 `funding` 非空才可能 COMPLETE（无 DB CHECK/trigger，故夹具绕重算写进了矛盾态）。实测：新门禁 + 原夹具 -> **exit=1 `AssertionError: 完整闭合生命周期达到门槛`**；新门禁 + patch02 -> **17/0**。patch02 不改产品代码、只把夹具补成它自称的状态；真正的不完整反例由新增 [4b] 覆盖。",
+            "gates_unchanged": "7/200/30/0.999/120 逐字相同；`gates` 8 键集合不变；`release_gate_role`/`SOURCE_A`/`directional_candidates` 一字未改。",
+            "delta": "**NEW_FAIL=∅、FIXED=∅**（94 脚本逐脚本两态；Q 沙箱两态唯一失败均为 `smoke_u10a_release_package.py`，系其沙箱环境差异、与 FU1 无关）；check_quality/smoke_contracts_v3/smoke_db_migrations/test_shadow_labels 两态全绿；补丁矩阵 **6/6**、0 Skipped。",
+            "mandatory_note": "**合入协调（Q 实测，已遵守）**：patch02 **必须与分支同时合入** —— 否则分支头单独跑全量回归会在 `smoke_release_acceptance.py` 处 rc=1 中断（第 42 个脚本 CalledProcessError）。I 集成时已同批应用。",
+            "not_verified": [
+              "smoke_u10a_release_package 在作者真实工作区是否通过（Q 的 git archive 沙箱必报 2 条包完备性断言，只能证明两态一致失败；I 已在真实树复跑 37/0 不在其列）",
+              "真实库 position_lifecycles.cost_status 分布及其对 eligible 的运营影响"
+            ]
+          },
+          "integration_commit": "9edd2d0",
+          "integration_tests": "集成态实测：U09 冒烟 **67/0**、U09 验收 **86/0**、`smoke_release_acceptance` **17/0**、契约 **173/0**、`check_quality OK files=303 untracked=0`、`SMOKE MANIFEST OK included=81 excluded=1`、**`OFFLINE REGRESSION OK scripts=94`**"
         }
       }
     },
