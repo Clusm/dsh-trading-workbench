@@ -111,6 +111,11 @@
     - **教训**：① 增量提交不是形式要求，是**这个环境里唯一可靠的损失上限**；② 续做提示词必须写明"上一会话零提交"并要求**开头就提交一次**；③ 作者工作树里出现共享文件改动时，续做会话有义务把它转成补丁并还原。
 17. **应用任务补丁后，必须用 `git status` 核对"补丁实际触碰的全部文件"再提交**。U10a 集成时我按"文档清单"手写 `git add` 路径，漏了补丁 04 另外改到的 3 篇文档（`多Agent执行分派手册`/`开发规格书_v2`/`项目说明书` 各 1 行绝对路径占位化），导致它们以**未提交**状态留在树里 —— 靠随后的 `git status` 才发现并补交。**做法**：补丁应用后**先 `git status --short`**，把 `M` 的文件全部纳入同一次提交；**不要凭记忆列举路径**（补丁的触及面由补丁决定，不由任务卡决定）。
 
+18. **不要把可运行的 `.py` 证据/探针归档进被 lint 的树内**。我把 F14/F18 演练的 7 个探针以 `.py` 复制进 `docs/dispatch/reviews/U12/drill_F14_F18/raw/`，`check_quality.py` 的 ruff 立刻扫到它们，产生 **25 条** E401/E402/E702/F401，**把 RC 门禁 `check_quality` 弄红**（此前一直是 `OK files=290`）。而 U13-FU1 的作者把这 25 条**误归因**给"U02/更早的归档脚本"，并据此提了一条"让 check_quality 变绿"的可选补丁（会给 ruff 加 exclude）。
+    - **处置**：把 7 个探针改名为 `.py.txt`（内容逐字节不变），**ruff 的扫描范围逐字未变**、未新增任何 exclude、门禁未收窄，`check_quality` 恢复绿。
+    - **做法**：归档**可运行脚本**时用 `.py.txt`/`.py.orig` 之类后缀，或存到被 lint 范围之外；**任何"让门禁变绿"的配置改动（exclude/ignore）都要先问"变红的原因到底是什么"** —— 按文件分组实测（`ruff check <dir> --output-format=concise | sed 's/:.*//' | sort | uniq -c`）比接受归因快得多。
+    - **衍生教训**：作者对**集成树现状**的叙述可能错误（本例作者说 base 的 check_quality 就是红的，实测 base 在我改名前的红**是我造成的**）。**集成前凡涉及"某个门禁本来是红的/本来就是好的"的断言，一律自己复跑。**
+
 16. **子代理会往集成树根写 git archive 产物**（已两次：`base.tar` 8.4MB、`ac.tar` 8.5MB —— 均来自用 cwd 在 `mat-wt/I` 里跑 `git archive`）。二者都**未被 .gitignore 忽略**，属"随时可能被误提交"的散件。
     - **处置**：会话运行中**不删**（可能正在被其沙箱使用），等其结束后删除；I 的 `git add` **一律带路径前缀**（`git add -A src/ scripts/ tests/`、`git add docs/...`），所以根级散件不会被误纳入。
     - **做法**：派发时继续强调"产物只落在自己 worktree 内"；若要建 pristine 沙箱，用 `git -C <主仓> archive ... | tar -x -C <自己的临时目录>`，或 `git -C <主仓> worktree add`，**不要 cd 进别人的工作区**。
@@ -157,10 +162,12 @@
   - **判定：F14 = PASS-with-notes（有条件的）；F18 = PASS-with-notes**。F14 在**生产恢复脚本**路径上必达成立（先对账再开仓、不重复下单，`broker.posts` 全程未增加）；F18 在**显式状态根**下必达成立（换代码根不换锁/不换身份、PID 复用拒启动、迁移回滚不损坏）。
   - **4 条 P1（I 已独立核对源码证实）**：`F14-DRILL-GATE-NOT-INSTALLED`、`F14-LIVE-GATE-LAYOUT`、`F14-GATE-EVIDENCE-SELFASSERTED`、`F18-STATE-ROOT-MISSING-UNREACHABLE`；另有 5 条 P2（`RECOVERY-BUNDLE-P2-CLUSTER`，含**既有**缺陷"截断锁文件单方接管 → 双持锁"）与 4 条 P3。全部已登记进台账 `dispatch.known_issues`。
   - KI02 天然检验通过：该树**无 `.venv`**，`smoke_windows_service_plan.py` 仍 24/0 无 `ValueError`；官方入口 `OFFLINE REGRESSION OK scripts=84` exit 0。
-- **E 线修复会话 `U13-FU1`**：工作树 `mat-wt/W3-fix`（`task/U13-FU1` @ `943d839`）—— 修上述 4 条 P1（P1-1 core 演练不装门禁 / P1-2 live 布局 fail-open / P1-3 门禁证据自证 / P1-4 `STATE_ROOT_MISSING` 不可达）。**仍在运行，勿重复派发。**
-  - 已落 4 个提交（`d9b635d` P1-4、`4bfaeb0` P1-1/2/3、`a40d677` 验收接线、`bc112fe` 两态化）。
-  - **⚠ 文件面比派发时宽**：除 `src/core/ops/recovery.py`、`src/core/runtime_paths.py`、`scripts/ops/verify_recovery_plan.py`、`scripts/restore_recovery_bundle.py` 外，工作树另有未提交改动落在 `src/core/service.py`、`scripts/create_recovery_bundle.py`、`scripts/ops/verify_runtime_paths.py`、`scripts/run_web.py`。集成时必须按**补丁实际触及面**核对（lesson 17），不要凭派发清单列举。
-  - 补丁包目录 `docs/dispatch/patches/U13-FU1/`（尚未提交）。
+- **E 线修复 `U13-FU1`**：**作者已交付 → 独立复验进行中**。工作树 `mat-wt/W3-fix`（`task/U13-FU1`，base `943d839`），**head `af76443`**，工作树干净。
+  - 分支内 6 文件：`src/core/ops/recovery.py`(+275)、`src/core/runtime_paths.py`(+56)、`scripts/ops/verify_recovery_plan.py`(+50)、`scripts/restore_recovery_bundle.py`(+40)、**新增** `scripts/ops/verify_u13f1_recovery_gate.py`(+400)、`scripts/smoke_u13_supervision.py`(+7)。
+  - 补丁包 `docs/dispatch/patches/U13-FU1/bc112fe/`：`01`（必选·P1-3 生产接线）、`02`（必选·P1-2 建包 profile）、`03`/`04`（建议·P1-4 可观测）、`05`（**I 判定不采用**，见下）+ README + `evidence/`（before/after 日志）。
+  - **`05_optional_docs_probe_lint.diff` 不采用**：作者把 `check_quality` 变红归因给"U02/base 的归档脚本"，**该归因经 I 按文件分组实测不成立** —— 25 条 ruff **全部来自 I 自己归档的演练探针**；已改名 `.py.txt` 修复，`check_quality` 现为 `OK files=290 untracked=0`。应用 `05` 会新增 exclude = 收窄门禁范围，故弃用。
+  - **待 Q 裁决的关键一条**：`drill_f14_e2e.py` 打全补丁后 **11 通过 / 4 失败**，作者称为"P1-3 之后的收紧（必须先真对账再提交证据）"而非回归 —— 已要求复验会话独立判定。
+  - **复验已派发**：Q（`reviews/U13-FU1/R1/q`，detached @ `af76443`）。**仍在运行，勿重复派发。**
 
 ### 两个会话的共同恢复要点
 - U09 与 U13-FU1 的工作树**各有若干共享文件处于未提交修改态**。若任一会话中断：接续会话必须**先把共享改动导出为 unified diff 到各自的 `docs/dispatch/patches/<ID>/<head>/`，再用 `git checkout <base> -- <文件>` 还原**，任务分支最终不得含共享文件改动（lesson 13）。
