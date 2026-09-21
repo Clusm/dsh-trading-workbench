@@ -2157,7 +2157,7 @@
       "title": "可运行发布包与准确运维说明",
       "owner_role": "F",
       "actual_assignee": "U10a 作者会话",
-      "status": "READY_FOR_REVIEW",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -2250,6 +2250,19 @@
             "--verify-package 仍在重依赖导入后"
           ],
           "unfinished": "P3-10 归属、U08 集成后 delta（归 U12）"
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "10bc4d2",
+          "verdict": "Q r3 PASS-with-notes",
+          "code_identity": "git diff 10bc4d2 HEAD -- <U10a 路径> 为空",
+          "patches": "1eb1b1e/ 的 4 个补丁干净应用（03 承载 SCRIPTS 登记、04 文档绝对路径占位化）；旧 89541df/ 已由作者移除，无歧义",
+          "i_registration": "MANIFEST OK included=79",
+          "tests": "smoke_u10a **37/0**；smoke_windows_service_plan 24/0；smoke_release_package 6/0；契约 173/0；check_quality **OK files=287**",
+          "offline_regression": "**OFFLINE REGRESSION OK scripts=83**（exit 0）",
+          "r3_verification": "P2-1/2/3 全闭合（9 类变异硬失败且点名；**反向不误杀**：正常仓库 exit 0/216 成员、真实树去掉 .git 仍 exit 0；fence 解析器 0 违规、门禁双向非空转；台账在包内且自检如实列出，移出即 5 条断链）；**claim ② 承载它的 2 处均已更正**（补丁 README 从未含该表述，无矛盾残留）；**P3-7 附录 A 的 C1–C14 全部符号可在本仓指认、可逐条核对**；delta ∅（82->83，NEW=[] GONE=[]）；门禁 files=287 / SECRET SCAN 521",
+          "new_p3": "5 条全 P3：N1 三处称 docs/contracts/README.md 引用台账**不实**；N2 合成夹具（无 git 且无 release_manifest）仍可静默出包（为既有冒烟所必需）；N3 非必需 src 模块挪进排除前缀会静默少 1 且理由误导；N4 建 .venv/.env 后自检必红（r1 遗留）；**N5 P3-10 未处理且交付物内无登记**",
+          "note": "VERIFIED 留待 U12 部署证据；真实部署/起服务/sc.exe/干净解释器归 U12"
         }
       ],
       "blockers": [],
@@ -2283,7 +2296,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "32ecf63",
       "review_assignments": [
         {
           "round": "r2",
