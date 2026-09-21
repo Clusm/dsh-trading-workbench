@@ -1,0 +1,96 @@
+U10b 复验原始输出摘要（全部只读/离线；沙箱位于系统临时目录，真实工作区零写入）
+=========================================================================
+
+[1] 补丁在 3 种 git 配置下的 git apply --check
+    沙箱：git archive 0706db1 | tar -x  然后  git init  （解包后立刻 init）
+    命令：git apply --check -v <01_docs_index_archive_links.diff>
+          git -c core.autocrlf=false -c core.eol=lf apply --check -v <diff>
+          git -c core.autocrlf=true apply --check -v <diff>
+
+  == config1 default
+  Checking patch "docs/\346\226\207\346\241\243\347\264\242\345\274\225.md"...
+  == config2 LF
+  Checking patch "docs/\346\226\207\346\241\243\347\264\242\345\274\225.md"...
+  == config3 CRLF
+  Checking patch "docs/\346\226\207\346\241\243\347\264\242\345\274\225.md"...
+
+  三种配置均只输出 Checking patch，0 Skipped、0 error。
+
+
+[2] 官方离线回归入口（pristine = 0706db1；patched = task/U10B + 本补丁）
+
+  pristine:
+    SMOKE MANIFEST OK included=81 excluded=1
+    OFFLINE REGRESSION OK scripts=85
+    (进程退出码 0)
+
+  patched:
+    SMOKE MANIFEST OK included=81 excluded=1
+    OFFLINE REGRESSION OK scripts=85
+    (进程退出码 0)
+
+  -> N(SCRIPTS) 前后均为 85，SMOKE MANIFEST 前后均为 included=81/excluded=1。
+     覆盖未减少；scripts/run_offline_regression.py 未被 U10b 改动。
+
+
+[3] pristine vs patched 失败集合增量（按失败签名归一化）
+
+  PRISTINE failures=10  PATCHED failures=10
+  REGRESSION(共有)=10
+     = FAIL 已成交的键即使超过 TTL 也保持幂等: {...}
+     = FAIL 幂等记忆被淘汰后同键仍判重复（不重发）: {...}
+     = FAIL 授权绑定账户域:
+     = FAIL 未给 TTL 时同键严格幂等: {...}
+     = FAIL 记录被淘汰 + TTL 到期后同键仍判重复（不重发）: {...}
+     = FAIL 账本 account_ref = 运行代派生值:
+     = FAIL 重复退出不产生提交量: {...}
+     = FAIL 重复退出仍是 reduce_only/非开仓:
+     = FAIL 重复退出的原因码正确:
+     = FAIL 重复退出被幂等识别:
+  FIXED(仅 pristine)=0
+  NEW_FAIL(仅 patched)=0
+
+  这 10 条全部来自 scripts/smoke_u02_strategy_position_manager.py 的双态快照段，
+  两侧逐行一致：
+    U02 strategy position manager: PASS=158 FAIL=0
+    U02 strategy position manager: PASS=156 FAIL=2
+    U02 strategy position manager: PASS=150 FAIL=8
+    U02 SMOKE OK          （该冒烟自身退出码 0）
+  属既有基线现象，与 U10b 无关。
+
+
+[4] 发布包冒烟 scripts/smoke_u10a_release_package.py
+
+  pristine: 结果: 37 通过 / 0 失败   （沙箱已跟踪文件 734 个）
+  patched : 结果: 37 通过 / 0 失败   （沙箱已跟踪文件 735 个）
+  两侧均退出码 0；patched 尾段节选：
+    PASS  缺失必需策略卡后自检失败
+    PASS  新增相对断链后自检失败
+    PASS  存在未归类文件时构建失败（防漏包闸门）
+    PASS  source 包在 runtime 之上补齐 tests/CI（且仍排除 data/.env）
+    PASS  新增未登记的 scripts/ 入口 → 构建失败（禁止静默归类为 source-only）
+    PASS  runtime 启动入口改名后（落 source-only）→ 构建硬失败，不再静默出包
+
+  -> 归档 18 个脚本 + 8 篇文档之后，打包器仍全绿；0 断链、0 未归类文件。
+
+
+[5] 质量门禁 scripts/check_quality.py
+
+  pristine: QUALITY CHECK OK files=296 untracked=0
+            SECRET SCAN OK files=655 registered_false_positives=2
+  patched : QUALITY CHECK OK files=296 untracked=0
+            SECRET SCAN OK files=656 registered_false_positives=2
+
+  两侧均退出码 0；pyproject.toml 未改动，未新增任何 ruff exclude。
+  （SECRET SCAN 656 vs 655 = 新增 docs/archive/README.md 一个被扫描文本。）
+
+
+[6] 归档脚本项目根深度：运行时探针（不是目测）
+
+  做法：AST 取模块级里引用 __file__ 的表达式（含 sys.path.insert(...) 这类调用），
+  以**新路径**作为 __file__ 求值，断言结果 == 仓库根 或 仓库根的直接子目录。
+  深度未修正时（parents[1] 落在 scripts/<子目录>/）会被判 BAD。
+
+  ROOT PROBE: bad=0
+  覆盖 scripts/diagnostics/*.py 与 scripts/maintenance/*.py 全部 18 个文件；
+  _js_check.py 与 probe_intel_with_proxy.py 不含 __file__ 表达式（跳过）。
