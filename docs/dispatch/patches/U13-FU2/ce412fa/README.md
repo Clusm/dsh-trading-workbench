@@ -210,3 +210,24 @@ demo/paper 部署会被启动期挡死。
    全部证据来自进程内假 broker 与合成状态根。
 5. 未修任何其它 P2/P3（含复验 N4：补丁 05 不必要、作者对 base 红灯的归因有误），
    按约定留给 U12。
+
+---
+
+## 8. U13-FU3 更正（复验 Q 的 CHANGES_REQUESTED 收口后追加）
+
+本节由 **U13-FU3** 追加，**不改动上文任何原文**（保留当时的判断痕迹），只更正
+两处已被独立复验**实测推翻**的结论：
+
+1. **§2「如实说明」与 §7.1「N2 的行为增量不可达 / 没有构造出行为翻转」不成立。**
+   复验 Q（`docs/dispatch/reviews/U13-FU2/R1/q/_scratch_Q/Q_U13-FU2_r1.md`）构造出了
+   **可达且方向为放松**的行为翻转：门禁 `CLEARED` 之后账本里出现一颗
+   `purpose='EXIT'`/`status='UNKNOWN'` 的未收口单时，本轮的注入形态**放行**、
+   `control.state` 停在 `normal`、`set_control('normal')` **成功**；而裸形态
+   阻断、收紧为 `close_only`、拒绝拨回 `normal`。
+2. **§4.2「注入形态更精确」的前提不成立**：无参调用
+   `self._recovery_gate_ledger_facts()` 时 `unknown_orders`/`submitting_orders`
+   **并非"账本可证干净"，而是硬编码 0**——它没有证明，只是默认。门禁对这两列是
+   **不分 purpose 全表计数**，于是这两列的账本读取被整个绕过。
+
+修复见 `docs/dispatch/patches/U13-FU3/5651531/`：三列一律从本进程账本实读，`facts`
+形参降级为额外下界（逐列取 max）。本节结论即为 U13-FU3 的交付前提。
