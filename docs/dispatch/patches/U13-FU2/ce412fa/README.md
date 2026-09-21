@@ -174,6 +174,7 @@ demo/paper 部署会被启动期挡死。
 | **NEW_FAIL**（pristine rc=0 → patched rc≠0） | **∅** |
 | **FIXED**（pristine rc≠0 → patched rc=0） | **∅** |
 | 两边同非零 | **∅** |
+| 官方入口（patched 树） | `OFFLINE REGRESSION OK scripts=85`，exit 0（`evidence/official_after.tail.log`） |
 
 受影响冒烟（全在 official 清单内，逐条 rc 均 0）：
 
