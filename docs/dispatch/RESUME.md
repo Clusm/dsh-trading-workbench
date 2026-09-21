@@ -38,7 +38,7 @@
 | B | U02 策略仓管理与有界退出 | `task/U02` | **✅ INTEGRATED** | A 初审 P0×1 → r2 闭 P0+P1（迁移方案升级为"可执行"）→ r3 闭 3 条 P2（`_consumed_ids` 事实判重 / `release()` 幂等 / `confirm_exit` 结算使声明成真）→ **Q r3 PASS-with-notes** → 集成：6 补丁在 U13/U05 集成后**仍 6/6 干净应用**、登记冒烟（MANIFEST OK 76）、158/0、**check_quality OK files=280**、**OFFLINE REGRESSION OK scripts=80**。**残余（重要）**：`_consumed_ids` 是**纯内存 set** → "已消费不可重发"**仅在进程内成立**，重启后同 `exit_key` 会再次 `SUBMIT_REDUCE`（已登记 P2-9） |
 | CD | U06a 影子最小隔离与口径修正 | `task/U06a` | **✅ INTEGRATED** | 初审硬结论：**影子样本确实会进发布门槛**（200→300）→ 登记为 **U09 硬前置**（`S08-SHADOW-GATE-LEAK`）。r2 修 P2-1（陈旧当新值）/P2-2（披露渲染）→ **Q r3 PASS-with-notes**（两项真闭合、13/13；漂移测试非空转；边界 11 全 A/0 M、共享文件与 `release_evidence.py` 逐文件 SAME）→ 集成：3 补丁、登记冒烟（77）、264/0、**check_quality OK files=283**、**OFFLINE REGRESSION OK scripts=81** |
 | EF | U14 外部告警送达与主机失联 | `task/U14` | **✅ INTEGRATED** | r3 闭 **P1-4**（单条隔离改为对任意异常 fail-closed；三向量 + 兜底桶全收敛，`KeyboardInterrupt` 仍穿出，`_isolate_failure` 用 SQLite 触发器验证）→ **Q r4 PASS-with-notes**（七行混合批无早退；全模块仅 4 处 `except Exception`；delta 四树全 ∅）→ 集成：4 补丁、登记冒烟（78）、262/0、**check_quality OK files=286**、**OFFLINE REGRESSION OK scripts=82**。**残余（须传达 U12）**：`AlertQueue` **无生产消费者** → 门禁全绿 ≠ 无人值守告警可用；兜底桶把新 bug 表现为"该条持续退避"而非崩溃 → 接线须监控 `errors`（且 `PERSIST_FAILED` **不在** `errors`，有计数盲区） |
-| CD | U08 策略漏斗与管理责任展示 | `task/U08` @ `2ed2e5d` | **作者进行中** | 依赖 U00+U05 已满足（CD 线串行 U03→U05→U06a→U08）。新建 `src/core/strategy_funnel.py`；**额外承担 U05 遗留的接线缺口**（U05 明写"接线归 U08（漏斗/保护优先/原因码）与 U08/U12"）；原因码须与 U05 九码一致、不得自造平行体系 |
+| CD | U08 策略漏斗与管理责任展示 | `task/U08` | **作者已交付 → 初审 B 中** | head `c147895`（7 提交、**仅独占路径**）；`strategy_funnel.py` 1298 行。必达：①17 闸门×37 细分码全映射九码（拒绝型缺码 fail-closed）、`verdict` 四值不把故障读成 no_edge ②`TicketLedger` 原子落盘、`consumed` 独立布尔不依赖时钟、损坏 fail-closed ③每仓 `manager`/`position_class`（与 U02 同口径）/`rule_version` ④直接 import U05 九码并断言相等 ⑤`claim_research` 永不碰预留池。**U05 接线**：接了 `classify_cycle`/`reason_from_source_errors`/`classify_evidence_report`（可达），**其余留 U12**。补丁 5 条两配置 OK；**delta 新增 ∅/修复 ∅**；**未新增列/枚举/迁移**（7 个 `range(1,18)` 脚本两态逐字相同） |
 | EF | U10a 可运行发布包与运维说明 | `task/U10a` @ `f5e4790` | **作者进行中** | 依赖 U00+U15 已满足（EF 线串行 U15→U13→U14→U10a）。改 `scripts/create_release_package.py` + 三份运维文档；必达"凭据/运行状态不入包、解压自检与相对链接可达、文档不得写未实现能力"。派发前已清理 EF 遗留 scratch（原 1177 个未跟踪 .py 会触发 Windows 命令行上限使本地 `check_quality` 无法运行） |
 
 **W2 门禁状态：两个 RC 门禁持续全绿** —— `OFFLINE REGRESSION OK scripts=82`、`check_quality QUALITY CHECK OK files=286`。
@@ -103,6 +103,9 @@
 13. **新增失败模式：agent stall（`no progress for 600s`，watchdog 未恢复）**。U06a 首轮即如此，与之前的"截断式中止"不同 —— 它**静默停住约 10 分钟**（cron 观察到 3 分钟零写入）。**且该会话违反了增量提交**：跑了约 40 分钟、**零提交**，中断后只能靠 WIP 保全（`f0c0e48`），当时 `shadow_status.py` 未完成、测试不存在、共享文件 `src/intel/service.py` 被改并混进 WIP。
     - **处置**：WIP 保全 → 派续做会话，并要求它**先把共享文件改动导出为补丁、再用 `git checkout <base> -- <file>` 从分支还原**（任务分支最终不得含共享文件改动）。
     - **教训**：① 增量提交不是形式要求，是**这个环境里唯一可靠的损失上限**；② 续做提示词必须写明"上一会话零提交"并要求**开头就提交一次**；③ 作者工作树里出现共享文件改动时，续做会话有义务把它转成补丁并还原。
+15. **路径统一用绝对路径，不要依赖 cwd**。U08 建审查区时我在 cwd= 下执行 `mkdir -p "../mat-wt/reviews/U08/B"` -> 实际创建了嵌套的 `mat-wt/mat-wt/reviews/U08/B`，于是 `git worktree add` 因**正确父目录不存在**而失败；又因命令用 `&&` 串联，**台账更新被一并跳过**。已用绝对路径重建并回读确认，错误嵌套目录已清理。
+    - **做法**：凡涉及 `mkdir`/`git worktree add`/`cp` 的路径一律写**绝对路径**；也**不要**把"建工作区"与"写台账"串在一条 `&&` 链里（前一步失败会静默吞掉后一步）。
+
 14. **建审查 worktree 后必须回读确认**（与 lesson 10 同源，针对**审查区**）。U14 r3 复验时我**没成功建出** `reviews/U14/R3/r1`，却已在提示词里把它写成工作区；复验者落到一个**普通目录**，自行用 `git archive` 沙箱实现了 detached 语义并产出完整报告（**结果可用**），但这属于**运气**：提示词指向不存在的工作区时，不同会话可能做出不可预料的事。
     - **做法**：`git worktree add --detach <path> <commit>` 之后**必须 `git -C <path> rev-parse --short HEAD` 回读**，确认路径存在且指向目标提交，再把它写进提示词。
     - 附带发现：该会话的 Bash **无法把命令行里字面写出的中文路径透传给子进程**（`ls`/`python -c` 报 No such file or directory），它改用 `$(cd <glob>/mat-wt && pwd)` 动态取值绕过。派发时若涉及中文路径，宜让作者/复验者用动态取值而非字面量。
