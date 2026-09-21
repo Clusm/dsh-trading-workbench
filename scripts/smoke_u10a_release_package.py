@@ -22,6 +22,7 @@ SCRIPTS 登记行（由 I 加入 ``scripts/run_offline_regression.py`` 的 ``SCR
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -291,6 +292,20 @@ try:
     check("报告含逐文件排除理由（可审计而非'已忽略'）",
           bool(meta.get("excluded_files")) and bool(meta.get("inventory", {}).get(
               "excluded_by_reason")))
+
+    # --- [1b] 手册的"runtime 包内含"清单必须与代码清单一致 ------------
+    print("\n[1b] 运维说明与代码清单一致性（禁止文档写未实现/漏写的能力）")
+    manual = (ROOT / "docs" / "运行与故障恢复手册_2026-09-06.md").read_text(encoding="utf-8")
+    anchor = "**本手册命令的包适用性**"
+    check("手册含'包适用性'段落（[source 包] 标注的出处）", anchor in manual)
+    paragraph = manual.split(anchor, 1)[-1].split("\n\n", 1)[0] if anchor in manual else ""
+    claimed = {
+        Path(name).name for name in re.findall(r"`([A-Za-z0-9_./]+\.(?:py|bat))`", paragraph)
+    }
+    actual = {Path(name).name for name in crp.RUNTIME_SCRIPTS}
+    check("手册声称的 runtime 包内容 == 代码 RUNTIME_SCRIPTS（逐项）",
+          claimed == actual, {"手册漏写": sorted(actual - claimed),
+                              "手册多写": sorted(claimed - actual)})
 
     # --- [2] 凭据及运行状态不入代码包（对包内容实际扫描） -------------
     print("\n[2] 凭据及运行状态不入代码包（实际扫描包内每一个成员）")

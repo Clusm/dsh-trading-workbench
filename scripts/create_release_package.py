@@ -783,6 +783,24 @@ def verify_release_package(package_root: Path) -> dict[str, Any]:
     else:
         record("release_manifest_present", True)
 
+    # 两次发布之间只换清单不换代码（或反之）会让"这份工件对应哪个 release_id"
+    # 变成两套说法；绑定两者的哈希与 release_id 是发布身份的最低要求（F13）。
+    embedded: dict[str, Any] = {}
+    if release_file.is_file():
+        try:
+            embedded = json.loads(release_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            record("release_identity_matches", False, f"{type(exc).__name__}")
+            embedded = None  # type: ignore[assignment]
+    if embedded:
+        expected_hash = hashlib.sha256(
+            json.dumps(embedded, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        same_id = str(meta.get("release_id") or "") == str(embedded.get("release_id") or "")
+        same_hash = str(meta.get("release_manifest_sha256") or "") == expected_hash
+        record("release_identity_matches", same_id and same_hash,
+               {"release_id_equal": same_id, "manifest_sha256_equal": same_hash})
+
     rows = meta.get("files") if isinstance(meta.get("files"), list) else []
     listed = {str(row.get("path")) for row in rows if isinstance(row, dict)}
 
