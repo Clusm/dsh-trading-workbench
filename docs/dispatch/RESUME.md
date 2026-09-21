@@ -16,7 +16,7 @@
 - 已验收候选：`71f8109`（Q r5 复验 PASS-with-notes；与 tag 的差异仅为 dispatch 文档，`src/core/contracts` 与 `docs/contracts` 逐字节相同）
 - 集成区分支：`integration/unattended-v3` @ `ffdab44`（契约冻结后又有 1 个台账提交 `4fdc6bf`）
 - 四个实现线 worktree **已创建**（均从 `ffdab44`）：`mat-wt/A`(task/U01)、`mat-wt/B`(task/U04)、`mat-wt/CD`(task/U03)、`mat-wt/EF`(task/U15)
-- 当前步骤：**W1/W2/W3 工程侧全部完成** —— **首批 14 项任务全部 INTEGRATED**（含 U09、U12、U13-FU1/FU2/FU3、U12-BF1+契约勘误 `CONTRACT-ERRATUM-1`）。**RC 仍未冻结**（DRAFT）；**W4 结构性不可在本窗口完成**。
+- 当前步骤：**17/18 任务已 INTEGRATED（仅 U11 在修复轮）；W1/W2/W3 工程侧全部完成** —— **首批 14 项任务全部 INTEGRATED**（含 U09、U12、U13-FU1/FU2/FU3、U12-BF1+契约勘误 `CONTRACT-ERRATUM-1`）。**RC 仍未冻结**（DRAFT）；**W4 结构性不可在本窗口完成**。
 - **后置线（P2，非首批必需）进行中**：`U06b` **已 INTEGRATED**；`U10b` 作者已交付→Q 复验中；`U07` 已派发；`U11` 等 U10b。
 - 最新门禁：**`OFFLINE REGRESSION OK scripts=85`**、**`QUALITY CHECK OK files=301 untracked=0`**、契约 `PASS 173 / FAIL 0`。
 - **恢复门禁三条（N1/N2/N3）已全部闭合并复验**：Q 的 110 格 `purpose×status` 矩阵 **0 处放松格**（pristine/FU2 各 8 处 → 修复 0），集成提交 `57a4e97`。
@@ -151,7 +151,17 @@
   - 集成实测：shadow v2 套件 **100/0**、`smoke_u06a` 52/0、`smoke_u09` 60/0、契约 173/0、`check_quality OK files=301`、**`OFFLINE REGRESSION OK scripts=85`**。
   - **集成顺序已核实为真且必要**（Q 复现了单独打补丁 02 的 `ImportError`）。
   - 新登记 `U06B-P3-CLUSTER`（补丁 02 缺空行 / `autocrlf=true` 下整文件转 CRLF / `sampler.clock_verdict_for_window()` 死代码）。
-- **`U07` 配对实验与独立样本统计**：**作者已交付 → Q 复验中**。工作树 `mat-wt/D3`，head `e610319`（base `c2f1bab`）。**纯增量 +2497/−0，分支内无共享文件改动**；补丁包 `docs/dispatch/patches/U07/f9e3094/`（01 只读研究表 `shadow_v2_statistics`（门禁/权重/晋升三列强制归零、主键含 digest ⇒ 重放 0 新增、不占迁移版本号）+ 02 **必需**的 `test_shadow_labels.py` 模块集断言从"相等"改"包含"）。
+- **`U07` 配对实验与独立样本统计**：**✅ 已 INTEGRATED**（`afbcf8f`，merge）。工作树 `mat-wt/D3`，head `e610319`（base `c2f1bab`）。**Q r1 = PASS-with-notes（无阻塞项）**，报告 `docs/dispatch/reviews/U07/e610319/Q_r1.md`。
+  - **门禁不倒性加压**：Q 除自建夹具外，**用裸 SQL 绕过写入层**强行把 `counts=1/weight=9.9/promo=1` 塞进研究表，门禁报告**仍逐字段不变** → 门禁根本不读该表。两关键文件 diff 0 字节。
+  - **补丁 02 经隔离反向测试裁定"不是削弱"**：字面删 `labels.py` 会先撞 `ModuleNotFoundError`（未到断言），Q 改做"改名 + 改 3 处导入让 import 链活着、只让 glob 少一个" → 断言**立刻变红**且**点名缺哪个模块**；完整 diff 仅 +8/−4、唯一 hunk 只动那一处 check。原 `==` 属过度约束。
+  - **统计口径经数值审计**（91 项探针 BAD=0）：二项检验与 `math.comb` 及 **2^n 暴力枚举**三方一致；独立块数 7 组手算全吻合；`naive_understates` 在强重叠下 0.2236 vs 0.5000（真）、近似独立下差 0.0（不虚报）；费用压力插值=解析解且**区间外返回 None 不外推**。
+  - 集成实测：statistics **127/0**、labels 100/0、smoke_u09 60/0、契约 173/0、`check_quality OK files=303`、**`OFFLINE REGRESSION OK scripts=85`**。
+  - 新登记 `U07`/`U06B` 相关 P3 若干（`ENTRY_DIVERGENT` 原因码可细分、压力点退回 iid 未分块、`block_means` O(n·|keys|) 等）。
+- **`U11` 核心模块渐进拆分**：**Q r1 = CHANGES_REQUESTED（2 阻塞 + 6 备注）→ 修复轮 `U11-FU1` 进行中**（同一分支 `task/U11`）。
+  - **阻塞 1**：映射**漏掉 `decision_trace.py` 第 961–1799 行（839 行 = 46.6%、28 个公开名）**，且 §3.1 称"天然三块"实为 ≥6 块；`strategy_funnel.py` 同漏 1804–2138 段 4 名。**只搬前半、后半留门面，V1 照样逐字通过** → 漏 47% 文件的映射能通过它自己的出口。
+  - **阻塞 2**：§5"不动清单"里**没有任何 `tests/`**（全文 `grep "tests/"` = 0），而 `tests/integration/*`（12 套件）才是行为断言真身（12 个 `smoke_*.py` 只是透传退出码的薄壳）→ 实施者改测试 import 指向新子模块，**smoke 仍 exit 0、V2 静默通过**。责任归属亦缺（未提 U08）。
+  - **口径发现 C1**（非"作者算错"）：V1 用 `dir()`（86/158 名）而**不是 `__all__`**（61/71），且不检查 `__all__` → 会对"清理门面未用 import"产生**假红**。
+  - Q 确认**通过**的部分：§7 的 10 条命令逐条重跑 **10/10 数字与 exit code 逐字符合**；V1 基线**独立复现 4/4 哈希一致**。
   - **门禁不倒性**：smoke_u09 60/0、test_release_evidence_v2 78/0、test_shadow_labels 100/0、契约 173/0、smoke_u06a 52/0 —— **前后同值**；套件内还有逐字段断言（灌统计快照后门禁报告除 `generated_at` 外相同、`directional_candidates` 3→3、来源过滤仍 `[SOURCE_A]`）。delta `NEW_FAIL=∅`；`check_quality OK files=303`。
   - **待 Q 裁决的关键一条**：补丁 02 把**别人（U06b）的**模块集断言由"集合相等"改为"集合包含"。**已要求 Q 做反向测试**：删掉 U06b 四模块之一必须立刻变红，否则=真削弱。另要求审**统计口径本身**（`naive_understates` 真假、独立块数手算、二项符号检验 p 值独立核对、费用压力区间外是否拒绝外推）。
 - **`U11` 核心模块渐进拆分**：**作者已交付 → Q 复验中**。工作树 `mat-wt/F3`，head `00a49a8`（base `03967e9`）。**仅两个新增文件、未触碰任何 `src/`、0 个共享补丁**：`docs/重构接口映射.md`(356) + 补丁包 README。
