@@ -144,7 +144,15 @@
 > **当前在做的是「后置线」（非首批必需，P2）**：U06b 与 U10b 已派发（U12 集成后二者依赖就绪）。
 
 ### 后置线进行中（勿重复派发）
-- **`U06b` 影子 v2 固定时点标签**：**作者已交付 → Q 复验中**。工作树 `mat-wt/D2`，head `8ae0f65`（base `0706db1`），**共享文件已从分支还原**、只在补丁包 `docs/dispatch/patches/U06b/0f1f21c/`（2 diff）内。
+- **`U06b` 影子 v2 固定时点标签**：**✅ 已 INTEGRATED**（`d9a0734`，merge `e738e2c`）。工作树 `mat-wt/D2`，head `8ae0f65`（base `0706db1`）。**Q r1 = PASS-with-notes（无阻塞项）**，报告 `docs/dispatch/reviews/U06b/8ae0f65/Q_r1.md`。
+  - **门禁不倒性由 Q 自建夹具独立复现**：`directional_candidates` 3→3、`release_readiness` NO_GO→NO_GO、报告除 `generated_at` 外逐字相同；**再加灌 500 条 v2 行候选仍 3**；**越权测试**传 `counts_toward_release_gate=True` 落库仍全 0；`grep -rn shadow_v2 src/core/` **0 命中**（门禁根本不读该表）；两关键 blob 未变（`shadow_status.py` `afa53766be`、`release_evidence.py` `c146b89c75`）。
+  - 集成实测：shadow v2 套件 **100/0**、`smoke_u06a` 52/0、`smoke_u09` 60/0、契约 173/0、`check_quality OK files=301`、**`OFFLINE REGRESSION OK scripts=85`**。
+  - **集成顺序已核实为真且必要**（Q 复现了单独打补丁 02 的 `ImportError`）。
+  - 新登记 `U06B-P3-CLUSTER`（补丁 02 缺空行 / `autocrlf=true` 下整文件转 CRLF / `sampler.clock_verdict_for_window()` 死代码）。
+- **`U07` 配对实验与独立样本统计**：**已派发（U06b 集成后依赖就绪）**。工作树 `mat-wt/D3`（`task/U07` @ `c2f1bab`）。已内联：不得改动 `shadow_status` 口径、必须证明统计产物**同样不进任何门禁分母**、不得伪称 F11 已通过。
+
+<!-- 以下为 U06b 派发/交付时的记录，保留备查
+- **`U06b` 影子 v2 固定时点标签**：工作树 `mat-wt/D2`，head `8ae0f65`（base `0706db1`），**共享文件已从分支还原**、只在补丁包 `docs/dispatch/patches/U06b/0f1f21c/`（2 diff）内。
   - 作者称门禁**不受影响**：写 50 条 v2 标签后 `directional_candidates` 3→3、`release_readiness` NO_G0→NO_GO、**门禁报告除 `generated_at` 外逐字相同**；`shadow_status.py` **一个字符未改**；`current_schema_version()` 仍 17；无新增 ruff exclude。两态 PASS=89/0（未打补丁）、100/0（打完）；delta **NEW_FAIL=∅**；补丁 6/6 干净。
   - **集成顺序（作者注明）**：**先合 `src/intel/shadow_v2/`，再应用两个补丁**，否则 `service.py` 的 `from intel import shadow_status, shadow_v2` 会 ImportError。
   - **未做（如实登记）**：v2 **未接入采集循环**（默认开关 `False`）、未做采集调度编排、未做 U07 的配对统计。
@@ -317,6 +325,8 @@ export PYTHONUTF8=1
 - **D01–D05 外部待决项**阻断 DEPLOY_DEMO / OPS / RELEASE（D01 宿主托管、D03 账户风险覆盖需用户决策）
 - 实盘启用需用户**另行明确授权**
 - 真实宿主/渠道验收（U12 OPS）需 D01/D02 决策后才能进行
+
+-->
 
 -->
 
