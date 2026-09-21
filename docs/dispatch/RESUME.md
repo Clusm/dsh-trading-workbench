@@ -135,7 +135,11 @@
 
 > **W0 / W1 / W2 均已完成**（W1 5/5、W2 7/7 全部 INTEGRATED）。以下为 W3 起点。
 
-1. **W3 第一步：U09（已派发，作者会话运行中）** —— 工作树 `mat-wt/W3`，分支 `task/U09`，base `448a4e9`。
+1. **W3 第一步：U09（作者已交付，独立审查进行中）** —— 工作树 `mat-wt/W3`，分支 `task/U09`，base `448a4e9`。
+   - **作者 head `7cb6a71`**（补丁包提交 `b675118`）。独占交付：`src/core/release_evidence.py`（538→1483）、`tests/acceptance/test_release_evidence_v2.py`（新 989）、`scripts/smoke_u09_release_evidence.py`（新 783）。补丁包 `docs/dispatch/patches/U09/7cb6a71/`（4 diff + README + evidence/）。
+   - 作者自述关键数：**S08 泄漏 300→200（Δ−100）**；三态 A 26/0（基线证明缺陷存在）· B 65/0 · C 78/0，冒烟 9/0 → 60/0；沙箱 delta pristine 84 → patched 85、**NEW_FAIL=∅**；3 种 git 配置 4/4 干净应用。
+   - **I 已独立抽查两项**：①`release_evidence.py` 内**无**第二份 source 名单（走 `intel.shadow_status.release_gate_role`）；②门禁阈值 **200/30/7.0/0.999/120 全部未变**、`release_readiness` 派生方式未变。
+   - **审查已并行派发**：Q（`reviews/U09/R1/q`）与 A（`reviews/U09/R1/a`），均 detached @ `b675118`。**两者仍在运行，勿重复派发。**
    - 交付：`src/core/release_evidence.py`（扩展，不重写）＋ `tests/acceptance/test_release_evidence_v2.py` ＋ `scripts/smoke_u09_release_evidence.py` ＋ 补丁包 `docs/dispatch/patches/U09/<head>/`（含 `database.py`/`health_watch.py`/`report_release_readiness.py` 适配 + `run_offline_regression.py` 登记）。
    - 已内联进提示词：S08 泄漏的具体行号与修法（**从 `src.intel.shadow_status` 导入 gate_role 口径，禁止硬编码第二份 source 名单**）、NO_EDGE 不计分母、**窗口首尾缺失计入分母**（现 `observation_coverage` 自动取首尾健康行 = 规格 §12 明禁）、lifecycle 去重 + 晚到成本重算、ACK≠恢复、重启 vs 换版、不建第二套 GO 判断器、F10/F12/F16/F23/F24 证据、3 种 git 配置补丁可应用、两态测试、禁止硬编码迁移版本集合。
    - **作者会话仍在运行 → 本回合不要重复派发 U09。**

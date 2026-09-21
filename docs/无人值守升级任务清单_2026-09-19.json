@@ -2203,7 +2203,7 @@
       "title": "发布证据与事件恢复门禁",
       "owner_role": "I",
       "actual_assignee": null,
-      "status": "PLANNED",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": true,
       "depends_on": [
         "U01",
@@ -2230,7 +2230,40 @@
         "F23",
         "F24"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "7cb6a71",
+          "package_commit": "b675118",
+          "base": "448a4e9",
+          "branch": "task/U09（worktree mat-wt/W3）",
+          "changed_files": [
+            "src/core/release_evidence.py（538 -> 1483 行）",
+            "tests/acceptance/test_release_evidence_v2.py（新 989 行）",
+            "scripts/smoke_u09_release_evidence.py（新 783 行）"
+          ],
+          "shared_patches": "docs/dispatch/patches/U09/7cb6a71/ 4 个 diff（01 database A_strategy 别名归一 +29/-1；02 health_watch 窗口与回执探针 +229；03 report_release_readiness 窗口与证据 +50/-3；04 run_offline_regression 登记 +3）+ README + evidence/（apply_database_patch.py、probe_cli_report.py）。共享文件只在工作树改动、未提交。",
+          "s08_fix": "同一夹具（200 A + 50 B + 50 C，机会键互不相同）：directional_candidates 300 -> 200（Δ-100）；shadow_rows 仍 300、shadow_source_rows A=200/B=50/C=50（只披露不计分）。修法：分母只计入 intel.shadow_status.release_gate_role(source)==GATE_ROLE_EXECUTION_DECISION（SOURCE_A），本文件无第二份 source 名单。删 B/C 后分母不变；A_strategy 旧别名在 database.py 写入时归一。【I 已独立抽查】release_evidence.py 内 grep 不到 A_current_baseline/B_contract_market/C_contract_plus_web3 字面量，确实走 release_gate_role。",
+          "must_haves": "①NO_EDGE/无方向不计入分母（+120 no_edge +120 reason_code:NO_EDGE +240 neutral/unknown 后分母仍 200；基线态 440）②窗口首尾缺失计入分母（expected=31 observed=26 head_missing=3 tail_missing=2 -> 覆盖率 FAIL；未声明窗口 -> NO_DATA+WINDOW_MISSING 且分母为 None；畸形窗口 8 取值 + 反向窗口 -> FAIL+WINDOW_INVALID 不崩溃）③迟到修订重算不重复计数（同 lifecycle 仍 30 非 31；lc-0 净收益 0.85->0.55，evidence_revision_hash 变化）；同 recorded_at 冲突 -> REVISION_CONFLICT 且冲突生命周期不进 30；cost_status != COMPLETE 不进 30 且不谎报净收益 0 ④ACK != 恢复（delivered_confirmed=1、ack_without_delivery=[ack-only-1]、provider_accepted_only=1，复用 U14 的 MANUAL_ACK_ONLY/NO_CONFIRMED_DELIVERY；incident acked_not_recovered_count=1 + ACK_WITHOUT_RECOVERY）⑤重启 vs 换版（2 session + 单 config_hash -> RESTART_SAME_ARTIFACT/restart_count=1/restart_is_version_change=False/PASS；第二个 config_hash -> CONFIG_CHANGED_WITHIN_WINDOW+MIXED_CONFIG_SAMPLES+FAIL；窗口内其它 release_id -> MIXED_RELEASE_SAMPLES）⑥不建第二套 GO（gates 键集合与升级前完全一致、release_readiness==all(gates)；新增 k06 五组 + blocking_items，无整体 GO 字段）",
+          "thresholds_unchanged": "【I 已独立抽查】min_directional_candidates=200 / min_eligible_closed_trades=30 / min_observation_days=7.0 / min_observation_coverage=0.999 / max_observation_gap_seconds=120.0 全部未变；release_readiness 派生方式未变。",
+          "two_state": "A（纯基线 448a4e9 + 仅套件）26/0（断言基线缺陷确实存在：300、NO_EDGE 计入、窗口自动截断、无修订披露）；B（独占产物无共享补丁）65/0、冒烟 9/0；C（全补丁）78/0、冒烟 60/0",
+          "patches_applicability": "3 种 git 配置下 4/4 干净应用（Checking patch、0 Skipped）；作者自述唯一失败组合是『工作树为 CRLF 却声明 autocrlf=false,eol=lf』（认为任何补丁都无解）；加 --ignore-whitespace 后 9/9 通过 —— 待 Q 复验。",
+          "delta": "沙箱（git archive 448a4e9，独立 repo）：pristine OFFLINE REGRESSION OK scripts=84（rc=0）；patched@7cb6a71 OK scripts=85（含 U09 冒烟 60/0，rc=0）；失败行排序对比 NEW_FAIL = ∅（10 行内部 FAIL 来自既有 smoke_u02_strategy_position_manager.py，两态逐字相同）",
+          "affected_shared_smokes": "patched 沙箱全 rc=0：smoke_contracts_v3 / smoke_release_acceptance / smoke_db_migrations / smoke_health_watch / smoke_release_observation_freshness / smoke_u14_alert_delivery / smoke_u06a_shadow_isolation / smoke_u10a_release_package；check_quality rc=0、ruff 全绿",
+          "known_limits": [
+            "CRLF 工作树需 git apply --ignore-whitespace",
+            "窗口『声明』目前只能来自调用方或发布清单；service.py（非 U09 集成目标）未持久化发布起始 -> 真实报告缺声明时只会 NO_DATA+WINDOW_MISSING（建议 U12/U15 在清单写窗口键）",
+            "全部为离线合成夹具，未做真实故障注入",
+            "告警来源是 alert_deliveries 审计镜像（非投递队列），镜像为空一律 NO_DATA",
+            "历史库缺 acknowledged_at/resolved_at 列时按『无 ACK 证据』处理",
+            "『谁能声明 PASS』属 U12 流程，未定义",
+            "runtime_identity.py:2283 的 fu-3 启动期门禁仍归 U12/U13",
+            "窗口不成立时分母字段一律 None（避免把全库行数读成本发布样本）",
+            "NO_EDGE 只认显式标记，new_entry_allowed=false 不排除（另以 blocked_entry_rows 披露），若要改口径需显式变更并同步 200 定义"
+          ],
+          "unfinished": "无（必达要点均有实测）；真实故障注入、真实发布清单窗口键、live 档均在 U12"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "Q",
@@ -2264,12 +2297,25 @@
         "DL07",
         "DL10"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "448a4e9",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r1",
+          "stage": "独立审查",
+          "candidate": "b675118",
+          "sessions": [
+            "Q (reviews/U09/R1/q)",
+            "A (reviews/U09/R1/a)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U09/b675118/",
+          "note": "Q = 独立复验全部必达要点 + S08 前后对照 + 三态 + 全量 delta + 补丁矩阵；A = 以 U01 账本真实语义交叉核对『30 完整闭合/净收益/成本证据』口径，重点查 fail-open（冲突样本被排除后凑数）。"
+        }
+      ],
       "qa_runs": []
     },
     {
