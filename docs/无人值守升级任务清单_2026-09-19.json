@@ -2223,6 +2223,33 @@
             "P2-3 195KB 台账进包且是包内**唯一免扫文件**；索引三处口径冲突（不进发布包/仅源码仓库/进发布包）"
           ],
           "reviewer_incident": "该审查者把 git archive 产物写到**集成树根部**（mat-wt/I/base.tar，8.4MB），越界；I 已删除"
+        },
+        {
+          "type": "author_fix_r2",
+          "head_commit": "10bc4d2",
+          "commits": [
+            "ff98566",
+            "e0a8cf2",
+            "1eb1b1e",
+            "10bc4d2"
+          ],
+          "scope": "共享文件零改动（contracts/run_offline_regression diff 空）",
+          "p2_1": "出包路径去掉 .exists() 过滤（'真实仓库'=git-index 或含包内 release_manifest.py）；scripts/ 兜底由'一律 source-only'改为**未归类即失败**。前后：改名 run_web_renamed.py exit=0 215 成员 -> **exit=2 存在未归类文件**；改名 smoke -> exit=2 '运行必需资产在仓库中不存在[scripts/run_web.py]'；删除 run_web.py -> exit=2 同上",
+          "p2_2": "§9.1 标题与命令块标 [source 包]，并新增'**runtime 包内可用的启动方式**'（run_web.py --profile live/demo）；§9.3/§9.6/§9.7 同步；新门禁 [1c] 要求 source-only 引用带标记并有注入负例（双向非空转）",
+          "p2_3": "**已统一**（选'进了就说明为何免扫'）：台账仍在包内（5 处相对链接引用、contracts 属禁改目录），新增断言'KI04 豁免成员必须在自检报告中如实列出'；三处口径改后一致",
+          "p3": "P3-5 已修（forbidden_paths_absent 改判 on_disk 全集 + 负例）；P3-6 已修（索引补两篇）；**P3-7 已修：手册附录 A 落盘 14 条=12 本仓+2 补丁依赖**；P3-8/P3-10 如实登记；P3-9 更正；P3-4 三篇文档经补丁 04 占位化，活台账 JSON 登记为遗留",
+          "claim2_corrected": "**已更正**：旧实现补 -z 前后成员集合 **0 差异**；-z 只在新设计下缺了会'未归类->构建失败'。改了 docstring、代码维护规范 §11.2、补丁 README；'两处真实漏包' **更正为一处**",
+          "patches": "docs/dispatch/patches/U10a/1eb1b1e/（r1 的 89541df/ 已移除、无引用）；01-04 在三配置下 apply --check 全 OK（仓库根、集成 HEAD b97ae0d）",
+          "delta": "pristine f5e4790 -> MANIFEST OK 78 + OFFLINE REGRESSION OK scripts=82 exit 0；head+01-04 -> included=79 + **OK scripts=83** exit 0；**NEW failures [] / GONE []**",
+          "tests": "smoke_u10a 32/0；--self-check --kind runtime/source 均 exit 0、13/13 ok（214/376 文件）；契约 173/0；check_quality **OK files=287**；SECRET SCAN OK files=521",
+          "known_limits": [
+            "台账 JSON 内绝对路径（I 活力台账，行级补丁必冲突）",
+            "P3-10 属 U15 文件",
+            "basename 门禁分辨不出同名不同目录",
+            "台账仍在 runtime 包（移出需 I 同批改 5 处链接）",
+            "--verify-package 仍在重依赖导入后"
+          ],
+          "unfinished": "P3-10 归属、U08 集成后 delta（归 U12）"
         }
       ],
       "blockers": [],
@@ -2267,6 +2294,16 @@
           ],
           "verdict": "PENDING",
           "reports_dir": "docs/dispatch/reviews/U10a/<r2head>/"
+        },
+        {
+          "round": "r3",
+          "stage": "修复复验",
+          "candidate": "10bc4d2",
+          "sessions": [
+            "Q (reviews/U10a/R3/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U10a/10bc4d2/"
         }
       ],
       "qa_runs": []
