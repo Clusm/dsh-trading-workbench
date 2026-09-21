@@ -669,14 +669,26 @@ def build_release_package(
     # 登记项与仓库脱节必须在**出包路径**就硬失败：早期版本写作
     # ``... and (root / relative).exists()``，把不存在的必需项直接跳过，于是
     # ``scripts/run_web.py`` 被重命名后 ``--out`` 仍能**静默出包**（包内没有任何
-    # 启动器）。现在与 ``verify_release_package`` 的判定对齐：必需路径不存在即失败，
-    # 且"存在但没进包"与"根本不存在"分别给出可读原因（两种包都检查）。
-    absent = sorted(relative for relative in required if not (root / relative).is_file())
-    if absent:
-        raise ReleasePackageError(
-            f"运行必需资产在仓库中不存在（登记项与实际仓库脱节，禁止出包）: {absent[:10]}"
-        )
-    missing = sorted(set(required) - set(files))
+    # 启动器）。现在与 ``verify_release_package`` 的判定对齐：真实仓库里必需路径不
+    # 存在即失败，且"存在但没进包"与"根本不存在"分别给出可读原因。
+    #
+    # 唯一的例外是**合成夹具**（无 Git 索引、也没有 ``src/core/release_manifest.py``
+    # 的临时目录，例如 ``scripts/smoke_release_package.py`` 自建的 partial tree）：
+    # 它没有"真实仓库"语义，天然只带一小撮文件，沿用旧的"存在才要求入包"口径。
+    real_repo = inventory["source"] == "git-index" or (
+        root / SRC_DIRNAME / "core" / "release_manifest.py"
+    ).is_file()
+    if real_repo:
+        absent = sorted(relative for relative in required
+                        if not (root / relative).is_file())
+        if absent:
+            raise ReleasePackageError(
+                f"运行必需资产在仓库中不存在（登记项与实际仓库脱节，禁止出包）: {absent[:10]}"
+            )
+        missing = sorted(set(required) - set(files))
+    else:
+        missing = sorted(relative for relative in required
+                         if relative not in set(files) and (root / relative).exists())
     if missing:
         raise ReleasePackageError(f"运行必需资产未入包: {missing[:10]}")
     if problems:
