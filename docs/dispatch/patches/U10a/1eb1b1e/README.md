@@ -1,14 +1,15 @@
 # U10a 共享适配补丁包（r2）
 
 - 作者线/任务：EF / U10a（可运行发布包与准确运维说明）
-- 补丁生成时作者 head：`ff98566`（`task/U10a`）
+- 补丁发布时作者 head：`1eb1b1e`（`task/U10a`）。01–03 与 r1 在 `89541df` 生成时逐字节
+  相同，04 生成于 `ff98566`；三者内容都不随 head 推进而变，故本目录以最终 head 命名
 - 集成 base：`8a96609`（本报告核对时的集成 HEAD）。本轮窗口内集成 HEAD 持续推进
   （`f5e4790` → `c7783d9` → `8a96609`），但 4 个补丁触及的**全部文件**在
   `f5e4790..8a96609` 之间**逐字节相同**（`git diff --stat` 为空，已核），因此补丁对
   任意含这些文件的集成 HEAD 都适用。
 - 集成目标：`scripts/run_web.py`、`src/core/windows_service.py`（补丁 01/02）；
   文档卫生 3 篇（补丁 04）；伴随登记 `scripts/run_offline_regression.py`（补丁 03）
-- 上下文一致性：作者分支**未改任何共享文件**（`git diff --stat f5e4790 ff98566 -- <共享文件>` 为空）
+- 上下文一致性：作者分支**未改任何共享文件**（`git diff --stat f5e4790 1eb1b1e -- <共享文件>` 为空）
 
 ## 补丁清单
 
@@ -26,7 +27,7 @@
 
 ```bash
 cd <repo-root>
-for p in docs/dispatch/patches/U10a/ff98566/0*.diff; do git apply -p1 "$p"; done
+for p in docs/dispatch/patches/U10a/1eb1b1e/0*.diff; do git apply -p1 "$p"; done
 ```
 
 ## 应用校验（实际执行）
@@ -58,7 +59,7 @@ for p in docs/dispatch/patches/U10a/ff98566/0*.diff; do git apply -p1 "$p"; done
 ## 沙箱 delta（独立检出 + 补丁应用后的实测）
 
 沙箱 = `git archive <rev>` → `git init` → `git add -A`（`core.autocrlf=false`），
-pristine = `f5e4790`（不含 U10a），patched = 作者 head `ff98566` + 补丁 01–04。
+pristine = `f5e4790`（不含 U10a），patched = 作者 head `1eb1b1e` + 补丁 01–04。
 
 | 运行 | 结果 |
 |---|---|
