@@ -102,6 +102,8 @@ SCRIPTS = (
     "scripts/smoke_u02_strategy_position_manager.py",
     # U06a（D 影子研究）：影子最小隔离与旧口径披露。全程离线。
     "scripts/smoke_u06a_shadow_isolation.py",
+    # U14（E 运维）：外部告警送达/心跳交易证据/主机失联检测离线冒烟。
+    "scripts/smoke_u14_alert_delivery.py",
 )
 EXCLUDED_SMOKE_SCRIPTS = {
     # 第[6]节直接调用 query_symbol_detail/query_symbol_cards 打公共行情接口，

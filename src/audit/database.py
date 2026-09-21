@@ -330,6 +330,37 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
     opened_at TEXT,
     closed_at TEXT NOT NULL
 );
+-- U14（外部告警送达）：投递状态的**审计镜像**。
+-- 职责边界（R14/F22）：投递队列本身（有界容量/指数退避/冷却聚合/去重）位于
+-- <state_root>/ops/alert_queue.sqlite，**独立于本交易库**——告警积压不写这里、
+-- 也不锁交易路径；本表只把**已发生的**投递状态变化留一份可审计副本，供运维与
+-- 发布报告读取。
+-- 版本策略：本表随 SCHEMA（每次打开即幂等执行 CREATE TABLE IF NOT EXISTS）落地，
+-- **不**占用 schema_migrations 版本号，因此不改变 current_schema_version()，也不
+-- 打破既有 scripts/smoke_*.py 的 `list(range(1, N))` 迁移版本断言（U01 教训）。
+CREATE TABLE IF NOT EXISTS alert_deliveries (
+    environment TEXT NOT NULL,
+    incident_key TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    state_rank INTEGER NOT NULL DEFAULT 0,
+    severity TEXT NOT NULL DEFAULT '',
+    first_occurred_at TEXT NOT NULL,
+    first_occurred_at_ms INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    submitted_at_ms INTEGER,
+    delivered_at_ms INTEGER,
+    ack_at_ms INTEGER,
+    provider_receipt TEXT,
+    device_receipt TEXT,
+    receiver_ref TEXT NOT NULL DEFAULT '',
+    manual_ack_actor TEXT,
+    manual_ack_note TEXT,
+    record_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (environment, incident_key, attempt)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_deliveries_state
+ON alert_deliveries(environment, state, first_occurred_at_ms);
 """
 
 
@@ -1223,6 +1254,198 @@ class AuditDatabase:
         return self.fetch_all(
             "SELECT * FROM release_observations WHERE " + " AND ".join(clauses)
             + " ORDER BY observed_minute,observed_at",
+            tuple(params),
+        )
+
+    # ------------------------------------------------------------------
+    # U14 外部告警送达：投递状态的**审计镜像**（K05 阶梯的派生视图）
+    # ------------------------------------------------------------------
+
+    def record_alert_delivery(
+        self,
+        *,
+        environment: str,
+        incident_key: str,
+        attempt: int,
+        first_occurred_at_ms: int,
+        severity: str = "",
+        state: str | None = None,
+        submitted_at_ms: int | None = None,
+        provider_receipt: str | None = None,
+        delivered_at_ms: int | None = None,
+        ack_at_ms: int | None = None,
+        device_receipt: str | None = None,
+        receiver_ref: str = "",
+        manual_ack_actor: str | None = None,
+        manual_ack_note: str | None = None,
+        record: Mapping[str, Any] | None = None,
+        bound_incident_key: str | None = None,
+    ) -> bool:
+        """写入一条告警投递审计行；状态**由事实派生**，不接受调用方自报。
+
+        U14（R14：供应商“已接受”≠“已送达”）。三条不可退让的规则：
+
+        1. ``state`` 一律由 :func:`core.contracts.k05_trace.evaluate_state` 从
+           ``submitted_at_ms``/``provider_receipt``/``delivered_at_ms``/``ack_at_ms``
+           派生（显式传入且不一致 → ``ValueError``）；
+        2. 派生出的阶梯必须通过 :func:`delivery_violations`（HTTP200 只到 SUBMITTED、
+           缺 provider_receipt 不得 ACCEPTED/DELIVERED、缺 submitted_at_ms 不得进阶、
+           时间戳必须非降序），违规即拒绝落库；
+        3. ``DELIVERED`` 必须另有非空 ``device_receipt``，否则拒绝——**不得伪造送达**。
+        4. 回执必须**绑定到本消息身份**（与 ``core.ops.alert_delivery`` 的 P1-3 同源）：
+           本镜像的身份是 ``incident_key``，因此凡提供 ``provider_receipt`` 或
+           ``device_receipt`` 就必须同时给出 ``bound_incident_key`` 且与本行
+           ``incident_key`` 相等，否则拒绝（``RECEIPT_UNBOUND`` /
+           ``RECEIPT_BINDING_MISMATCH`` / ``RECEIPT_TYPE_INVALID``）。绑定一致后，
+           本行主键 ``(environment, incident_key, attempt)`` 即“回执归属”的落库证据。
+
+        **每次调用必须携带该 attempt 上截至当时的全部已确认事实**
+        （``submitted_at_ms`` / ``provider_receipt`` / ``delivered_at_ms`` /
+        ``ack_at_ms``）：阶梯不替调用方"记忆"前件，缺前件即拒绝（例如只给
+        ``provider_receipt`` 而不给 ``submitted_at_ms`` → ``SUBMITTED_WITHOUT_TIMESTAMP``）。
+        这是有意的 fail-closed 口径——拒绝"先提升后补证"，而不是替调用方补齐。
+
+        写入是**状态单调**的（``state_rank`` 只增不减）：已存在的事实列用
+        ``COALESCE(旧值, 新值)`` 保留，重复上报不会抹掉更早或更强的证据。
+
+        **列语义**（新表，无既有消费者；此处显式声明以免下游误用）：
+
+        - ``first_occurred_at`` 是 ISO-8601 UTC 文本，与
+          ``release_observations.observed_at`` 同口径（供人读/报表）；
+        - ``first_occurred_at_ms`` 是 epoch 毫秒整数，与
+          ``execution_fills.trade_time_ms`` 同类的毫秒事件口径（供计算与跨表比较）；
+          两者**指同一个时刻**，即 U14 告警的 ``occurrence_at_ms``（首次发生时间，
+          积压恢复后不得改写）；
+        - ``state_rank`` 是 ``ALERT_STATE_ORDER`` 里的下标，只用于 SQL 侧的单调守卫，
+          不是新的状态枚举（状态枚举只认 K05）。
+        """
+        from core.contracts.k05_trace import (
+            ALERT_STATE_ORDER,
+            AlertDelivery,
+            delivery_violations,
+            evaluate_state,
+        )
+
+        from core.ops.alert_delivery import (
+            RECEIPT_BINDING_MISMATCH,
+            RECEIPT_TYPE_INVALID,
+            RECEIPT_UNBOUND,
+        )
+
+        incident = str(incident_key).strip()
+        if not incident:
+            raise ValueError("incident_key is required")
+        attempt_value = int(attempt)
+        if attempt_value < 1:
+            raise ValueError("attempt must be >= 1")
+        # 回执类型：非字符串一律结构化拒绝，不做 str() 强转（与队列侧同口径）。
+        for _field, _value in (("provider_receipt", provider_receipt),
+                               ("device_receipt", device_receipt)):
+            if _value is not None and not isinstance(_value, str):
+                raise ValueError(f"{RECEIPT_TYPE_INVALID}: {_field} must be a string")
+        derived = evaluate_state(
+            submitted_at_ms=submitted_at_ms,
+            provider_receipt=provider_receipt,
+            delivered_at_ms=delivered_at_ms,
+            ack_at_ms=ack_at_ms,
+        )
+        if state is not None and str(state).strip().upper() != derived:
+            raise ValueError(
+                f"alert state mismatch: declared={state!r} derived={derived!r}")
+        delivery = AlertDelivery(
+            incident_key=incident,
+            attempt=attempt_value,
+            receiver_ref=str(receiver_ref),
+            provider_receipt=(str(provider_receipt) if provider_receipt else None),
+            submitted_at_ms=(None if submitted_at_ms is None else int(submitted_at_ms)),
+            delivered_at_ms=(None if delivered_at_ms is None else int(delivered_at_ms)),
+            ack_at_ms=(None if ack_at_ms is None else int(ack_at_ms)),
+            state=derived,
+        )
+        violations = delivery_violations(delivery)
+        if violations:
+            raise ValueError("alert delivery violates K05 ladder: " + ",".join(violations))
+        if derived == "DELIVERED" and not str(device_receipt or "").strip():
+            raise ValueError(
+                "DELIVERED requires a non-empty device receipt (no fabricated delivery)")
+        # 回执身份绑定：本镜像的身份是 incident_key（见 docstring 第 4 条）。
+        if provider_receipt is not None or device_receipt is not None:
+            bound = bound_incident_key
+            if not isinstance(bound, str) or not bound.strip():
+                raise ValueError(
+                    f"{RECEIPT_UNBOUND}: receipts must declare bound_incident_key "
+                    "(which message they belong to)")
+            if bound.strip() != incident:
+                raise ValueError(
+                    f"{RECEIPT_BINDING_MISMATCH}: receipt bound to {bound.strip()!r} "
+                    f"but this row is {incident!r}")
+
+        occurred_ms = int(first_occurred_at_ms)
+        occurred_iso = datetime.fromtimestamp(
+            occurred_ms / 1000.0, tz=timezone.utc).isoformat(timespec="milliseconds")
+        rank = ALERT_STATE_ORDER.index(derived)
+        payload = json.dumps(dict(record or {}), ensure_ascii=False, sort_keys=True)
+        with self.lock:
+            cursor = self.conn.execute(
+                """INSERT INTO alert_deliveries(
+                    environment,incident_key,attempt,state,state_rank,severity,
+                    first_occurred_at,first_occurred_at_ms,created_at,submitted_at_ms,
+                    delivered_at_ms,ack_at_ms,provider_receipt,device_receipt,receiver_ref,
+                    manual_ack_actor,manual_ack_note,record_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(environment,incident_key,attempt) DO UPDATE SET
+                    state=excluded.state,
+                    state_rank=excluded.state_rank,
+                    severity=excluded.severity,
+                    submitted_at_ms=COALESCE(alert_deliveries.submitted_at_ms,
+                                             excluded.submitted_at_ms),
+                    delivered_at_ms=COALESCE(alert_deliveries.delivered_at_ms,
+                                             excluded.delivered_at_ms),
+                    ack_at_ms=COALESCE(alert_deliveries.ack_at_ms, excluded.ack_at_ms),
+                    provider_receipt=COALESCE(alert_deliveries.provider_receipt,
+                                              excluded.provider_receipt),
+                    device_receipt=COALESCE(alert_deliveries.device_receipt,
+                                            excluded.device_receipt),
+                    manual_ack_actor=COALESCE(alert_deliveries.manual_ack_actor,
+                                              excluded.manual_ack_actor),
+                    manual_ack_note=COALESCE(alert_deliveries.manual_ack_note,
+                                             excluded.manual_ack_note),
+                    record_json=excluded.record_json
+                WHERE excluded.state_rank >= alert_deliveries.state_rank""",
+                (
+                    str(environment).lower(), incident, attempt_value, derived, rank,
+                    str(severity).upper(), occurred_iso, occurred_ms, utc_now(),
+                    None if submitted_at_ms is None else int(submitted_at_ms),
+                    None if delivered_at_ms is None else int(delivered_at_ms),
+                    None if ack_at_ms is None else int(ack_at_ms),
+                    (str(provider_receipt) if provider_receipt else None),
+                    (str(device_receipt) if device_receipt else None),
+                    str(receiver_ref),
+                    (str(manual_ack_actor) if manual_ack_actor else None),
+                    (str(manual_ack_note) if manual_ack_note else None),
+                    payload,
+                ),
+            )
+            self.conn.commit()
+        return cursor.rowcount == 1
+
+    def fetch_alert_deliveries(
+        self, *, environment: str, incident_key: str | None = None,
+        state: str | None = None, limit: int = 50,
+    ) -> list[sqlite3.Row]:
+        """读取告警投递审计行（只读；不触发迁移、不改任何样本）。"""
+        clauses = ["environment=?"]
+        params: list[Any] = [str(environment).lower()]
+        if incident_key:
+            clauses.append("incident_key=?")
+            params.append(str(incident_key))
+        if state:
+            clauses.append("state=?")
+            params.append(str(state).upper())
+        params.append(max(1, int(limit)))
+        return self.fetch_all(
+            "SELECT * FROM alert_deliveries WHERE " + " AND ".join(clauses)
+            + " ORDER BY first_occurred_at_ms DESC, attempt DESC LIMIT ?",
             tuple(params),
         )
 
