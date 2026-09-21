@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,7 @@ from core.strategy_funnel import (  # noqa: E402
     DETAIL_NATURE,
     DETAIL_REASON,
     DETAIL_STAGES,
+    LEDGER_WRITE_FAILED,
     NATURE_FAULT,
     NATURE_SCOPE,
     ROUND_ONLY_DETAILS,
@@ -604,6 +606,140 @@ def test_execution_and_ledger() -> None:
               and bool(n4_record.release_round_id),
               None if n4_record is None else n4_record.as_dict())
 
+        # --- B-r4 N6：账本**写盘本身**失败（磁盘满/只读盘/文件被占用）也不得穿出 --- #
+        # 收尾 save()：任何异常都局部化（不再只吞 LedgerLockTimeout/LedgerCorrupt）。
+        for exc_name, exc_factory in (
+                ("OSError", lambda: OSError(28, "No space left on device")),
+                ("PermissionError", lambda: PermissionError(13, "denied")),
+                ("sqlite3.OperationalError",
+                 lambda: sqlite3.OperationalError("database is locked"))):
+            class _SaveBoom(TicketLedger):
+                def save(self, _factory=exc_factory) -> None:  # noqa: D102 - 构造用替身
+                    raise _factory()
+
+            boom_path = Path(tmp) / f"led_n6_{exc_name.replace('.', '_')}.json"
+            boom_led = _SaveBoom(boom_path, clock=lambda: 1_700_000_000_000)
+            boom_f = ScanFunnel(round_id=f"smoke-save-{exc_name}")
+            escaped = None
+            decision = None
+            try:
+                decision = run_strategy_trader(tickets=[live_ticket("t-n6")],
+                                               prices={"BTCUSDT": 100.0},
+                                               funnel=boom_f, ledger=boom_led)
+            except Exception as inner:  # noqa: BLE001 - 修复前这里就是穿出点
+                escaped = type(inner).__name__
+            check(f"N6 收尾 save() 抛 {exc_name} 不再穿出执行器，intents 不被丢弃",
+                  escaped is None and decision is not None
+                  and decision.decision == "open" and len(decision.intents) == 1,
+                  (escaped, None if decision is None else decision.reasoning[:140]))
+            check(f"N6 {exc_name} 照样登记轮级故障 LEDGER_SAVE_DEFERRED",
+                  boom_f.detail_counts.get(funnel_mod.DETAIL_LEDGER_SAVE_DEFERRED) == 1
+                  and [x.detail for x in boom_f.round_faults]
+                  == [funnel_mod.DETAIL_LEDGER_SAVE_DEFERRED], boom_f.as_dict())
+            n6_reread = TicketLedger(boom_path, clock=lambda: 1_700_000_000_000)
+            check(f"N6 {exc_name} 下孤儿可审计（盘上已消费、orphan_consumed 可定位）",
+                  n6_reread.is_consumed("t-n6")
+                  and [r.ticket_id for r in n6_reread.orphan_consumed()] == ["t-n6"])
+
+        # 账本内部的写盘收敛（consume/release/BaseException）见 [9]：那一组不依赖
+        # 共享适配接线，两态都跑；这里只留"经由执行器"的那部分。
+
+        # 执行器侧：认领抛异常 → 该票 fail-closed 跳过，其余票照常
+        cc_path = Path(tmp) / "led_n6_consume_call.json"
+        cc_led = TicketLedger(cc_path, clock=lambda: 1_700_000_000_000)
+        cc_real_consume = cc_led.consume
+
+        def _consume_boom(ticket_id, **kwargs):
+            if str(ticket_id) == "t-bad":
+                raise OSError(28, "No space left on device")
+            return cc_real_consume(ticket_id, **kwargs)
+
+        cc_led.consume = _consume_boom  # type: ignore[method-assign]
+        cc_f = ScanFunnel(round_id="smoke-consume-boom")
+        cc_decision = run_strategy_trader(
+            tickets=[live_ticket("t-bad"), live_ticket("t-good")],
+            prices={"BTCUSDT": 100.0}, funnel=cc_f, ledger=cc_led)
+        check("N6 认领抛 OSError 不再穿出：坏票 fail-closed 跳过，同轮其余票照常成交",
+              cc_decision.decision == "open" and len(cc_decision.intents) == 1
+              and cc_f.detail_counts.get(
+                  funnel_mod.DETAIL_TICKET_LEDGER_UNAVAILABLE) == 1
+              and cc_led.is_consumed("t-good") and "OSError" in cc_decision.reasoning,
+              cc_decision.reasoning[:160])
+
+
+def test_ledger_write_failure_contained() -> None:
+    """B-r4 N6：账本**写盘本身**失败（磁盘满/只读盘/文件被占用）不得穿出，也不得
+    在内存里留下"没落盘的已消费"（否则下一次成功 save() 会把它洗成已消费）。
+
+    只依赖 U08 独占模块，**两态都跑**。
+    """
+    note("账本写盘失败收敛（N6）")
+    with tempfile.TemporaryDirectory(prefix="mta-u08-smoke-n6-") as tmp:
+        clock = lambda: 1_700_000_000_000  # noqa: E731
+        for exc in (OSError(28, "No space left on device"),
+                    PermissionError(13, "denied"),
+                    sqlite3.OperationalError("database is locked")):
+            exc_name = type(exc).__name__
+            exc_label = f"{type(exc).__module__}.{exc_name}"
+            w_path = Path(tmp) / f"led_n6_w_{exc_name}.json"
+            w_led = TicketLedger(w_path, clock=clock)
+            w_real_save_locked = w_led._save_locked
+
+            def _boom_save(_exc=exc) -> None:
+                raise _exc
+
+            w_led._save_locked = _boom_save
+            w_escaped = None
+            claim = None
+            try:
+                claim = w_led.consume("t-w", round_id="r1")
+            except Exception as inner:  # noqa: BLE001 - 修复前这里就是穿出点
+                w_escaped = type(inner).__name__
+            w_led._save_locked = w_real_save_locked
+            check(f"N6 账本写盘抛 {exc_label}：consume() 不穿出，返回 LEDGER_WRITE_FAILED"
+                  f"（带底层异常名）且内存/盘上都不算已消费",
+                  w_escaped is None and claim is not None
+                  and claim.state == LEDGER_WRITE_FAILED and claim.error == exc_name
+                  and not w_led.is_consumed("t-w")
+                  and not TicketLedger(w_path, clock=clock).is_consumed("t-w"),
+                  (w_escaped, None if claim is None else claim.as_dict()))
+
+        # release() 写盘失败同样不得穿出（内存已撤销 → True）
+        r_path = Path(tmp) / "led_n6_release.json"
+        r_led = TicketLedger(r_path, clock=clock)
+        r_led.consume("t-r", round_id="r1")
+        r_real_save_locked = r_led._save_locked
+
+        def _boom_release_save() -> None:
+            raise PermissionError(13, "denied")
+
+        r_led._save_locked = _boom_release_save
+        r_escaped = None
+        r_result = None
+        try:
+            r_result = r_led.release("t-r", round_id="r1")
+        except Exception as inner:  # noqa: BLE001 - 修复前这里就是穿出点
+            r_escaped = type(inner).__name__
+        r_led._save_locked = r_real_save_locked
+        check("N6 release() 写盘抛 PermissionError：不穿出，内存已撤销（返回 True）",
+              r_escaped is None and r_result is True
+              and not r_led.is_consumed("t-r"), (r_escaped, r_result))
+
+        # 只吞 Exception：BaseException 必须继续穿出（U14 规矩）
+        be_led = TicketLedger(Path(tmp) / "led_n6_base.json", clock=clock)
+
+        def _boom_base_save() -> None:
+            raise KeyboardInterrupt("构造：账本写盘时 Ctrl-C")
+
+        be_led._save_locked = _boom_base_save
+        be_escaped = None
+        try:
+            be_led.consume("t-be", round_id="r1")
+        except KeyboardInterrupt as inner:
+            be_escaped = type(inner).__name__
+        check("N6 只吞 Exception：KeyboardInterrupt 仍从 consume() 穿出（未被吞掉）",
+              be_escaped == "KeyboardInterrupt", be_escaped)
+
 
 def test_attribution() -> None:
     """必达要点 3：每仓能定位管理者与规则版本。"""
@@ -771,6 +907,8 @@ def main() -> int:
     run_case("[6] 每仓管理者与规则版本", test_attribution)
     run_case("[7] 管理优先预算", test_management_priority_budget)
     run_case("[8] 看板展示", test_dashboard_display)
+    run_case("[9] 账本写盘失败收敛（N6，两态都跑）",
+             test_ledger_write_failure_contained)
     print("\n" + "=" * 72)
     print(f"结果：PASS {PASS} / FAIL {FAIL}")
     if FAILURES:

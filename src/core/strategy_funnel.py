@@ -1079,6 +1079,12 @@ ALREADY_CONSUMED = "ALREADY_CONSUMED"
 LEDGER_CORRUPT = "LEDGER_CORRUPT"
 #: 取不到跨进程独占锁（另一进程正在写）：fail-closed，**不**消费。
 LEDGER_BUSY = "LEDGER_BUSY"
+#: 账本**写盘**本身失败（B-r4 N6）：磁盘满/只读挂载（``OSError``）、
+#: ``os.replace`` 目标被占用（``PermissionError``）、存储层 ``OperationalError`` 等。
+#: 与 :data:`LEDGER_BUSY` 同等待遇（fail-closed，**不**消费、不穿出执行器），
+#: 区别只在"为什么写不进去"——底层异常名回带在
+#: :attr:`TicketConsumption.error` 里，诊断不丢。
+LEDGER_WRITE_FAILED = "LEDGER_WRITE_FAILED"
 UNSEEN = "UNSEEN"
 
 #: 账本保留窗口：超过这个时长仍未结算的 old 条目会被修剪（防止文件无限增长）。
@@ -1146,13 +1152,19 @@ def exclusive_file_lock(path: str | Path, *, timeout_s: float = DEFAULT_LOCK_TIM
 
 @dataclass(frozen=True)
 class TicketConsumption:
-    """一次消费尝试的结果；``consumed=False`` 时 ``state`` 说明为什么。"""
+    """一次消费尝试的结果；``consumed=False`` 时 ``state`` 说明为什么。
+
+    ``error`` 只在"账本写盘本身失败"（``state == LEDGER_WRITE_FAILED``）时非空，
+    带上底层异常**类名**（如 ``OSError``/``PermissionError``）——调用方把它写进
+    note/日志，运维不必再从一句泛泛的异常里猜原因（B-r4 N6）。
+    """
 
     ticket_id: str
     state: str
     round_id: str = ""
     first_round_id: str = ""
     first_at_ms: int = 0
+    error: str = ""
 
     @property
     def consumed(self) -> bool:
@@ -1166,7 +1178,7 @@ class TicketConsumption:
         return {"ticket_id": self.ticket_id, "state": self.state,
                 "round_id": self.round_id, "first_round_id": self.first_round_id,
                 "first_at_ms": self.first_at_ms, "consumed": self.consumed,
-                "duplicate": self.duplicate}
+                "duplicate": self.duplicate, "error": self.error}
 
 
 @dataclass(frozen=True)
@@ -1424,7 +1436,12 @@ class TicketLedger:
         实现是"取跨进程锁 → 重读文件 → 判定 → 落盘"的读-改-写原子操作：
         两个进程同时消费同一张票时，**恰好一个**拿到 ``CONSUMED``，另一个拿到
         ``ALREADY_CONSUMED``（B-r1 P0-3）。取不到锁返回 ``LEDGER_BUSY``（fail-closed，
-        不消费），损坏返回 ``LEDGER_CORRUPT``。
+        不消费），损坏返回 ``LEDGER_CORRUPT``，**写盘本身失败**返回
+        ``LEDGER_WRITE_FAILED``（同样 fail-closed，并把底层异常名回带在 ``error``）。
+
+        **本方法不抛异常**（B-r4 N6）：``OSError``/``PermissionError`` 等写盘异常原先会
+        一路穿出调用方（执行器），后果是"已经消费落盘的票据被丢掉、本轮已构造的
+        intents 全部作废、调用方只得到一句泛泛的异常"——与 B-r3 N3 完全同形。
         """
         key = str(ticket_id or "")
         stamp = int(self._clock() if at_ms is None else at_ms)
@@ -1440,6 +1457,12 @@ class TicketLedger:
             except LedgerLockTimeout:
                 return TicketConsumption(ticket_id=key, state=LEDGER_BUSY,
                                          round_id=round_id)
+            except Exception as exc:  # noqa: BLE001 - 写盘异常不得穿出执行器
+                # 磁盘满/只读挂载/``os.replace`` 目标被占用/存储层报错……一律与"取不到锁"
+                # 同等待遇：fail-closed（本轮**不**下单这张票），异常类名进 ``error``。
+                # 内存回滚已由 :meth:`_consume_locked` 在落盘处完成。
+                return TicketConsumption(ticket_id=key, state=LEDGER_WRITE_FAILED,
+                                         round_id=round_id, error=type(exc).__name__)
 
     def _consume_locked(self, key: str, stamp: int, round_id: str) -> TicketConsumption:
         self._reload_locked()
@@ -1467,7 +1490,17 @@ class TicketLedger:
             release_count=int(existing.release_count if existing else 0),
         )
         # 消费事实必须在下单前**落盘**，否则崩溃窗口里"已消费"只活在内存里。
-        self._save_locked()
+        try:
+            self._save_locked()
+        except Exception:  # noqa: BLE001 - 落盘失败先回滚内存，再交给调用方局部化
+            # **没落盘就不算消费**：把上面预置的"已消费"回滚回 `existing`，否则这次的
+            # 失败消费会留在内存里，被下一次成功的 `save()` 洗成"已消费"——一张从未
+            # 下单的票被永久占死（B-r4 N6；与 N4 的"占死"是同一类伤害）。
+            if existing is None:
+                self._records.pop(key, None)
+            else:
+                self._records[key] = existing
+            raise
         return TicketConsumption(ticket_id=key, state=CONSUMED, round_id=round_id,
                                  first_round_id=str(round_id), first_at_ms=stamp)
 
@@ -1521,8 +1554,11 @@ class TicketLedger:
             try:
                 with self._locked():
                     self._save_locked()
-            except LedgerLockTimeout:
-                return True  # 内存已撤销；落盘留给下一次成功写入
+            except Exception:  # noqa: BLE001 - 锁超时/写盘异常都不得穿出（B-r4 N6）
+                # 内存已撤销；落盘留给下一次成功写入。写盘异常（磁盘满/目标文件被占用）
+                # 原先会穿出整个执行器——后果与 N3 同形（本轮 intents 全废），同样必须
+                # 局部化。撤销事实以内存为准，`release_count` 留痕已生效。
+                return True
             return True
 
     def orphan_consumed(self, ticket_has_order: Any = None) -> list[TicketRecord]:
@@ -2064,6 +2100,7 @@ __all__ = [
     "LEDGER_BUSY",
     "LEDGER_CORRUPT",
     "LEDGER_SCHEMA_VERSION",
+    "LEDGER_WRITE_FAILED",
     "LedgerCorrupt",
     "LedgerLockTimeout",
     "exclusive_file_lock",

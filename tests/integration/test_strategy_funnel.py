@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,7 @@ from core.strategy_funnel import (  # noqa: E402
     DETAIL_REASON,
     DETAIL_STAGES,
     LEDGER_CORRUPT,
+    LEDGER_WRITE_FAILED,
     NATURE_SCOPE,
     POSITION_CLASS_ATTRIBUTED,
     POSITION_CLASS_LEGACY,
@@ -575,6 +577,75 @@ def case_ticket_ledger() -> None:
               orphan.orphan_consumed(lambda tid: True) == [])
         check("orphan_consumed() 不用权威判定时如实返回全部已消费（不假装能判定）",
               len(orphan.orphan_consumed()) == 2)
+
+        # --- B-r4 N6：**写盘本身失败**（磁盘满/只读盘/目标文件被占用）不得穿出，
+        # 也不得在内存里留下"没落盘的已消费"（否则会被下一次成功 save() 洗成
+        # 已消费，把一张从未下单的票永久占死）。
+        for exc in (OSError(28, "No space left on device"),
+                    PermissionError(13, "denied"),
+                    sqlite3.OperationalError("database is locked")):
+            exc_name = type(exc).__name__
+            exc_label = f"{type(exc).__module__}.{exc_name}"
+            n6_path = Path(tmp) / f"n6_writes_{exc_name}.json"
+            n6_led = TicketLedger(n6_path, clock=clock)
+            real_save_locked = n6_led._save_locked
+
+            def _boom_save(_exc=exc) -> None:
+                raise _exc
+
+            n6_led._save_locked = _boom_save
+            escaped = None
+            claim = None
+            try:
+                claim = n6_led.consume("t-n6", round_id="r1")
+            except Exception as inner:  # noqa: BLE001 - 修复前这里就是穿出点
+                escaped = type(inner).__name__
+            n6_led._save_locked = real_save_locked
+            check(f"N6 账本写盘抛 {exc_label}：consume() 不穿出，返回 fail-closed "
+                  f"LEDGER_WRITE_FAILED 且带回底层异常名",
+                  escaped is None and claim is not None
+                  and claim.state == LEDGER_WRITE_FAILED and not claim.consumed
+                  and claim.error == exc_name,
+                  (escaped, None if claim is None else claim.as_dict()))
+            check(f"N6 {exc_label} 未落盘就不算消费：内存与盘上都不留脏的'已消费'",
+                  not n6_led.is_consumed("t-n6")
+                  and not TicketLedger(n6_path, clock=clock).is_consumed("t-n6"))
+
+        # release() 的写盘失败同样不得穿出（内存已撤销 → 返回 True）
+        rel_path = Path(tmp) / "n6_release_write.json"
+        rel_led = TicketLedger(rel_path, clock=clock)
+        rel_led.consume("t-rw", round_id="r1")
+        rel_real_save_locked = rel_led._save_locked
+
+        def _boom_release_save() -> None:
+            raise PermissionError(13, "denied")
+
+        rel_led._save_locked = _boom_release_save
+        rel_escaped = None
+        rel_result = None
+        try:
+            rel_result = rel_led.release("t-rw", round_id="r1")
+        except Exception as inner:  # noqa: BLE001 - 修复前这里就是穿出点
+            rel_escaped = type(inner).__name__
+        rel_led._save_locked = rel_real_save_locked
+        check("N6 release() 写盘抛 PermissionError：不穿出，内存已撤销（返回 True）",
+              rel_escaped is None and rel_result is True
+              and not rel_led.is_consumed("t-rw"), (rel_escaped, rel_result))
+
+        # 只吞 Exception：BaseException（KeyboardInterrupt/SystemExit）必须继续穿出
+        be_led = TicketLedger(Path(tmp) / "n6_base_exc.json", clock=clock)
+
+        def _boom_base_save() -> None:
+            raise KeyboardInterrupt("构造：账本写盘时 Ctrl-C")
+
+        be_led._save_locked = _boom_base_save
+        be_escaped = None
+        try:
+            be_led.consume("t-be", round_id="r1")
+        except KeyboardInterrupt as inner:
+            be_escaped = type(inner).__name__
+        check("N6 只吞 Exception：KeyboardInterrupt 仍从 consume() 穿出（未被吞掉）",
+              be_escaped == "KeyboardInterrupt", be_escaped)
 
 
 def case_ticket_skip_detail_shared() -> None:
@@ -1214,6 +1285,115 @@ def case_trader_wiring() -> None:
                       n4_record is not None and n4_record.release_count == 1
                       and bool(n4_record.release_round_id),
                       None if n4_record is None else n4_record.as_dict())
+
+                # --- B-r4 N6：收尾落盘**任何**异常都必须局部化（不再只吞
+                # LedgerLockTimeout/LedgerCorrupt）——否则 OSError/PermissionError
+                # 会穿出执行器，已消费落盘的票据被丢掉、本轮 intents 全废。
+                for exc_name, exc_factory in (
+                        ("OSError", lambda: OSError(28, "No space left on device")),
+                        ("PermissionError", lambda: PermissionError(13, "denied")),
+                        ("sqlite3.OperationalError",
+                         lambda: sqlite3.OperationalError("database is locked"))):
+                    class _SaveBoomLedger(TicketLedger):
+                        def save(self, _factory=exc_factory) -> None:
+                            raise _factory()
+
+                    boom_path = Path(tmp) / f"led_n6_{exc_name.replace('.', '_')}.json"
+                    boom_led = _SaveBoomLedger(boom_path,
+                                               clock=lambda: 1_700_000_000_000)
+                    boom_f = ScanFunnel(round_id=f"ledger-save-{exc_name}")
+                    escaped = None
+                    boom_decision = None
+                    try:
+                        boom_decision = run_strategy_trader(
+                            tickets=[live_ticket("t-n6")], prices=prices,
+                            funnel=boom_f, ledger=boom_led)
+                    except Exception as inner:  # noqa: BLE001 - 修复前这里就是穿出点
+                        escaped = type(inner).__name__
+                    check(f"N6 收尾 save() 抛 {exc_name} 不再穿出执行器，本轮仍有明确结论",
+                          escaped is None and boom_decision is not None
+                          and boom_decision.decision == "open"
+                          and len(boom_decision.intents) == 1,
+                          (escaped, None if boom_decision is None
+                           else boom_decision.reasoning[:160]))
+                    check(f"N6 {exc_name} 照样登记轮级故障 LEDGER_SAVE_DEFERRED",
+                          boom_f.detail_counts.get(
+                              funnel_mod.DETAIL_LEDGER_SAVE_DEFERRED) == 1
+                          and [x.detail for x in boom_f.round_faults]
+                          == [funnel_mod.DETAIL_LEDGER_SAVE_DEFERRED], boom_f.as_dict())
+                    n6_reread = TicketLedger(boom_path, clock=lambda: 1_700_000_000_000)
+                    check(f"N6 {exc_name} 下孤儿仍可审计（盘上已消费、可定位）",
+                          n6_reread.is_consumed("t-n6")
+                          and [r.ticket_id for r in n6_reread.orphan_consumed()]
+                          == ["t-n6"],
+                          [r.ticket_id for r in n6_reread.orphan_consumed()])
+
+                # N6：认领本身抛异常 → 该票 fail-closed 跳过，同一轮其余票照常
+                c_path = Path(tmp) / "led_n6_consume_call.json"
+                c_led = TicketLedger(c_path, clock=lambda: 1_700_000_000_000)
+                c_real_consume = c_led.consume
+
+                def _consume_boom(ticket_id, **kwargs):
+                    if str(ticket_id) == "t-bad":
+                        raise OSError(28, "No space left on device")
+                    return c_real_consume(ticket_id, **kwargs)
+
+                c_led.consume = _consume_boom  # type: ignore[method-assign]
+                c_f = ScanFunnel(round_id="ledger-consume-boom")
+                c_decision = run_strategy_trader(
+                    tickets=[live_ticket("t-bad"), live_ticket("t-good")],
+                    prices=prices, funnel=c_f, ledger=c_led)
+                check("N6 认领抛 OSError 不再穿出：该票 fail-closed 跳过，其余票照常成交",
+                      c_decision.decision == "open" and len(c_decision.intents) == 1
+                      and c_f.detail_counts.get(
+                          funnel_mod.DETAIL_TICKET_LEDGER_UNAVAILABLE) == 1
+                      and c_led.is_consumed("t-good"), c_decision.reasoning)
+                check("N6 认领异常的底层异常名进 note（诊断不丢）",
+                      "OSError" in c_decision.reasoning, c_decision.reasoning[:160])
+
+                # N6：撤销本身抛异常 → 不穿出，且如实标注"可能仍被占死"
+                r_path = Path(tmp) / "led_n6_release_call.json"
+                r_led = TicketLedger(r_path, clock=lambda: 1_700_000_000_000)
+
+                def _release_boom(*_args, **_kwargs):
+                    raise PermissionError(13, "denied")
+
+                r_led.release = _release_boom  # type: ignore[method-assign]
+                r_original_build = trader_mod.build_intent_from_ticket
+                r_escaped = None
+                r_decision = None
+                try:
+                    trader_mod.build_intent_from_ticket = _raise_build_error
+                    r_decision = run_strategy_trader(tickets=[live_ticket("t-rb")],
+                                                     prices=prices,
+                                                     funnel=ScanFunnel(round_id="rel-boom"),
+                                                     ledger=r_led)
+                except Exception as inner:  # noqa: BLE001 - 修复前这里就是穿出点
+                    r_escaped = type(inner).__name__
+                finally:
+                    trader_mod.build_intent_from_ticket = r_original_build
+                check("N6 撤销抛 PermissionError 不再穿出，且如实标注票据可能仍被占死",
+                      r_escaped is None and r_decision is not None
+                      and r_decision.intents == []
+                      and "PermissionError" in r_decision.reasoning
+                      and "占死" in r_decision.reasoning,
+                      (r_escaped, None if r_decision is None else r_decision.reasoning))
+
+                # N6：只吞 Exception —— KeyboardInterrupt 必须仍穿出执行器
+                class _InterruptLedger(TicketLedger):
+                    def save(self) -> None:
+                        raise KeyboardInterrupt("构造：收尾落盘时 Ctrl-C")
+
+                ki_led = _InterruptLedger(Path(tmp) / "led_ki.json",
+                                          clock=lambda: 1_700_000_000_000)
+                ki_escaped = None
+                try:
+                    run_strategy_trader(tickets=[live_ticket("t-ki")], prices=prices,
+                                        funnel=ScanFunnel(round_id="ki"), ledger=ki_led)
+                except KeyboardInterrupt as inner:
+                    ki_escaped = type(inner).__name__
+                check("N6 BaseException（KeyboardInterrupt）仍穿出执行器（未被 except Exception 吞）",
+                      ki_escaped == "KeyboardInterrupt", ki_escaped)
         else:
             check("未打补丁时执行器不接受 ledger 参数（消费一次只在库层，不冒充已接线）",
                   "ledger" not in inspect.signature(run_strategy_trader).parameters)
