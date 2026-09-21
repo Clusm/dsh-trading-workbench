@@ -1903,7 +1903,7 @@
       "title": "配对实验与独立样本统计",
       "owner_role": "D",
       "actual_assignee": null,
-      "status": "PLANNED",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": false,
       "depends_on": [
         "U03",
@@ -1923,7 +1923,37 @@
         "F16",
         "F24"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "e610319",
+          "base": "c2f1bab",
+          "branch": "task/U07（worktree mat-wt/D3）",
+          "commits": 6,
+          "diff_shape": "**纯增量 +2497 / -0**；作者逐文件核验**分支内无共享文件改动**（database.py / test_shadow_labels.py / shadow_status.py / release_evidence.py / run_offline_regression.py / decisions.html / service.py 均 SAME）。",
+          "changed_files": [
+            "src/intel/shadow_v2/statistics.py(942)",
+            "tests/integration/test_shadow_statistics.py(942)",
+            "tests/fixtures/shadow/statistics/paired_opportunities.json(151)",
+            "tests/fixtures/shadow/statistics/overlap_windows.json(50)",
+            "tests/fixtures/shadow/statistics/fee_stress_cases.json(43)"
+          ],
+          "delivered": "同机会配对（键 = 实验版本+标的+目标时刻+horizon；从严校验信号方向、入场参考价反推偏差；逐条披露 7 类剔除原因、无静默丢弃）；重叠窗口分块（independent_blocks / overlap_ratio / largest_block，按标的分块、相接即合并）；配对差的**朴素 iid 区间 + 独立块自举区间 + 精确二项符号检验**并标记 naive_understates；费用压力（逐倍数点、线性插值盈亏平衡倍数、额外滑点）；显式种子的自举与报告 digest（可重放）；assert_gate_neutral / ExperimentMixError / promotion_guard / statistics_isolation_facts；消费 U06b 的 coverage_report 与 LabelResult，未自造第二套标签。",
+          "not_done": [
+            "未做看板/UI 渲染，decisions.html 零改动",
+            "未接 src/intel/service.py 只读状态，未接采集循环（v2 采集默认开关仍 False，统计不依赖采集跑起来）",
+            "未做跨 horizon 配对",
+            "费用压力点的区间用 iid 自举，**没有**对压力点做分块自举（分块区间只在配对差上）；报告 assumption 字段已如实标注",
+            "不做影子权重晋升、不改首批行为、不动风险档/白名单/live",
+            "F11:v2_labels=DEFERRED 未改，未伪称首批通过"
+          ],
+          "gate_invariance": "前后同值且全 exit=0：smoke_u09 60/0、test_release_evidence_v2 78/0、test_shadow_labels 100/0、smoke_contracts_v3 173/0、smoke_u06a 52/0。另加**套件内逐字节断言**：灌入统计快照（补丁 01 的 log_shadow_v2_statistics 写入独立研究表 shadow_v2_statistics）前后，build_release_readiness_report 除墙钟 generated_at 外**逐字段相同**，directional_candidates 前后同为 3，来源过滤仍为 [SOURCE_A]；shadow_status.py 一个字符未动。",
+          "patch_02_necessity": "**必需**：U06b 套件原以『集合相等』断言 shadow_v2/ 四模块，U07 的 statistics.py 同包必触发 PASS=99 FAIL=1；改为『集合包含』后回 100/0。作者称未放宽 U06b 其它断言。**待 Q 反向测试裁决**（删掉四模块之一必须立刻变红）。",
+          "two_state": "sandbox_branch（不打补丁）**120 PASS / 0 FAIL**；sandbox_patched **127 PASS / 0 FAIL**（差值即 7 条落库/幂等/摘要断言）；两态 exit=0，断言均为相对性质（迁移版本集合前后快照、区间宽度、独立块数与行数比较），未硬编码迁移版本集合。",
+          "delta": "sandbox_pristine 与 sandbox_patched 全量离线回归（85 脚本）均 SMOKE MANIFEST OK included=81 excluded=1 + **OFFLINE REGRESSION OK scripts=85 exit 0** -> 失败集合 ∅/∅，**NEW_FAIL = ∅**。本任务未新增 scripts/smoke_*.py，无需登记。check_quality **OK files=303 untracked=0**（未新增 exclude；期间修掉一处 F401）。",
+          "patches_applicability": "docs/dispatch/patches/U07/f9e3094/ 两个 diff 在 3 种 git 配置下均 exit=0、Skipped=0、逐文件 Checking patch。（目录名=生成时作者 head；其后仅 F401 修复/文档提交，两个 diff 未变。）"
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "C",
@@ -1954,12 +1984,24 @@
         "DL08",
         "DL09"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "c2f1bab",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r1",
+          "stage": "独立审查",
+          "candidate": "e610319",
+          "sessions": [
+            "Q (reviews/U07/R1/q)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U07/e610319/",
+          "focus": "重点：①自建夹具复现门禁不倒性；②**补丁 02 的反向测试**（删掉 U06b 四模块之一必须立刻变红，否则=真削弱）；③**统计口径本身**（naive_understates 是否真为『朴素更窄』、独立块数手算比对、二项符号检验 p 值独立核对、自举可重放、费用压力插值区间外是否拒绝外推）；④配对剔除总数守恒；⑤assert_gate_neutral/promotion_guard 真拦得住。"
+        }
+      ],
       "qa_runs": []
     },
     {
