@@ -4127,10 +4127,12 @@
       {
         "id": "KI02",
         "title": "run_offline_regression 在任意 worktree 中必然中止（config/windows_service.json 硬编码 worktree 本地 .venv）",
-        "status": "OPEN",
+        "status": "FIXED",
         "owner": "U13(E线)/U10a 或 I",
         "blocks": "完整 run_offline_regression / check_quality / U12 RC 门禁",
-        "note": "scripts/smoke_windows_service_plan.py 读 config/windows_service.json，其 python_executable 指向 <project_root>/.venv/Scripts/python.exe；worktree 内无 .venv 故 ValueError。运行目录（存在 .venv）不受影响。已确认与 U15/U01 无关的既有缺陷。**不得静默忽略**；建议由 U13 的 RuntimePaths 口径统一（或测试环境注入 python 路径）。"
+        "note": "scripts/smoke_windows_service_plan.py 读 config/windows_service.json，其 python_executable 指向 <project_root>/.venv/Scripts/python.exe；worktree 内无 .venv 故 ValueError。运行目录（存在 .venv）不受影响。已确认与 U15/U01 无关的既有缺陷。**不得静默忽略**；建议由 U13 的 RuntimePaths 口径统一（或测试环境注入 python 路径）。",
+        "fix": "U13 修复解释器解析层：smoke_windows_service_plan.py 在无 .venv 的 worktree 内不再 ValueError。U13-FU1 的演练工作树（无 .venv）实测 24/0、官方入口 OFFLINE REGRESSION OK。",
+        "status_prev": "OPEN"
       },
       {
         "id": "W1-JOINT-WIRING",
@@ -4192,10 +4194,12 @@
       {
         "id": "S08-SHADOW-GATE-LEAK",
         "title": "影子样本会进发布门槛分母（release_evidence 未按 source 过滤）",
-        "status": "OPEN",
+        "status": "FIXED",
         "owner": "**U09**（硬前置）",
         "blocks": "U12 的 200 方向候选 / 30 闭合分母定义",
-        "note": "实测：不加 source 过滤时，50 条 B + 50 条 C 影子样本使方向候选从 200 变 300（Δ+100）。U06a 已按职责只交事实并逐字披露（release_gate.note），未越权改 release_evidence.py，也未建第二套 GO。**U09 必须在定义分母前加 source 过滤**，否则影子样本会污染发布门禁。"
+        "note": "实测：不加 source 过滤时，50 条 B + 50 条 C 影子样本使方向候选从 200 变 300（Δ+100）。U06a 已按职责只交事实并逐字披露（release_gate.note），未越权改 release_evidence.py，也未建第二套 GO。**U09 必须在定义分母前加 source 过滤**，否则影子样本会污染发布门禁。",
+        "fix": "U09 @ b675118（集成 4e164a1）：方向候选分母只计入 gate_role==execution_decision_copy 的 A 组，300 -> 200。Q r1 独立复现（自建夹具 + monkeypatch release_gate_role 使分母 200->300，证明同源非巧合）；A-line 复验确认无第二份 source 名单。",
+        "status_prev": "OPEN"
       },
       {
         "id": "U08-R5-FU1",
@@ -4308,18 +4312,21 @@
       {
         "id": "U13FU1-BARE-BEFORE_ENTRY-FAILOPEN",
         "title": "裸 `before_entry()` 在缺账本时 fail-open；且 service.py 启动/set_control 未注入事实（N1+N2，P2）",
-        "status": "OPEN",
+        "status": "FIXED",
         "owner": "U12（须裁决：RC 前修 或 明确接受并登记）",
         "blocks": "不阻断集成（Q 判 P2 有界、未构造出生产链利用），但属安全控制的 fail-open 面",
-        "note": "N1：`before_entry()` 的**未注入 facts 形态**在『门禁状态根没有账本文件 / 账本无 order_outbox 表』时，自洽摘要即放行 —— 与它自己的文档契约相悖。N2：补丁 01 的接线**只覆盖就绪链**，`src/core/service.py:314`（启动）与 `:1416`（set_control）仍是**裸 `before_entry()`**，作者自带验证器**完全不触及 service.py**。两者叠加的触发条件是『状态根缺账本』——真实部署里账本存在，故 Q 未能构造生产链利用；但 N2 说明**生产代码里仍有两处未接线的调用点**，U12 必须决定补齐还是登记接受。"
+        "note": "N1：`before_entry()` 的**未注入 facts 形态**在『门禁状态根没有账本文件 / 账本无 order_outbox 表』时，自洽摘要即放行 —— 与它自己的文档契约相悖。N2：补丁 01 的接线**只覆盖就绪链**，`src/core/service.py:314`（启动）与 `:1416`（set_control）仍是**裸 `before_entry()`**，作者自带验证器**完全不触及 service.py**。两者叠加的触发条件是『状态根缺账本』——真实部署里账本存在，故 Q 未能构造生产链利用；但 N2 说明**生产代码里仍有两处未接线的调用点**，U12 必须决定补齐还是登记接受。",
+        "fix": "U13-FU2（N1：缺账本/缺 order_outbox 表 -> EVIDENCE_UNVERIFIED 阻断）+ U13-FU3（N2 接线收口）；集成 57a4e97。Q 两轮复验均通过。"
       },
       {
         "id": "U13FU1-README-VS-CODE-N3",
         "title": "U13-FU1 README 称 demo 不阻止启动，但 assert_environment_bound('demo') 实测会抛（N3，P3）",
-        "status": "OPEN",
+        "status": "FIXED",
         "owner": "U12",
         "blocks": "无（该 API 生产零调用点，默认部署仍可启动）",
-        "note": "文档与代码行为不一致，属交付物卫生问题。"
+        "note": "文档与代码行为不一致，属交付物卫生问题。",
+        "fix": "U13-FU2（N3）：README/台账措辞改为与实测一致（assert_environment_bound('demo') 对未声明状态根会抛，不限 live）。集成 57a4e97。",
+        "status_prev": "OPEN"
       },
       {
         "id": "U12-BUILD-F1",
@@ -4333,10 +4340,11 @@
       {
         "id": "U13FU2-N2-CONTROL-RELAXATION",
         "title": "U13-FU2 的 N2 修复把控制面放松了：非 ENTRY 未收口单不再阻断 set_control(normal)（**放松方向**）",
-        "status": "OPEN",
+        "status": "FIXED",
         "owner": "U13-FU3（同一分支修复中）",
         "blocks": "U13-FU2 的集成（CHANGES_REQUESTED）；削弱 U13/F14『不允许把控制面拨回 normal』的既有整改",
-        "note": "Q r1 最小复现：门禁 CLEARED 后账本出现 purpose=EXIT/status=UNKNOWN 单 -> pristine 阻断启动/停 close_only/拒 set_control(normal)；**patched(2ac0d6f) 放行/normal/set_control(normal) 成功**。根因结构性：service.py:891 附近 _recovery_gate_ledger_facts(facts=None) 的 unknown_orders/submitting_orders 取自形参、**缺省硬编码 0**；FU2 新接线两条路径均无参调用 -> 这两列恒 0，绕过门禁的真实账本读取（门禁不分 purpose 全表计数）。**这是『修复反而放松』的典型，比不改更糟。** 修法要求：这两列取真实账本，而非打 purpose 特判；必须以 Q 原场景做两态测试且 pristine 结论一致。"
+        "note": "Q r1 最小复现：门禁 CLEARED 后账本出现 purpose=EXIT/status=UNKNOWN 单 -> pristine 阻断启动/停 close_only/拒 set_control(normal)；**patched(2ac0d6f) 放行/normal/set_control(normal) 成功**。根因结构性：service.py:891 附近 _recovery_gate_ledger_facts(facts=None) 的 unknown_orders/submitting_orders 取自形参、**缺省硬编码 0**；FU2 新接线两条路径均无参调用 -> 这两列恒 0，绕过门禁的真实账本读取（门禁不分 purpose 全表计数）。**这是『修复反而放松』的典型，比不改更糟。** 修法要求：这两列取真实账本，而非打 purpose 特判；必须以 Q 原场景做两态测试且 pristine 结论一致。",
+        "fix": "U13-FU3 @ 1e9f760（集成 57a4e97）：`_ledger_outbox_counts()` 三列一律从本进程 order_outbox 实读、谓词与门禁逐字同源；`facts` 形参降级为逐列 max 的**额外下界**。Q 复验：110 格矩阵 0 放松格（pristine/FU2 各 8 处放松 -> 修复 0）。"
       },
       {
         "id": "U12-BF1-RESIDUAL",
@@ -4345,6 +4353,14 @@
         "owner": "U12/U15",
         "blocks": "无（真实 src/ 无此类文件名）",
         "note": "secretary_roster.py 之类含 secret 子串的合法名会被拒。方向 fail-closed；改『整词匹配』会放过 mysecret.txt，属削弱防护，故不做。已作为用例显式登记。"
+      },
+      {
+        "id": "U13FU3-INJECTION-TRUST",
+        "title": "纵深防御建议：before_entry(facts=...) 会替换门禁自身的账本读取，安全性依赖注入诚实（非缺陷，设计属性）",
+        "status": "OPEN",
+        "owner": "U12",
+        "blocks": "无（唯一生产注入点 service.py:988 已核实正确）",
+        "note": "Q r1 的非回归发现：`before_entry(facts=...)` 用传入事实**替换**（而非叠加）门禁自己的账本读取，因此只要调用方传了事实，门禁就不再自己核账本。当前唯一生产注入点是 service.py:988（已核实正确），故不构成缺陷；Q 建议改为 `max(injected, live)` 的纵深防御写法（probe_bypass B9 已演示该差异）。U12 可裁决是否采纳。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -4440,7 +4456,7 @@
       "U13-FU2": {
         "title": "恢复门禁生产接线收口（N1 裸形态 fail-open + N2 service.py 未注入 + N3 文档）",
         "owner_role": "E线",
-        "status": "CHANGES_REQUESTED -> 修复由 U13-FU3 承接（待独立复验）",
+        "status": "INTEGRATED（其 N2 回归由 U13-FU3 修复后一并集成）",
         "head_commit": "2ac0d6f",
         "base": "7885e6a",
         "branch": "task/U13-FU2（worktree mat-wt/W3-fix2）",
@@ -4493,7 +4509,9 @@
             "未在 mat-wt/I 等他人 worktree 上验证"
           ]
         },
-        "fix_round": "U13-FU3 @ 1e9f760（同一分支 task/U13-FU2 继续提交）—— 已提交修复，待 Q 复验。"
+        "fix_round": "U13-FU3 @ 1e9f760（同一分支 task/U13-FU2 继续提交）—— 已提交修复，待 Q 复验。",
+        "integration_commit": "57a4e97",
+        "integration_note": "merge task/U13-FU2 @ 1e9f760（分支已含 recovery.py / service.py / test_supervision.py / 验证器，owned 路径与已验证 head 逐字节一致：git diff 1e9f760 HEAD = 0 行）。分支对台账的一行 N3 措辞更正已随 3-way 合并落入 I 的台账。"
       },
       "U12-BF1": {
         "title": "修 U12-BUILD-F1（RELEASE 阻断）：身份采集在真实 src/ 树必然抛 CredentialLeakError",
@@ -4519,7 +4537,7 @@
       "U13-FU3": {
         "title": "修 U13-FU2 的 N2 放松回归：门禁两列改从账本实读",
         "owner_role": "E线",
-        "status": "READY_FOR_REVIEW",
+        "status": "INTEGRATED",
         "head_commit": "1e9f760",
         "code_head": "5651531",
         "base": "2ac0d6f（即 U13-FU2 分支 head）",
@@ -4551,12 +4569,30 @@
           "全部证据来自进程内假 broker + 系统临时目录合成状态根；无真实交易所/断电/多账户验证"
         ],
         "verification": {
-          "session": "Q (reviews/U13-FU3/R1/q)",
-          "candidate": "1e9f760",
-          "verdict": "PENDING",
-          "reports_dir": "docs/dispatch/reviews/U13-FU3/1e9f760/",
-          "focus": "重点：用 Q 自己的原探针复现三方对照；**遍历 purpose×status 矩阵找剩余放松面**（任何一格修复态比 pristine 松 = 阻塞）；验证『facts 形参只增不减』；两条已登记边界（不按 environment 过滤 / 读不出时退回）会不会产生放松；complete_reconcile 口子现状。"
-        }
+          "verdict": "Q r1 **PASS-with-notes**（无阻塞项）",
+          "report": "docs/dispatch/reviews/U13-FU3/1e9f760/Q_r1.md",
+          "three_way": "Q 自己的原探针 probe_n2.py [C] unknown_exit：pristine 7/3 exit1、FU2 7/3 exit1、**fix 10/0 exit0**。FU2 态 allowed=True/control=normal/set_control ok=True；修复态 allowed=False RECONCILE_REQUIRED_BEFORE_ENTRY/close_only/ok=False；pristine 也是 close_only+拒，但**其就绪快照标志为 True** -> 修复态在第三个通道上**更严**。",
+          "relax_matrix": "**110 格 purpose x status 矩阵：门禁计数 vs 新计数 0 处不一致、0 个放松格**。直接调用接线点 `_recovery_gate_ledger_facts(None)`：pristine **8 处放松**、FU2 **8 处放松**、修复 **0**。",
+          "pipeline": "全管线（注入态 vs 裸 before_entry）：**24/24 一致，0 处『注入放行而裸阻断』**。",
+          "lower_bound_invariant": "**13/0**：结果 = max(live, declared) >= live，覆盖 低报/缺失/None/负数/非整数；高报只会更严。",
+          "boundary_1_no_env_filter": "与门禁同口径，实测**过度阻断** -> 方向安全。",
+          "boundary_2_fallback": "方向安全；长连接无陈旧读；`settings.db_file == runtime_paths.db_file == gate.ledger_file()` 在**全部 5 种配置**（含 MTA_STATE_ROOT/profiles）下成立 -> 注入读的就是门禁自己的账本。",
+          "non_regression_finding": "**非回归的设计属性**：门禁的 `before_entry(facts=...)` 会**替换**它自己的账本读取，故安全性依赖**注入诚实**。唯一生产注入点是 `service.py:988`（已核实正确）。Q 建议做纵深防御改成 `max(injected, live)`，已登记为 U13FU3-INJECTION-TRUST。",
+          "regressions": "probe_n1 **11/0**、probe_n3 **6/0**、probe_bypass **13/0**；`recovery.py` **FU3 未触碰**（git diff 2ac0d6f..5651531 为空，pristine 差异来自 FU2）。`complete_reconcile` 自声明 CLEARED 在裸读下仍 `EVIDENCE_UNVERIFIED`，状态位被写脏，注入不比裸读松。",
+          "delta": "全量离线回归 **85/85 同一集合，pristine 0 非零、patched 0 非零 -> NEW_FAIL=∅ / FIXED=∅**",
+          "gates": "check_quality OK files=295（无新增 exclude）、smoke_contracts_v3 173/0、test_supervision exit 0（未改）、smoke_u13_supervision 58/0；扩展验证器三方对照 pristine 47/11、FU2 54/4、fix **58/0**（与作者数字一致，FU2 的 4 条失败全在 [unknown_exit]）。",
+          "patches": "FU3 `01` 在 2 种 base x 3 配置 = **6/6 干净**；`02` 在 pristine 上 rc=1（预期，分支内独占）。集成顺序 `FU2 01-03 -> FU3 01` 得到与 `5651531` **逐字节一致**的 service.py/验证器。",
+          "not_verified": [
+            "真实生产账本（只读约束，仅合成根）",
+            "真实交易所/断电/多账户/SCM 双 profile",
+            "真实多环境共库",
+            "回退路径性能",
+            "02 在 pristine 上 rc=1 的 hunk 级唯一性",
+            "P2/P3 各项"
+          ]
+        },
+        "integration_commit": "57a4e97",
+        "integration_tests": "集成态实测：验证器 **58/0**、`test_supervision` **166 checks PASS**、`smoke_u13_supervision` **OK steps=4**、契约 173/0、`check_quality OK files=295 untracked=0`、**`OFFLINE REGRESSION OK scripts=85`**"
       }
     },
     "w3_status": {
@@ -4564,24 +4600,23 @@
       "integrated_in_w3": [
         "U09",
         "U13-FU1",
+        "U13-FU2+FU3（恢复门禁 N1/N2/N3 全闭）",
         "U12-BF1(hop1) + CONTRACT-ERRATUM-1(hop2)"
       ],
       "delivered_pending_integration": [
         "U12（RC DRAFT，head 044fccf）"
       ],
-      "in_flight": {
-        "U13-FU3-verify": "Q 复验进行中（candidate 1e9f760）"
-      },
+      "in_flight": {},
       "gates": {
         "offline_regression": "OFFLINE REGRESSION OK scripts=85",
         "quality": "QUALITY CHECK OK files=295 untracked=0",
         "contracts": "PASS 173 / FAIL 0 (golden 160)"
       },
       "rc_freeze_blockers": [
-        "U13-FU2 尚未集成（CHANGES_REQUESTED，N2 放松回归在修）",
-        "D05（SLO 时限冻结）",
+        "U12 的 RC 交付物尚未集成（DRAFT）",
+        "D05（SLO 时限冻结，需外部决策）",
         "观察窗三项 NOT_STARTED（7天/200/30）—— 结构性不可压缩",
-        "MODEL_ROUTE_MOCK：身份三字段在**未配置真实模型路由**时仍为 None（环境条件，须在真实路由下复验）"
+        "MODEL_ROUTE_MOCK：身份三字段在未配置真实模型路由时仍为 None（环境条件，须在真实路由下复验）"
       ]
     },
     "contract_erratum": {

@@ -16,8 +16,9 @@
 - 已验收候选：`71f8109`（Q r5 复验 PASS-with-notes；与 tag 的差异仅为 dispatch 文档，`src/core/contracts` 与 `docs/contracts` 逐字节相同）
 - 集成区分支：`integration/unattended-v3` @ `ffdab44`（契约冻结后又有 1 个台账提交 `4fdc6bf`）
 - 四个实现线 worktree **已创建**（均从 `ffdab44`）：`mat-wt/A`(task/U01)、`mat-wt/B`(task/U04)、`mat-wt/CD`(task/U03)、`mat-wt/EF`(task/U15)
-- 当前步骤：**W3 进行中** —— **U09 与 U13-FU1 均已 INTEGRATED**；**仅剩 U12（RC 集成 + F01–F25 矩阵 + 7 天观察窗启动）**。**首批 14 项已集成 13 项。**
+- 当前步骤：**W3 收尾** —— **U09 / U13-FU1 / U13-FU2+FU3 / U12-BF1+契约勘误 均已 INTEGRATED**；**唯一待集成的是 U12 的 RC 交付物（DRAFT，head `044fccf`）**。
 - 最新门禁：**`OFFLINE REGRESSION OK scripts=85`**、**`QUALITY CHECK OK files=295 untracked=0`**、契约 `PASS 173 / FAIL 0`。
+- **恢复门禁三条（N1/N2/N3）已全部闭合并复验**：Q 的 110 格 `purpose×status` 矩阵 **0 处放松格**（pristine/FU2 各 8 处 → 修复 0），集成提交 `57a4e97`。
 
 ### W1 进度（每轮更新）
 
