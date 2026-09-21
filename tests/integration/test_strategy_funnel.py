@@ -850,11 +850,58 @@ def case_dashboard_wiring() -> None:
                   and attribution["positions"][0]["manager"] == "strategy"
                   and attribution["positions"][0]["rule_version"].startswith("rv1:"),
                   attribution)
+        # 路由级：真的用 HTTP 打一次 /funnel 与 /api/funnel（不是只调助手函数）
+        _route_level_check(tmp)
     else:
         check("未打补丁时看板没有漏斗页助手（接线确实缺席，不冒充已接线）",
               not hasattr(dashboard_app, "_funnel_report")
               and not hasattr(dashboard_app, "_funnel_page_html"))
         check("未打补丁时 /channels 只展示既有 scanner 摘要（不新增字段）", True)
+
+
+def _route_level_check(tmp: str) -> None:
+    """路由级验证：构造真实 app → TestClient 打 /funnel 与 /api/funnel。
+
+    状态文件隔离在临时目录（``settings.project_root = tmp``），不读真实 ``data/``。
+    未应用补丁时这两个路由不存在（404），由调用方的分支断言覆盖。
+    """
+    import os
+
+    import yaml
+    from fastapi.testclient import TestClient
+
+    from core.config_loader import Settings
+    from core.service import TradingService
+    import dashboard.app as dashboard_app
+
+    os.environ["EXECUTION_MODE"] = "paper"
+    settings = Settings(
+        ROOT,
+        yaml.safe_load((ROOT / "config/settings.yaml").read_text(encoding="utf-8")),
+        yaml.safe_load((ROOT / "config/agents.yaml").read_text(encoding="utf-8")),
+        yaml.safe_load((ROOT / "config/risk_learning.yaml").read_text(encoding="utf-8")),
+    )
+    iso_root = Path(tmp) / "iso_root"
+    (iso_root / "data").mkdir(parents=True, exist_ok=True)
+    settings.project_root = iso_root
+    service = TradingService(settings)
+    client = TestClient(dashboard_app.create_app(service))
+    page = client.get("/funnel")
+    check("GET /funnel 返回 200（展示面真的可达，不只是助手函数）",
+          page.status_code == 200, page.status_code)
+    check("GET /funnel 页面含闸门与仓位归属两块",
+          "停在哪个闸门" in page.text and "仓位管理责任" in page.text)
+    api = client.get("/api/funnel")
+    check("GET /api/funnel 返回 JSON 且含漏斗与仓位两个键",
+          api.status_code == 200 and isinstance(api.json(), dict)
+          and {"scanner_funnel", "positions"} <= set(api.json()),
+          api.status_code)
+    check("没有漏斗状态文件时 JSON 明确标 available=False（不伪造成功）",
+          api.json()["scanner_funnel"].get("available") is False,
+          api.json()["scanner_funnel"])
+    channels = client.get("/channels")
+    check("GET /channels 仍 200（新增上下文键不破坏既有页面）",
+          channels.status_code == 200, channels.status_code)
 
 
 def main() -> int:
