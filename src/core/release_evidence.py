@@ -891,8 +891,12 @@ def build_run_continuity(
             "start": facts.get("declared_start"), "end": facts.get("declared_end"),
             "declared": facts.get("declared"),
         },
-        "head_missing_minutes": facts.get("head_missing_minutes"),
-        "tail_missing_minutes": facts.get("tail_missing_minutes"),
+        # 观察者**完全没有写入**观察行的断档分钟（与 coverage 的"有行但不健康"
+        # 是两件事，故名字不同，避免被读成同一口径）。
+        "head_gap_minutes": facts.get("head_gap_minutes"),
+        "tail_gap_minutes": facts.get("tail_gap_minutes"),
+        "observed_minute_count": facts.get("observed_minute_count"),
+        "healthy_minute_count": facts.get("healthy_minute_count"),
     }
 
 
@@ -902,9 +906,8 @@ def build_event_recovery(
 ) -> dict[str, Any]:
     """汇总「事件恢复真相」：ACK/已接受不等于已送达、不等于已恢复（F12/K05）。"""
     incident_block = dict(incidents or {})
-    acked_open = list(incident_block.get("acked_not_recovered") or [])
     reason_codes: list[str] = []
-    if acked_open:
+    if incident_block.get("acked_not_recovered"):
         reason_codes.append(CODE_ACK_WITHOUT_RECOVERY)
     if not patch_available or receipts is None:
         delivery = {
@@ -930,6 +933,11 @@ def build_event_recovery(
             "pending": int(facts.get("pending") or 0),
             "tracked_incidents": int(facts.get("tracked_incidents") or 0),
         }
+        for item in delivery["reason_codes"]:
+            # 直接复用 U14 的原因码（MANUAL_ACK_ONLY / NO_CONFIRMED_DELIVERY），
+            # 不在本层另造一套"送达"话术。
+            if str(item) not in reason_codes:
+                reason_codes.append(str(item))
     states = [delivery.get("state"), incident_block.get("state")]
     if FAIL in states or reason_codes:
         state = FAIL
@@ -1456,14 +1464,20 @@ def _group_evidence(
     declared: Mapping[str, str], group: str, computed: str, *,
     identity: Mapping[str, Any], window: Mapping[str, Any], detail: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """构造 K06 单组证据载荷：声明状态 + 证据 hash + 窗口 + 身份引用。"""
+    """构造 K06 单组证据载荷：声明状态 + 证据 hash + 窗口 + 身份引用。
+
+    身份不完整（缺运行工件 hash / 发布标识）时**不**传 ``identity_ref``：K06 要求
+    "PASS 必须同时具备证据 hash、有效窗口与匹配身份"，凭空造一个引用会让
+    "声明 PASS 但身份不明"逃过 ``IDENTITY_REF_MISSING``。
+    """
     status = declared.get(group, computed)
+    identity_complete = identity.get("state") == PASS
     payload = {
         "status": status,
         "evidence_hash": canonical_hash({"group": group, "detail": detail}),
         "window_start_ms": window.get("since_ms"),
         "window_end_ms": window.get("until_ms"),
-        "identity_ref": identity.get("identity_ref"),
+        "identity_ref": identity.get("identity_ref") if identity_complete else None,
         "detail": dict(detail),
     }
     return payload
