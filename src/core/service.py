@@ -311,15 +311,21 @@ class TradingService:
             account_ref=str(getattr(self.run_generation, "account_ref", "") or ""),
             runtime_instance_id=str(self.runtime_instance_id or ""),
         )
-        gate_decision = self.recovery_gate.before_entry()
-        if gate_decision.allowed:
+        # U13-FU2/N2：启动路径**必须注入本进程账本的真实事实**（与就绪链共用
+        # ``_recovery_gate_facts`` 这一个入口），不得退回裸 ``before_entry()``：
+        # 裸形态不读本进程账本，无法证明"未收口 ENTRY 单真的清完了"。读不出账本
+        # 或门禁异常时 ``_recovery_gate_facts``/``_recovery_gate_ledger_facts``
+        # 各自 fail-closed，因此这里没有"判定失败就放行"的口子。
+        gate_facts = self._recovery_gate_facts(self._recovery_gate_ledger_facts())
+        if gate_facts.get("recovery_gate_allowed") is True:
             self.db.resolve_risk_incidents_by_type("recovery_reconcile_required")
         else:
+            gate_reasons = list(gate_facts.get("recovery_gate_reason_codes") or [])
             self.db.log_risk_event(
                 event_type="recovery_reconcile_required", severity="critical",
                 details=(f"epoch={self.recovery_gate.epoch_id} "
                          f"account_ref={self.recovery_gate.account_ref} "
-                         f"reasons={','.join(gate_decision.reason_codes)}"),
+                         f"reasons={','.join(gate_reasons)}"),
                 action_taken="fail closed to close_only; reconcile before new entry",
             )
             if self.control.state == "normal":
@@ -1413,12 +1419,17 @@ class TradingService:
         if str(new_state) == "normal":
             # U13/F14 接线：恢复门禁未收口时不允许把控制面拨回 normal，
             # 否则"恢复完先对账"可以被控制台一步绕过。
-            gate_decision = self.recovery_gate.before_entry()
-            if not gate_decision.allowed:
+            # U13-FU2/N2：与启动、就绪链同一个入口——注入本进程账本真实事实。
+            # 裸 ``before_entry()`` 不读账本，"账本里还有未收口单"挡不住把控制面
+            # 拨回 normal。判定设施自身异常时 ``_recovery_gate_facts`` 返回
+            # RECOVERY_GATE_UNPROVEN（allowed 非 True）→ 一样被拒。
+            gate_facts = self._recovery_gate_facts(self._recovery_gate_ledger_facts())
+            if gate_facts.get("recovery_gate_allowed") is not True:
+                gate_reasons = list(gate_facts.get("recovery_gate_reason_codes") or [])
                 return {
                     "ok": False,
                     "error": "recovery gate blocked: "
-                             + ",".join(gate_decision.reason_codes)
+                             + ",".join(gate_reasons)
                              + "（先提交对账证据 /api/recovery/reconcile）",
                 }
         if not self.control.set_state(new_state):
