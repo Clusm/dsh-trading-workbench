@@ -1,8 +1,10 @@
 # U13-FU1 补丁包（目录名 `bc112fe`）
 
-> 目录名 = **引入本补丁包内容的提交** `bc112fe`（其后的提交只往本目录追加
-> `README.md` 正文与 `evidence/` 归档，`.diff` 从未被改动）。分支最终 head 见
-> 交付报告，`git log --oneline -- docs/dispatch/patches/U13-FU1/` 可回溯。
+> 目录名 = **打包时（`.diff` 生成时）的分支 head** `bc112fe`。补丁内容随后在
+> `777c22c` 落库，其后只有对 `service.py` 补丁的加宽（`a12805b`）与本目录
+> 正文/`evidence/` 的追加（`d260607`）。`.diff` 的**当前**内容 = `a12805b`
+> 之后、`d260607` 之前的状态（正文与证据不改变 `.diff`）。
+> `git log --oneline -- docs/dispatch/patches/U13-FU1/` 可回溯全部落库点。
 
 本目录是 **U13-FU1（E 线托管/恢复修复）** 的补丁包。四条 P1 的**核心修复**已在
 分支 `task/U13-FU1` 内直接提交（独占路径：`src/core/ops/recovery.py`、
