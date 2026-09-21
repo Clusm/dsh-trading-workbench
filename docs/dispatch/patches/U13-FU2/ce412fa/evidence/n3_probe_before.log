@@ -1,0 +1,14 @@
+probe N3 tree = C:\Users\Tao\AppData\Local\Temp\u13fu2\sandbox\before
+  validate('demo') = ('STATE_ROOT_MISSING',)
+  assert_environment_bound('demo') -> raised=True
+    状态根与环境不一致: environment='demo' profile='demo' reasons=STATE_ROOT_MISSING
+  PASS  assert_environment_bound('demo') 对未声明状态根**会抛**
+  README(README.md) 提到 assert_environment_bound 会抛: False
+  FAIL  README 明确写了 assert_environment_bound 对 demo **会抛**  README 未登记真实行为
+  登记文件 = ['无人值守升级任务清单_2026-09-19.json']
+  U13-FU1 tradeoff 仍称 demo『被检出并报告』: ['无人值守升级任务清单_2026-09-19.json: 默认部署 demo/paper 仍可启动，只是被检出并报告；只有 environment=live 是硬拦截...']
+  FAIL  任务清单里 U13-FU1 的 tradeoff 不再声称 demo 只被检出/仅报告  stale=['无人值守升级任务清单_2026-09-19.json: 默认部署 demo/paper 仍可启动，只是被检出并报告；只有 environment=live 是硬拦截...']
+
+PROBE N3: 1 通过 / 2 失败
+  FAILED: README 明确写了 assert_environment_bound 对 demo **会抛**
+  FAILED: 任务清单里 U13-FU1 的 tradeoff 不再声称 demo 只被检出/仅报告

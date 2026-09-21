@@ -1,0 +1,235 @@
+"""U13-FU2 探针 N2：``TradingService`` 的**启动**与 **set_control** 两条路径是否真的
+受恢复门禁约束（不是"只有就绪链受约束"）。
+
+用法：``python probe_n2_service_paths.py <tree_root>``
+
+关键场景（同一份状态根、同一时刻，**门禁自己的只读快照**与**本进程账本事实**
+结论相反）：
+
+    账本主文件已 checkpoint（其中没有未收口单），而进程最后一次提交只落在
+    ``agent_trader.sqlite-wal`` 里、且没有 ``-shm`` 边车 —— 这正是
+    ``RecoveryGate.ledger_snapshot_present()`` 判定的"停写快照"形态。此时：
+
+    - 门禁自己读：``immutable=1`` 只读主文件 → 看不到那颗 SUBMITTING ENTRY
+      → 判定"干净"（``source='ledger'``，全 0）；
+    - 服务本进程读：正常打开的连接会重放 ``-wal`` → 看到未收口 ENTRY = 1。
+
+    所以"启动/set_control 只看门禁自己怎么说"与"用本进程事实复验"在**同一份账本**
+    上会得出相反结论 —— 这正是 U13-FU2/N2 要接的线。
+
+三条观察：
+  [W] 接线：spy 记录两条路径调用 ``before_entry`` 时 ``facts`` 是否为 Mapping；
+  [S] 行为：启动后控制状态 + ``set_control('normal')`` 的返回值；
+  [C] 对照：账本干净时**不得**误伤（控制状态保持 normal、set_control 成功）。
+
+全程离线：只写系统临时目录里的合成状态根，不读 ``.env``/真实 ``data``/密钥、
+不联网、不下单、不发真实告警。真实 ``config/*.yaml`` 只读，用来构造 Settings。
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sqlite3
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+TREE = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(TREE / "src"))
+
+os.environ["EXECUTION_MODE"] = "paper"
+for key in ("MTA_STATE_ROOT", "MTA_DATA_ROOT"):
+    os.environ.pop(key, None)
+
+import yaml  # noqa: E402
+
+from audit.database import AuditDatabase  # noqa: E402
+from core.config_loader import Settings  # noqa: E402
+from core.ops.recovery import RecoveryGate  # noqa: E402
+from core.service import TradingService  # noqa: E402
+from exchange.order_outbox import OrderOutbox  # noqa: E402
+
+PASS = 0
+FAIL: list[str] = []
+
+
+def check(name: str, ok: bool, detail: str = "") -> None:
+    global PASS
+    if ok:
+        PASS += 1
+        print(f"  PASS  {name}")
+    else:
+        FAIL.append(name)
+        print(f"  FAIL  {name}  {detail}")
+
+
+def _settings(iso: Path) -> Settings:
+    settings = Settings(
+        TREE,
+        yaml.safe_load((TREE / "config/settings.yaml").read_text(encoding="utf-8")),
+        yaml.safe_load((TREE / "config/agents.yaml").read_text(encoding="utf-8")),
+        yaml.safe_load((TREE / "config/risk_learning.yaml").read_text(encoding="utf-8")),
+    )
+    settings.project_root = iso
+    return settings
+
+
+def build_root(base: Path, name: str, *, unresolved_entry: bool) -> Path:
+    """造一个"已恢复且已装门禁"的状态根（镜像生产恢复布局）。
+
+    账本用真实 ``AuditDatabase`` 建（迁移齐全，与生产同形）；门禁走真实
+    ``require_reconcile`` + ``complete_reconcile`` 到 CLEARED。
+    """
+    iso = base / name
+    data = iso / "data"
+    (data / "ops").mkdir(parents=True, exist_ok=True)
+
+    db = AuditDatabase(data / "agent_trader.sqlite")
+    db.environment = "paper"
+    saved: Path | None = None
+    if unresolved_entry:
+        # 最后一次提交只进 -wal：连接保持打开（不 checkpoint）时把**主文件 + -wal**
+        # 拷贝到 staging（**不带 -shm**），关闭连接后再拷回 —— 于是状态根里是
+        # "主文件（无未收口单）+ 只含该单的 -wal、没有 -shm"，与
+        # ``ledger_snapshot_present()`` 判定的"停写快照"形态逐字一致。
+        db.conn.execute("PRAGMA journal_mode=WAL")
+        outbox = OrderOutbox(db, environment="paper")
+        outbox.prepare(
+            client_order_id="ENTRY-N2-1", symbol="BTCUSDT", side="BUY",
+            position_side="LONG", order_type="MARKET", purpose="ENTRY",
+            qty=0.010, price=None, reduce_only=False,
+            endpoint="/fapi/v1/order", request={},
+            command_kind="STANDARD", qty_text="0.010")
+        db.conn.commit()
+        saved = base / f"{name}_staging"
+        saved.mkdir(parents=True, exist_ok=True)
+        for member in ("agent_trader.sqlite", "agent_trader.sqlite-wal"):
+            shutil.copy2(data / member, saved / member)
+    db.conn.commit()
+    db.close()  # 关闭会把原库 checkpoint 并删除 -wal/-shm
+    if saved is not None:
+        for member in ("agent_trader.sqlite", "agent_trader.sqlite-wal"):
+            shutil.copy2(saved / member, data / member)
+    print(f"  [{name}] 落盘文件 = {sorted(p.name for p in data.iterdir())}")
+
+    for state_name, payload in {
+        "capital_state.json": {"mode": "paper"},
+        "channel_state.json": {"date": "2026-09-20"},
+        "control_state.json": {"state": "normal"},
+        "account_risk_state.json": {"anchor_id": "paper:u13fu2"},
+    }.items():
+        (data / state_name).write_text(json.dumps(payload), encoding="utf-8")
+
+    gate = RecoveryGate.load(data / "ops" / "recovery_gate.json")
+    now_ms = int(time.time() * 1000)
+    gate.require_reconcile(epoch_id="e2e-epoch", account_ref="", runtime_instance_id="")
+    decision = RecoveryGate.load(data / "ops" / "recovery_gate.json").complete_reconcile(
+        {"observed_at_ms": now_ms, "positions_verified": True,
+         "open_orders_verified": True}, now_ms=now_ms)
+    print(f"  [{name}] 门禁建立 => allowed={decision.allowed} "
+          f"codes={decision.reason_codes}")
+    return iso
+
+
+def run_case(base: Path, name: str, *, unresolved_entry: bool) -> dict:
+    """构造服务并驱动两条路径；返回观察结果。"""
+    print(f"\n--- case {name}（账本未收口单: {unresolved_entry}）---")
+    iso = build_root(base, name, unresolved_entry=unresolved_entry)
+
+    calls: list[object] = []
+    original = RecoveryGate.before_entry
+
+    def spy(self, *args, **kwargs):  # noqa: ANN001
+        calls.append(kwargs.get("facts"))
+        return original(self, *args, **kwargs)
+
+    RecoveryGate.before_entry = spy
+    try:
+        service = TradingService(_settings(iso))
+    finally:
+        RecoveryGate.before_entry = original
+    startup_calls = len(calls)
+    startup_bare = sum(1 for facts in calls if facts is None)
+    print(f"  启动期 before_entry 调用 {startup_calls} 次；其中未注入事实 {startup_bare} 次")
+    print(f"  启动期注入的事实: {[facts for facts in calls if facts is not None]}")
+
+    service_ledger = Path(service.runtime_paths.db_file)
+    gate_ledger = RecoveryGate.load(
+        service.runtime_paths.recovery_gate_file).ledger_file()
+    print(f"  服务账本 = {service_ledger}")
+    print(f"  门禁读的账本 = {gate_ledger}（同一文件: {service_ledger == gate_ledger}）")
+    result = {"startup_calls": startup_calls, "startup_bare": startup_bare,
+              "same_ledger": service_ledger == gate_ledger,
+              "control": service.control.state,
+              "gate_allowed": service._entry_readiness_facts.get("recovery_gate_allowed"),
+              "gate_codes": list(
+                  service._entry_readiness_facts.get("recovery_gate_reason_codes") or [])}
+
+    calls.clear()
+    original = RecoveryGate.before_entry
+    RecoveryGate.before_entry = spy
+    try:
+        set_result = service.set_control("normal")
+    finally:
+        RecoveryGate.before_entry = original
+    result["set_control"] = set_result
+    result["set_control_calls"] = len(calls)
+    result["set_control_bare"] = sum(1 for facts in calls if facts is None)
+    print(f"  set_control('normal') -> {set_result}")
+    print(f"  set_control 期 before_entry 调用 {len(calls)} 次；"
+          f"未注入事实 {result['set_control_bare']} 次；"
+          f"注入的事实 {[facts for facts in calls if facts is not None]}")
+
+    try:
+        service.close()
+    except Exception as exc:  # pragma: no cover - 清理失败不影响结论
+        print(f"  NOTE service.close() 异常: {type(exc).__name__}: {exc}")
+    return result
+
+
+def main() -> int:
+    base = Path(tempfile.mkdtemp(prefix="u13fu2-n2-"))
+    print(f"probe N2 tree = {TREE}")
+    print(f"probe N2 tmp  = {base}")
+    try:
+        dirty = run_case(base, "dirty_wal", unresolved_entry=True)
+        print("\n[P] 前提：服务账本与门禁读的账本是同一个文件")
+        check("服务账本 == 门禁读的账本（同一文件）", dirty["same_ledger"],
+              str(dirty["same_ledger"]))
+        print("\n[W] 接线：启动与 set_control 都必须注入账本事实")
+        check("启动路径注入账本事实（不再有裸 before_entry 调用）",
+              dirty["startup_bare"] == 0 and dirty["startup_calls"] >= 1,
+              f"calls={dirty['startup_calls']} bare={dirty['startup_bare']}")
+        check("set_control 路径注入账本事实",
+              dirty["set_control_bare"] == 0 and dirty["set_control_calls"] >= 1,
+              f"calls={dirty['set_control_calls']} bare={dirty['set_control_bare']}")
+        print("\n[S] 行为：账本里有未收口 ENTRY 时两条路径都必须被挡住")
+        check("启动后控制状态被收紧为 close_only", dirty["control"] == "close_only",
+              dirty["control"])
+        check("启动期门禁判定为阻断", dirty["gate_allowed"] is False,
+              f"allowed={dirty['gate_allowed']} codes={dirty['gate_codes']}")
+        check("set_control('normal') 被拒",
+              dirty["set_control"].get("ok") is False
+              and "recovery gate blocked" in str(dirty["set_control"].get("error")),
+              str(dirty["set_control"]))
+
+        clean = run_case(base, "clean", unresolved_entry=False)
+        print("\n[C] 对照：账本干净时**不得**误伤（合法启动）")
+        check("干净账本启动后控制状态保持 normal", clean["control"] == "normal",
+              clean["control"])
+        check("干净账本启动期门禁放行", clean["gate_allowed"] is True,
+              f"allowed={clean['gate_allowed']} codes={clean['gate_codes']}")
+        check("干净账本 set_control('normal') 成功",
+              clean["set_control"].get("ok") is True, str(clean["set_control"]))
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    print(f"\nPROBE N2: {PASS} 通过 / {len(FAIL)} 失败")
+    for name in FAIL:
+        print(f"  FAILED: {name}")
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
