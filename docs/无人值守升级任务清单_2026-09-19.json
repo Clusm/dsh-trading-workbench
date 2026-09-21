@@ -1997,6 +1997,26 @@
             "_load_state() 损坏静默清去重记忆（冲击必达②）-> 登记 U12"
           ],
           "unfinished": "graph.py 整轮聚合接线、run_offline_regression.py 登记行落地（I 独占）"
+        },
+        {
+          "type": "review_r3_verification",
+          "candidate": "cc9287a",
+          "verdict": "CHANGES_REQUESTED（窄口径：上轮 4 个 P0 全部真修复，但 r2 自带 2 条未登记 P2（+1 条））",
+          "archived_path": "docs/dispatch/reviews/U08/cc9287a/Q_r3.md",
+          "p0_all_closed": {
+            "接线": "**真接上**：grep 7 处与作者逐行一致；**真实路径实测**：真跑 SignalScanner.scan() -> 状态文件 last_scan.funnel + no_open_verdict=blocked；路由 /funnel、/api/funnel、/channels 全 200 且端到端读到 blocked；ticket_skip_detail() 经真执行器落 ENTRY_ZONE_INVERTED；第 2 轮 handled/TICKET_ALREADY_CONSUMED",
+            "跨进程": "**真修**：自建 spawn+barrier，4 进程 1/3、8x5 轮全 (1,7,0)、16 线程 1/15；5 种绕过（删锁/残留锁/持锁超时 LEDGER_BUSY/同进程双对象/消费后不 save）全部守住，0 异常",
+            "故障 vs no_edge": "**两侧都成立**：25 类故障无一产出 no_edge；4 类真 no_edge 仍 no_edge；顶层与内嵌逐字一致（P0-4c 已修）"
+          },
+          "patch_adjudication": "**用 ec8fd1c/**（基线 = 集成树现状 blob）。`c147895/05` 在 `b97ae0d` 上 **4 配置全 apply 失败** -> **旧包必须标 superseded**（I 应在应用前处理）；作者报告写 `76381b7/` 属命名混淆（目录不能以创建它的提交命名）",
+          "delta": "base=82 / head=83 / manifest=83，NEW_FAIL=[] / FIXED=[] / BOTH_FAIL=[]；两树 harness 入口均 rc=0；含 FAIL 的行全在 rc=0 负向对照里。门禁 OK files=289、密钥扫描 OK",
+          "new_p2": [
+            "**N3（P2 未登记崩溃）**：strategy_trader.py:322 的 ledger.save() 不吞 LedgerLockTimeout -> 异常穿出**整个执行器**、丢弃已构造 intents、留下**消费孤儿**",
+            "N1（P2）：卡册损坏被误标 STRATEGY_LAB_DRIFT，CARDS_INVALID 主路径**不可达**",
+            "N2（P2）：graph.py:320/344 不注入 funnel/ledger，README 把 ledger 记'可达'**过乐观**"
+          ],
+          "new_p3": "N4/N5 两条",
+          "unfinished": "真实集成树合批回归、真实多实例、DB 侧勾稽权威性 —— 需 U12 或改 I 树"
         }
       ],
       "blockers": [],
@@ -2042,8 +2062,18 @@
           "sessions": [
             "Q (reviews/U08/R3/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED（窄口径）",
           "reports_dir": "docs/dispatch/reviews/U08/cc9287a/"
+        },
+        {
+          "round": "r4",
+          "stage": "修复复验",
+          "candidate": null,
+          "sessions": [
+            "U08 author (r3)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U08/<r3head>/"
         }
       ],
       "qa_runs": []
