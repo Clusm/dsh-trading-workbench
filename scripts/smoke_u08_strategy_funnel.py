@@ -42,7 +42,12 @@ from agents.strategy_trader import run_strategy_trader  # noqa: E402
 from audit.database import AuditDatabase  # noqa: E402
 from core import decision_trace as trace  # noqa: E402
 from core.strategy_funnel import (  # noqa: E402
+    DETAIL_NATURE,
     DETAIL_REASON,
+    DETAIL_STAGES,
+    NATURE_FAULT,
+    NATURE_SCOPE,
+    ROUND_ONLY_DETAILS,
     ManagementPriorityPlan,
     ScanFunnel,
     Stage,
@@ -162,6 +167,160 @@ def test_module_registry() -> None:
     check("拒绝型闸门不带细分码即拒绝登记（原因不允许缺失）",
           _raises(ValueError, lambda: ScanFunnel(round_id="r").record(
               Stage.SIGNAL_TRIGGERED.value)))
+    check("每个细分码都登记了性质与允许的闸门（两张表不是各自自洽）",
+          set(DETAIL_NATURE) == set(DETAIL_REASON) == set(DETAIL_STAGES))
+    check("细分码挂错闸门即拒绝（不是'随便挂哪都行'）",
+          _raises(ValueError, lambda: ScanFunnel(round_id="r").record(
+              Stage.SIGNAL_TRIGGERED.value, funnel_mod.DETAIL_KLINE_FETCH_FAILED))
+          and _raises(ValueError, lambda: ScanFunnel(round_id="r").record(
+              Stage.CARD_INDICATORIZED.value, funnel_mod.DETAIL_CARDS_UNAVAILABLE)))
+    check("终态/通过型闸门带细分码即拒绝（不被静默算成'被拒绝'）",
+          _raises(ValueError, lambda: ScanFunnel(round_id="r").record(
+              Stage.INTENT_READY.value, funnel_mod.DETAIL_NO_SIGNAL_ON_CLOSED_BAR)))
+    check("轮级专用码只能经 record_round_fault 登记",
+          bool(ROUND_ONLY_DETAILS)
+          and ScanFunnel(round_id="r").record_round_fault(
+              funnel_mod.DETAIL_CARDS_UNAVAILABLE).reason
+          == trace.REASON_READINESS_BLOCKED)
+
+
+def test_faults_are_not_read_as_no_edge() -> None:
+    """必达要点 1 的**核心安全性质**：故障与"真的没有信号"必须可区分。
+
+    左侧：三类故障各自**不再**产出 no_edge；右侧：真的 no_edge 仍产出 no_edge。
+    """
+    # 故障①：卡片配置缺陷（三张卡全部未指标化）
+    cards_off = ScanFunnel(round_id="fault-card")
+    for idx in range(3):
+        cards_off.record(Stage.CARD_INDICATORIZED.value,
+                         funnel_mod.DETAIL_CARD_NOT_INDICATORIZED, card_id=f"c{idx}")
+    report = cards_off.no_open_explanation()
+    check("故障①卡册配置缺陷：verdict/主因都不是 NO_EDGE",
+          report["verdict"] != "no_edge"
+          and report["primary_reason"] == trace.REASON_VALIDATION_REJECTED, report)
+
+    # 故障②：票据源读取失败（轮级故障，与"本轮没有票据"区分）
+    source = ScanFunnel(round_id="fault-source")
+    source.record_round_fault(funnel_mod.DETAIL_TICKET_SOURCE_UNAVAILABLE,
+                              note="fetch_open_signal_tickets 抛错")
+    report = source.no_open_explanation()
+    check("故障②票据源读取失败：blocked + DATA_UNAVAILABLE（不是 no_edge）",
+          report["verdict"] == "blocked"
+          and report["primary_reason"] == trace.REASON_DATA_UNAVAILABLE, report)
+    check("票据源读取失败与'本轮没有票据'是两个不同的细分码（可区分）",
+          funnel_mod.DETAIL_TICKET_SOURCE_UNAVAILABLE
+          != funnel_mod.DETAIL_NO_TICKETS_AVAILABLE
+          and DETAIL_NATURE[funnel_mod.DETAIL_TICKET_SOURCE_UNAVAILABLE] == NATURE_FAULT
+          and DETAIL_NATURE[funnel_mod.DETAIL_NO_TICKETS_AVAILABLE] != NATURE_FAULT)
+
+    # 故障③：轮级前置失败（卡册读不到 / 运行时不可用 / 通道预算为 0）
+    for detail, expect in (
+            (funnel_mod.DETAIL_CARDS_UNAVAILABLE, trace.REASON_READINESS_BLOCKED),
+            (funnel_mod.DETAIL_CARDS_INVALID, trace.REASON_VALIDATION_REJECTED),
+            (funnel_mod.DETAIL_STRATEGY_LAB_UNAVAILABLE, trace.REASON_READINESS_BLOCKED),
+            (funnel_mod.DETAIL_STRATEGY_LAB_DRIFT, trace.REASON_VALIDATION_REJECTED)):
+        f = ScanFunnel(round_id="fault-round")
+        f.record_round_fault(detail, note="轮级前置失败")
+        rep = f.no_open_explanation()
+        check(f"故障③轮级 {detail}：blocked/{expect}，候选数不被虚增",
+              rep["verdict"] == "blocked" and rep["primary_reason"] == expect
+              and rep["candidates"] == 0 and rep["evaluated"] == 0, rep)
+
+    # 反向误标：范围界定不得把真实 no_edge 挤成 blocked
+    scoped = ScanFunnel(round_id="scoped")
+    scoped.record(Stage.SIGNAL_TRIGGERED.value,
+                  funnel_mod.DETAIL_NO_SIGNAL_ON_CLOSED_BAR)
+    scoped.record(Stage.SYMBOL_IN_SCOPE.value, funnel_mod.DETAIL_SYMBOL_NOT_IN_SCOPE,
+                  symbol="SOLUSDT")
+    rep = scoped.no_open_explanation()
+    check("真 no_edge + 范围外的卡：仍 no_edge/NO_EDGE（不再常态误判 blocked）",
+          rep["verdict"] == "no_edge" and rep["primary_reason"] == trace.REASON_NO_EDGE,
+          rep)
+    check("范围界定码的性质是 scope（可见但不抢主因）",
+          DETAIL_NATURE[funnel_mod.DETAIL_SYMBOL_NOT_IN_SCOPE] == NATURE_SCOPE
+          and trace.REASON_READINESS_BLOCKED in rep["reason_codes"])
+
+    # 右侧：真的没有信号仍然必须是 no_edge
+    plain = ScanFunnel(round_id="plain")
+    plain.record(Stage.SIGNAL_TRIGGERED.value,
+                 funnel_mod.DETAIL_NO_SIGNAL_ON_CLOSED_BAR)
+    rep = plain.no_open_explanation()
+    check("真的没有信号：仍 no_edge/NO_EDGE 且 evaluated>0",
+          rep["verdict"] == "no_edge" and rep["primary_reason"] == trace.REASON_NO_EDGE
+          and rep["evaluated"] == 1, rep)
+
+    # 已在处理（全部票已消费）不得读成 no_edge
+    consumed = ScanFunnel(round_id="consumed")
+    consumed.record(Stage.TICKET_FRESH.value,
+                    funnel_mod.DETAIL_TICKET_ALREADY_CONSUMED, ticket_id="t-1")
+    rep = consumed.no_open_explanation()
+    check("所有票都已消费：verdict=handled/HOLD_EXISTING（不是 no_edge）",
+          rep["verdict"] == "handled"
+          and rep["primary_reason"] == trace.REASON_HOLD_EXISTING, rep)
+
+    # 顶层与内嵌 no_open 共用同一次判定（不允许自相矛盾）
+    for label, kwargs in (
+            ("源级错误", {"source_errors": ["macro_public: 5xx"],
+                          "source_labels": ["macro_public"]}),
+            ("模型超时", {"model_error": TimeoutError("超时")})):
+        explained = funnel_mod.round_explanation(funnel=plain, **kwargs)
+        check(f"顶层与内嵌 no_open 一致（{label}）",
+              explained["verdict"] == explained["no_open"]["verdict"] == "blocked"
+              and explained["primary_reason"]
+              == explained["no_open"]["primary_reason"],
+              (explained["verdict"], explained["no_open"]["verdict"]))
+
+
+def test_cross_process_consumption() -> None:
+    """必达要点 2 的**跨进程**形态（B-r1 P0-3）：N 个真实子进程抢同一张票。
+
+    修复前：4 个子进程**全部**拿到 CONSUMED（各自只读自己内存里的账本）。
+    修复后：恰好 1 个 CONSUMED，其余 ALREADY_CONSUMED。
+    """
+    import multiprocessing as mp
+    import os
+
+    src_dir = str(ROOT / "src")
+    with tempfile.TemporaryDirectory(prefix="mta-u08-xproc-") as tmp:
+        ledger_path = str(Path(tmp) / "led.json")
+        ready = Path(tmp) / "ready"
+        n_procs = 4
+        ctx = mp.get_context("spawn") if hasattr(mp, "get_context") else mp
+        with ctx.Pool(n_procs) as pool:
+            states = pool.map(_xproc_child, [(src_dir, ledger_path, str(ready), n_procs,
+                                              idx) for idx in range(n_procs)])
+        check(f"{n_procs} 个进程抢同一张票：恰好 1 个 CONSUMED",
+              states.count("CONSUMED") == 1, states)
+        check(f"{n_procs} 个进程抢同一张票：其余全部 ALREADY_CONSUMED",
+              states.count("ALREADY_CONSUMED") == n_procs - 1, states)
+        reloaded = TicketLedger(ledger_path, clock=lambda: 1_700_000_000_000)
+        check("跨进程消费事实已落盘（重载后仍 is_consumed）",
+              reloaded.is_consumed("t-shared")
+              and sum(1 for r in reloaded._records.values() if r.consumed) == 1)
+        check("并发下没有子进程抛异常（tmp 名带 pid/uuid，不再 PermissionError）",
+              not [s for s in states if str(s).startswith("EXC:")], states)
+
+
+def _xproc_child(args) -> str:
+    """子进程体：先 load 完成，等所有兄弟 ready 后再 consume（确定性竞态窗口）。"""
+    import os
+    import time
+
+    src_dir, ledger_path, ready_dir, n_procs, idx = args
+    sys.path.insert(0, src_dir)
+    from core.strategy_funnel import TicketLedger as _Ledger
+
+    led = _Ledger(ledger_path, clock=lambda: 1_700_000_000_000)
+    ready = Path(ready_dir)
+    ready.mkdir(parents=True, exist_ok=True)
+    (ready / f"{os.getpid()}_{idx}").write_text("1", encoding="utf-8")
+    deadline = time.time() + 30
+    while len(list(ready.iterdir())) < n_procs and time.time() < deadline:
+        time.sleep(0.005)
+    try:
+        return led.consume("t-shared", round_id=f"round-{idx}").state
+    except Exception as exc:  # noqa: BLE001
+        return f"EXC:{type(exc).__name__}:{exc}"[:80]
 
 
 def _raises(exc_type, fn) -> bool:
@@ -381,9 +540,26 @@ def test_management_priority_budget() -> None:
     """必达要点 5：管理优先预算不被新仓研究挤占。"""
     plan = ManagementPriorityPlan.from_total(8, reserve_ratio=0.5)
     check("切出管理预留（8 -> 预留 4）", plan.management_reserve == 4, plan.as_dict())
-    check("研究取用不减少管理可取用的量",
-          plan.claim_research(4) == 4 and plan.management_available == 4)
+    # 真正的不变量是"研究碰不到预留池"，**不是**"management_available 不下降"（P2-4）。
+    check("研究取用碰不到预留池（管理'已用+仍可取' >= 预留量）",
+          plan.claim_research(4) == 4
+          and plan.management_used + plan.management_available >= plan.management_reserve
+          and plan.management_available == 4, plan.as_dict())
     check("研究池耗尽后不再放行研究", plan.claim_research(1) == 0)
+    check("管理侧请求全满足 => meets_management_demand()=True",
+          plan.meets_management_demand() and plan.management_shortfall == 0)
+    squeezed = ManagementPriorityPlan.from_total(8, reserve_ratio=0.5)
+    squeezed.claim_management(9)
+    check("管理侧没拿到请求量 => meets_management_demand()=False（旧实现恒 True）",
+          squeezed.meets_management_demand() is False and squeezed.management_shortfall == 1)
+    zero_reason = ManagementPriorityPlan.from_total(0, reserve_ratio=0.5).research_reason()
+    check("总预算为 0 也有显式原因（MODEL_DEADLINE + RESEARCH_BUDGET_ZERO）",
+          zero_reason is not None
+          and funnel_mod.DETAIL_RESEARCH_BUDGET_ZERO in zero_reason.details,
+          None if zero_reason is None else zero_reason.as_dict())
+    check("非法比例的实际生效比例在 as_dict 里可见（P3-3）",
+          ManagementPriorityPlan.from_total(4, reserve_ratio=float("nan")).as_dict()[
+              "reserve_ratio_effective"] == 0.0)
 
     starved = ManagementPriorityPlan.from_total(6, reserve_ratio=0.5)
     starved.claim_management(6)
@@ -487,11 +663,14 @@ def main() -> int:
     print("U08 策略漏斗冒烟（离线；两态均可运行）")
     print("=" * 72)
     run_case("[1] 原因码注册表与九码一致", test_module_registry)
-    run_case("[2] 真实扫描轮次的逐项原因", test_scan_round_end_to_end)
-    run_case("[3] 执行侧原因 + ticket 消费一次", test_execution_and_ledger)
-    run_case("[4] 每仓管理者与规则版本", test_attribution)
-    run_case("[5] 管理优先预算", test_management_priority_budget)
-    run_case("[6] 看板展示", test_dashboard_display)
+    run_case("[2] 故障不得被读成'没有信号'（含反向误标）",
+             test_faults_are_not_read_as_no_edge)
+    run_case("[3] 真实扫描轮次的逐项原因", test_scan_round_end_to_end)
+    run_case("[4] 执行侧原因 + ticket 消费一次", test_execution_and_ledger)
+    run_case("[5] 跨进程并发消费（P0-3）", test_cross_process_consumption)
+    run_case("[6] 每仓管理者与规则版本", test_attribution)
+    run_case("[7] 管理优先预算", test_management_priority_budget)
+    run_case("[8] 看板展示", test_dashboard_display)
     print("\n" + "=" * 72)
     print(f"结果：PASS {PASS} / FAIL {FAIL}")
     if FAILURES:

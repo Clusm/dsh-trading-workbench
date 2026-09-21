@@ -39,11 +39,17 @@ from core.signal_ticket import valid_signal_ticket  # noqa: E402
 from core.strategy_funnel import (  # noqa: E402
     ALREADY_CONSUMED,
     CONSUMED,
+    DETAIL_NATURE,
     DETAIL_REASON,
+    DETAIL_STAGES,
     LEDGER_CORRUPT,
-    ManagementPriorityPlan,
+    NATURE_SCOPE,
+    POSITION_CLASS_ATTRIBUTED,
+    POSITION_CLASS_LEGACY,
     REASON_ALL,
+    ROUND_ONLY_DETAILS,
     STAGE_ORDER,
+    ManagementPriorityPlan,
     ScanFunnel,
     Stage,
     TicketLedger,
@@ -73,6 +79,16 @@ def check(name: str, condition: bool, detail: object = "") -> bool:
         FAILURES.append(name)
         print(f"  FAIL  {name} :: {detail}")
     return bool(condition)
+
+
+def raises(exc_type, fn) -> bool:
+    try:
+        fn()
+    except exc_type:
+        return True
+    except Exception:
+        return False
+    return False
 
 
 # --------------------------------------------------------------------- #
@@ -140,6 +156,16 @@ CARDS = [
 ]
 
 
+class _FailingEvidence:
+    """U03 证据报告形态的最小替身：门禁不放行。"""
+
+    def __init__(self) -> None:
+        self.intents: list = []
+
+    def decision_gate(self) -> dict:
+        return {"ok": False, "identity_pinned": False}
+
+
 # --------------------------------------------------------------------- #
 def case_reason_code_consistency() -> None:
     """必达要点 4：原因码分类与 U05 九码一致，不得自造平行体系。"""
@@ -151,25 +177,57 @@ def case_reason_code_consistency() -> None:
           sorted(codes - trace.REASON_CODES))
     check("九码全部由细分码可达（无孤立码）", codes == set(trace.REASON_CODES),
           sorted(set(trace.REASON_CODES) - codes))
-    check("ReasonCodes 与 U05 同一处定义（不是本模块的字面量副本）",
-          funnel_mod.REASON_ALL == frozenset(trace.REASON_CODES) and REASON_ALL == codes)
-    unknown = 0
-    try:
-        detail_reason("NOT_A_REGISTERED_DETAIL")
-    except funnel_mod.UnknownDetailCode:
-        unknown += 1
-    check("未登记细分码 fail-closed（拒绝自由文本冒充原因）", unknown == 1)
+    check("九码集合就是 U05 的冻结集合（本模块不另立字面量）",
+          REASON_ALL is funnel_mod.REASON_ALL and codes == set(trace.REASON_CODES)
+          and REASON_ALL == frozenset(trace.REASON_CODES))
+    check("未登记细分码 fail-closed（拒绝自由文本冒充原因）",
+          raises(funnel_mod.UnknownDetailCode,
+                 lambda: detail_reason("NOT_A_REGISTERED_DETAIL")))
     staged = all(name in STAGE_ORDER for name in
                  (Stage.CARD_LOADED.value, Stage.SIGNAL_TRIGGERED.value,
                   Stage.INTENT_READY.value))
     check("漏斗阶段枚举全部登记在 STAGE_ORDER（C#13）", staged and len(STAGE_ORDER) == 17,
           len(STAGE_ORDER))
+    check("拒绝型闸门不带细分码即拒绝登记（不允许静默原因）",
+          raises(ValueError, lambda: ScanFunnel(round_id="r").record(
+              Stage.SIGNAL_TRIGGERED.value)))
+
+    # --- B-r1 P3-1：不做"构造即恒真"的断言，改为对 validate_detail_table() 打负例 ---
+    saved_reason = dict(DETAIL_REASON)
     try:
-        ScanFunnel(round_id="r").record(Stage.SIGNAL_TRIGGERED.value)
-        refused = False
-    except ValueError:
-        refused = True
-    check("拒绝型闸门不带细分码即拒绝登记（不允许静默原因）", refused)
+        funnel_mod.DETAIL_REASON["BOGUS_DETAIL"] = "NOT_A_REASON"
+        bogus_refused = raises(Exception, validate_detail_table)
+    finally:
+        funnel_mod.DETAIL_REASON.clear()
+        funnel_mod.DETAIL_REASON.update(saved_reason)
+    check("validate_detail_table() 抓住'细分码映射到非九码'（非恒真，真的会抛）",
+          bogus_refused)
+    saved_reason = dict(DETAIL_REASON)
+    try:
+        funnel_mod.DETAIL_REASON.pop(funnel_mod.DETAIL_PROVIDER_RATE_LIMITED, None)
+        orphan_refused = raises(Exception, validate_detail_table)
+    finally:
+        funnel_mod.DETAIL_REASON.clear()
+        funnel_mod.DETAIL_REASON.update(saved_reason)
+    check("validate_detail_table() 抓住'某九码没有任何细分码可达'", orphan_refused)
+    validate_detail_table()
+    check("恢复注册表后自检重新通过（负例不是把注册表改坏）", True)
+
+    # --- B-r1 P3-5：细分码 ↔ 闸门 是一张**有约束**的表，不是两张各自自洽的表 ---
+    check("每个细分码都登记了性质与允许的闸门",
+          set(DETAIL_NATURE) == set(DETAIL_REASON) == set(DETAIL_STAGES))
+    check("性质只有 fault/edge/handled/scope 四种",
+          set(DETAIL_NATURE.values()) <= {"fault", "edge", "handled", "scope"})
+    check("轮级专用码不得挂在候选闸门上（只能用 record_round_fault）",
+          raises(ValueError, lambda: ScanFunnel(round_id="r").record(
+              Stage.TICKET_FRESH.value, funnel_mod.DETAIL_NO_TICKETS_AVAILABLE))
+          and ROUND_ONLY_DETAILS)
+    check("细分码挂错闸门即拒绝（KLINE_FETCH_FAILED 只能挂 market_data_ready）",
+          raises(ValueError, lambda: ScanFunnel(round_id="r").record(
+              Stage.SIGNAL_TRIGGERED.value, funnel_mod.DETAIL_KLINE_FETCH_FAILED)))
+    check("通过型/终态闸门带细分码即拒绝（不被静默算成'被拒绝'）",
+          raises(ValueError, lambda: ScanFunnel(round_id="r").record(
+              Stage.INTENT_READY.value, funnel_mod.DETAIL_NO_SIGNAL_ON_CLOSED_BAR)))
 
     doc = ROOT / "docs" / "策略扫描原因码.md"
     if doc.exists():
@@ -200,9 +258,9 @@ def case_round_reasons_are_distinguishable() -> None:
           len({item["detail"] for item in report["details"]}) == 4, report["details"])
     check("每个细分原因都带九码（不是自由文本）",
           all(item["reason"] in trace.REASON_CODES for item in report["details"]))
-    check("本轮主因是数据/就绪类根因而不是 NO_EDGE（不得把故障读成没信号）",
-          report["verdict"] == "blocked" and report["primary_reason"] in
-          (trace.REASON_DATA_UNAVAILABLE, trace.REASON_READINESS_BLOCKED),
+    check("本轮主因是数据类根因而不是 NO_EDGE（不得把故障读成没信号）",
+          report["verdict"] == "blocked"
+          and report["primary_reason"] == trace.REASON_DATA_UNAVAILABLE,
           report["verdict"])
     check("停在闸门处的直方图非空（知道卡在哪一道闸门）",
           len(report["stopped_at"]) == 4, report["stopped_at"])
@@ -214,6 +272,97 @@ def case_round_reasons_are_distinguishable() -> None:
     check("同一轮只有 NO_EDGE 时 verdict=no_edge（不把正常无信号读成故障）",
           clean_report["verdict"] == "no_edge"
           and clean_report["primary_reason"] == trace.REASON_NO_EDGE, clean_report)
+
+    # --- P0-4 核心安全性质：三类故障各自**不再**产出 no_edge（左侧） -------------
+    cards_off = ScanFunnel(round_id="fault-a")
+    for idx in range(3):
+        cards_off.record(Stage.CARD_INDICATORIZED.value,
+                         funnel_mod.DETAIL_CARD_NOT_INDICATORIZED, card_id=f"c{idx}")
+    off_report = cards_off.no_open_explanation()
+    check("故障①卡片全部未指标化：不再读成 no_edge（verdict/主因都不是 NO_EDGE）",
+          off_report["verdict"] != "no_edge"
+          and off_report["primary_reason"] == trace.REASON_VALIDATION_REJECTED,
+          off_report)
+
+    tickets_gone = ScanFunnel(round_id="fault-b")
+    tickets_gone.record_round_fault(funnel_mod.DETAIL_TICKET_SOURCE_UNAVAILABLE,
+                                    note="fetch_open_signal_tickets 抛错")
+    gone_report = tickets_gone.no_open_explanation()
+    check("故障②票据源读取失败：记 TICKET_SOURCE_UNAVAILABLE 且 verdict=blocked",
+          gone_report["verdict"] == "blocked"
+          and gone_report["primary_reason"] == trace.REASON_DATA_UNAVAILABLE
+          and gone_report["round_faults"][0]["detail"]
+          == funnel_mod.DETAIL_TICKET_SOURCE_UNAVAILABLE, gone_report)
+
+    round_fault = ScanFunnel(round_id="fault-c")
+    round_fault.record_round_fault(funnel_mod.DETAIL_CARDS_UNAVAILABLE,
+                                   note="strategy_cards.json 不存在")
+    fault_report = round_fault.no_open_explanation()
+    check("故障③轮级前置失败（卡册读不到）：有独立登记点且 verdict=blocked",
+          fault_report["verdict"] == "blocked"
+          and fault_report["primary_reason"] == trace.REASON_READINESS_BLOCKED
+          and fault_report["candidates"] == 0, fault_report)
+    check("轮级故障不进候选计数、不进闸门直方图（不虚增候选）",
+          fault_report["candidates"] == 0 and fault_report["stopped_at"] == {}
+          and round_fault.evaluated == 0, fault_report)
+    check("轮级故障不得混进候选明细（record() 拒绝轮级码）",
+          raises(ValueError, lambda: ScanFunnel(round_id="x").record(
+              Stage.CARD_INDICATORIZED.value, funnel_mod.DETAIL_CARDS_UNAVAILABLE)))
+
+    # --- 右侧：真的没有边际仍然必须产出 no_edge（两侧都不能坏） -----------------
+    plain = ScanFunnel(round_id="edge-a")
+    plain.record(Stage.SIGNAL_TRIGGERED.value, funnel_mod.DETAIL_NO_SIGNAL_ON_CLOSED_BAR)
+    plain.record(Stage.SIGNAL_TRIGGERED.value, funnel_mod.DETAIL_NO_SIGNAL_ON_CLOSED_BAR)
+    edge_report = plain.no_open_explanation()
+    check("真的没有信号：仍产出 no_edge/NO_EDGE（没有误判成故障）",
+          edge_report["verdict"] == "no_edge"
+          and edge_report["primary_reason"] == trace.REASON_NO_EDGE
+          and edge_report["evaluated"] == 2, edge_report)
+
+    # --- 反向误标（B-r1 §2.0 次生问题）：范围界定不得把真 no_edge 挤成 blocked ---
+    scoped_out = ScanFunnel(round_id="edge-b")
+    scoped_out.record(Stage.SIGNAL_TRIGGERED.value,
+                      funnel_mod.DETAIL_NO_SIGNAL_ON_CLOSED_BAR)
+    scoped_out.record(Stage.SYMBOL_IN_SCOPE.value, funnel_mod.DETAIL_SYMBOL_NOT_IN_SCOPE,
+                      symbol="SOLUSDT")
+    scoped_out.record(Stage.SYMBOL_IN_SCOPE.value, funnel_mod.DETAIL_SYMBOL_NOT_USDT,
+                      symbol="BTCEUR")
+    scoped_report = scoped_out.no_open_explanation()
+    check("真的 no_edge + 范围外的卡：仍 verdict=no_edge/NO_EDGE（不再被判 blocked）",
+          scoped_report["verdict"] == "no_edge"
+          and scoped_report["primary_reason"] == trace.REASON_NO_EDGE, scoped_report)
+    check("范围界定码仍如实出现在辅因里（可见但不抢主因）",
+          trace.REASON_READINESS_BLOCKED in scoped_report["reason_codes"],
+          scoped_report["reason_codes"])
+    check("范围界定码的性质是 scope（不是 fault，否则整轮会永久 blocked）",
+          DETAIL_NATURE[funnel_mod.DETAIL_SYMBOL_NOT_IN_SCOPE] == NATURE_SCOPE)
+
+    # --- 已在处理（HOLD_EXISTING）不得被读成"没有信号" -------------------------
+    consumed_all = ScanFunnel(round_id="handled")
+    consumed_all.record(Stage.TICKET_FRESH.value,
+                        funnel_mod.DETAIL_TICKET_ALREADY_CONSUMED, ticket_id="t-1")
+    handled_report = consumed_all.no_open_explanation()
+    check("所有票都已消费：verdict=handled/主因 HOLD_EXISTING（不是 no_edge）",
+          handled_report["verdict"] == "handled"
+          and handled_report["primary_reason"] == trace.REASON_HOLD_EXISTING,
+          handled_report)
+
+    # --- 一致性：顶层与内嵌 no_open 共用同一次判定（B-r1 P0-4c） ----------------
+    inconsistent = ScanFunnel(round_id="consistency")
+    inconsistent.record(Stage.SIGNAL_TRIGGERED.value,
+                        funnel_mod.DETAIL_NO_SIGNAL_ON_CLOSED_BAR)
+    for label, kwargs in (
+            ("源级错误", {"source_errors": ["macro_public: 5xx"],
+                          "source_labels": ["macro_public"]}),
+            ("证据门禁", {"evidence_report": _FailingEvidence()}),
+            ("模型超时", {"model_error": TimeoutError("超时")})):
+        explained = round_explanation(funnel=inconsistent, **kwargs)
+        check(f"顶层与内嵌 no_open 一致（{label}）：verdict/主因逐字相同",
+              explained["no_open"]["verdict"] == explained["verdict"]
+              and explained["no_open"]["primary_reason"] == explained["primary_reason"]
+              and explained["verdict"] == "blocked",
+              (explained["verdict"], explained["no_open"]["verdict"],
+               explained["primary_reason"], explained["no_open"]["primary_reason"]))
 
     opened = ScanFunnel(round_id="round-3")
     opened.record(Stage.SIGNAL_TRIGGERED.value, funnel_mod.DETAIL_NO_SIGNAL_ON_CLOSED_BAR,
@@ -362,12 +511,65 @@ def case_ticket_ledger() -> None:
         check("账本损坏时 fail-closed：拒绝新消费（不把损坏读成空账本）",
               refused.state == LEDGER_CORRUPT and not refused.consumed, refused.as_dict())
 
+        # --- P1-1：损坏态**写路径**同样拒绝（不得用 register()+save() 洗白） ----
+        check("损坏态 register() 抛 LedgerCorrupt（不能把损坏洗成'只有新票'的账本）",
+              raises(funnel_mod.LedgerCorrupt,
+                     lambda: corrupt.register(live_ticket("t-new"), round_id="r9")))
+        check("损坏态 save() 抛 LedgerCorrupt（旧消费事实不会被静默覆盖）",
+              raises(funnel_mod.LedgerCorrupt, corrupt.save))
+        wash_path = Path(tmp) / "wash.json"
+        washer = TicketLedger(wash_path, clock=clock)
+        washer.consume("t-keep", round_id="r1")
+        washer.save()
+        wash_path.write_text("{ truncated", encoding="utf-8")
+        washed = TicketLedger(wash_path, clock=clock)
+        check("损坏后旧消费事实在（consume 仍 LEDGER_CORRUPT）",
+              washed.consume("t-keep", round_id="r2").state == LEDGER_CORRUPT)
+        check("洗白路径被堵死：损坏态下 register+save 无法让 t-keep 再次可消费",
+              raises(funnel_mod.LedgerCorrupt,
+                     lambda: washed.register({"ticket_id": "t-fresh"}))
+              and raises(funnel_mod.LedgerCorrupt, washed.save)
+              and washed.consume("t-keep", round_id="r2").state == LEDGER_CORRUPT)
+        washed.reset_corrupt(at_ms=clock())
+        check("显式 reset_corrupt() 后账本可用（留痕 reset_at_ms）",
+              washed.as_dict()["reset_at_ms"] == clock()
+              and washed.consume("t-keep", round_id="r3").state == CONSUMED)
+
         release_path = Path(tmp) / "release.json"
         releasing = TicketLedger(release_path, clock=clock)
         releasing.consume("t-3", round_id="r1")
-        check("release 对已消费票据返回 True", releasing.release("t-3") is True)
+        check("release 对已消费票据返回 True（当次轮次一致）",
+              releasing.release("t-3", round_id="r1") is True)
         check("release 后同键可再次消费（一次异常不会永久占死）",
               releasing.consume("t-3", round_id="r1").state == CONSUMED)
+
+        # --- P1-2：release 门禁 + 留痕 + "已消费未落库"查询 -------------------
+        gate_path = Path(tmp) / "gate.json"
+        gated = TicketLedger(gate_path, clock=clock)
+        gated.consume("t-g", round_id="round-a")
+        check("release 无 round_id 被拒（门禁：不允许无来源的撤销）",
+              gated.release("t-g") is False)
+        check("release 跨轮被拒（不得撤销别的轮次/进程的消费）",
+              gated.release("t-g", round_id="round-b") is False)
+        check("被拒的撤销不影响已消费事实", gated.is_consumed("t-g"))
+        check("同轮 release 成功且留下审计留痕（released_at_ms/release_count）",
+              gated.release("t-g", round_id="round-a") is True
+              and gated.get("t-g").release_count == 1
+              and gated.get("t-g").released_at_ms == clock())
+        check("release() 损坏态 fail-closed（返回 False 而不是改账本）",
+              corrupt.release("t-9", round_id="r9") is False)
+
+        orphan_path = Path(tmp) / "orphan.json"
+        orphan = TicketLedger(orphan_path, clock=clock)
+        orphan.consume("t-o1", round_id="r1")
+        orphan.consume("t-o2", round_id="r1")
+        check("orphan_consumed() 能列出'已消费但无对应订单'的票（崩溃窗口待补单）",
+              [r.ticket_id for r in orphan.orphan_consumed(lambda tid: False)]
+              == ["t-o1", "t-o2"])
+        check("orphan_consumed() 用审计库权威判定能收敛到空（已落库的不再是孤儿）",
+              orphan.orphan_consumed(lambda tid: True) == [])
+        check("orphan_consumed() 不用权威判定时如实返回全部已消费（不假装能判定）",
+              len(orphan.orphan_consumed()) == 2)
 
 
 def case_ticket_skip_detail_shared() -> None:
@@ -435,10 +637,18 @@ def case_position_attribution() -> None:
           and by_symbol["SOLUSDT"].manager_detail)
     check("manager（谁在管）与 position_class（有无策略归属）是两个正交事实",
           by_symbol["ETHUSDT"].manager == "ai"
-          and by_symbol["ETHUSDT"].position_class == "LEGACY_UNATTRIBUTED"
+          and by_symbol["ETHUSDT"].position_class == POSITION_CLASS_LEGACY
           and not by_symbol["ETHUSDT"].attributed
-          and by_symbol["BTCUSDT"].position_class == "ATTRIBUTED"
+          and by_symbol["BTCUSDT"].position_class == POSITION_CLASS_ATTRIBUTED
           and by_symbol["BTCUSDT"].attributed, by_symbol["ETHUSDT"].as_dict())
+    # --- P2-1：position_class 与 U02 **同源**（不是字符串字面量巧合一致） --------
+    from core.strategy_position_manager import PositionClass  # noqa: PLC0415
+
+    check("position_class 直接取 U02 PositionClass 枚举值（同源，改枚举不会静默漂移）",
+          POSITION_CLASS_ATTRIBUTED == PositionClass.ATTRIBUTED.value
+          and POSITION_CLASS_LEGACY == PositionClass.LEGACY_UNATTRIBUTED.value
+          and POSITION_CLASS_ATTRIBUTED == PositionClass.ATTRIBUTED
+          and POSITION_CLASS_LEGACY == PositionClass.LEGACY_UNATTRIBUTED)
     check("策略仓规则版本已知且形如 rv1:<hash>",
           by_symbol["BTCUSDT"].rule_known
           and by_symbol["BTCUSDT"].rule_version.startswith("rv1:")
@@ -466,6 +676,15 @@ def case_position_attribution() -> None:
           and all(item["rule_version"].startswith("rv1:unknown")
                   for item in summary["rule_unknown"]),
           summary["rule_unknown"])
+    # --- P3-6：position_class 也参与聚合，"需要迁移的旧仓"一眼可见 --------------
+    check("聚合视图按 position_class 计数（与 manager 正交，两者都要有）",
+          summary["by_position_class"] == {POSITION_CLASS_ATTRIBUTED: 1,
+                                           POSITION_CLASS_LEGACY: 2},
+          summary["by_position_class"])
+    check("存在 LEGACY 仓位时给出 legacy_pending 提示位与明细",
+          summary["legacy_pending"] == 2
+          and {item["symbol"] for item in summary["legacy_positions"]}
+          == {"ETHUSDT", "SOLUSDT"}, summary["legacy_pending"])
     check("manager_of 只读既有字段（source/strategy_id/ticket_id），不新增列",
           manager_of({"source": "strategy", "strategy_id": "c"})[0] == "strategy"
           and manager_of({})[0] == "legacy_unattributed")
@@ -478,8 +697,15 @@ def case_management_priority_budget() -> None:
     check("按比例切出管理预留（8 -> 预留 4）",
           plan.management_reserve == 4 and plan.research_available == 4,
           plan.as_dict())
-    check("研究取用不减少管理可取用的量",
-          plan.claim_research(4) == 4 and plan.management_available == 4, plan.as_dict())
+    # 真正的第 2 条不变量是"预留池不被研究触碰"，**不是**"management_available 不下降"
+    # （B-r1 P2-4：后者字面不成立，研究取用自然减少全池剩余）。
+    available_before = plan.management_available
+    check("研究取用自然减少全池剩余（原'不下降'措辞与实现不符，已改口径）",
+          plan.claim_research(4) == 4
+          and plan.management_available == available_before - 4, plan.as_dict())
+    check("研究取用**碰不到预留池**：管理'已用+仍可取'>= 预留量",
+          plan.management_used + plan.management_available >= plan.management_reserve,
+          plan.as_dict())
     check("研究池耗尽后不再放行研究", plan.claim_research(1) == 0)
     check("管理侧仍能取到全池剩余（含研究池已用之外的额度）",
           plan.claim_management(4) == 4 and plan.management_available == 0, plan.as_dict())
@@ -531,8 +757,44 @@ def case_management_priority_budget() -> None:
     degraded = ManagementPriorityPlan.from_total(4, reserve_ratio=float("nan"))
     check("非法预留比例退化为显式 0 预留（可见，不静默饿死管理）",
           degraded.management_reserve == 0 and degraded.as_dict()["management_reserve"] == 0)
+    check("非法比例的**实际生效比例**在 as_dict 里可见（P3-3：文档承诺过这个键）",
+          degraded.as_dict()["reserve_ratio_effective"] == 0.0
+          and ManagementPriorityPlan.from_total(8, reserve_ratio=0.5).as_dict()[
+              "reserve_ratio_effective"] == 0.5)
     check("零预算不产生 starved 假象",
           not ManagementPriorityPlan.from_total(0, reserve_ratio=0.5).research_starved)
+
+    # --- P2-2：meets_management_demand() 必须**真有约束力**（原先恒真空转） -----
+    satisfied = ManagementPriorityPlan.from_total(8, reserve_ratio=0.5)
+    satisfied.claim_management(3)
+    check("管理侧请求都拿到 => meets_management_demand()=True（不是恒真，而是真判定）",
+          satisfied.meets_management_demand() and satisfied.management_shortfall == 0)
+    squeezed = ManagementPriorityPlan.from_total(8, reserve_ratio=0.5)
+    squeezed.claim_management(9)
+    check("管理侧没拿到请求量 => meets_management_demand()=False（旧实现恒 True）",
+          squeezed.meets_management_demand() is False
+          and squeezed.management_shortfall == 1
+          and squeezed.as_dict()["meets_management_demand"] is False)
+    check("管理侧被研究挤占后再要也判 False（研究池已用会占掉全池剩余）",
+          (lambda p: (p.claim_research(8), p.claim_management(8),
+                      p.meets_management_demand())[-1])(
+                          ManagementPriorityPlan.from_total(8, reserve_ratio=0.5)) is False)
+
+    # --- P2-3：总预算 0/负 是**显式**原因，不是静默 None ------------------------
+    zero = ManagementPriorityPlan.from_total(0, reserve_ratio=0.5)
+    zero_reason = zero.research_reason()
+    check("总预算为 0：给出 MODEL_DEADLINE + RESEARCH_BUDGET_ZERO（原先静默 None）",
+          zero_reason is not None
+          and zero_reason.primary == trace.REASON_MODEL_DEADLINE
+          and funnel_mod.DETAIL_RESEARCH_BUDGET_ZERO in zero_reason.details,
+          None if zero_reason is None else zero_reason.as_dict())
+    negative = ManagementPriorityPlan.from_total(-7, reserve_ratio=0.5).research_reason()
+    check("总预算为负：同样显式给原因（'没有预算可谈'不再等于'这轮没信号'）",
+          negative is not None
+          and funnel_mod.DETAIL_RESEARCH_BUDGET_ZERO in negative.details)
+    check("'没有预算'与'预算被管理占用'是两个不同的细分码",
+          funnel_mod.DETAIL_RESEARCH_BUDGET_ZERO
+          != funnel_mod.DETAIL_MANAGEMENT_PRIORITY_BUDGET)
 
 
 def patch_fetch(frame):
