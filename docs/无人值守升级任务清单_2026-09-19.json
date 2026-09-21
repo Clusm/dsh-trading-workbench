@@ -2556,7 +2556,7 @@
       "title": "旧脚本与历史文档整理",
       "owner_role": "F",
       "actual_assignee": null,
-      "status": "PLANNED",
+      "status": "READY_FOR_REVIEW",
       "required_for_first_release": false,
       "depends_on": [
         "U10a",
@@ -2573,7 +2573,35 @@
       "fault_tests": [
         "F13"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "type": "author_delivery_r1",
+          "head_commit": "0416408",
+          "base": "0706db1",
+          "branch": "task/U10b（worktree mat-wt/F2）",
+          "commits": 8,
+          "moved_scripts": "18 个 git mv（**文件名不变**）：-> scripts/diagnostics/（13：_js_check、diag_dump_run、diag_failures、diag_latest_run、diag_positions_ledger、diag_tool_errors、live_check_query_detail、probe_exchange_positions、probe_futures_ws_routes、probe_intel_with_proxy、probe_symbol_trades、probe_user_stream_live、verify_symbol_fix）；-> scripts/maintenance/（5：cleanup_ghost_orders、cleanup_orphan_algo_orders、cleanup_positions_ledger、repair_bad_reconcile_orders、run_phase0）。其中 **16 个**修根深度 parents[1]->parents[2]（否则 ROOT 指到 scripts/<子目录>/），作者用 AST 运行时探针验证 bad=0。",
+          "moved_docs": "8 篇 git mv 进 docs/archive/（作者称 -M 全 R100，正文逐字节未改）：上线前核查报告_2026-09-02、风险事件排查与改善计划_2026-09-03、实盘上线评估与整改计划_2026-09-14、实盘接管阻断诊断_2026-09-16、实盘账户并行接入评估与上线整改清单_2026-09-15、架空机制排查_2026-09-02、UI重构方案_整合版、双进程双账本改造设计_2026-09-15。",
+          "scope": "30 个文件全部落在独占路径（docs/archive/ 9 + scripts/diagnostics/ 13 + scripts/maintenance/ 5 + docs/dispatch/patches/U10b/ 3）。对 docs/文档索引.md、scripts/run_offline_regression.py、src/、tests/、config/、knowledge/、pyproject.toml、.github/ 的 diff = 0（分支内）。",
+          "shared_patch": "docs/dispatch/patches/U10b/273892c/01_docs_index_archive_links.diff（改 docs/文档索引.md）+ README + evidence。**分支本身是红的**：不应用补丁时 docs/文档索引.md 有 8 条入链断（仅来自该文件），应用后恢复 —— 刻意的共享文件边界。",
+          "coverage_not_reduced": "SMOKE MANIFEST OK included=81 excluded=1（前后同值）；OFFLINE REGRESSION OK scripts=85（前后同值）。**一个 smoke_*.py 都没动** —— _validate_smoke_manifest 只 glob scripts/ 顶层，移走即等于静默削减覆盖（已写进归档规则首条）。",
+          "packager": "smoke_u10a_release_package.py：pristine 37/0 -> patched 37/0（exit 0）；沙箱已跟踪文件 734 -> 738；归档后 0 断链、0 未归类文件。",
+          "delta": "NEW_FAIL=∅、FIXED=∅；10 条两侧完全相同的失败签名全部来自 smoke_u02_strategy_position_manager.py 的双态快照段（该冒烟自身 U02 SMOKE OK、exit 0），属既有基线现象。",
+          "gates": "check_quality QUALITY CHECK OK files=296 untracked=0（两树一致），pyproject.toml 未改、未新增 ruff exclude。补丁 3 配置 git apply --check 均 Checking patch、0 Skipped、0 error；被测 diff 与交付件 sha256 一致。",
+          "archive_index": "docs/archive/README.md —— 归档规则（4 条硬判据）、文档去向表、脚本去向表、**空删除清单及其核验方式**（--no-renames 下 D=26 且 26/26 都有同名新增配对，孤儿删除=0）、**『已核实但不归档』保留清单 + 逐条理由**。",
+          "not_archived_with_reasons": [
+            "scripts/diag_algo_orphans.py：pyproject.toml 的 per-file-ignores 只对 scripts/*.py 豁免 E402，而它必须在 apply_proxy_env() 之后导入 SDK，E402 是结构性的；移进子目录要么违反 ruff 要么被迫新增 exclude（本任务禁止）",
+            "scripts/run_phase1.py：src/core/runtime_paths.py:640 以**字面路径**登记了它（ConsumerEntry），改它要动 src/，超独占范围",
+            "docs/策略扫描原因码.md：tests/integration/test_strategy_funnel.py:239 断言该路径存在",
+            "7 篇被相对链接引用的文档（项目问题盘点_2026-09-07、USD-M 计划_2026-09-05、WorkBuddy 说明_2026-09-16、决策链路专项评估_2026-09-19、模拟盘复审_2026-09-19、无人值守规格/细审_2026-09-19、CHANGES_2026-09-01、dual_agent_design）：入链来自 README/项目说明书/技术报告/**docs/contracts/README.md（冻结目录，不得改）**，归档必须同批改多篇非独占文档",
+            "上线前最后一轮优化工作计划_2026-09-15.md：有 16 条指向 src/ 的出链，移动后全部断链"
+          ],
+          "unfinished": [
+            "归档脚本的**端到端可运行性未实测**（多数要真实 data/.env，触碰硬约束）；只做到 ruff 干净 + py_compile 通过 + 项目根深度运行时探针 bad=0",
+            "docs/文档索引.md 原先标注的『schema 16 已过期（U10b 统一处理）』：正文未改（历史证据保持原样），改由归档索引给出当前值 17 与唯一口径"
+          ]
+        }
+      ],
       "blockers": [],
       "reviewer_roles": [
         "E",
@@ -2597,12 +2625,24 @@
       "dl_work_packages": [
         "DL09"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "0706db1",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r1",
+          "stage": "独立审查",
+          "candidate": "0416408",
+          "sessions": [
+            "Q (reviews/U10b/R1/q)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U10b/0416408/",
+          "focus": "重点：①覆盖未减少必须实测（N/M/K 前后值）；②空删除清单独立核验（每个 D 都有同名新增配对、18 个脚本新路径内容逐字节同）；③每个改过的 parents[...] **自己算**是否解析到仓库根（不采信作者 bad=0）；④**应用补丁后**是否仍有断链（含冻结目录与 src/ 字面路径）；⑤**归档脚本是否还在发布包内**（若被排除 = 静默削减交付物）。"
+        }
+      ],
       "qa_runs": []
     },
     {
