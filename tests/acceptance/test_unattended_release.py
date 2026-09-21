@@ -289,7 +289,12 @@ def test_identity_is_never_silently_empty() -> None:
         manifest.get("runtime_instance_id"))
     if complete:
         check("身份完整（artifact_hash 与 runtime_instance_id 均非空）", True)
-        check("身份完整时不得带阻断码", not blockers, f"blockers={blockers}")
+        # 身份完整 **不等于** 无阻断：`MODEL_ROUTE_MOCK`（配置的是 Mock 模型路由）
+        # 是**环境级**阻断，与"身份采集失败"是两回事。本行只拒绝把采集失败
+        # 伪装成完整身份（原断言要求 complete -> 无任何阻断码，在采集修复之后
+        # 会把合法的 Mock 路由阻断误报为失败）。
+        check("身份完整时不得带 IDENTITY_COLLECT_FAILED（环境级阻断可存在）",
+              "IDENTITY_COLLECT_FAILED" not in blockers, f"blockers={blockers}")
     else:
         # 采集失败时**必须**显式登记阻断原因，不得静默产出空身份。
         check("身份不完整时显式带 IDENTITY_COLLECT_FAILED（不静默）",
