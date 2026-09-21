@@ -1,0 +1,109 @@
+# offline regression (pristine) 摘要  —  base=4de8666，沙箱 git archive|tar 后立刻 git init
+=== OFFLINE scripts/check_execution_boundaries.py ===
+=== OFFLINE scripts/test_secret_scanner.py ===
+=== OFFLINE scripts/test_precheck_fixes.py ===
+=== OFFLINE scripts/smoke_p0_account_safety.py ===
+=== OFFLINE scripts/smoke_channels.py ===
+=== OFFLINE scripts/smoke_baseline_guard.py ===
+=== OFFLINE scripts/smoke_order_outbox.py ===
+=== OFFLINE scripts/smoke_order_mirror.py ===
+=== OFFLINE scripts/smoke_binance_transport.py ===
+=== OFFLINE scripts/smoke_close_reconcile.py ===
+=== OFFLINE scripts/smoke_market_query_tools.py ===
+=== OFFLINE scripts/smoke_public_rate_limit.py ===
+=== OFFLINE scripts/smoke_request_policy.py ===
+=== OFFLINE scripts/check_binance_request_policy.py ===
+=== OFFLINE scripts/smoke_rate_limit_multiprocess.py ===
+=== OFFLINE scripts/smoke_market_data_gateway.py ===
+=== OFFLINE scripts/smoke_ws_routes.py ===
+=== OFFLINE scripts/smoke_kline_finality.py ===
+=== OFFLINE scripts/smoke_intel_sidecar.py ===
+=== OFFLINE scripts/smoke_signal_scanner_integration.py ===
+=== OFFLINE scripts/smoke_p0b.py ===
+=== OFFLINE scripts/smoke_trading_scope.py ===
+=== OFFLINE scripts/smoke_p0b_loop.py ===
+=== OFFLINE scripts/smoke_p1.py ===
+=== OFFLINE scripts/smoke_decision_policy.py ===
+=== OFFLINE scripts/smoke_portfolio_policy.py ===
+=== OFFLINE scripts/smoke_position_guardian.py ===
+=== OFFLINE scripts/smoke_usdm_replay.py ===
+=== OFFLINE scripts/smoke_strategy_evaluation.py ===
+=== OFFLINE scripts/smoke_strategy_prefix_invariance.py ===
+=== OFFLINE scripts/smoke_decision_pipeline.py ===
+=== OFFLINE scripts/smoke_entry_readiness.py ===
+=== OFFLINE scripts/smoke_llm_coordinator.py ===
+=== OFFLINE scripts/smoke_llm_deadline.py ===
+=== OFFLINE scripts/smoke_workbuddy_adapter.py ===
+=== OFFLINE scripts/smoke_minimum_research_gate.py ===
+=== OFFLINE scripts/smoke_review_worker.py ===
+=== OFFLINE scripts/smoke_trade_reconciliation.py ===
+=== OFFLINE scripts/smoke_trade_lifecycle.py ===
+=== OFFLINE scripts/smoke_db_migrations.py ===
+=== OFFLINE scripts/smoke_release_acceptance.py ===
+=== OFFLINE scripts/smoke_release_observation_freshness.py ===
+=== OFFLINE scripts/smoke_health_watch.py ===
+=== OFFLINE scripts/smoke_fault_matrix.py ===
+=== OFFLINE scripts/smoke_recovery_bundle.py ===
+=== OFFLINE scripts/smoke_risk_incidents.py ===
+=== OFFLINE scripts/smoke_dashboard_health.py ===
+=== OFFLINE scripts/smoke_service_lifecycle.py ===
+=== OFFLINE scripts/smoke_windows_service_plan.py ===
+=== OFFLINE scripts/smoke_windows_service_lifecycle.py ===
+=== OFFLINE scripts/smoke_release_package.py ===
+=== OFFLINE scripts/smoke_ui.py ===
+=== OFFLINE scripts/smoke_step0.py ===
+=== OFFLINE scripts/smoke_db_backup.py ===
+=== OFFLINE scripts/smoke_exchange_event_inbox.py ===
+=== OFFLINE scripts/smoke_account_mirror.py ===
+=== OFFLINE scripts/smoke_exchange_safety_monitor.py ===
+=== OFFLINE scripts/smoke_protection_mirror.py ===
+=== OFFLINE scripts/smoke_user_stream_transport.py ===
+=== OFFLINE scripts/smoke_user_stream_lifecycle.py ===
+=== OFFLINE scripts/smoke_snapshot_guard.py ===
+=== OFFLINE scripts/smoke_graph_barrier.py ===
+=== OFFLINE scripts/smoke_force_submit.py ===
+=== OFFLINE scripts/smoke_p2.py ===
+=== OFFLINE scripts/smoke_profile_isolation.py ===
+=== OFFLINE scripts/smoke_detached_profiles.py ===
+=== OFFLINE scripts/smoke_takeover_compatibility.py ===
+=== OFFLINE scripts/smoke_llm_failover.py ===
+=== OFFLINE scripts/smoke_contracts_v3.py ===
+=== OFFLINE scripts/smoke_u03_research_evidence.py ===
+=== OFFLINE scripts/smoke_u03_market_evidence_quality.py ===
+=== OFFLINE scripts/smoke_u01_income.py ===
+=== OFFLINE scripts/smoke_u01_review_statistics.py ===
+=== OFFLINE scripts/smoke_u05_decision_trace.py ===
+=== OFFLINE scripts/smoke_u05_model_route_safety.py ===
+=== OFFLINE scripts/smoke_u05_background_refresh_budget.py ===
+=== OFFLINE scripts/smoke_u05_cross_process_admission.py ===
+=== OFFLINE scripts/smoke_u04_execution_faults.py ===
+=== OFFLINE scripts/smoke_u13_supervision.py ===
+=== OFFLINE scripts/smoke_u02_strategy_position_manager.py ===
+=== OFFLINE scripts/smoke_u06a_shadow_isolation.py ===
+=== OFFLINE scripts/smoke_u08_strategy_funnel.py ===
+=== OFFLINE scripts/smoke_u14_alert_delivery.py ===
+=== OFFLINE scripts/smoke_u10a_release_package.py ===
+=== OFFLINE scripts/smoke_u09_release_evidence.py ===
+U09 冒烟: 60 通过 / 0 失败  (PATCHED=True, SHARED=True)
+=== OFFLINE tests/acceptance/test_alert_delivery.py ===
+=== OFFLINE tests/acceptance/test_control_boundary.py ===
+=== OFFLINE tests/acceptance/test_release_evidence_v2.py ===
+U09 验收: 78 通过 / 0 失败
+=== OFFLINE tests/acceptance/test_runtime_identity.py ===
+=== OFFLINE tests/acceptance/test_unattended_release.py ===
+=== OFFLINE tests/integration/test_shadow_labels.py ===
+=== OFFLINE tests/integration/test_shadow_statistics.py ===
+=== OFFLINE tests/integration/test_shadow_status.py ===
+=== OFFLINE tests/integration/test_strategy_funnel.py ===
+OFFLINE REGRESSION OK scripts=94
+--- 内部 FAIL 行 (10) ---
+  FAIL  授权绑定账户域: 
+  FAIL  账本 account_ref = 运行代派生值: 
+  FAIL  重复退出被幂等识别: 
+  FAIL  重复退出不产生提交量: {'exit_key': 'exit-1', 'accepted': True, 'duplicate': True, 'action': 'OPEN', 'side': 'BUY', 'submit_qty': '0.01', 'reduce_only': False, 'reason_codes': [], 'opens_position': True}
+  FAIL  重复退出的原因码正确: 
+  FAIL  重复退出仍是 reduce_only/非开仓: 
+  FAIL  未给 TTL 时同键严格幂等: {'exit_key': 'g-1', 'accepted': True, 'duplicate': True, 'action': 'OPEN', 'side': 'BUY', 'submit_qty': '0.01', 'reduce_only': False, 'reason_codes': [], 'opens_position': True}
+  FAIL  已成交的键即使超过 TTL 也保持幂等: {'exit_key': 'g-1', 'accepted': True, 'duplicate': True, 'action': 'OPEN', 'side': 'BUY', 'submit_qty': '0.01', 'reduce_only': False, 'reason_codes': [], 'opens_position': True}
+  FAIL  记录被淘汰 + TTL 到期后同键仍判重复（不重发）: {'exit_key': 'g-cons', 'accepted': True, 'duplicate': True, 'action': 'OPEN', 'side': 'BUY', 'submit_qty': '0.01', 'reduce_only': False, 'reason_codes': [], 'opens_position': True}
+  FAIL  幂等记忆被淘汰后同键仍判重复（不重发）: {'exit_key': 'g2', 'accepted': True, 'duplicate': True, 'action': 'OPEN', 'side': 'BUY', 'submit_qty': '0.01', 'reduce_only': False, 'reason_codes': [], 'opens_position': True}

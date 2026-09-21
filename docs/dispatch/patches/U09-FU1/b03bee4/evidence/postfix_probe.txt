@@ -1,0 +1,54 @@
+[D1-both-COMPLETE(正常)]
+  gate_state=PASS actual=30 required=30
+  eligible_closed_lifecycles=30
+  net_realized_unknown_lifecycles=0
+  eligible_net_realized_total=24.0
+  eligible_rows=30 net_computable_rows=30
+  cost_recomputed_values=[True]
+  incomplete_closed=0
+  release_readiness=NO_GO
+[D1-lifecycle-INCOMPLETE/outcome-COMPLETE]
+  gate_state=FAIL actual=0 required=30
+  eligible_closed_lifecycles=0
+  net_realized_unknown_lifecycles=0
+  eligible_net_realized_total=0.0
+  eligible_rows=0 net_computable_rows=0
+  cost_recomputed_values=[]
+  incomplete_closed=30
+  release_readiness=NO_GO
+[D1-lifecycle-COMPLETE/outcome-INCOMPLETE]
+  gate_state=FAIL actual=0 required=30
+  eligible_closed_lifecycles=0
+  net_realized_unknown_lifecycles=0
+  eligible_net_realized_total=0.0
+  eligible_rows=0 net_computable_rows=0
+  cost_recomputed_values=[]
+  incomplete_closed=30
+  release_readiness=NO_GO
+[D2-30条净收益未知]
+  gate_state=FAIL actual=0 required=30
+  eligible_closed_lifecycles=0
+  net_realized_unknown_lifecycles=30
+  eligible_net_realized_total=0.0
+  eligible_rows=0 net_computable_rows=0
+  cost_recomputed_values=[]
+  incomplete_closed=30
+  release_readiness=NO_GO
+[D2-29真凭证+1未知]
+  gate_state=FAIL actual=29 required=30
+  eligible_closed_lifecycles=29
+  net_realized_unknown_lifecycles=1
+  eligible_net_realized_total=23.2
+  eligible_rows=29 net_computable_rows=29
+  cost_recomputed_values=[True]
+  incomplete_closed=1
+  release_readiness=NO_GO
+[D2-30条合法零收益(net=0.0)]
+  gate_state=PASS actual=30 required=30
+  eligible_closed_lifecycles=30
+  net_realized_unknown_lifecycles=0
+  eligible_net_realized_total=0.0
+  eligible_rows=30 net_computable_rows=30
+  cost_recomputed_values=[True]
+  incomplete_closed=0
+  release_readiness=NO_GO

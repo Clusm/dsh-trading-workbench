@@ -1,0 +1,26 @@
+U09 证据版本标记: False  health_watch 共享接线: False
+U09 冒烟工作目录: C:\Users\Tao\AppData\Local\Temp\u09-smoke-nfviuio7
+
+[1] F16/S08：B/C 研究影子样本不得进 200 方向候选分母
+Traceback (most recent call last):
+  File "C:\Users\Tao\AppData\Local\Temp\u09fu1sbx\base\scripts\orig_smoke_check.py", line 783, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "C:\Users\Tao\AppData\Local\Temp\u09fu1sbx\base\scripts\orig_smoke_check.py", line 752, in main
+    scenario_shadow_source_leak(root)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\Tao\AppData\Local\Temp\u09fu1sbx\base\scripts\orig_smoke_check.py", line 236, in scenario_shadow_source_leak
+    reports[label] = build_report(fixture, since=iso(start), until=iso(end),
+                     ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                 thresholds=thresholds)
+                                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Tao\AppData\Local\Temp\u09fu1sbx\base\scripts\orig_smoke_check.py", line 205, in build_report
+    return evidence.build_release_readiness_report(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        fixture.path, manifest, environment=fixture.environment,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        since=since, until=until, thresholds=thresholds, declaration=declaration,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+TypeError: build_release_readiness_report() got an unexpected keyword argument 'declaration'
