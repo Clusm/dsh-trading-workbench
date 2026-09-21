@@ -55,6 +55,9 @@ def minute(moment: datetime) -> str:
 
 PATCHED = bool(getattr(evidence, "U09_EVIDENCE_VERSION", ""))
 SHARED = bool(getattr(health_watch, "U09_INTEGRATION", ""))
+#: 只有独占产物与共享适配**同时**到位，新口径场景才可断言（否则新证据块按设计
+#: 返回 NO_DATA + U09_SHARED_PATCH_MISSING，硬断言会误报）。
+FULL = PATCHED and SHARED
 print(f"U09 证据版本标记: {PATCHED}  health_watch 共享接线: {SHARED}")
 
 
@@ -747,13 +750,18 @@ def main() -> int:
     print(f"U09 冒烟工作目录: {root}")
     try:
         scenario_shadow_source_leak(root)
-        if PATCHED:
+        if FULL:
             scenario_observation_window(root)
             scenario_window_invalid(root)
             scenario_lifecycle_revision(root)
             scenario_ack_not_recovery(root)
             scenario_restart_versus_release_change(root)
             scenario_k06_groups(root)
+        elif PATCHED:
+            print("\n[2-8] 共享适配补丁（audit.database/core.health_watch/"
+                  "scripts.report_release_readiness）未应用：新口径场景按设计跳过；"
+                  "release_evidence 会把依赖共享补丁的证据块标 NO_DATA + "
+                  "U09_SHARED_PATCH_MISSING（不猜、不伪造）。")
         else:
             print("\n[2-8] U09 补丁未应用：新口径断言按设计跳过，"
                   "仅保留基线缺陷证据（上面的 200→300）。")

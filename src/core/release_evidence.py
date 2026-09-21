@@ -919,6 +919,8 @@ def build_event_recovery(
             "pending": 0,
             "tracked_incidents": 0,
         }
+        reason_codes.extend(item for item in delivery["reason_codes"]
+                            if str(item) not in reason_codes)
     else:
         facts = dict(receipts)
         ack_only = list(facts.get("ack_without_delivery") or [])

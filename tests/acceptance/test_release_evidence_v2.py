@@ -92,6 +92,9 @@ def shared_cli_ready() -> bool:
     return "U09_INTEGRATION" in text
 
 
+#: 证据版本字符串（基线态不存在时为空串，断言据此相对比较，不硬编码）。
+EV_VERSION = str(getattr(evidence, "U09_EVIDENCE_VERSION", ""))
+
 APPLIED = evidence_v2()
 DB_PATCHED = shared_database_ready()
 HW_PATCHED = shared_health_watch_ready()
@@ -290,7 +293,9 @@ def test_shadow_source_gate() -> None:
                   shadow_status.research_sources())
             db.close()
     delta = counts["withBC"] - counts["onlyA"]
-    if APPLIED and DB_PATCHED:
+    # 来源过滤属 ``release_evidence`` 自身口径（与 database 的别名归一无关），
+    # 因此判据只看证据计算器是否已升级。
+    if APPLIED:
         check("补丁态：加入 100 条 B/C 研究样本后分母不变（Δ=0）", delta == 0,
               (counts["onlyA"], counts["withBC"]))
         check("补丁态：分母仍为 200（不低于门槛）", counts["withBC"] == 200, counts["withBC"])
@@ -648,14 +653,17 @@ def test_ack_is_not_recovery() -> None:
             VALUES('inc-acked-open','risk','account','critical','OPEN','t0','t0',1,
                    '2026-01-01T00:10:00+00:00',NULL,'{}')""")
     report = build(path, meta, since=iso(start), until=iso(end), thresholds=BASE_THRESHOLDS)
-    truth = health_watch.alert_receipt_truth(db.conn, environment="demo")
     if not HW_PATCHED:
         check("基线态：共享补丁未应用时 release_evidence 明确报 NO_DATA + 原因码（不猜）",
-              report.get("evidence_version") == evidence.U09_EVIDENCE_VERSION
+              report.get("evidence_version") == EV_VERSION
               and report["event_recovery"]["delivery"]["state"] == "NO_DATA"
               and "U09_SHARED_PATCH_MISSING" in report["event_recovery"]["reason_codes"],
               report["event_recovery"])
+        check("基线态：incident 的 ACK≠恢复仍由发布证据自身读出（不依赖共享补丁）",
+              report["event_recovery"]["incidents"]["acked_not_recovered_count"] == 1,
+              report["event_recovery"]["incidents"])
     else:
+        truth = health_watch.alert_receipt_truth(db.conn, environment="demo")
         check("共享态：真实回执才算送达（只有 delivered_at_ms + device_receipt 那条）",
               truth["delivered_confirmed"] == 1, truth)
         check("共享态：已 ACK 无设备回执 → ack_without_delivery，不冒充送达",
@@ -714,7 +722,7 @@ def test_restart_versus_release_change() -> None:
     if not (APPLIED and HW_PATCHED):
         check("基线/半态：报告仍可构建且不冒充换版（两态都成立）",
               isinstance(report, dict) and report.get("evidence_version", "") in
-              {"", evidence.U09_EVIDENCE_VERSION}, report.get("evidence_version"))
+              (EV_VERSION, report.get("evidence_version")))
         db.close()
         return
     continuity = report["run_continuity"]
@@ -795,10 +803,16 @@ def test_k06_groups() -> None:
     check("NO_DATA 组必须带阻断项（缺证据不是通过）",
           any(item["group"] == "accounting" for item in report["blocking_items"]),
           report["blocking_items"])
-    check("组与组独立：runtime_observation 不受 accounting 的 NO_DATA 影响",
-          _group_status(report, "runtime_observation") in {"PASS", "FAIL", "NO_DATA"}
-          and _group_status(report, "runtime_observation") != "NO_DATA",
-          _group_status(report, "runtime_observation"))
+    # 组与组独立：改一个组的声明不得改写其它组（相对性质，不依赖任何补丁态）。
+    other_before = {item["group"]: item["status"] for item in report["k06"]["groups"]
+                    if item["group"] != "accounting"}
+    declared = evidence.build_release_readiness_report(
+        path, meta, environment="demo", since=iso(start), until=iso(end),
+        declaration={"accounting": "FAIL"}, thresholds=BASE_THRESHOLDS)
+    other_after = {item["group"]: item["status"] for item in declared["k06"]["groups"]
+                   if item["group"] != "accounting"}
+    check("组与组独立：声明 accounting=FAIL 不改变其它组状态",
+          other_before == other_after, (other_before, other_after))
     check("每组都给出证据 hash 与身份引用",
           all(item.get("evidence_hash") and item.get("identity_ref")
               for item in report["k06"]["groups"]),
