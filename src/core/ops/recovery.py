@@ -17,6 +17,16 @@
   或不可解析 → ``GATE_CORRUPT`` 阻断；门禁被删除（但安装戳仍在）→
   ``GATE_MISSING`` 阻断；只有"文件与安装戳都不存在"（确实从未 restore）才
   回到 ``GATE_NOT_INSTALLED``。
+- **还原布局与门禁落点由 profile 决定（P1-2）**：恢复包携带 ``epoch.profile``，
+  还原时状态 JSON **与** ``ops/recovery_gate.json`` 一并落在
+  ``RuntimePaths.state_root`` 之下（live → ``<target>/data/live``）。演练路径
+  （:func:`drill_epoch_bundle`）与生产恢复脚本共用 :func:`restored_state_root`
+  / :func:`restored_gate_path`，且**两条路径都真的装上并落盘门禁**（P1-1）——
+  只写一句 ``entry_gate`` 字符串声明不算装门禁。
+- **门禁证据读取时复验（P1-3）**：``before_entry`` 不只看 ``state`` +
+  ``reconciled_at_ms``。证据必须携带与 :func:`facts_digest` 自洽的对账事实块，
+  且**当前账本**（``order_outbox``）里没有未收口的 SUBMITTING/UNKNOWN ENTRY 单；
+  手写一份 ``{"state":"CLEARED","evidence":{}}`` 走不通。
 
 F05 相关：写盘采用"暂存目录 + 原子发布"，中断的恢复包**不会被发布**；目标已
 存在时**拒绝覆盖**（坏包不得覆盖好包）；状态 JSON 损坏时 ``STATE_CORRUPT``
@@ -46,9 +56,11 @@ __all__ = [
     "BUNDLE_SCHEMA",
     "EPOCH_MISMATCH",
     "EVIDENCE_ACCOUNT_MISMATCH",
+    "EVIDENCE_MISMATCH",
     "EVIDENCE_MISSING",
     "EVIDENCE_STALE",
     "EVIDENCE_TYPE_INVALID",
+    "EVIDENCE_UNVERIFIED",
     "GATE_CLEARED",
     "GATE_CORRUPT",
     "GATE_MISSING",
@@ -71,8 +83,13 @@ __all__ = [
     "check_writer_stopped",
     "create_epoch_bundle",
     "drill_epoch_bundle",
+    "facts_digest",
     "gate_install_marker",
+    "gate_state_root",
+    "ledger_reconcile_facts",
     "recovery_plan",
+    "restored_gate_path",
+    "restored_state_root",
     "state_json_health",
     "verify_epoch_bundle",
 ]
@@ -113,6 +130,19 @@ EVIDENCE_TYPE_INVALID = "EVIDENCE_TYPE_INVALID"
 EVIDENCE_STALE = "EVIDENCE_STALE"
 #: 证据/调用方身份与门禁绑定的账户/运行代不符 → 阻断（**不**用一份对账洗白另一个账户）。
 EVIDENCE_ACCOUNT_MISMATCH = "EVIDENCE_ACCOUNT_MISMATCH"
+#: ``CLEARED`` 但证据不携带**可核事实**（缺失/类型错）→ 阻断。手写一份
+#: ``{"state":"CLEARED","evidence":{}}`` 因此不再放行（P1-3）。
+EVIDENCE_UNVERIFIED = "EVIDENCE_UNVERIFIED"
+#: 证据声明的事实与摘要不一致，或与**账本真实事实**不一致 → 阻断（P1-3）。
+EVIDENCE_MISMATCH = "EVIDENCE_MISMATCH"
+
+#: 门禁证据必须绑定的"真实对账事实"字段（P1-3，内容可核）。
+FACTS_KEYS = ("unknown_orders", "submitting_orders", "unresolved_entry_orders")
+#: ``order_outbox`` 里"尚未收口"的状态（与 exchange.order_outbox._ACTIVE 同口径；
+#: 这里只做只读计数，不导入该模块以免把交易所依赖带进 ops 层）。
+UNRESOLVED_ORDER_STATUSES = (
+    "SUBMITTING", "UNKNOWN", "ACKNOWLEDGED", "NEW", "PARTIALLY_FILLED",
+)
 
 #: 已知的门禁状态；出现未知取值一律按 ``CORRUPT`` 处理（不猜、不放行）。
 KNOWN_GATE_STATES = frozenset({
@@ -131,6 +161,120 @@ def gate_install_marker(path: Path) -> Path:
     """
     resolved = Path(path)
     return resolved.with_name(f"{resolved.name}.installed")
+
+
+def _text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def restored_state_root(target_root: Path, profile: str | None) -> Path:
+    """恢复后的**状态根**（profile 感知，唯一口径，P1-2）。
+
+    与 :attr:`core.runtime_paths.RuntimePaths.state_root` 同源：live 分区到
+    ``<target>/data/live``，其余（demo/未声明）落在 ``<target>/data``。
+    恢复还原的"项目根"是 ``target_root``，旧布局的状态基座即 ``<target>/data``。
+
+    演练路径（:func:`drill_epoch_bundle`）与生产恢复脚本
+    （``scripts/restore_recovery_bundle.restore_to_new_directory``）**必须**
+    共用本函数：两边各写一套布局正是 P1-1/P1-2 缺陷的根源。
+    """
+    base = Path(target_root) / "data"
+    return base / "live" if _text(profile).lower() == "live" else base
+
+
+def restored_gate_path(target_root: Path, profile: str | None) -> Path:
+    """恢复后门禁的落点：``<状态根>/ops/recovery_gate.json``（P1-2）。"""
+    return restored_state_root(target_root, profile) / "ops" / "recovery_gate.json"
+
+
+def gate_state_root(gate_path: Path) -> Path:
+    """从门禁文件路径推出它所属的**状态根**（用于读取账本真实事实，P1-3）。"""
+    parent = Path(gate_path).parent
+    return parent.parent if parent.name.lower() == "ops" else parent
+
+
+def _canonical_facts(facts: Mapping[str, Any] | None) -> dict[str, int]:
+    """把对账事实归一成可摘要的整数三元组；非整数一律记 ``-1``（不可信）。"""
+    source = facts if isinstance(facts, Mapping) else {}
+    result: dict[str, int] = {}
+    for key in FACTS_KEYS:
+        value = source.get(key, 0)
+        if isinstance(value, bool) or not isinstance(value, int):
+            try:
+                value = int(value)  # 数字字符串可接受
+            except (TypeError, ValueError):
+                value = -1
+        result[key] = int(value)
+    return result
+
+
+def facts_digest(facts: Mapping[str, Any] | None) -> str:
+    """对账事实的内容摘要（证据与真实结果绑定的可核指纹，P1-3）。"""
+    material = json.dumps(_canonical_facts(facts), sort_keys=True,
+                          separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def ledger_reconcile_facts(db_file: Path) -> dict[str, Any] | None:
+    """从**账本**读真实对账事实；不可用即 ``None``（不猜、不伪造，P1-3）。
+
+    ``None`` 的含义只是"读不到"，判定方必须按 fail-closed 处理，绝不能把
+    "读不到"当成"账本干净"。
+
+    读取方式按介质状态二选一，**都不新增文件**：
+
+    - ``-shm`` 边车在（服务正在写这个库）→ 普通 ``mode=ro``（WAL 感知，能看见
+      已提交但未 checkpoint 的最新事实；边车本就存在，不会多出文件）；
+    - 干净的停写快照（恢复包还原出来的库就是这种）→ ``immutable=1``，绝不在
+      只读介质旁生成 WAL/SHM。
+    """
+    path = Path(db_file)
+    if not path.is_file():
+        return None
+    wal_sidecar = path.with_name(f"{path.name}-shm")
+    try:
+        if wal_sidecar.exists():
+            connection = sqlite3.connect(
+                f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        else:
+            connection = _open_immutable_readonly(path)
+    except (OSError, sqlite3.Error):
+        return None
+    try:
+        table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='order_outbox'").fetchone()
+        if not table:
+            # 该账本根本没有 outbox（合成夹具/旧库）：**不适用**，不是"干净"。
+            return {"unknown_orders": 0, "submitting_orders": 0,
+                    "unresolved_entry_orders": 0, "source": "not_applicable"}
+        placeholders = ",".join("?" for _ in UNRESOLVED_ORDER_STATUSES)
+        row = connection.execute(
+            "SELECT "
+            " SUM(CASE WHEN status='UNKNOWN' THEN 1 ELSE 0 END) AS unknown_orders, "
+            " SUM(CASE WHEN status='SUBMITTING' THEN 1 ELSE 0 END) AS submitting_orders, "
+            f" SUM(CASE WHEN status IN ({placeholders}) "
+            "          AND UPPER(COALESCE(purpose,''))='ENTRY' THEN 1 ELSE 0 END) "
+            "   AS unresolved_entry_orders "
+            "FROM order_outbox",
+            UNRESOLVED_ORDER_STATUSES).fetchone()
+    except sqlite3.Error:
+        # outbox 在、但读不出来（损坏/被锁）→ 不可证明：返回 None，调用方阻断。
+        return None
+    finally:
+        connection.close()
+    return {
+        "unknown_orders": int(row[0] or 0),
+        "submitting_orders": int(row[1] or 0),
+        "unresolved_entry_orders": int(row[2] or 0),
+        "source": "ledger",
+    }
+
+
+def _facts_block_unresolved(facts: Mapping[str, Any] | None) -> bool:
+    """事实里还能看到未收口订单（含"事实不可信"）→ 必须阻断。"""
+    canonical = _canonical_facts(facts)
+    return any(canonical.get(key, -1) != 0 for key in FACTS_KEYS)
 
 #: 同 epoch 容差：DB 快照与全部 JSON 的 ``snapshot_at_ms`` 必须落在同一窗口。
 DEFAULT_EPOCH_TOLERANCE_MS = 5000
@@ -533,6 +677,8 @@ def drill_epoch_bundle(
     """
     started = time.perf_counter()
     verified = verify_epoch_bundle(bundle_dir, expected_environment=expected_environment)
+    # 恢复包携带的 profile 决定"状态 JSON 与门禁落在哪个状态根"（P1-2）。
+    epoch_profile = str(verified.get("profile") or "")
     bundle = Path(bundle_dir).resolve()
     target = Path(target_dir).resolve()
     same_volume = bundle.anchor.casefold() == target.anchor.casefold()
@@ -554,30 +700,43 @@ def drill_epoch_bundle(
         raise RecoveryError("TARGET_EXISTS", f"恢复暂存目录已存在: {stage}")
     stage.mkdir(parents=False)
     try:
-        (stage / "data").mkdir()
         (stage / "config").mkdir()
+        # P1-2：状态 JSON/数据库/门禁**一律**落在 profile 感知的状态根之下，
+        # 与 RuntimePaths.state_root 同口径（live → <target>/data/live）。
+        state_root = restored_state_root(stage, epoch_profile)
+        state_root.mkdir(parents=True)
         manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
         for key, metadata in manifest["files"].items():
             source = (bundle / str(metadata["path"])).resolve()
-            destination = (stage / "data" / source.name) if key != "database" \
-                else (stage / "data" / "agent_trader.sqlite")
+            destination = (state_root / "agent_trader.sqlite") if key == "database" \
+                else (state_root / source.name)
             shutil.copy2(source, destination)
-        check = _open_immutable_readonly(stage / "data" / "agent_trader.sqlite")
+        check = _open_immutable_readonly(state_root / "agent_trader.sqlite")
         try:
             if str(check.execute("PRAGMA quick_check").fetchone()[0]).lower() != "ok":
                 raise RecoveryError(RECOVERY_INCOMPLETE, "恢复后数据库 quick_check 失败")
         finally:
             check.close()
+        # P1-1：还原**必须**与生产恢复路径行为一致地装上恢复门禁。只写一个
+        # ``entry_gate`` 字符串声明等于没装：还原后的状态根 ``before_entry()``
+        # 会返回 ``GATE_NOT_INSTALLED`` 放行，"恢复完直接开仓"可达。
+        gate_file = restored_gate_path(stage, epoch_profile)
+        RecoveryGate.load(gate_file).require_reconcile(
+            epoch_id=str((verified.get("epoch") or {}).get("epoch_id") or ""),
+            account_ref="", runtime_instance_id="")
         receipt = {
             "restored_at": datetime.now(timezone.utc).isoformat(),
             "source_manifest_sha256": _sha256_file(bundle / "manifest.json"),
             "epoch_id": (verified["epoch"] or {}).get("epoch_id"),
             "environment": verified["environment"],
+            "profile": epoch_profile,
+            "state_root": state_root.relative_to(stage).as_posix(),
             "database_schema": verified["database_schema"],
             "same_volume": same_volume,
             "notices": notices,
             # 恢复完成 **不等于** 可以开仓：门禁仍在 RECONCILE_REQUIRED。
             "entry_gate": RECONCILE_REQUIRED_BEFORE_ENTRY,
+            "recovery_gate_file": gate_file.relative_to(stage).as_posix(),
         }
         _atomic_write_json(stage / "restore_receipt.json", receipt)
         os.replace(stage, target)
@@ -588,6 +747,8 @@ def drill_epoch_bundle(
     return {**verified, "status": "restored", "target": str(target),
             "same_volume": same_volume, "notices": notices,
             "reconcile_required": True,
+            "state_root": str(restored_state_root(target, epoch_profile)),
+            "recovery_gate_file": str(restored_gate_path(target, epoch_profile)),
             "duration_ms": round((time.perf_counter() - started) * 1000, 3)}
 
 
@@ -673,7 +834,11 @@ class RecoveryGate:
     文件存在但不可解析/未知状态  ``CORRUPT``           拒绝 ``GATE_CORRUPT``
     安装戳存在但文件不存在       ``MISSING``           拒绝 ``GATE_MISSING``
     文件 = RECONCILE_REQUIRED    ``RECONCILE_REQUIRED`` 拒绝 ``RECONCILE_REQUIRED_BEFORE_ENTRY``
+    文件 = CLEARED 但证据不可核  ``CLEARED``           拒绝 ``EVIDENCE_UNVERIFIED``
+    文件 = CLEARED 但账本仍有    ``CLEARED``           拒绝 ``RECONCILE_REQUIRED_BEFORE_ENTRY``
+    未收口 ENTRY 单
     文件 = CLEARED 且证据新鲜    ``CLEARED``            allowed
+    + 内容可核 + 账本无未收口单
     ==========================  ====================  ========================
 
     证据必须是显式 Mapping（与 K05 ``resolve_incident`` 同口径，fail-closed）：
@@ -682,11 +847,16 @@ class RecoveryGate:
 
         {"observed_at_ms": int, "positions_verified": true,
          "open_orders_verified": true, "account_ref": "...",
-         "runtime_instance_id": "..."}
+         "runtime_instance_id": "...",
+         "facts": {"unknown_orders": 0, "submitting_orders": 0,
+                   "unresolved_entry_orders": 0},
+         "facts_digest": "<sha256 of canonical facts>"}
 
     缺字段 → ``EVIDENCE_MISSING``；类型混淆/裸布尔 → ``EVIDENCE_TYPE_INVALID``；
     时间戳过旧或来自未来 → ``EVIDENCE_STALE``；调用方身份与门禁绑定的
-    账户/运行代不符 → ``EVIDENCE_ACCOUNT_MISMATCH``。**不伪造**：证据不足即保持阻断。
+    账户/运行代不符 → ``EVIDENCE_ACCOUNT_MISMATCH``；**证据不携带可核事实
+    或摘要对不上 → ``EVIDENCE_UNVERIFIED`` / ``EVIDENCE_MISMATCH``**。
+    **不伪造**：证据不足即保持阻断。
     """
 
     path: Path
@@ -782,8 +952,24 @@ class RecoveryGate:
             self.save()
         return changed
 
-    def before_entry(self, *, now_ms: int | None = None) -> RecoveryGateDecision:
-        """新开仓前的唯一判定入口（fail-closed）。"""
+    def before_entry(self, *, now_ms: int | None = None,
+                     facts: Mapping[str, Any] | None = None
+                     ) -> RecoveryGateDecision:
+        """新开仓前的唯一判定入口（fail-closed）。
+
+        **P1-3（读取时复验）**：``state == CLEARED`` 不再只看 ``state`` +
+        ``reconciled_at_ms``。必须同时满足：
+
+        1. 证据里携带**内容可核**的对账事实块（``facts`` + ``facts_digest``），
+           且摘要自洽、事实里没有未收口订单 —— 手写一份
+           ``{"state":"CLEARED","evidence":{}}`` 因此**不再放行**；
+        2. **账本真实事实**（当前状态根下 ``agent_trader.sqlite`` 的
+           ``order_outbox``）里没有未收口 ENTRY 单 —— 声明"已对账"但账本里
+           订单还挂着时一律维持阻断。``facts`` 形参供调用方（服务运行代）注入
+           已经采集到的事实，避免判定时再打开一次账本。
+
+        账本不可读时**不**假定干净：见 :func:`ledger_reconcile_facts`。
+        """
         now = now_ms if now_ms is not None else _now_ms()
         if self.state == GATE_STATE_CORRUPT:
             return RecoveryGateDecision(False, (GATE_CORRUPT,), self.state)
@@ -801,7 +987,50 @@ class RecoveryGate:
                 False, (RECONCILE_REQUIRED_BEFORE_ENTRY,), self.state)
         if now - int(self.reconciled_at_ms) > self.evidence_ttl_ms:
             return RecoveryGateDecision(False, (EVIDENCE_STALE,), self.state)
+        # (1) 证据必须内容可核。
+        evidence = self.evidence if isinstance(self.evidence, Mapping) else {}
+        declared = evidence.get("facts")
+        digest = str(evidence.get("facts_digest") or "")
+        if not isinstance(declared, Mapping) or not digest:
+            return RecoveryGateDecision(False, (EVIDENCE_UNVERIFIED,), self.state)
+        if digest != facts_digest(declared):
+            return RecoveryGateDecision(False, (EVIDENCE_MISMATCH,), self.state)
+        if _facts_block_unresolved(declared):
+            return RecoveryGateDecision(
+                False, (RECONCILE_REQUIRED_BEFORE_ENTRY,), self.state)
+        # (2) 用当前账本的**真实事实**复验（调用方注入的实时事实优先）。
+        if isinstance(facts, Mapping):
+            live: Mapping[str, Any] | None = facts
+            live_required = True
+        else:
+            live = self.live_reconcile_facts()
+            # 干净快照（账本在、没有活动写者的 -shm 边车）下"读不出事实"只能是
+            # 账本损坏 → 阻断；活动库（服务正在写）不做自动复验，由服务注入。
+            live_required = self.ledger_snapshot_present()
+        if live is not None and _facts_block_unresolved(live):
+            return RecoveryGateDecision(
+                False, (RECONCILE_REQUIRED_BEFORE_ENTRY,), self.state)
+        if live is None and live_required:
+            return RecoveryGateDecision(False, (EVIDENCE_UNVERIFIED,), self.state)
         return RecoveryGateDecision(True, (GATE_CLEARED,), self.state)
+
+    def gate_state_root(self) -> Path:
+        """门禁所在的状态根（``<状态根>/ops/recovery_gate.json``）。"""
+        return gate_state_root(self.path)
+
+    def ledger_file(self) -> Path:
+        return self.gate_state_root() / "agent_trader.sqlite"
+
+    def ledger_snapshot_present(self) -> bool:
+        """账本是"停写快照"（文件在且没有活动写者的 ``-shm`` 边车）。"""
+        db = self.ledger_file()
+        if not db.is_file():
+            return False
+        return not db.with_name(f"{db.name}-shm").exists()
+
+    def live_reconcile_facts(self) -> dict[str, Any] | None:
+        """当前账本（门禁所在状态根）的真实对账事实；读不到 → ``None``。"""
+        return ledger_reconcile_facts(self.ledger_file())
 
     def complete_reconcile(
         self, evidence: Any, *, now_ms: int | None = None,
@@ -813,6 +1042,13 @@ class RecoveryGate:
         ``account_ref``/``runtime_instance_id`` 是**调用方（服务运行代）注入**的
         身份，不是请求体自证：门禁若已绑定某个账户/运行代，身份不符即
         ``EVIDENCE_ACCOUNT_MISMATCH``（P2-6：一份对账不得洗白另一个账户）。
+
+        **P1-3（证据与真实对账结果绑定）**：收口前先读**账本真实事实**
+        （``order_outbox`` 里未收口的 SUBMITTING/UNKNOWN ENTRY 单）。账本里还有
+        未收口订单 → 直接 ``RECONCILE_REQUIRED_BEFORE_ENTRY``（不许用一份
+        "我认为对完了"把门禁洗白）。账本不可读时（合成夹具/旧库）才退回证据
+        自声明，且把声明事实连同 :func:`facts_digest` 一起落盘，供
+        :meth:`before_entry` 读取时复核。
         """
         now = now_ms if now_ms is not None else _now_ms()
         if untrusted_clock:
@@ -843,6 +1079,27 @@ class RecoveryGate:
         if (self.runtime_instance_id and runtime_instance_id
                 and str(runtime_instance_id) != self.runtime_instance_id):
             return RecoveryGateDecision(False, (EVIDENCE_ACCOUNT_MISMATCH,), self.state)
+        # P1-3：证据必须绑定**真实的**对账事实，而不是操作者自证的裸布尔。
+        ledger = self.live_reconcile_facts()
+        if ledger is not None:
+            if _facts_block_unresolved(ledger):
+                return RecoveryGateDecision(
+                    False, (RECONCILE_REQUIRED_BEFORE_ENTRY,), self.state)
+            bound_facts: dict[str, Any] = dict(ledger)
+        else:
+            declared: dict[str, Any] = {key: 0 for key in FACTS_KEYS}
+            for key in FACTS_KEYS:
+                if key not in evidence:
+                    continue
+                value = evidence.get(key)
+                if isinstance(value, bool) or not isinstance(value, int):
+                    return RecoveryGateDecision(
+                        False, (EVIDENCE_TYPE_INVALID,), self.state)
+                declared[key] = int(value)
+            if _facts_block_unresolved(declared):
+                return RecoveryGateDecision(
+                    False, (RECONCILE_REQUIRED_BEFORE_ENTRY,), self.state)
+            bound_facts = {**declared, "source": "evidence"}
         self.state = GATE_STATE_CLEARED
         self.reconciled_at_ms = now
         self.account_ref = account_ref or self.account_ref
@@ -853,6 +1110,8 @@ class RecoveryGate:
             "open_orders_verified": True,
             "account_ref": self.account_ref,
             "runtime_instance_id": self.runtime_instance_id,
+            "facts": bound_facts,
+            "facts_digest": facts_digest(bound_facts),
         }
         self.save()
         return RecoveryGateDecision(True, (GATE_CLEARED,), self.state)

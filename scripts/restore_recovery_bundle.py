@@ -20,6 +20,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from core.ops.recovery import (  # noqa: E402
     RECONCILE_REQUIRED_BEFORE_ENTRY,
     RecoveryGate,
+    restored_gate_path,
+    restored_state_root,
 )
 
 #: 未声明 epoch 时的同 epoch 容差（与 core.ops.recovery 同口径）。
@@ -224,7 +226,11 @@ def restore_to_new_directory(bundle_dir: Path, target_dir: Path, *, execute: boo
         return {**verified, "status": "dry_run", "target": str(target),
                 "source_volume": source_volume, "target_volume": target_volume,
                 "independent_volume": independent_volume,
-                "entry_gate": RECONCILE_REQUIRED_BEFORE_ENTRY}
+                "entry_gate": RECONCILE_REQUIRED_BEFORE_ENTRY,
+                "state_root": str(restored_state_root(
+                    target, str(verified.get("epoch_profile") or ""))),
+                "recovery_gate_file": str(restored_gate_path(
+                    target, str(verified.get("epoch_profile") or "")))}
 
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = target.parent / f".{target.name}.restore-{os.getpid()}"
@@ -232,23 +238,30 @@ def restore_to_new_directory(bundle_dir: Path, target_dir: Path, *, execute: boo
         raise FileExistsError(f"恢复暂存目录已存在: {stage}")
     stage.mkdir(parents=False)
     try:
-        (stage / "data").mkdir()
         (stage / "config").mkdir()
+        # P1-2：布局口径只由 core.ops.recovery 提供（演练路径与生产路径共用同一
+        # 个函数）。state JSON **与** ops/recovery_gate.json 一并落在 profile
+        # 感知的状态根之下：live → <target>/data/live，其余 → <target>/data。
+        #
+        # 修复前：state JSON 平铺在 <target>/data，而门禁按 profile 落在
+        # <target>/data/live/ops 或 <target>/data/ops——两种档位各坏一半：
+        # live 服务读 <state_base>/live/ops 找不到门禁 → GATE_NOT_INSTALLED
+        # 放行；若把状态也搬去 live 又会让四个必需状态文件不在状态根。
+        profile = str(verified.get("epoch_profile") or "")
+        state_root = restored_state_root(stage, profile)
+        state_root.mkdir(parents=True)
         manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
         for key, metadata in manifest["files"].items():
             source = _safe_member(bundle, str(metadata["path"]))
             if key == "database":
-                destination = stage / "data" / "agent_trader.sqlite"
+                destination = state_root / "agent_trader.sqlite"
             elif key == "risk_profile_lock":
                 destination = stage / "config" / "risk_profile.lock.json"
             else:
-                destination = stage / "data" / source.name
+                destination = state_root / source.name
             shutil.copy2(source, destination)
-        # 门禁装在**恢复后**的状态根里：live 的状态根是 <data>/live（RuntimePaths
-        # 同口径），装错位置等于门禁不存在。
-        gate_dir = (stage / "data" / "live" if verified.get("epoch_profile") == "live"
-                    else stage / "data") / "ops"
-        gate = RecoveryGate.load(gate_dir / "recovery_gate.json")
+        gate_file = restored_gate_path(stage, profile)
+        gate = RecoveryGate.load(gate_file)
         gate.require_reconcile(
             epoch_id=str(verified.get("epoch_id") or ""),
             account_ref="", runtime_instance_id="")
@@ -256,19 +269,20 @@ def restore_to_new_directory(bundle_dir: Path, target_dir: Path, *, execute: boo
             "restored_at": datetime.now(timezone.utc).isoformat(),
             "source_manifest_sha256": _sha256(bundle / "manifest.json"),
             "environment": verified["environment"],
+            "profile": profile,
+            "state_root": state_root.relative_to(stage).as_posix(),
             "database_schema": verified["database_schema"],
             "independent_volume": independent_volume,
             "epoch_id": verified.get("epoch_id"),
             "entry_gate": RECONCILE_REQUIRED_BEFORE_ENTRY,
-            "recovery_gate_file": (gate_dir / "recovery_gate.json")
-            .relative_to(stage).as_posix(),
+            "recovery_gate_file": gate_file.relative_to(stage).as_posix(),
         }
         (stage / "restore_receipt.json").write_text(
             json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8", newline="\n")
         # 恢复后的快照同样按不可变只读方式复核；不要把空 WAL/SHM 一并带入
         # 最终恢复目录，避免恢复演练本身改变快照的文件集合。
-        check = _open_immutable_readonly(stage / "data" / "agent_trader.sqlite")
+        check = _open_immutable_readonly(state_root / "agent_trader.sqlite")
         try:
             if str(check.execute("PRAGMA quick_check").fetchone()[0]).lower() != "ok":
                 raise ValueError("恢复后数据库 quick_check 失败")
@@ -283,6 +297,8 @@ def restore_to_new_directory(bundle_dir: Path, target_dir: Path, *, execute: boo
             "source_volume": source_volume, "target_volume": target_volume,
             "independent_volume": independent_volume,
             "entry_gate": RECONCILE_REQUIRED_BEFORE_ENTRY,
+            "state_root": str(restored_state_root(target, profile)),
+            "recovery_gate_file": str(restored_gate_path(target, profile)),
             "duration_ms": round((time.perf_counter() - started) * 1000, 3)}
 
 
