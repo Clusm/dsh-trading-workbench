@@ -821,6 +821,7 @@ def case_scanner_wiring() -> None:
     patched = scanner_supports_funnel()
     print(f"  当前态：scanner funnel 接线 {'已应用' if patched else '未应用'}")
     from signal_engine import SignalScanner
+    import strategy_runtime as strategy_runtime_mod
     from audit.database import AuditDatabase
 
     with tempfile.TemporaryDirectory(prefix="mta-u08-scan-") as tmp:
@@ -925,6 +926,75 @@ def case_scanner_wiring() -> None:
                   bool(round_funnel.no_open_explanation()["primary_reason"])
                   and round_funnel.no_open_explanation()["verdict"] != "opened",
                   round_funnel.no_open_explanation())
+
+            # --- P0-4③ 轮级前置失败：**真的能表达**（不只是模块里有这个通道） ----
+            fault_root = root / "no_cards"
+            fault_root.mkdir()
+            db2 = AuditDatabase(root / "audit2.sqlite")
+            missing_funnel = ScanFunnel(round_id="cards-missing")
+            scanner_missing = SignalScanner(
+                knowledge_dir=fault_root, strategy_lab_src="unused",
+                state_file=root / "state_missing.json", db=db2,
+                funnel=missing_funnel)
+            scanner_missing._registry = {}
+            scanner_missing._features_mod = None
+            with patch_fetch(frame):
+                missing_tickets = scanner_missing.scan(now=now, scan_symbols=["BTCUSDT"])
+            missing_report = missing_funnel.no_open_explanation()
+            check("卡册不存在：轮级故障 CARDS_UNAVAILABLE 且 verdict=blocked（不是 no_edge）",
+                  missing_tickets == []
+                  and missing_report["verdict"] == "blocked"
+                  and missing_report["primary_reason"] == trace.REASON_READINESS_BLOCKED
+                  and missing_funnel.detail_counts.get(
+                      funnel_mod.DETAIL_CARDS_UNAVAILABLE) == 1, missing_report)
+            check("卡册不存在时状态文件也带漏斗与显式 verdict（不是 status=ok）",
+                  json.loads((root / "state_missing.json").read_text(
+                      encoding="utf-8"))["last_scan"]["no_open_verdict"] == "blocked")
+
+            broken_root = root / "broken_cards"
+            broken_root.mkdir()
+            (broken_root / "strategy_cards.json").write_text("{ nope",
+                                                             encoding="utf-8")
+            broken_funnel = ScanFunnel(round_id="cards-broken")
+            scanner_broken = SignalScanner(
+                knowledge_dir=broken_root, strategy_lab_src="unused",
+                state_file=root / "state_broken.json", db=db2,
+                funnel=broken_funnel)
+            scanner_broken._registry = {}
+            scanner_broken._features_mod = None
+            with patch_fetch(frame):
+                broken_tickets = scanner_broken.scan(now=now, scan_symbols=["BTCUSDT"])
+            broken_report = broken_funnel.no_open_explanation()
+            check("卡册 JSON 损坏：轮级故障 CARDS_INVALID 且 verdict=blocked（不是崩掉/静默）",
+                  broken_tickets == []
+                  and broken_report["verdict"] == "blocked"
+                  and broken_report["primary_reason"] == trace.REASON_VALIDATION_REJECTED
+                  and broken_funnel.detail_counts.get(
+                      funnel_mod.DETAIL_CARDS_INVALID) == 1, broken_report)
+
+            lab_funnel = ScanFunnel(round_id="lab-down")
+            scanner_lab = SignalScanner(
+                knowledge_dir=root, strategy_lab_src="unused",
+                state_file=root / "state_lab.json", db=db2, funnel=lab_funnel)
+            original_registry = getattr(strategy_runtime_mod, "REGISTRY", None)
+            try:
+                strategy_runtime_mod.REGISTRY = None  # type: ignore[attr-defined]
+                lab_error = ""
+                try:
+                    scanner_lab.scan(now=now, scan_symbols=["BTCUSDT"])
+                except Exception as exc:  # noqa: BLE001 - 既有语义是整轮中断
+                    lab_error = type(exc).__name__
+            finally:
+                strategy_runtime_mod.REGISTRY = original_registry  # type: ignore[attr-defined]
+            lab_report = lab_funnel.no_open_explanation()
+            check("策略运行时不可用：既有'整轮中断'语义不变，但漏斗里有轮级故障留痕",
+                  bool(lab_error) and lab_report["verdict"] == "blocked"
+                  and lab_funnel.detail_counts.get(
+                      funnel_mod.DETAIL_STRATEGY_LAB_UNAVAILABLE) == 1, lab_report)
+            check("整轮中断时状态文件仍写入漏斗（故障不只在内存里）",
+                  json.loads((root / "state_lab.json").read_text(
+                      encoding="utf-8"))["last_scan"]["no_open_verdict"] == "blocked")
+            db2.close()
         else:
             check("未打补丁时状态文件里没有 funnel 段（接线确实缺席，不冒充已接线）",
                   funnel_mod.FUNNEL_REPORT_KEY not in last_scan, sorted(last_scan))
@@ -1017,6 +1087,10 @@ def case_trader_wiring() -> None:
                 check("第二轮的跳过原因是 HOLD_EXISTING/TICKET_ALREADY_CONSUMED",
                       second.detail_counts.get(
                           funnel_mod.DETAIL_TICKET_ALREADY_CONSUMED) == 1, second.as_dict())
+                check("一轮'所有票都已消费'读成 handled/HOLD_EXISTING，不是 no_edge",
+                      second.no_open_explanation()["verdict"] == "handled"
+                      and second.no_open_explanation()["primary_reason"]
+                      == trace.REASON_HOLD_EXISTING, second.no_open_explanation())
                 reloaded = TicketLedger(Path(tmp) / "led.json",
                                         clock=lambda: 1_700_000_000_000)
                 third = ScanFunnel(round_id="led-3")
@@ -1027,6 +1101,26 @@ def case_trader_wiring() -> None:
         else:
             check("未打补丁时执行器不接受 ledger 参数（消费一次只在库层，不冒充已接线）",
                   "ledger" not in inspect.signature(run_strategy_trader).parameters)
+
+        # --- 进循环前的早退分支必须留痕（原先"没有任何地方记录它"） -------------
+        budget = ScanFunnel(round_id="budget-zero")
+        budget_decision = run_strategy_trader(tickets=[], prices=prices, min_notional=0.0,
+                                              funnel=budget)
+        check("通道预算为 0 的早退：记轮级故障 CHANNEL_BUDGET_ZERO（不再只是'没有票'）",
+              budget_decision.decision == "no_trade"
+              and budget.detail_counts.get(funnel_mod.DETAIL_CHANNEL_BUDGET_ZERO) == 1
+              and budget.no_open_explanation()["verdict"] == "no_candidates"
+              and budget.no_open_explanation()["primary_reason"]
+              == trace.REASON_READINESS_BLOCKED, budget.no_open_explanation())
+        check("预算为 0 的原因码写进 note（运维可直接读）",
+              "CHANNEL_BUDGET_ZERO" in budget_decision.reasoning)
+        empty_round = ScanFunnel(round_id="no-tickets")
+        run_strategy_trader(tickets=[], prices=prices, funnel=empty_round)
+        check("本轮一张票都没有：轮级 NO_TICKETS_AVAILABLE（与'被过滤光'可区分）",
+              empty_round.detail_counts.get(funnel_mod.DETAIL_NO_TICKETS_AVAILABLE) == 1
+              and empty_round.no_open_explanation()["verdict"] == "no_candidates"
+              and empty_round.no_open_explanation()["primary_reason"]
+              == trace.REASON_NO_EDGE, empty_round.no_open_explanation())
     else:
         try:
             run_strategy_trader(tickets=[live_ticket("t-x")], prices=prices,
@@ -1106,6 +1200,34 @@ def case_dashboard_wiring() -> None:
             check("漏斗页对缺失的漏斗段给出显式说明而不是空白成功页",
                   "没有可用漏斗数据" in dashboard_app._funnel_page_html(
                       dashboard_app._funnel_report(FakeService()), {}))
+            # --- P3-2 读侧篡改：展示层必须兜住，不能把一个坏状态文件打成 500 ---
+            tampered_path = Path(tmp) / "tampered.json"
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            payload["last_scan"][funnel_mod.FUNNEL_REPORT_KEY]["reason_codes"] = [
+                {"reason": "NOT_A_REAL_REASON", "count": 3}]
+            payload["last_scan"][funnel_mod.FUNNEL_REPORT_KEY]["no_open"] = {
+                "verdict": "no_edge", "primary_reason": trace.REASON_NO_EDGE}
+            tampered_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            class TamperedSettings(FakeSettings):
+                project_root = Path(tmp)
+                raw_settings = {"signal_scanner": {"signal_state_file": "tampered.json"}}
+
+            class TamperedService(FakeService):
+                settings = TamperedSettings()
+
+            tampered_service = TamperedService()
+            tampered_view = dashboard_app._funnel_report(tampered_service)
+            check("被篡改的漏斗段不会把展示层打成 500：标 available=False/verdict=unavailable",
+                  tampered_view.get("available") is False
+                  and tampered_view.get("verdict") == "unavailable"
+                  and "未登记" in str(tampered_view.get("reason")), tampered_view)
+            page = dashboard_app._funnel_page_html(
+                tampered_view, dashboard_app._position_attribution(tampered_service))
+            check("被篡改时漏斗页仍渲染出显式说明（不是空白成功页）",
+                  "没有可用漏斗数据" in page and "unavailable" in page)
+            check("读侧不把被篡改的 no_open.verdict=no_edge 当结论",
+                  tampered_view.get("verdict") != "no_edge")
             attribution = dashboard_app._position_attribution(service)
             check("看板能定位每个仓位的管理者与规则版本",
                   attribution["total"] == 1
