@@ -154,6 +154,13 @@
   - **4 条 P1（I 已独立核对源码证实）**：`F14-DRILL-GATE-NOT-INSTALLED`、`F14-LIVE-GATE-LAYOUT`、`F14-GATE-EVIDENCE-SELFASSERTED`、`F18-STATE-ROOT-MISSING-UNREACHABLE`；另有 5 条 P2（`RECOVERY-BUNDLE-P2-CLUSTER`，含**既有**缺陷"截断锁文件单方接管 → 双持锁"）与 4 条 P3。全部已登记进台账 `dispatch.known_issues`。
   - KI02 天然检验通过：该树**无 `.venv`**，`smoke_windows_service_plan.py` 仍 24/0 无 `ValueError`；官方入口 `OFFLINE REGRESSION OK scripts=84` exit 0。
 - **E 线修复会话 `U13-FU1`**：工作树 `mat-wt/W3-fix`（`task/U13-FU1` @ `943d839`）—— 修上述 4 条 P1（P1-1 core 演练不装门禁 / P1-2 live 布局 fail-open / P1-3 门禁证据自证 / P1-4 `STATE_ROOT_MISSING` 不可达）。**仍在运行，勿重复派发。**
+  - 已落 4 个提交（`d9b635d` P1-4、`4bfaeb0` P1-1/2/3、`a40d677` 验收接线、`bc112fe` 两态化）。
+  - **⚠ 文件面比派发时宽**：除 `src/core/ops/recovery.py`、`src/core/runtime_paths.py`、`scripts/ops/verify_recovery_plan.py`、`scripts/restore_recovery_bundle.py` 外，工作树另有未提交改动落在 `src/core/service.py`、`scripts/create_recovery_bundle.py`、`scripts/ops/verify_runtime_paths.py`、`scripts/run_web.py`。集成时必须按**补丁实际触及面**核对（lesson 17），不要凭派发清单列举。
+  - 补丁包目录 `docs/dispatch/patches/U13-FU1/`（尚未提交）。
+
+### 两个会话的共同恢复要点
+- U09 与 U13-FU1 的工作树**各有若干共享文件处于未提交修改态**。若任一会话中断：接续会话必须**先把共享改动导出为 unified diff 到各自的 `docs/dispatch/patches/<ID>/<head>/`，再用 `git checkout <base> -- <文件>` 还原**，任务分支最终不得含共享文件改动（lesson 13）。
+- U09 工作树另有**已改未提交的独占文件**（`src/core/release_evidence.py`、`tests/acceptance/test_release_evidence_v2.py`）—— 接续会话应先核对它们是否自洽并**立即提交**。
   - F14 = 从恢复包启动期间有交易所已成交订单 → **先全量对账/增量回拉再开仓，不重复下单**。
   - F18 = 新代码目录/旧状态根/PID 复用/两账户同 profile·同账户不同 profile → **状态路径与身份一致、单账户互斥、不新建错误基线、迁移可回滚**。
   - 注意：该工作树**没有 `.venv`**，正好检验 **KI02**（解释器解析）是否真的修好。
