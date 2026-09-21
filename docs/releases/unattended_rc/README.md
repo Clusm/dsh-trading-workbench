@@ -127,6 +127,48 @@ cd C:\Users\Tao\Desktop\币安\mat-wt\W3-rc
 | `U09-P3-CLUSTER` | `thresholds=` 入参可显式调低 `required`；`smoke_u02` 自计数瑕疵；U01 契约函数无生产调用方 | U12 | 登记。见第 8 节待裁决 |
 | `CONTRACT-FREEZE-BOUNDARY` | 残余限制不得直接写入已冻结的 `docs/contracts/README.md` §12 | I | 遵循：本 RC 未改冻结契约 |
 | `W1-PATCH-BATCHING` / `W1-MANIFEST-TRANSIENT*` | I 侧原子登记/同批应用事项 | I | 本 RC 不涉及（属集成动作） |
+| **`U12-BUILD-F1`**（**U12 BUILD 新发现**，台账未登记） | **K01 身份采集在真实 `src/` 树上必然失败**：`collect_artifact_files(root)` 默认扫描 `src/**/*.py`，对路径分量做 `is_sensitive_name()` 子串匹配，而 `SENSITIVE_KEY_MARKERS` 含 `"authorization"` → 文件名 `src/core/management_authorization.py` 命中 → `CredentialLeakError`。`_identity_evidence` 单点降级为 `IDENTITY_COLLECT_FAILED`，于是 `runtime_instance_id`/`effective_config_hash`/`model_route_hash` 全空 | **U15（守卫口径）/U02（文件名）/I** | **未修**（属 `src/`，超出 U12 硬约束）。**属既有缺陷**（`management_authorization.py` 来自 U02，`SENSITIVE_KEY_MARKERS` 来自 U00），**非 U12 引入**。后果链见 §5.1。**RC 不得据此宣称身份已验** |
+
+### 5.1 U12 BUILD 新发现：K01 身份采集在真实 `src/` 树上必然失败
+
+> **本条是 U12 BUILD 会话在**运行集成树代码**（而非引用任何作者报告）时发现的。**
+> 台账 `known_issues` **未登记**此条。
+
+**事实链（全部为本树实测）**：
+
+1. `src/core/contracts/common.py:19` `SENSITIVE_KEY_MARKERS` 含 `"authorization"`。
+2. `src/core/runtime_identity.py:320` `is_sensitive_name()` 只做 `lower()` + **子串匹配**。
+3. `src/core/runtime_identity.py:557` `collect_artifact_files()` 对每个路径**分量**调用它；
+   默认 `relatives=None` 即扫描 `src/**/*.py`。
+4. `src/core/management_authorization.py`（U02 交付物）的**文件名**含 `authorization`
+   → 命中 → `CredentialLeakError: credential-bearing fields rejected:
+   artifacts.src/core/management_authorization.py`（实测异常原文）。
+5. `src/core/service.py:184` **生产启动路径**调用 `build_release_manifest(...)`，
+   **未传** `artifact_relatives` → 走默认扫描 → 必然抛错 → `_identity_evidence`
+   单点降级 → `identity_blockers = ('IDENTITY_COLLECT_FAILED',)`。
+6. 实测铸造结果（`release_manifest.json`，本目录）：
+   `artifact_hash = 544d176a…`（**非空**，来自 `content_hash`），但
+   `runtime_instance_id = ""`、`effective_config_hash = ""`、`model_route_hash = ""`。
+7. `_identity_block()`（`release_evidence.py:812`）对同一清单的实测输出：
+   `state = NO_DATA`，`reason_codes = ['IDENTITY_REF_MISSING']`，`runtime_instance_id = None`。
+8. ⇒ K06 `engineering` 组为 **NO_DATA** ⇒ `release_readiness` **不可能为 GO**。
+
+**为什么此前没被发现**：`tests/acceptance/test_runtime_identity.py`（本树 exit 0，
+`RUNTIME IDENTITY ACCEPTANCE PASS`）使用**合成临时根**或**显式 `artifact_relatives`**，
+**从不**对真实 `src/**/*.py` 跑默认扫描 ⇒ U15 的验收套件对本缺陷**盲**。
+
+**本 RC 的处置**：**不修**（`src/` 只读约束）。已在本 RC 登记为：
+- 待裁决 **A13**（§8）；
+- 矩阵 `F13` 行的 ⚠；
+- 本 RC 验收套件 `tests/acceptance/test_unattended_release.py` 第 [8] 节
+  **两态不变量**："身份要么完整，要么**显式**带 `IDENTITY_COLLECT_FAILED`，**绝不静默空身份**"
+  —— 该不变量在修复前后都成立，且把本缺陷**钉在证据里**。
+
+**修复方向（供 I 裁决，本 RC 不代行）**：① 让 `is_sensitive_name()` 对**路径分量**改用
+更精确的口径（如按 `_`/`.` 切分后的 token 精确匹配，或对 `*.py` 源文件名豁免）；
+② 给 `collect_artifact_files()` 的 `src/**/*.py` 默认扫描加**有文档依据的文件名白名单/豁免**；
+③ 重命名 `management_authorization.py`（会改 U02 契约路径，**不可轻动**）。
+**无论选哪种，都不得降低凭据守卫强度、不得新增 ruff exclude。**
 
 ## 6. 如何复现（离线，不联网，不读真实 `data/`/`.env`，不下单）
 
@@ -185,6 +227,7 @@ cd C:\Users\Tao\Desktop\币安\mat-wt\W3-rc
 | A10 | `MTA_ACCOUNT_REF` 启用前置迁移 | `U02-LEDGER-PARTITION` | 迁移落地前不得启用 |
 | A11 | U09-P3 `smoke_u02` 自计数瑕疵、`current_closed` 无窗口过滤 | 台账 | 修 / 登记 |
 | A12 | 运维 SLO 口径与目标冻结（D05） | 台账 `external_decisions` | **RC 冻结前必须关闭**（`blocks_checkpoint=RC_FREEZE`） |
+| **A13** | **K01 身份采集在真实 `src/` 树上必然失败**（文件名 `management_authorization.py` 命中 `"authorization"` 敏感标记 → `IDENTITY_COLLECT_FAILED` → identity `NO_DATA` → `release_readiness` 不可 GO） | **本 RC §5.1 新发现**（台账未登记） | 收窄敏感名口径 / 加源文件名豁免 / 登记接受并说明为何不阻断；**RC 冻结前必须裁决**（阻断 RELEASE） |
 
 ## 9. 未尽事项（如实登记）
 
@@ -200,3 +243,17 @@ cd C:\Users\Tao\Desktop\币安\mat-wt\W3-rc
    `D03`（账户风险模式覆盖）阻断 RELEASE。
 7. 本交付物由 `deepseek-v4.1-flash` 同模型会话产出；矩阵中**引用他人证据**的条目已在
    矩阵"证据来源"列逐条标注（`引用`/`自跑`），未把引用当自验。
+8. **`U12-BUILD-F1`（§5.1）未修**：K01 身份采集在真实 `src/` 树上必然失败，K06
+   `engineering` 组为 `NO_DATA`，`release_readiness` 不可能为 GO。本 RC **不**声称
+   身份已验。**本会话首轮官方离线回归（`smoke_u10a_release_package.py`）也因此曾红**——
+   详见 §6.1；那是本 RC 交付物自身文档链接尚未落盘所致的**门禁真实生效**，非缺陷。
+9. **`F11:v2_labels=DEFERRED` 的 v2 面**属 U06b 后置；影子权重在 U06b/U07 完成前
+   **不得**讨论收益。
+
+## 6.1 官方离线回归的两次实测（含首轮红的根因）
+
+| 轮次 | 结果 | 根因 |
+|---|---|---|
+| 第 1 轮（矩阵/README 已提交、`observed_status.*` **未**提交时） | `run_offline_regression.py` **FAIL**（`smoke_u10a_release_package.py` 5 项失败） | `docs/releases/unattended_rc/README.md` 的 3 个相对链接指向**尚未落盘**的文件 → `doc_links_resolve` 报 3 条 `BROKEN_LINK`，并连带 `run_web.py --verify-package rc=2`。**门禁真实生效**（U10a 的"不漏包/链接可达"闸门抓到了本 RC 的在制品）。 |
+| 第 2 轮（全部交付物落盘后） | 见 §6 表：`OFFLINE REGRESSION OK scripts=84`，**exit 0** | 修复方式为**补齐文件**（非豁免/非跳过），门禁范围未收窄 |
+

@@ -55,6 +55,13 @@
 - **明示后置**：1 条（F11）。
 - **必须由 DEPLOY_DEMO/OPS/OBSERVE 承接的必须结果**：见 §D（9 类缺失能力）。
 
+### 1.1 U12 BUILD 新发现（`U12-BUILD-F1`，台账未登记）
+
+**K01 身份采集在真实 `src/` 树上必然失败** → identity `NO_DATA` →
+`release_readiness` **不可能为 GO**。该缺陷使上表 **F13** 行再加一个 ⚠，
+并**阻断 RELEASE**。完整事实链、证据与修复方向见
+`README.md` §5.1（同目录），待裁决编号 **A13**。**本 RC 不声称身份已验。**
+
 ---
 
 ## 2. 主表
@@ -73,7 +80,7 @@
 | **F10** | 收入重复、同毫秒满页、迟到、双向仓、零资金费、非 USDT 费用 | 幂等守恒；COMPLETE 可证明；未知仍未知 | `E1`→`smoke_u01_income.py`、`tests/integration/test_income_reconciliation.py`（自跑）；`E4` | `COVERED_OFFLINE` | 合成夹具驱动，必须结果完全离线可判 |
 | **F11** | 5 分钟标签晚 8 分钟、轮转币缺价、历史版本混合 | 旧口径可见，v2 缺失明确，不选择性丢负样本 | 见 §3（F11 专条）；`E1`→`smoke_u06a_shadow_isolation.py`、`tests/integration/test_shadow_status.py`（自跑） | **`DEFERRED`** | **`F11:v2_labels=DEFERRED`** —— 见 §3 |
 | **F12** | 告警供应商接受但不送达、断网、主机断电、配置假 verified | 按真实回执展示状态；外部能发现失联 | `E4`[5]（ACK ≠ 送达 ≠ 恢复）；`E7`；`E1`→`smoke_u14_alert_delivery.py`、`smoke_health_watch.py`（自跑） | `PARTIAL_OFFLINE` ⚠ | **缺**真实告警通道送达回执 + 异地 dead-man 探针（§D-3，D02 PENDING）→ 端到端 ≤120s、失联 ≤180s 的**外部发现不可验**。⚠ **已知未修**：`AlertQueue` **无生产消费者**，监控只看 `errors` 且 `PERSIST_FAILED` **不在其中** |
-| **F13** | 改依赖锁/模型覆盖/profile/策略卡/参数 | 指纹必变，身份不符不发单，凭据不外泄 | `E5`；`E1`→`smoke_contracts_v3.py`、`smoke_u10a_release_package.py`、`smoke_detached_profiles.py`（自跑）；`E2`（密钥扫描） | `PARTIAL_OFFLINE` ⚠ | 指纹必变与凭据不外泄已验。⚠ **缺**"身份不符不发单"的**联合链路**：`W1-JOINT-WIRING` **未执行**（U03 接线 × U15 身份须同批），手册 S05 联合候选验收**尚未做** → 单独启用会让缺 pinned 身份时**拒绝全部开仓** |
+| **F13** | 改依赖锁/模型覆盖/profile/策略卡/参数 | 指纹必变，身份不符不发单，凭据不外泄 | `E5`；`E1`→`smoke_contracts_v3.py`、`smoke_u10a_release_package.py`、`smoke_detached_profiles.py`（自跑）；`E2`（密钥扫描） | `PARTIAL_OFFLINE` ⚠⚠ | 指纹必变与凭据不外泄已验。⚠⚠ **U12 BUILD 新发现 `U12-BUILD-F1`**：K01 身份采集在真实 `src/` 树上**必然失败**（`management_authorization.py` 命中 `"authorization"` 敏感标记 → `IDENTITY_COLLECT_FAILED` → identity `NO_DATA` → `release_readiness` 不可 GO）；`E5` 用合成根/显式 relatives **对本缺陷盲**。见 `README.md` §5.1。⚠ **缺**"身份不符不发单"的**联合链路**：`W1-JOINT-WIRING` **未执行**（U03 接线 × U15 身份须同批），手册 S05 联合候选验收**尚未做** |
 | **F14** | 从恢复包启动，期间有交易所已成交订单 | 先全量对账/增量回拉再开仓，不重复下单 | 见 §4（F14/F18 专条）；`E9` + `E10`（**引用**）；`E1`→`smoke_recovery_bundle.py`、`smoke_takeover_compatibility.py`（自跑）；`E6`[7] | `PARTIAL_OFFLINE` ⚠ | 4 条 P1 已 FIXED 并集成（`acf9ced`），但**仍有两条 U12 待裁决项**；**不得记作"完全通过"**。**缺**真实交易所已成交订单 + `live` 档端到端（§D-1/§D-2） |
 | **F15** | 无凭据控制请求、错误 Origin/token、改 profile 路径 | 控制面拒绝未授权写入，demo/live 状态互不污染 | `E8`（控制面纯策略函数）；`E1`→`smoke_profile_isolation.py`、`smoke_detached_profiles.py`（自跑）；`E9` | `PARTIAL_OFFLINE` ⚠ | **缺**真实 HTTP 控制面（回环/Origin/token 判定**只做代码核对/纯策略函数**，未发请求，§D-2）。⚠ S05 联合链路未做（同 F13）。⚠ `U13FU1 README vs 代码`（N3）待裁决 |
 | **F16** | B 影子样本充当 AI 候选、同单多 fill、资金费晚到 | 候选/闭合不膨胀，门禁可撤销并可重算 | `E4`[2][2b]（S08/F16：B/C 影子行不得进方向候选分母）；`E1`→`smoke_u09_release_evidence.py`、`smoke_u06a_shadow_isolation.py`（自跑） | `COVERED_OFFLINE` | **`S08-SHADOW-GATE-LEAK` 已闭合**：`release_evidence.py` 只计入 `intel.shadow_status` 判定的 `execution_decision_copy` 来源，影子行只进诊断字段 |

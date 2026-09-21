@@ -262,6 +262,44 @@ def test_report_fail_closed() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# [8] 身份采集：要么完整，要么显式阻断（绝不静默空身份）
+# --------------------------------------------------------------------------- #
+def test_identity_is_never_silently_empty() -> None:
+    section("[8] K01 身份：完整 或 显式阻断（两态都成立的 fail-closed 不变量）")
+    try:
+        from core.release_manifest import build_release_manifest  # noqa: PLC0415
+        from core.runtime_identity import collect_artifact_files  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        check("身份模块可导入", False, f"{type(exc).__name__}: {exc}")
+        return
+
+    # 两态探测：真实 src/ 树的默认工件扫描现在会怎样（不快照，不修复，只观察）。
+    scan_error = ""
+    try:
+        collect_artifact_files(ROOT)
+        scan_ok = True
+    except Exception as exc:  # noqa: BLE001 - 两态都不得崩
+        scan_ok = False
+        scan_error = f"{type(exc).__name__}: {exc}"
+    print(f"  ----  src/ 默认工件扫描成功={scan_ok} {scan_error}")
+
+    manifest = build_release_manifest(ROOT, environment="demo").to_dict()
+    blockers = tuple(manifest.get("identity_blockers") or ())
+    complete = bool(manifest.get("artifact_hash")) and bool(
+        manifest.get("runtime_instance_id"))
+    if complete:
+        check("身份完整（artifact_hash 与 runtime_instance_id 均非空）", True)
+        check("身份完整时不得带阻断码", not blockers, f"blockers={blockers}")
+    else:
+        # 采集失败时**必须**显式登记阻断原因，不得静默产出空身份。
+        check("身份不完整时显式带 IDENTITY_COLLECT_FAILED（不静默）",
+              "IDENTITY_COLLECT_FAILED" in blockers, f"blockers={blockers}")
+    check("身份采集结果与工件扫描状态一致（两态不矛盾）",
+          scan_ok == complete or (not scan_ok and not complete),
+          f"scan_ok={scan_ok} complete={complete}")
+
+
+# --------------------------------------------------------------------------- #
 # [7] CI 入口确实调用官方离线回归
 # --------------------------------------------------------------------------- #
 def test_ci_wires_official_entry() -> None:
@@ -283,6 +321,7 @@ def main() -> int:
     test_matrix_covers_all_faults()
     test_no_release_claims()
     test_report_fail_closed()
+    test_identity_is_never_silently_empty()
     test_ci_wires_official_entry()
     print(f"\nU12 UNATTENDED RELEASE ACCEPTANCE PASS={PASS} FAIL={len(FAIL)}")
     if FAIL:
