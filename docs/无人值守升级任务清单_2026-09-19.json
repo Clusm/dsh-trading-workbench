@@ -2136,6 +2136,24 @@
             "U01-R3-FU1（历史文档内嵌 schema==16 字面量）仅在索引标旧版，正文未改，留 U10b"
           ],
           "unfinished": "未部署真实宿主、未执行 sc.exe、未启动真实服务 —— 全部为离线/夹具证据，宿主项归 U12"
+        },
+        {
+          "type": "review_r1_E",
+          "candidate": "23bfe88",
+          "verdict": "有条件GO（需处置 P2 x3）",
+          "counts": "P0=0 / P1=0 / P2 x3 / P3 x7（均文档一致性/纵深防御/表述类）",
+          "archived_path": "docs/dispatch/reviews/U10a/23bfe88/E_r1.md",
+          "漏包修复核实": "**真实且完整**：差集 69 项逐条列出（src/data/*.py 13、templates/*.html 8、knowledge/ 3、PROVENANCE.md/.env.example/start_web.bat 各1、docs/contracts/** 13、其余 docs 28），与作者数字逐项吻合；**反向检查 only_in_old=0**（source 包严格超集、无静默丢弃）；src/ 133/133、config/ 6/6、knowledge/ 3/3 全覆盖；214+162+187=563=独立 git ls-files",
+          "claim2_falsified": "**claim ② 表述不准（P3）**：旧实现补 -z 前后成员集合 **0 差异**；新实现去掉 -z 是**硬失败**而非静默漏包 -> 该条并非'真实漏包 bug'",
+          "claims14": "**无法 1:1 核对**（作者的枚举清单不在交付物内）。按内容核对 21 条声明，唯一不落本仓代码的是**依赖共享补丁的两项**（run_web.py --verify-package、解释器 fail-closed），手册已如实标注",
+          "new_gate": "**非空转**：塞入不存在的 runtime 脚本 -> exit 1（手册多写）；删一条 -> exit 1（手册漏写）；跨清单门禁亦非空转（CONFIG_LIST_DRIFT）",
+          "delta": "base 82 / head_patched 83，均 0 失败；82 个共有脚本 exit 码逐条一致；harness 复跑 OFFLINE REGRESSION OK scripts=83；check_quality files=287 全绿",
+          "blocking_p2": [
+            "P2-1 RUNTIME_SCRIPTS 无存在性校验 + docs/ 兜底 source-only -> 重命名启动入口时 --out **静默出包**（--self-check/smoke 能抓）",
+            "P2-2 手册 §9.1 live 启动用 start_web_detached.py，该脚本**不在 runtime 包内**且无 [source 包] 标记 -> **文档写了包内不可用的启动方式**（与必达'文档不得写未实现能力'直接冲突）",
+            "P2-3 195KB 台账进包且是包内**唯一免扫文件**；索引三处口径冲突（不进发布包/仅源码仓库/进发布包）"
+          ],
+          "reviewer_incident": "该审查者把 git archive 产物写到**集成树根部**（mat-wt/I/base.tar，8.4MB），越界；I 已删除"
         }
       ],
       "blockers": [],
@@ -2170,7 +2188,18 @@
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r2",
+          "stage": "修复复验",
+          "candidate": null,
+          "sessions": [
+            "U10a author (r2)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U10a/<r2head>/"
+        }
+      ],
       "qa_runs": []
     },
     {
