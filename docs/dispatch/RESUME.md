@@ -16,9 +16,9 @@
 - 已验收候选：`71f8109`（Q r5 复验 PASS-with-notes；与 tag 的差异仅为 dispatch 文档，`src/core/contracts` 与 `docs/contracts` 逐字节相同）
 - 集成区分支：`integration/unattended-v3` @ `ffdab44`（契约冻结后又有 1 个台账提交 `4fdc6bf`）
 - 四个实现线 worktree **已创建**（均从 `ffdab44`）：`mat-wt/A`(task/U01)、`mat-wt/B`(task/U04)、`mat-wt/CD`(task/U03)、`mat-wt/EF`(task/U15)
-- 当前步骤：**17/18 任务已 INTEGRATED（仅 U11 在修复轮）；W1/W2/W3 工程侧全部完成** —— **首批 14 项任务全部 INTEGRATED**（含 U09、U12、U13-FU1/FU2/FU3、U12-BF1+契约勘误 `CONTRACT-ERRATUM-1`）。**RC 仍未冻结**（DRAFT）；**W4 结构性不可在本窗口完成**。
-- **后置线（P2，非首批必需）**：`U06b` ✅ INTEGRATED、`U10b` ✅ INTEGRATED、`U07` ✅ INTEGRATED；**`U11` = CHANGES_REQUESTED，修复轮 `U11-FU1` 进行中**（唯一未集成项）。
-- 最新门禁：**`OFFLINE REGRESSION OK scripts=85`**、**`QUALITY CHECK OK files=303 untracked=0`**、契约 `PASS 173 / FAIL 0`。
+- 当前步骤：**🎯 18/18 任务全部 INTEGRATED —— 任务清单已走完**（首批 14 项 + 后置 P2 四项 U06b/U07/U10b/U11）。**仅剩 W4，而 W4 结构性不可在本窗口完成**。**RC 仍未冻结**（DRAFT）。
+- 最新门禁：**`OFFLINE REGRESSION OK scripts=94`**（含新登记的 9 个 tests/ 套件）、**`QUALITY CHECK OK files=303 untracked=0`**、契约 `PASS 173 / FAIL 0`、打包器 `37/0`（0 BROKEN_LINK）。
+- **新增已修项 `TEST-SUITE-COVERAGE-GAP`**：9 个行为套件此前**不在常设回归内**（`scripts=85` 全绿 ≠ 它们绿），I 已 dry-run 全部 rc=0 后登记进 `SCRIPTS`，门禁 **85 → 94**。教训：**"全绿"的覆盖范围必须实测，不能由名字推断**。
 - **恢复门禁三条（N1/N2/N3）已全部闭合并复验**：Q 的 110 格 `purpose×status` 矩阵 **0 处放松格**（pristine/FU2 各 8 处 → 修复 0），集成提交 `57a4e97`。
 - **RC 冻结仍待四项**：`D05`（SLO 时限冻结，需外部决策）、观察窗三项 `NOT_STARTED`（7天/200/30，结构性不可压缩）、`MODEL_ROUTE_MOCK`（须配真实模型路由后重铸 manifest）、`U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER`。
 

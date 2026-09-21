@@ -2779,7 +2779,7 @@
       "title": "核心模块渐进拆分",
       "owner_role": "F",
       "actual_assignee": null,
-      "status": "CHANGES_REQUESTED",
+      "status": "INTEGRATED",
       "required_for_first_release": false,
       "depends_on": [
         "U10b",
@@ -2850,6 +2850,26 @@
             "U13FU3-INJECTION-TRUST 完整语义（台账 L4512/L4758 真实登记，文档**未点名**；其『改 max(injected,live)』与本文档『recovery.py 不动』存在**潜在张力**）"
           ],
           "fix_round": "U11-FU1（同一分支 task/U11 继续提交）：①补全 decision_trace 961-1799（28 名）与 strategy_funnel 1804-2138（4 名）进 §3.1/§4.1；②把 tests/integration/*（点名 12 套件）与 tests/acceptance/* 写进 §5 并写明责任归属（U08/U15/U05）+ 点名 U13FU3-INJECTION-TRUST；③C1 口径改为基于 __all__ 或明写 dir() 边界与假红/漏报边界；④C2/C3 行号更正；⑤C4-C6 逐条处置。另要求补一个**它自己的出口也测得出的**覆盖率自检。"
+        },
+        {
+          "type": "fix_round_+_integration",
+          "fix_head": "bdd7e49",
+          "verdict": "**I 亲自复验通过**（U11-FU1 为文档修复轮；对文档的可执行断言由 I 直接复核，未再派 agent 轮）",
+          "blocker_1_fixed": "映射覆盖率（自检 §7 V1b：AST 顶层公开定义 × 文档点名覆盖率）：`core.decision_trace` **44.4%（28/63，漏 35）-> 100%（63/63，漏 0）**；`core.strategy_funnel` **22.1%（27/122，漏 95）-> 100%（122/122，漏 0）**。漏的 35 个 dt 名里 **24 个正是整块未映射的 B8-B13（961-1799，839 行 = 46.6%）**，另 11 个被『9 码/107-208』这类区间简写顺手漏掉。补入块与归属：B8 978-1046 run_protection_first -> core/decision_protection.py；B9 1052-1246 RouteRisk/ModelRouteGuard 等 -> core/decision_routing.py；B10/B11 1252-1465 credential_alias/Lease/LeaseRegistry/shared_quota_lease -> core/shared_admission.py；B12 1471-1689 SourceCache/background_refresh -> core/source_cache.py；B13 1696-1734 EvidenceLink -> 并入 core/decision_recording.py；F6 1807-2063 ManagementPriorityPlan/round_explanation -> core/funnel_explanation.py。",
+          "v1b_verified_by_I": "**I 实跑**：FU1 树 `V1B OK 映射覆盖完整` exit **0**；对 **R1 版文档回放 `V1B FAIL 2 个模块有漏项` exit 1** —— 即这个新自检**确实能检出当初漏掉的那类缺陷**，不是只在修好的文本上通过。（这正是复验者要求的『新出口必须自己也能测出漏项』。）",
+          "blocker_2_fixed": "§5 新增 `tests/integration/*`（12 套逐一点名）+ `tests/acceptance/*`（7 套），写死『既有测试的 import 与断言一行不改』；新增 §5.1（薄壳自证陷阱 + 仓内先例 test_research_evidence.py:447 的包含式断言）、§5.2（签字责任：decision_trace->**U05**、strategy_funnel->**U08**、runtime_identity->**U15**）、§5.3（点名 `U13FU3-INJECTION-TRUST`）；§6 把作者签字写成硬前置。**I 实测**：文档中 `U08` 出现 **9 次**（R1 为 0）、`U13FU3-INJECTION-TRUST` 出现 **7 次**。",
+          "c1_resolved": "采用**双口径、`__all__` 为主判据**（理由：`__all__` 定义 `from ... import *` 语义，且以 `_` 开头被 `dir()` 过滤 —— R1 的 V1 完全不检查它，正是漏报边界）。`dir()` 保留为更严辅判据。新基线：decision_trace all=61/18c353c52153、dir=86/1e96c448b313；strategy_funnel all=71/efa242e24495、dir=158/9ec72c643e4b。文档明写**假红边界**（清门面未用 import -> dir_sha 变但非回归）与**漏报边界**。",
+          "c2_c6_disposed": "C2 真实起点 78（REASON_* 81-89、REASON_ORDER 93-103、REASON_CODES 104）；C3 改为『顶层共 82 = 清单纳入 81 + 排除 1（smoke_p0c.py）』；C4 knowledge/*.json 入 §5；C5 scripts/check_quality.py 与 create_release_package.py 入 §5；C6 §5.3 专节给出**相容顺序：先由 U12 裁决落地 U13FU3-INJECTION-TRUST，再由 U11 拆分，不得并行**。",
+          "integration": "merge task/U11 @ bdd7e49；**该 merge 只触及 docs/**（实测 merge diff 无任何非 docs 路径）；docs/重构接口映射.md 逐字节一致。",
+          "gates": "OFFLINE REGRESSION OK **scripts=94**（见下）、check_quality OK files=303 untracked=0、契约 173/0、打包器 37/0（0 BROKEN_LINK、43 篇 md 全可达）。",
+          "i_side_gap_closed": "**U11-FU1 发现的真实缺口（属 I 的文件）**：`tests/` 下有 **9 个行为套件不被任何 `smoke_*.py` 调起** —— tests/acceptance 的 alert_delivery/control_boundary/release_evidence_v2/runtime_identity/unattended_release 与 tests/integration 的 shadow_labels/shadow_statistics/shadow_status/strategy_funnel。后果：`scripts=85` 全绿 **不等于**这些套件绿（它们只在各任务集成时被手工跑过一次）。**I 已处理**：逐条在 harness 环境下 dry-run 全部 rc=0 后登记进 `SCRIPTS`，常设门禁由 **85 -> 94**；全量实测 rc=0、`OFFLINE REGRESSION OK scripts=94`。",
+          "unfinished": [
+            "**src/ 一行未拆** —— V1/V2 的『拆分后逐行相同』仍是待实施者断言（基线已给出）",
+            "**V3（磁盘/持久化格式不变）仍未实跑**（与 R1 相同）",
+            "V1b 只验『名字在不在』，**不验『块划得对不对』** —— 归错模块它不报，靠人工审查 + V2 行为回放 + 一次只动一个模块兜底",
+            "V1b **有意不覆盖** core.contracts（非拆分候选）与 runtime_identity（§4.3 明写的不完整映射），理由已写进文档（算进来会让探测器变噪声）",
+            "本轮新引用并实跑：smoke_u05_background_refresh_budget 0、smoke_u05_model_route_safety 0、tests/integration/test_strategy_funnel 0（208/0）"
+          ]
         }
       ],
       "blockers": [],
@@ -2884,7 +2904,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "bdd7e49",
       "review_assignments": [
         {
           "round": "r1",
@@ -2897,6 +2917,16 @@
           "reports_dir": "docs/dispatch/reviews/U11/00a49a8/",
           "focus": "**本交付是规划文档，无 src/ 改动 —— 验证重点是其对代码库的断言是否属实、不动清单有无漏项。** 重点：①逐条重跑文档列出的命令比对 exit code/数字；②**独立重新实现 V1 公开面快照**并与文档基线哈希比对；③独立枚举『拆分绝不能动』清单与文档 §5 对照找漏项（含 CONTRACT-ERRATUM-1、200 分母单一口径、N1/N2/N3 与 before_entry(facts) 替换语义、smoke_* 禁移动、pyproject E402 豁免、docs/archive 规则 3 已被证伪、跨任务共享断言）；④拆分建议是否写清**责任归属**（strategy_funnel 属 U08、runtime_identity 属 U15，拆后谁复跑）；⑤行数等事实抽查。",
           "report": "docs/dispatch/reviews/U11/00a49a8/Q_r1.md"
+        },
+        {
+          "round": "r2",
+          "stage": "修复复验（I 直接复核，未派 agent）",
+          "candidate": "bdd7e49",
+          "sessions": [
+            "I（文档类交付；对可执行断言的复核由 I 完成）"
+          ],
+          "verdict": "PASS（I 复验：V1b 在 FU1 上 exit 0、在 R1 上 exit 1；§5/U08/U13FU3 均实测到位）",
+          "reports_dir": "docs/dispatch/reviews/U11/00a49a8/Q_r1.md（r1 报告）"
         }
       ],
       "qa_runs": []
@@ -4670,6 +4700,14 @@
         "owner": "U11/U12",
         "blocks": "无",
         "note": "①被归档脚本 docstring 仍写旧调用路径（12 个）②3 个脚本同时被 CRLF->LF 归一（_js_check.py / probe_exchange_positions.py / run_phase0.py），『逐字节相同』对它们不字面成立但语义零改动 ③docs/dispatch/** 历史记录里的旧路径属冻结证据，预期保留。"
+      },
+      {
+        "id": "TEST-SUITE-COVERAGE-GAP",
+        "title": "9 个行为套件此前不在常设离线回归内（`scripts=N` 全绿 ≠ 这些套件绿）—— **已修**",
+        "status": "FIXED",
+        "owner": "I",
+        "blocks": "无（已闭）",
+        "note": "U11-FU1 发现：tests/acceptance 的 alert_delivery/control_boundary/release_evidence_v2/runtime_identity/unattended_release 与 tests/integration 的 shadow_labels/shadow_statistics/shadow_status/strategy_funnel **不被任何 smoke_*.py 调起**。它们只在各任务集成时被手工跑过一次，因此一次静默回归不会有人发现；U12 的 FAULT_MATRIX 里这些条目也只能写『（自跑）』。**I 已登记进 SCRIPTS**（先逐条在 harness 环境下 dry-run 确认 rc=0），常设门禁 85 -> 94。教训：**『全绿』的覆盖范围必须实测，不能由名字推断**。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -4950,11 +4988,9 @@
           "note": "U06b 集成后依赖就绪。风险已内联：不得改动 shadow_status 的 COHORTS/SOURCE_*/GATE_ROLE_*/release_gate_role 语义（release_evidence 的 200 分母单一口径来源）；必须证明统计产物同样不进任何门禁分母（复跑 smoke_u09 60/0 与 test_release_evidence_v2 78/0 前后同值）；不得伪称 F11 已通过。"
         },
         "U11": {
-          "status": "IN_PROGRESS",
-          "branch": "task/U11",
-          "worktree": "mat-wt/F3",
-          "base": "03967e9",
-          "note": "U10b 集成后依赖就绪。**本任务是映射/设计交付（独占路径 docs/重构接口映射.md），不是代码重构** —— 已明确禁止真的去拆 src/。已内联 7 条现实约束逐条需在文档体现：冻结契约与 CONTRACT-ERRATUM-1 先例、run_offline_regression 的 smoke 清单强制、release_evidence 的 shadow_status 单一口径与 7/200/30 不得降低、共享文件由 I 合入与历史集成级缺陷、恢复门禁 N1/N2/N3 与 before_entry(facts) 替换语义、pyproject 的 scripts/*.py E402 豁免、U10b 归档布局与已被证伪的归档规则 3。"
+          "status": "INTEGRATED",
+          "head": "bdd7e49",
+          "integration_commit": "2ffc436"
         }
       }
     },
