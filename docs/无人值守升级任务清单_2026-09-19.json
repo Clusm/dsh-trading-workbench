@@ -2753,7 +2753,7 @@
       "title": "核心模块渐进拆分",
       "owner_role": "F",
       "actual_assignee": null,
-      "status": "READY_FOR_REVIEW",
+      "status": "CHANGES_REQUESTED",
       "required_for_first_release": false,
       "depends_on": [
         "U10b",
@@ -2806,6 +2806,24 @@
             "service.py『不拆』是基于 C5/C6 与验证成本的**判断**，非形式化证明"
           ],
           "gates": "改动后 check_quality exit 0（files=301，未新增 exclude）；run_offline_regression exit 0（scripts=85、manifest 81/1）—— 纯文档改动未把门禁弄红；smoke_u10a exit 0（新文档相对链接在构建期 doc_links_resolve 下全部可达）；未新增 scripts/smoke_u11_*.py，故 run_offline_regression.py **一行未改**。"
+        },
+        {
+          "type": "review_r1_Q",
+          "candidate": "00a49a8",
+          "verdict": "CHANGES_REQUESTED（2 阻塞 + 6 备注）",
+          "passed": "①§7 的 **10 条命令逐条重跑，exit code 与关键数字 10/10 全部逐字符合**（scripts=85、included=81 excluded=1、files=301、173/0、golden 160(45/115) 等）②**V1 基线用自己的实现独立复现，4/4 项数与哈希逐字一致**（86/1e96c448b313、158/9ec72c643e4b、117/9616373d6147、118/8172c604e1b2）；逆序 import 与单模块隔离进程哈希均不变 ③§5 确为 16 项；src/pyproject/run_offline_regression 在 03967e9..00a49a8 **0 行变更**；链接门禁通过 ④事实性抽查 15 处大部分正确。",
+          "blocker_1": "**映射漏掉半个文件，而它自己的验收测不出**：§3.1 称 decision_trace.py『天然三块』，实测 >=6 块；**第 961-1799 行（839 行 = 46.6%）整块既不在 §3.1 表也不在 §4.1 映射表**，涉 **28 个公开名**（Lease/LeaseRegistry/shared_quota_lease/ModelRouteGuard/SourceCache/background_refresh/EvidenceLink/run_protection_first 等，复验者用 dir() 逐一确认 28/28 在公开面内）。strategy_funnel.py 同漏 **1804-2138 段 4 名**（ManagementPriorityPlan 等，均在 __all__）。**危害：只搬前半、后半留门面，V1 照样逐字通过** —— 漏 47% 文件的映射能通过它自己的出口。",
+          "blocker_2": "**§5『不动清单』里没有任何 tests/**（全文 grep \"tests/\" = 0）。而 tests/integration/*（12 套件）才是行为断言真身：12 个 smoke_*.py 只是**透传退出码的薄壳**（smoke_u05_decision_trace.py:4 明写真正执行的是 tests/integration/test_decision_trace.py）。§7 V2 整条证据链落在这些文件上，§5 只保护外壳 -> 实施者把测试 import 改指向新子模块，**smoke 仍 exit 0、V2 静默通过**（自证陷阱）。仓内先例：tests/integration/test_research_evidence.py:447 的模块集断言用包含而非相等。**责任归属亦缺**：文档通篇未提 U08（strategy_funnel 的产物方），未写拆分后由谁复跑签字。",
+          "caliber_finding_C1": "**口径不同且未言明（非『作者算错』）**：V1 用 `dir()`，会把偶然导入的 Any/ctypes/math/json 与契约透传名算进『公开面』—— decision_trace 的 __all__ 只有 **61** 而 dir() 数 **86**；strategy_funnel 是 **71 vs 158**。且 __all__ 以 _ 开头被过滤，**V1 完全不检查 __all__**。故基线可复现、能当回归探测器，但 **!= 文档所说的『公开面』**，且会对『拆分时清掉门面未用 import』产生**假红**。",
+          "fact_check": "15 处抽查大部分正确；**2 处行号不准**：§3.1『107-208 原因码』真实起点是**第 78 行**（9 个 REASON_* 在 80-88、REASON_ORDER 在 93-104，**恰被漏在区间外**）；§5 行9『81 个』是 **included 数**，顶层实际 **82 个**。",
+          "not_verified": [
+            "V3（磁盘格式，拆分未发生）",
+            "拆分后等价性",
+            "反射用法清查",
+            "runtime_identity 分块内聚性",
+            "U13FU3-INJECTION-TRUST 完整语义（台账 L4512/L4758 真实登记，文档**未点名**；其『改 max(injected,live)』与本文档『recovery.py 不动』存在**潜在张力**）"
+          ],
+          "fix_round": "U11-FU1（同一分支 task/U11 继续提交）：①补全 decision_trace 961-1799（28 名）与 strategy_funnel 1804-2138（4 名）进 §3.1/§4.1；②把 tests/integration/*（点名 12 套件）与 tests/acceptance/* 写进 §5 并写明责任归属（U08/U15/U05）+ 点名 U13FU3-INJECTION-TRUST；③C1 口径改为基于 __all__ 或明写 dir() 边界与假红/漏报边界；④C2/C3 行号更正；⑤C4-C6 逐条处置。另要求补一个**它自己的出口也测得出的**覆盖率自检。"
         }
       ],
       "blockers": [],
@@ -2849,9 +2867,10 @@
           "sessions": [
             "Q (reviews/U11/R1/q)"
           ],
-          "verdict": "PENDING",
+          "verdict": "Q r1 **CHANGES_REQUESTED**（2 阻塞 + 6 备注）",
           "reports_dir": "docs/dispatch/reviews/U11/00a49a8/",
-          "focus": "**本交付是规划文档，无 src/ 改动 —— 验证重点是其对代码库的断言是否属实、不动清单有无漏项。** 重点：①逐条重跑文档列出的命令比对 exit code/数字；②**独立重新实现 V1 公开面快照**并与文档基线哈希比对；③独立枚举『拆分绝不能动』清单与文档 §5 对照找漏项（含 CONTRACT-ERRATUM-1、200 分母单一口径、N1/N2/N3 与 before_entry(facts) 替换语义、smoke_* 禁移动、pyproject E402 豁免、docs/archive 规则 3 已被证伪、跨任务共享断言）；④拆分建议是否写清**责任归属**（strategy_funnel 属 U08、runtime_identity 属 U15，拆后谁复跑）；⑤行数等事实抽查。"
+          "focus": "**本交付是规划文档，无 src/ 改动 —— 验证重点是其对代码库的断言是否属实、不动清单有无漏项。** 重点：①逐条重跑文档列出的命令比对 exit code/数字；②**独立重新实现 V1 公开面快照**并与文档基线哈希比对；③独立枚举『拆分绝不能动』清单与文档 §5 对照找漏项（含 CONTRACT-ERRATUM-1、200 分母单一口径、N1/N2/N3 与 before_entry(facts) 替换语义、smoke_* 禁移动、pyproject E402 豁免、docs/archive 规则 3 已被证伪、跨任务共享断言）；④拆分建议是否写清**责任归属**（strategy_funnel 属 U08、runtime_identity 属 U15，拆后谁复跑）；⑤行数等事实抽查。",
+          "report": "docs/dispatch/reviews/U11/00a49a8/Q_r1.md"
         }
       ],
       "qa_runs": []
