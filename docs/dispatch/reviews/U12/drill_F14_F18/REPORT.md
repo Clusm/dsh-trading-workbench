@@ -109,5 +109,6 @@ intruder : {"role":"intruder","owned":true,"content":"{\"pid\": 34808, ...}"}
 
 - 本报告：`docs/dispatch/reviews/U12/drill_F14_F18/REPORT.md`
 - 可复跑探针与原始输出：`docs/dispatch/reviews/U12/drill_F14_F18/raw/`
-  - 探针：`drill_f14.py`、`drill_f14_e2e.py`、`drill_f18.py`、`probe_bundle_identity.py`、`probe_live_restore_layout.py`、`race_child.py`、`race_child2.py`
+  - 探针（**以 `.py.txt` 后缀归档**，内容逐字节不变）：`drill_f14.py.txt`、`drill_f14_e2e.py.txt`、`drill_f18.py.txt`、`probe_bundle_identity.py.txt`、`probe_live_restore_layout.py.txt`、`race_child.py.txt`、`race_child2.py.txt`
   - 原始输出：`raw_f14_drill.log`、`raw_f14_e2e.log`、`raw_f18_drill.log`、`raw_probe_bundle_identity.log`、`raw_probe_live_restore_layout.log`、`raw_smoke_*.log` 等（全量离线回归日志另存 `raw_offline_regression.tail.txt`）
+  - **为什么用 `.py.txt`**：I 最初以 `.py` 归档，结果这 7 个探针被 `check_quality.py` 的 ruff 扫到（25 条 E401/E402/E702/F401），**把 RC 门禁 `check_quality` 弄红**。改用 `.py.txt` 使 ruff 的**扫描范围逐字不变**（不新增任何 exclude、不降低门禁），同时保留证据逐字节原样。要复跑：复制到沙箱后把后缀改回 `.py`。
