@@ -1903,7 +1903,7 @@
       "title": "配对实验与独立样本统计",
       "owner_role": "D",
       "actual_assignee": null,
-      "status": "READY_FOR_REVIEW",
+      "status": "INTEGRATED",
       "required_for_first_release": false,
       "depends_on": [
         "U03",
@@ -1952,6 +1952,32 @@
           "two_state": "sandbox_branch（不打补丁）**120 PASS / 0 FAIL**；sandbox_patched **127 PASS / 0 FAIL**（差值即 7 条落库/幂等/摘要断言）；两态 exit=0，断言均为相对性质（迁移版本集合前后快照、区间宽度、独立块数与行数比较），未硬编码迁移版本集合。",
           "delta": "sandbox_pristine 与 sandbox_patched 全量离线回归（85 脚本）均 SMOKE MANIFEST OK included=81 excluded=1 + **OFFLINE REGRESSION OK scripts=85 exit 0** -> 失败集合 ∅/∅，**NEW_FAIL = ∅**。本任务未新增 scripts/smoke_*.py，无需登记。check_quality **OK files=303 untracked=0**（未新增 exclude；期间修掉一处 F401）。",
           "patches_applicability": "docs/dispatch/patches/U07/f9e3094/ 两个 diff 在 3 种 git 配置下均 exit=0、Skipped=0、逐文件 Checking patch。（目录名=生成时作者 head；其后仅 F401 修复/文档提交，两个 diff 未变。）"
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "e610319",
+          "verdict": "Q r1 **PASS-with-notes**（无阻塞项）",
+          "report": "docs/dispatch/reviews/U07/e610319/Q_r1.md",
+          "integration_commit": "afbcf8f",
+          "gate_invariance_verified": "Q **自建夹具**（4 A + 2 B + 1 C，与作者数目不同）三态对比：directional_candidates=4、release_readiness=NO_GO、sources=['A_current_baseline'] 全部不变；报告去 generated_at 后逐字段相同。**额外加压：用裸 SQL 绕过写入层**把 counts=1/weight=9.9/promo=1 强塞进研究表 —— 门禁**仍逐字段不变**，证明门禁根本不读该表。`git diff c2f1bab..e610319 -- shadow_status.py release_evidence.py` = **0 字节**；`grep -rn shadow_v2 src/core/` 零命中；smoke_u09=60/0、test_release_evidence_v2=78/0 三态同值。",
+          "patch_02_ruling": "**裁定为『不是削弱』（关键裁决）**：字面删 labels.py -> exit=1 红但红在 `ModuleNotFoundError`（未到断言）；Q 遂做**隔离反向测试**（改名 `labels_impl.py` + 同步改 3 处导入，让 import 链活着而 `glob(\"*.py\")` 真缺一个模块，只调 `test_module_boundaries()`）-> **`FAIL 独占路径四个模块齐备 ['labels.py']` 断言立刻变红**，且新写法**点出缺哪个**模块。完整 diff = **+8/-4，唯一 hunk 只动那一处 check 调用**，其它断言逐字未动；原 `==` 属过度约束，改 `<=` 合理。",
+          "statistics_audited": "Q 自建探针 91 项、**BAD=0**：①`naive_understates` **非空话** —— 强重叠 2 块×3 对 -> naive_se=0.2236 vs cluster_se=0.5000（朴素半宽 0.438 vs 自举全宽 1.000）标志 True；近似独立 -> 标志 False 且 |naive_se-cluster_se|=0.0 ②**独立块手算全吻合**（7 组：600/300/200/400 间隔、跨标的、gap=300 合并 vs gap=299 不合并、overlap_ratio、空集）③**二项检验三方比对一致**：实现 vs `math.comb` 精确公式 vs **2^n 暴力枚举**（n<=16），含 6/0=0.03125、8/2=0.109375、10/0=0.001953125、7/3=0.34375；`n=0`/全 0 差 -> `p=None` 不冒充 ④**自举可重放**：同种子逐字段（含 digest）相同；换种子/输入/config_fingerprint 则变 ⑤**费用压力**：net(m) 对 m 线性故插值与解析解 `gross/(fee+slip)` 精确相等；**区间外如实返回 None 不外推**；`assumption` 逐点确为 `iid_pairs`、`cost_assumption_note` 明写非成交成本 —— **披露属实**。",
+          "pairing_guards_verified": "配对键换 symbol/horizon/version/target_at 任一即换键；**7 类剔除各构造 1 条全部命中且披露**，`pairs+dropped==唯一机会键` **守恒**；反推入场价在 4 个量级 x 2 方向精确还原参考价。`assert_gate_neutral` 与 `build_statistics_report` 对 `counts=True`/`weight=0.5`/`caliber=LEGACY` **全拒**；`promotion_guard`/`to_rows` 三项归零；`decisions.html`/`service.py`/`shadow_status.py` diff 均 0 字节。",
+          "delta": "全量回归两态 **OFFLINE REGRESSION OK scripts=85**，**失败集 ∅、NEW_FAIL=∅**（归一化后残差仅时间戳/临时路径，外加打包冒烟的 746->755 跟踪文件、155->156 必需文件 —— 恰好 9 个新文件，自检两态均 PASS）。补丁矩阵 2x3 全 Checking/0 Skipped；**01 与 02 顺序无关**（文件集不相交，正反序都 cleanly）。",
+          "integration_tests": "statistics **127/0**；labels **100/0**（补丁 02 恢复）；smoke_u09 **60/0**；契约 **173/0**；`check_quality OK files=303 untracked=0`；`SMOKE MANIFEST OK included=81 excluded=1`；**`OFFLINE REGRESSION OK scripts=85`**",
+          "new_p3": [
+            "`ENTRY_DIVERGENT` 在『反推不出入场价』（非 bullish/bearish 信号）时也会被标为该原因，即使 `require_matching_entry=False`（fail-closed 但原因码可细分）",
+            "费用压力点区间退回 iid 未分块（已如实标注）",
+            "`block_means` 查找 O(n·|keys|)",
+            "`naive_understates` 语义是『低估』非『有重叠』",
+            "补丁 01 末尾缺空行系仓库既有风格（pristine 同位置同样缺，ruff/quality 均过）"
+          ],
+          "not_verified": [
+            "真实市场数据下的统计经济含义（禁网禁 data/）",
+            "多进程并发写同 digest 的争用",
+            "UI 呈现（已确认 0 改）",
+            "无 scipy，n>16 仅公式比对无第三方库"
+          ]
         }
       ],
       "blockers": [],
@@ -1988,7 +2014,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "e610319",
       "review_assignments": [
         {
           "round": "r1",
@@ -1997,7 +2023,7 @@
           "sessions": [
             "Q (reviews/U07/R1/q)"
           ],
-          "verdict": "PENDING",
+          "verdict": "Q r1 PASS-with-notes（无阻塞项；补丁 02 经隔离反向测试裁定『不是削弱』；统计口径 91 项探针 BAD=0）",
           "reports_dir": "docs/dispatch/reviews/U07/e610319/",
           "focus": "重点：①自建夹具复现门禁不倒性；②**补丁 02 的反向测试**（删掉 U06b 四模块之一必须立刻变红，否则=真削弱）；③**统计口径本身**（naive_understates 是否真为『朴素更窄』、独立块数手算比对、二项符号检验 p 值独立核对、自举可重放、费用压力插值区间外是否拒绝外推）；④配对剔除总数守恒；⑤assert_gate_neutral/promotion_guard 真拦得住。"
         }
