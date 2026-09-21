@@ -12,14 +12,26 @@
 - **P1-4**：未声明状态根这一事实可被 ``validate()`` 检出（``STATE_ROOT_MISSING``
   可达），``state_base_explicit`` 有真实消费者（``state_root_drift``）。
 
+U13-FU2 增补（复验 N1/N2 的收口）：
+
+- **N1**：``before_entry()`` 的**裸形态**（未注入 facts）在"门禁状态根没有账本
+  文件 / 账本没有 ``order_outbox`` 表"时**不得 fail-open**——读不出账本事实
+  一律阻断（``EVIDENCE_UNVERIFIED``）；账本干净时仍然放行（不得误伤）。
+- **N2**：``TradingService`` 的**启动**与 ``set_control`` 两条路径都要走
+  "注入本进程账本事实"的形态，且启动/set_control 的结果真的受门禁约束
+  （账本里有未收口 ENTRY → 启动收紧为 close_only、``set_control('normal')``
+  被拒；账本干净 → 不被误伤）。本段会在**隔离临时状态根**里真的构造一次
+  ``TradingService``（paper、不联网、不下单、不读真实 ``data``/``.env``）。
+
 **两态可跑**：不假定本补丁是否已应用——缺符号/缺行为时逐条判失败并给出原因码，
 退出码非零。只写系统临时目录：不读 ``.env``/真实 ``data``/密钥、不联网、
-不下单、不动风险档、不启动服务。
+不下单、不动风险档、只在 N2 段构造一次隔离服务实例。
 """
 from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import sys
 import tempfile
 import time
@@ -375,6 +387,220 @@ def check_p1_4(tmp: Path) -> None:
           "STATE_ROOT_PROFILE_UNLOCKED" in live_reasons, str(live_reasons))
 
 
+def _make_ledger(root: Path, kind: str) -> None:
+    """按形态造"门禁所在状态根"的账本文件（只在本脚本的临时目录里）。
+
+    ``none`` = 没有账本文件；``no_outbox`` = 账本在但没有 ``order_outbox`` 表
+    （``ledger_reconcile_facts`` 判"不适用"）；``dirty`` = 有未收口 ENTRY 单；
+    ``clean`` = ``order_outbox`` 为空。
+    """
+    if kind == "none":
+        return
+    connection = sqlite3.connect(root / "agent_trader.sqlite")
+    try:
+        if kind == "no_outbox":
+            connection.execute("CREATE TABLE risk_events(ts REAL, event_type TEXT)")
+        else:
+            connection.execute(
+                "CREATE TABLE order_outbox(status TEXT, purpose TEXT, environment TEXT)")
+            if kind == "dirty":
+                connection.execute(
+                    "INSERT INTO order_outbox VALUES('SUBMITTING','ENTRY','demo')")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def check_n1_bare_ledger_failclosed(tmp: Path) -> None:
+    """N1：裸 ``before_entry()`` 读不出账本事实时**不得**放行（U13-FU2）。"""
+    print("\n[N1] 裸形态读不出账本事实时不得 fail-open（U13-FU2）")
+    expected = (
+        ("none", True, "EVIDENCE_UNVERIFIED"),
+        ("no_outbox", True, "EVIDENCE_UNVERIFIED"),
+        ("dirty", True, "RECONCILE_REQUIRED_BEFORE_ENTRY"),
+        ("clean", False, "GATE_CLEARED"),
+    )
+    for kind, expect_block, expect_code in expected:
+        root = tmp / f"n1_{kind}"
+        (root / "ops").mkdir(parents=True, exist_ok=True)
+        _make_ledger(root, kind)
+        gate_file = root / "ops" / "recovery_gate.json"
+        facts = {"unknown_orders": 0, "submitting_orders": 0, "unresolved_entry_orders": 0}
+        # 手写一份**自洽摘要**的 CLEARED 门禁（= N1 的绕过形态）。
+        _forged_gate(gate_file,
+                     evidence={"facts": facts, "facts_digest": facts_digest(facts)})
+        raw = ledger_reconcile_facts(root / "agent_trader.sqlite")
+        decision = RecoveryGate.load(gate_file).before_entry()
+        print(f"  [{kind}] ledger_reconcile_facts={raw}")
+        print(f"           before_entry() -> allowed={decision.allowed} "
+              f"codes={decision.reason_codes}")
+        check(f"[{kind}] 裸形态阻断={expect_block}（期望码 {expect_code}）",
+              bool(not decision.allowed) == expect_block
+              and (not expect_block or expect_code in decision.reason_codes),
+              f"allowed={decision.allowed} codes={decision.reason_codes}")
+    # 注入形态同样不接受"不适用"（读不出事实的另一种写法）。
+    root = tmp / "n1_injected"
+    (root / "ops").mkdir(parents=True, exist_ok=True)
+    _make_ledger(root, "clean")
+    gate_file = root / "ops" / "recovery_gate.json"
+    facts = {"unknown_orders": 0, "submitting_orders": 0, "unresolved_entry_orders": 0}
+    _forged_gate(gate_file, evidence={"facts": facts,
+                                      "facts_digest": facts_digest(facts)})
+    injected = RecoveryGate.load(gate_file).before_entry(
+        facts={**facts, "source": "not_applicable"})
+    check("[injected:not_applicable] 注入'不适用'事实也不得放行",
+          not injected.allowed, f"allowed={injected.allowed} codes={injected.reason_codes}")
+
+
+def _build_service_root(base: Path, name: str, *, dirty: bool) -> Path:
+    """造一个"已恢复且已装 CLEARED 门禁"的隔离状态根（镜像生产恢复布局）。
+
+    ``dirty=True`` 时把一颗 SUBMITTING ENTRY 只提交进 ``-wal``，且**不带 -shm**
+    地拷回：这门禁自己的 ``immutable=1`` 只读快照看不到它，而服务本进程正常
+    打开的连接会重放 ``-wal`` 看到它 —— 两者在同一份账本上结论相反，正是 N2
+    要接的线。
+    """
+    iso = base / name
+    data = iso / "data"
+    (data / "ops").mkdir(parents=True, exist_ok=True)
+
+    db = AuditDatabase(data / "agent_trader.sqlite")
+    db.environment = "paper"
+    saved: Path | None = None
+    if dirty:
+        saved = base / f"{name}_staging"
+        saved.mkdir(parents=True, exist_ok=True)
+        db.conn.execute("PRAGMA journal_mode=WAL")
+        outbox = OrderOutbox(db, environment="paper")
+        outbox.prepare(
+            client_order_id="ENTRY-N2-1", symbol="BTCUSDT", side="BUY",
+            position_side="LONG", order_type="MARKET", purpose="ENTRY",
+            qty=0.010, price=None, reduce_only=False, endpoint="/fapi/v1/order",
+            request={}, command_kind="STANDARD", qty_text="0.010")
+        db.conn.commit()
+        for member in ("agent_trader.sqlite", "agent_trader.sqlite-wal"):
+            shutil.copy2(data / member, saved / member)
+    db.conn.commit()
+    db.close()
+    if saved is not None:
+        for member in ("agent_trader.sqlite", "agent_trader.sqlite-wal"):
+            shutil.copy2(saved / member, data / member)
+
+    for state_name, payload in {
+        "capital_state.json": {"mode": "paper"},
+        "channel_state.json": {"date": "2026-09-20"},
+        "control_state.json": {"state": "normal"},
+        "account_risk_state.json": {"anchor_id": "paper:u13fu2"},
+    }.items():
+        (data / state_name).write_text(json.dumps(payload), encoding="utf-8")
+
+    now_ms = int(time.time() * 1000)
+    RecoveryGate.load(data / "ops" / "recovery_gate.json").require_reconcile(
+        epoch_id="verify-epoch", account_ref="", runtime_instance_id="")
+    RecoveryGate.load(data / "ops" / "recovery_gate.json").complete_reconcile(
+        {"observed_at_ms": now_ms, "positions_verified": True,
+         "open_orders_verified": True}, now_ms=now_ms)
+    return iso
+
+
+def _drive_service(iso: Path, tree: Path, settings_cls: object,
+                   service_cls: object) -> dict:
+    """在隔离状态根上真的构造一次 ``TradingService`` 并驱动两条路径。"""
+    import os
+
+    import yaml
+
+    os.environ["EXECUTION_MODE"] = "paper"
+    os.environ.pop("MTA_STATE_ROOT", None)
+    os.environ.pop("MTA_DATA_ROOT", None)
+    settings = settings_cls(
+        tree,
+        yaml.safe_load((tree / "config/settings.yaml").read_text(encoding="utf-8")),
+        yaml.safe_load((tree / "config/agents.yaml").read_text(encoding="utf-8")),
+        yaml.safe_load((tree / "config/risk_learning.yaml").read_text(encoding="utf-8")),
+    )
+    settings.project_root = iso
+
+    calls: list[object] = []
+    original = RecoveryGate.before_entry
+
+    def spy(self, *args, **kwargs):  # noqa: ANN001
+        calls.append(kwargs.get("facts"))
+        return original(self, *args, **kwargs)
+
+    RecoveryGate.before_entry = spy
+    try:
+        service = service_cls(settings)
+    finally:
+        RecoveryGate.before_entry = original
+    startup_bare = sum(1 for facts in calls if facts is None)
+    startup_injected = [facts for facts in calls if facts is not None]
+
+    calls.clear()
+    RecoveryGate.before_entry = spy
+    try:
+        set_result = service.set_control("normal")
+    finally:
+        RecoveryGate.before_entry = original
+    set_bare = sum(1 for facts in calls if facts is None)
+    set_injected = [facts for facts in calls if facts is not None]
+    try:
+        service.close()
+    except Exception:  # pragma: no cover - 清理失败不影响判定
+        pass
+    return {"control": service.control.state,
+            "gate_allowed": service._entry_readiness_facts.get("recovery_gate_allowed"),
+            "startup_bare": startup_bare, "startup_injected": startup_injected,
+            "set_result": set_result, "set_bare": set_bare,
+            "set_injected": set_injected}
+
+
+def check_n2_service_paths(tmp: Path) -> None:
+    """N2：服务启动与 ``set_control`` 两条路径都注入账本事实（U13-FU2）。"""
+    print("\n[N2] service 启动 / set_control 注入账本事实（U13-FU2）")
+    try:
+        from core.config_loader import Settings
+        from core.service import TradingService
+    except ImportError as exc:  # pragma: no cover
+        check("N2 段可导入 Settings/TradingService", False, str(exc))
+        return
+    for name, dirty in (("dirty_wal", True), ("clean", False)):
+        try:
+            iso = _build_service_root(tmp, name, dirty=dirty)
+            observed = _drive_service(iso, ROOT, Settings, TradingService)
+        except Exception as exc:
+            check(f"[{name}] 隔离服务可构造并驱动（paper/离线）", False,
+                  f"{type(exc).__name__}: {exc}")
+            continue
+        print(f"  [{name}] control={observed['control']} "
+              f"gate_allowed={observed['gate_allowed']} "
+              f"startup_bare={observed['startup_bare']} "
+              f"startup_injected={observed['startup_injected']} "
+              f"set_control_bare={observed['set_bare']} "
+              f"set_control_injected={observed['set_injected']} "
+              f"set_control={observed['set_result']}")
+        check(f"[{name}] 启动路径注入账本事实（无裸 before_entry 调用）",
+              observed["startup_bare"] == 0 and bool(observed["startup_injected"]),
+              f"bare={observed['startup_bare']} injected={observed['startup_injected']}")
+        check(f"[{name}] set_control 路径注入账本事实",
+              observed["set_bare"] == 0 and bool(observed["set_injected"]),
+              f"bare={observed['set_bare']} injected={observed['set_injected']}")
+        if dirty:
+            check("[dirty_wal] 账本有未收口 ENTRY → 启动收紧为 close_only 且门禁判定阻断",
+                  observed["control"] == "close_only"
+                  and observed["gate_allowed"] is False,
+                  f"control={observed['control']} allowed={observed['gate_allowed']}")
+            check("[dirty_wal] set_control('normal') 被门禁拒绝",
+                  observed["set_result"].get("ok") is False
+                  and "recovery gate blocked" in str(observed["set_result"].get("error")),
+                  str(observed["set_result"]))
+        else:
+            check("[clean] 账本干净 → 启动不被误伤（控制状态保持 normal）",
+                  observed["control"] == "normal", observed["control"])
+            check("[clean] 账本干净 → set_control('normal') 成功",
+                  observed["set_result"].get("ok") is True, str(observed["set_result"]))
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="u13f1-gate-"))
     print(f"U13-FU1 verify tmp = {tmp}")
@@ -386,9 +612,11 @@ def main() -> int:
         check_p1_1_and_p1_2(tmp)
         check_p1_3(tmp)
         check_p1_4(tmp)
+        check_n1_bare_ledger_failclosed(tmp)
+        check_n2_service_paths(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print(f"\nU13-FU1 RECOVERY GATE: {PASS} 通过 / {len(FAIL)} 失败")
+    print(f"\nU13-FU1/U13-FU2 RECOVERY GATE: {PASS} 通过 / {len(FAIL)} 失败")
     for name in FAIL:
         print(f"  FAILED: {name}")
     for text in NOTES:
