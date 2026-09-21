@@ -1091,8 +1091,10 @@ def exclusive_file_lock(path: str | Path, *, timeout_s: float = DEFAULT_LOCK_TIM
     locked = False
     try:
         if msvcrt is not None:  # pragma: no cover - Windows
-            if os.fstat(fd).st_size == 0:
-                os.write(fd, b"\0")
+            # **不要**往锁文件里写字节：先把文件撑到 1 字节再抢锁的写法本身有竞态
+            # （A 已锁住字节 0，B 在 size==0 的窗口里写同一字节 → PermissionError，
+            # 实测在统一离线回归的并发用例里稳定命中）。Windows 允许锁定越过 EOF
+            # 的字节区间，所以直接锁空文件的字节 0。
             deadline = time.monotonic() + float(timeout_s)
             while True:
                 try:

@@ -278,7 +278,6 @@ def test_cross_process_consumption() -> None:
     修复后：恰好 1 个 CONSUMED，其余 ALREADY_CONSUMED。
     """
     import multiprocessing as mp
-    import os
 
     src_dir = str(ROOT / "src")
     with tempfile.TemporaryDirectory(prefix="mta-u08-xproc-") as tmp:
