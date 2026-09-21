@@ -24,7 +24,10 @@ from core.contracts import (  # noqa: E402
     hash_effective_config,
     hash_strategy,
 )
-from core.contracts.common import sensitive_paths  # noqa: E402
+from core.contracts.common import (  # noqa: E402
+    SENSITIVE_KEY_MARKERS,
+    sensitive_paths,
+)
 from core.runtime_identity import (  # noqa: E402
     ACCOUNT_REF_LOCAL_FALLBACK,
     ACCOUNT_REF_UNPROVEN,
@@ -1456,6 +1459,129 @@ def check_environment_state_root_interface() -> None:
               "demo", "data", profile="demo", project_root="C:/repo"))
 
 
+# --------------------------------------------------------------------------
+# 27. U12-BUILD-F1：工件路径的**文件名**守卫必须与 K01 键名口径分离
+# --------------------------------------------------------------------------
+
+#: 名字里**含 K01 键名标记**但显然是普通代码模块的文件（不得被误杀）。
+#: 注意：这里只放**不含凭据容器词**的名字。``secret`` 是 K01 标记之外**同时**属于
+#: 凭据容器词的宽标记，``secretary_roster.py`` 因含子串 ``secret`` 被保守拒绝 ——
+#: 这是**有意**的 fail-closed 残差（见用例 ⑧），真实 ``src/`` 树无此类文件。
+_CODE_MODULE_NAMES = (
+    "src/core/management_authorization.py",   # 命中 "authorization"（U02 交付物）
+    "src/core/token_bucket.py",               # 命中 "token"
+    "src/core/authorization_gate.py",         # 命中 "authorization"
+    "src/core/keyboard_shortcuts.py",         # 命中 "key"
+    "src/core/monkey_patch.py",               # 命中 "key"
+)
+#: 应当**继续被拒**的凭据文件形态（反向证据；不得因本条修成空转）。
+_CREDENTIAL_FILE_NAMES = (
+    ".env",
+    ".env.local",
+    "config/.env.production",
+    "credentials.json",
+    "id_rsa",
+    "id_rsa.pub",
+    "api_secret.pem",
+    "secrets.yaml",
+    "server.key",
+    "cert.p12",
+    "app.keystore",
+    "db_password.txt",
+    "tls/private_key.pem",
+    "auth/passwd",
+    "src/api_key_store.py",  # 既有用例，必须继续成立
+)
+
+
+def check_artifact_filename_guard_is_separate() -> None:
+    """U12-BUILD-F1：真实根不变式 + 反向证据（两态可跑）。
+
+    缺陷：``_safe_artifact_name`` 曾拿 **K01 键名标记表**
+    （``SENSITIVE_KEY_MARKERS``，含 ``"authorization"``/``"key"``/``"token"`` 等宽标记）
+    对**文件名**做子串匹配 → ``src/core/management_authorization.py``（普通**代码模块**）
+    被误判为凭据文件 → 真实 ``src/**/*.py`` 默认扫描**恒失败** → 身份采集降级
+    ``IDENTITY_COLLECT_FAILED`` → 身份三字段全空 → ``release_readiness`` 不可能 GO。
+
+    修法：文件名改走**独立**的文件名口径（只拒凭据容器词/后缀/``.env``·SSH 私钥前缀），
+    键名口径（``is_sensitive_name``）不动。本用例同时钉住**两态**：
+    普通代码模块必须被接受、凭据文件必须仍被拒绝。
+    """
+    # ① 合成根（确定性）：默认扫描必须接受命中键名标记的**代码模块**
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = make_root(Path(raw))
+        for rel in ("src/core/management_authorization.py", "src/core/token_bucket.py",
+                    "src/core/keyboard_shortcuts.py"):
+            target = tmp / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+        try:
+            scanned = collect_artifact_files(tmp)
+        except BaseException as exc:  # noqa: BLE001 - 两态都不得崩
+            check("合成根默认扫描接受命中键名标记的代码模块", False,
+                  f"{type(exc).__name__}: {exc}")
+        else:
+            check("合成根默认扫描接受命中键名标记的代码模块",
+                  {"src/core/management_authorization.py", "src/core/token_bucket.py",
+                   "src/core/keyboard_shortcuts.py",
+                   "src/app.py"} <= set(scanned), str(sorted(scanned)))
+
+        # ② 合成根反向：同一条路径上的凭据文件名仍被拒
+        (tmp / ".env").write_text("SENSENOVA_API_KEY=x\n", encoding="utf-8")
+        (tmp / "credentials.json").write_text("{}\n", encoding="utf-8")
+        expect_raises("合成根 .env 仍被拒", (CredentialLeakError,),
+                      collect_artifact_files, tmp, relatives=[".env"])
+        expect_raises("合成根 credentials.json 仍被拒", (CredentialLeakError,),
+                      collect_artifact_files, tmp, relatives=["credentials.json"])
+
+    # ③ 真实项目根不变式（U12 §[8] 的对应项）：默认扫描不得抛错，且必须含 U02 模块
+    real: dict[str, str] | None = None
+    try:
+        real = collect_artifact_files(ROOT)
+    except BaseException as exc:  # noqa: BLE001 - 两态都不得崩
+        check("真实根默认工件扫描不抛错", False, f"{type(exc).__name__}: {exc}")
+    else:
+        check("真实根默认工件扫描不抛错", True)
+    if real is not None:
+        check("真实根工件集合包含 src/core/management_authorization.py",
+              "src/core/management_authorization.py" in real)
+        check("真实根工件集合非空且全部在 src/ 下",
+              bool(real) and all(name.startswith("src/") for name in real),
+              f"n={len(real)}")
+
+    # ④ 反向证据：凭据文件形态**仍然**被拒（逐条实测，不得空转）
+    for name in _CREDENTIAL_FILE_NAMES:
+        expect_raises(f"凭据文件名仍被拒 {name}", (CredentialLeakError,),
+                      collect_artifact_files, ROOT, relatives=[name])
+
+    # ⑤ 反向证据：普通代码模块**不得**再被文件名守卫误杀
+    for name in _CODE_MODULE_NAMES:
+        try:
+            collect_artifact_files(ROOT, relatives=[name])
+        except BaseException as exc:  # noqa: BLE001
+            check(f"普通代码模块未被误杀 {name}", False, f"{type(exc).__name__}: {exc}")
+        else:
+            check(f"普通代码模块未被误杀 {name}", True)
+
+    # ⑥ 键名口径**未被削弱**：敏感字段名仍被 K01 守卫拒绝（本地图仍生效）
+    check("K01 键名守卫未削弱（authorization/api_key/key 仍是敏感键名）",
+          sensitive_paths({"authorization": "x"}) == ["authorization"]
+          and sensitive_paths({"api_key": "x"}) == ["api_key"]
+          and sensitive_paths({"nested": {"token": "x"}}) == ["nested.token"],
+          "sensitive_paths 行为改变 = 键名口径被削弱")
+
+    # ⑦ 键名标记表仍被文件名路径之外的真实消费者使用
+    check("SENSITIVE_KEY_MARKERS 仍含 authorization（冻结契约未改）",
+          "authorization" in SENSITIVE_KEY_MARKERS)
+
+    # ⑧ 已登记的**保守**残差：``secret`` 同时是凭据容器词，含该子串的文件名一律拒绝
+    #    （``secretary_roster.py`` 亦被拒）。方向 fail-closed，且真实 ``src/`` 树无此名。
+    #    修它需要"整词匹配"，会放过 ``mysecret.txt`` 这类真凭据名 —— 属削弱防护，不做。
+    expect_raises("保守残差：含 secret 子串的文件名被拒（fail-closed）",
+                  (CredentialLeakError,),
+                  collect_artifact_files, ROOT, relatives=["src/core/secretary_roster.py"])
+
+
 def main() -> int:
     check_identity_inputs_change_hash()
     check_config_sources_enter_identity()
@@ -1484,6 +1610,7 @@ def main() -> int:
     check_coverage_fail_closed()
     check_environment_state_root_interface()
     check_fingerprint_disposition_registered()
+    check_artifact_filename_guard_is_separate()
     if FAILURES:
         print(f"\nU15 RUNTIME IDENTITY ACCEPTANCE FAILED: {len(FAILURES)} -> "
               + ", ".join(FAILURES))
