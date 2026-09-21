@@ -1,0 +1,21 @@
+diff --git a/scripts/run_web.py b/scripts/run_web.py
+index b3927cc..100f90b 100644
+--- a/scripts/run_web.py
++++ b/scripts/run_web.py
+@@ -81,8 +81,16 @@ def run_web_app(
+     paths = getattr(settings, "runtime_paths", None)
+     if paths is not None:
+         print(f"state: base={paths.state_base} declared={paths.state_base_declared} "
++              f"explicit={paths.state_base_explicit} "
+               f"profile={paths.profile or 'legacy'} "
+               f"shared_egress={paths.shared_egress_root} lock={paths.lock_file.name}")
++        # U13-FU1/P1-4：未声明状态根时把漂移**报告**出来。默认（旧布局）部署仍
++        # 可启动，但运维必须看得见"换一个代码目录就会换锁、换运行代"这一事实。
++        drift = paths.state_root_drift()
++        if drift["code"]:
++            print(f"  WARNING state_root_drift code={drift['code']} "
++                  f"lock_follows_code_root={drift['lock_follows_code_root']} "
++                  f"remediation={drift['remediation']}")
+     service = TradingService(settings)
+     if not no_autostart:
+         interval = interval_minutes or float(

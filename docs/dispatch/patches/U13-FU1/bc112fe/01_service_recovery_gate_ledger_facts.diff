@@ -1,0 +1,56 @@
+diff --git a/src/core/service.py b/src/core/service.py
+index d93e53e..d0c7317 100644
+--- a/src/core/service.py
++++ b/src/core/service.py
+@@ -881,18 +881,27 @@ class TradingService:
+             return bool(row["matched"])
+         return bool(row["matched"] or row["initialized"])
+ 
+-    def _recovery_gate_facts(self) -> dict[str, Any]:
++    def _recovery_gate_facts(self, ledger_facts: dict[str, Any] | None = None
++                             ) -> dict[str, Any]:
+         """把恢复门禁的判定做成开仓事实（U13/F14 接线）。
+ 
+         **存在性触发**：键存在即参与判定（``evaluate_entry_readiness`` 会把
+         ``recovery_gate_reason_codes`` 并入 ``blocking_reasons``），因此"恢复后
+         先对账再开仓"在执行层生效，而不是只靠控制面状态间接兜底。
++
++        U13-FU1/P1-3：``ledger_facts`` 是本进程**已经采集到的**账本事实
++        （``order_outbox.status()``）。门禁在 ``before_entry`` 读取时用它复验
++        "未收口 ENTRY 单是否真的清完了"，因此生产热循环不必再打开一次账本，
++        也不会被活动 WAL 库的只读快照语义影响。
+         """
+         gate = getattr(self, "recovery_gate", None)
+         if gate is None:
+             return {}
+         try:
+-            decision = gate.before_entry()
++            try:
++                decision = gate.before_entry(facts=ledger_facts)
++            except TypeError:  # 门禁尚未支持 facts 注入（补丁未合入）
++                decision = gate.before_entry()
+         except Exception as exc:  # 门禁读盘异常 = 不可证明 → 阻断，不放行
+             return {"recovery_gate_allowed": False,
+                     "recovery_gate_reason_codes": ["RECOVERY_GATE_UNPROVEN"],
+@@ -914,7 +923,6 @@ class TradingService:
+             "environment": environment,
+             "runtime_instance_id": self.runtime_instance_id,
+         })
+-        facts.update(self._recovery_gate_facts())
+         market_rate = rate_limit_status()
+         data_window = market_rate.get("data_endpoint_window") or {}
+         try:
+@@ -939,6 +947,13 @@ class TradingService:
+             except Exception:
+                 facts["unknown_orders"] = 1
+                 facts["submitting_orders"] = 1
++        # U13-FU1/P1-3：门禁判定必须用**同一批**刚采集到的账本事实复验，
++        # 因此这一次注入放在 outbox 读取之后（读取失败时上面的 1/1 也会照原样
++        # 注入 → 门禁维持阻断，fail-closed 与就绪链一致）。
++        facts.update(self._recovery_gate_facts({
++            "unknown_orders": int(facts.get("unknown_orders", 0) or 0),
++            "submitting_orders": int(facts.get("submitting_orders", 0) or 0),
++        }))
+         if environment == "paper":
+             # PaperBroker 没有交易所镜像，自己的持久化账本就是已验证事实。
+             facts["order_mirror_ok"] = True
