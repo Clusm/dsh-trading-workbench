@@ -1892,7 +1892,7 @@
       "title": "策略漏斗与管理责任展示",
       "owner_role": "C",
       "actual_assignee": "U08 作者会话",
-      "status": "CHANGES_REQUESTED",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -2081,6 +2081,25 @@
           ],
           "rollback": "git revert 08ca75d 9195782；或回用 0c131f2/（会重新引入 N6）",
           "unfinished": "无"
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "08ca75d",
+          "verdict": "Q r5 PASS-with-notes",
+          "code_identity": "git diff 08ca75d HEAD -- src/core/strategy_funnel.py tests/integration/test_strategy_funnel.py scripts/smoke_u08_strategy_funnel.py docs/策略扫描原因码.md = 空（0 行）",
+          "merge": "git merge --no-edit task/U08 @ 37716d6",
+          "patches": "docs/dispatch/patches/U08/9195782/ 5 个补丁先 --check 5/5 OK 再 apply 5/5 OK；05 承载 SCRIPTS 登记",
+          "integration_commit": "17b1d6f",
+          "i_registration": "SMOKE MANIFEST OK included=80 excluded=1",
+          "tests": "test_strategy_funnel **208/0**；smoke_u08_strategy_funnel **91/0**；smoke_contracts_v3 173/0；check_quality **QUALITY CHECK OK files=290 untracked=0**、SECRET SCAN OK files=554",
+          "offline_regression": "**OFFLINE REGRESSION OK scripts=84**（rc=0，零失败行；pristine 基线 83 → 84，新增脚本 1 个、**NEW_FAIL=∅**）",
+          "r5_verification": "N6 **真闭合**（3 异常 × 4 路径 = 12 条前后对照全部 ESCAPED→NO_ESCAPE；写盘失败真回滚内存 mem_consumed=false/disk_consumed=false；孤儿落盘可审计；异常名进 note；KeyboardInterrupt/SystemExit 仍穿出）；N7 真修（实测 exec-<iso>）；release() 返回 True 登记属实且 fail-closed（不重复消费/重复发射，只多占死）；补丁 15/15 可应用无 Skipped；门禁全绿；抽样 7/7",
+          "new_p2_n10": "**N10（P2 · fail-closed · 登记不完整）**：release() 落盘失败返回 True 后，**同一轮收尾 save() 会先 _reload_locked()，合并规则'盘上 consumed=True 而内存 False ⇒ 采纳盘上'把内存里的撤销覆盖回去**，盘上仍是已消费且已落盘；release_count=0（登记所称'留痕已生效'为否）；strategy_trader.py:331-336 那条 '账本释放未完成' 的 except 分支成为**死代码**（release 不抛异常）。方向 fail-closed（占死 ≠ 重复下单），故不升级为阻塞。**须更正**：§七 机制描述'落盘留给下一次成功写入'实为'被下一次成功写入丢弃'；执行器侧 note 应改为'release 返回 True 但盘上仍为已消费'的真实提示。",
+          "residual_for_u12": [
+            "graph.py 整轮聚合接线未做 -> classify_cycle/reason_from_source_errors/round_explanation 生产可达性仍为 0（只被测试调用）",
+            "真实宿主多实例并发、DB 侧勾稽权威性、浏览器渲染未验证",
+            "N10 更正（登记文字 + 死代码分支）"
+          ]
         }
       ],
       "blockers": [],
@@ -2117,7 +2136,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "08ca75d",
       "review_assignments": [
         {
           "round": "r3",
@@ -2132,11 +2151,11 @@
         {
           "round": "r4",
           "stage": "修复复验",
-          "candidate": null,
+          "candidate": "fbef4e0",
           "sessions": [
             "U08 author (r3)"
           ],
-          "verdict": "CHANGES_REQUESTED（单点阻塞 N6）",
+          "verdict": "DELIVERED",
           "reports_dir": "docs/dispatch/reviews/U08/<r3head>/"
         },
         {
@@ -2152,12 +2171,12 @@
         {
           "round": "r5",
           "stage": "修复复验",
-          "candidate": null,
+          "candidate": "08ca75d",
           "sessions": [
             "U08 author (r4)"
           ],
-          "verdict": "PENDING",
-          "reports_dir": "docs/dispatch/reviews/U08/<r4head>/"
+          "verdict": "DELIVERED",
+          "reports_dir": "docs/dispatch/reviews/U08/08ca75d/"
         },
         {
           "round": "r5",
@@ -2166,7 +2185,7 @@
           "sessions": [
             "Q (reviews/U08/R5/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "PASS-with-notes",
           "reports_dir": "docs/dispatch/reviews/U08/08ca75d/"
         }
       ],
@@ -4017,11 +4036,45 @@
         "owner": "**U09**（硬前置）",
         "blocks": "U12 的 200 方向候选 / 30 闭合分母定义",
         "note": "实测：不加 source 过滤时，50 条 B + 50 条 C 影子样本使方向候选从 200 变 300（Δ+100）。U06a 已按职责只交事实并逐字披露（release_gate.note），未越权改 release_evidence.py，也未建第二套 GO。**U09 必须在定义分母前加 source 过滤**，否则影子样本会污染发布门禁。"
+      },
+      {
+        "id": "U08-R5-FU1",
+        "title": "release() 撤销被同轮成功 save() 丢弃（N10）；登记机制描述与代码不符",
+        "status": "OPEN",
+        "owner": "I/U12",
+        "blocks": "U08 的 §七 登记文字可信性；不阻断集成（fail-closed）",
+        "note": "Q r5 实测：release() 落盘失败返回 True 后，同轮收尾 ledger.save() 先 _reload_locked()，按'盘上 consumed=True 而内存 False ⇒ 采纳盘上'（strategy_funnel.py:1330-1336）把内存撤销覆盖，写下去的是 consumed=True。后果：该 ticket_id 占死到过期/prune，release_count=0，且 strategy_trader.py:331-336 的 '账本释放未完成' except 分支永不触发（死代码）。须更正 docs/dispatch/patches/U08/9195782/README.md §七 的机制描述（'留给下一次成功写入' → '被下一次成功写入丢弃'），并把执行器侧分支改为'release 返回 True 但盘上仍为已消费'的真实提示。"
+      },
+      {
+        "id": "U08-U12-WIRING",
+        "title": "U08 的整轮聚合接线归 U12（classify_cycle/round_explanation 生产可达性 0）",
+        "status": "OPEN",
+        "owner": "U12",
+        "blocks": "执行侧逐票原因与跨进程去重在生产上生效",
+        "note": "graph.py 未注入 funnel/ledger（grep 0 命中），round_explanation() 唯一调用方是作者自己的测试。U08 README §五 已如实改记'生产不可达（待 U12）'。"
       }
     ],
     "contract_candidate": "71f8109",
     "handover": "docs/dispatch/交接说明_2026-09-21.md",
-    "w1_status": "四线作者全部交付；U01/U03/U15 已初审并进入 r2；U04 初审已派发"
+    "w1_status": "四线作者全部交付；U01/U03/U15 已初审并进入 r2；U04 初审已派发",
+    "w2_status": {
+      "state": "COMPLETE",
+      "integrated": [
+        "U05",
+        "U13",
+        "U02",
+        "U06a",
+        "U14",
+        "U08",
+        "U10a"
+      ],
+      "gates": {
+        "offline_regression": "OFFLINE REGRESSION OK scripts=84",
+        "quality": "QUALITY CHECK OK files=290 untracked=0",
+        "contracts": "PASS 173 / FAIL 0 (golden 160)"
+      },
+      "note": "W2 共 7 个任务全部 INTEGRATED（W1 的 5 个亦已集成，累计 12/12 已派发任务）。U09/U12 属 W3，尚未开始。"
+    }
   },
   "dispatch_version": "v1.1",
   "increment_scope": [

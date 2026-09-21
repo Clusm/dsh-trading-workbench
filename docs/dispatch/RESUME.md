@@ -6,7 +6,7 @@
 
 ---
 
-更新时间：2026-09-21 02:05（北京时间）
+更新时间：2026-09-21 13:4x（北京时间）
 更新者：I（claude-code 编排会话，接自 opencode 交接）
 
 ## 1. 当前状态
@@ -16,7 +16,7 @@
 - 已验收候选：`71f8109`（Q r5 复验 PASS-with-notes；与 tag 的差异仅为 dispatch 文档，`src/core/contracts` 与 `docs/contracts` 逐字节相同）
 - 集成区分支：`integration/unattended-v3` @ `ffdab44`（契约冻结后又有 1 个台账提交 `4fdc6bf`）
 - 四个实现线 worktree **已创建**（均从 `ffdab44`）：`mat-wt/A`(task/U01)、`mat-wt/B`(task/U04)、`mat-wt/CD`(task/U03)、`mat-wt/EF`(task/U15)
-- 当前步骤：**W1 进行中**（U15 已交付并进入初审；U01/U04/U03 作者会话仍在运行）
+- 当前步骤：**W2 已完成（7/7）** → 下一步 **W3：U09**（W3 尚未开始）
 
 ### W1 进度（每轮更新）
 
@@ -38,13 +38,19 @@
 | B | U02 策略仓管理与有界退出 | `task/U02` | **✅ INTEGRATED** | A 初审 P0×1 → r2 闭 P0+P1（迁移方案升级为"可执行"）→ r3 闭 3 条 P2（`_consumed_ids` 事实判重 / `release()` 幂等 / `confirm_exit` 结算使声明成真）→ **Q r3 PASS-with-notes** → 集成：6 补丁在 U13/U05 集成后**仍 6/6 干净应用**、登记冒烟（MANIFEST OK 76）、158/0、**check_quality OK files=280**、**OFFLINE REGRESSION OK scripts=80**。**残余（重要）**：`_consumed_ids` 是**纯内存 set** → "已消费不可重发"**仅在进程内成立**，重启后同 `exit_key` 会再次 `SUBMIT_REDUCE`（已登记 P2-9） |
 | CD | U06a 影子最小隔离与口径修正 | `task/U06a` | **✅ INTEGRATED** | 初审硬结论：**影子样本确实会进发布门槛**（200→300）→ 登记为 **U09 硬前置**（`S08-SHADOW-GATE-LEAK`）。r2 修 P2-1（陈旧当新值）/P2-2（披露渲染）→ **Q r3 PASS-with-notes**（两项真闭合、13/13；漂移测试非空转；边界 11 全 A/0 M、共享文件与 `release_evidence.py` 逐文件 SAME）→ 集成：3 补丁、登记冒烟（77）、264/0、**check_quality OK files=283**、**OFFLINE REGRESSION OK scripts=81** |
 | EF | U14 外部告警送达与主机失联 | `task/U14` | **✅ INTEGRATED** | r3 闭 **P1-4**（单条隔离改为对任意异常 fail-closed；三向量 + 兜底桶全收敛，`KeyboardInterrupt` 仍穿出，`_isolate_failure` 用 SQLite 触发器验证）→ **Q r4 PASS-with-notes**（七行混合批无早退；全模块仅 4 处 `except Exception`；delta 四树全 ∅）→ 集成：4 补丁、登记冒烟（78）、262/0、**check_quality OK files=286**、**OFFLINE REGRESSION OK scripts=82**。**残余（须传达 U12）**：`AlertQueue` **无生产消费者** → 门禁全绿 ≠ 无人值守告警可用；兜底桶把新 bug 表现为"该条持续退避"而非崩溃 → 接线须监控 `errors`（且 `PERSIST_FAILED` **不在** `errors`，有计数盲区） |
-| CD | U08 策略漏斗与管理责任展示 | `task/U08` | **r4 修复完成 → r5 复验中** | r4 修 **N6**：三异常（OSError/PermissionError/sqlite3.OperationalError）x 四路径 = 12 条，**前后全部 ESCAPED -> 全部 NO_ESCAPE**；其中 **`ledger.consume()` 写盘失败回滚内存**（`mem_consumed=false`/`disk_consumed=false`，不留脏"已消费"）、孤儿落盘可审计、异常名进 note（诊断未丢）；**`KeyboardInterrupt`/`SystemExit` 仍穿出**（两态一致）。N7 已修（`exec-<iso>`）。补丁 `9195782/` 对集成 HEAD `1a412440` **三配置 15/15 `--check` OK**（无 Skipped）；delta `83->84`、`NEW_FAIL=[]`（167 次执行全 rc=0）；harness **OK scripts=84**；test 135/0→208/0、smoke 58/0→91/0；**check_quality OK files=290**。**登记残余**：`release()` 落盘失败仍返回 True（盘上可能短暂仍记已消费）|
+| CD | U08 策略漏斗与管理责任展示 | `task/U08` | **✅ INTEGRATED** | r4 修 **N6**：三异常（OSError/PermissionError/sqlite3.OperationalError）x 四路径 = 12 条，**前后全部 ESCAPED -> 全部 NO_ESCAPE**；其中 **`ledger.consume()` 写盘失败回滚内存**（`mem_consumed=false`/`disk_consumed=false`，不留脏"已消费"）、孤儿落盘可审计、异常名进 note（诊断未丢）；**`KeyboardInterrupt`/`SystemExit` 仍穿出**（两态一致）。N7 已修（`exec-<iso>`）。补丁 `9195782/` 对集成 HEAD `1a412440` **三配置 15/15 `--check` OK**（无 Skipped）；delta `83->84`、`NEW_FAIL=[]`（167 次执行全 rc=0）；harness **OK scripts=84**；test 135/0→208/0、smoke 58/0→91/0；**check_quality OK files=290**。**登记残余**：`release()` 落盘失败仍返回 True（盘上可能短暂仍记已消费）|
 | EF | U10a 可运行发布包与运维说明 | `task/U10a` | **✅ INTEGRATED** | r2 修 3 条 P2 -> **Q r3 PASS-with-notes**（9 类变异硬失败且点名、**反向不误杀**：正常仓库 exit 0/216 成员；fence 门禁双向非空转；台账在包内且自检如实列出、移出即 5 条断链；**claim ② 承载它的 2 处均已更正**）-> 集成：4 补丁（旧目录已由作者移除）、登记冒烟（79）、smoke_u10a 37/0、**check_quality OK files=287**、**OFFLINE REGRESSION OK scripts=83**。**P3-7 附录 A 的 C1–C14 已可逐条核对**（补救上轮"无法 1:1 核对"）。**新 5 条 P3 已登记**，其中 N5：P3-10 未处理且交付物内无登记（需 U12/U15 归属） |
 
-**W2 门禁状态：两个 RC 门禁持续全绿** —— `OFFLINE REGRESSION OK scripts=82`、`check_quality QUALITY CHECK OK files=286`。
+**W2 门禁状态：两个 RC 门禁持续全绿** —— `OFFLINE REGRESSION OK scripts=84`、`check_quality QUALITY CHECK OK files=290`。
+
+**U08 集成落点**：`37716d6`（merge 已验证 head `08ca75d`，代码逐字节一致，`git diff 08ca75d HEAD` 为空）→ `17b1d6f`（应用 `9195782/` 5 补丁，05 承载 SCRIPTS 登记）。两态实测：`SMOKE MANIFEST OK included=80`、test 208/0、smoke 91/0、契约 173/0、quality files=290、`OFFLINE REGRESSION OK scripts=84`（**NEW_FAIL=∅**）。
+**U08 r5 复验（Q）= PASS-with-notes**：N6 真闭合（3 异常 × 4 路径 12 条全部 `ESCAPED→NO_ESCAPE`，写盘失败真回滚内存、孤儿可审计、`KeyboardInterrupt` 仍穿出）；N7 真修。**新登记 `U08-R5-FU1`（N10，P2，fail-closed）**：`release()` 撤销会被**同轮收尾 `save()` 的 `_reload_locked()` 合并规则覆盖**（盘上 `consumed=True` 而内存 `False ⇒ 采纳盘上`），导致撤销静默丢弃、`release_count=0`、执行器侧"账本释放未完成"分支成**死代码**；须更正 README §七 的机制描述与那条不可达分支。**`U08-U12-WIRING`**：`graph.py` 未注入 funnel/ledger，`round_explanation()` 生产可达性 0。
 达成路径：U13 修好 KI02（解释器解析层）→ 官方单命令回归不再中止；KI04 给密钥扫描器加**范围豁免**（仅审查报告与台账，代码/config 照扫）；清理 U04 补丁引入的 4 个 lint；修正扫描器自测的登记数断言；I 自身在 RESUME 里留下的 KI01 式字面量也已改写。
 
-**集成进度：11 已 INTEGRATED（U00–U06a、U10a、U13–U15）+ 仅 U08 待收尾；U09/U12（W3）尚未开始**（U00 · U01 · U02 · U03 · U04 · U05 · U06a · U13 · U14 · U15）。**剩余**：U08（作者进行中）、U10a（作者进行中）、U09、U12（W3，尚未开始）。
+**集成进度：12 已 INTEGRATED** —— U00 · U01 · U02 · U03 · U04 · U05 · U06a · U08 · U10a · U13 · U14 · U15（**W1 5/5 + W2 7/7 全部集成**）。**剩余**：U09、U12（W3，尚未开始）；W4 结构性不可在窗口内完成（7 天观察窗）。
+
+**W2 出口状态：✅ 完成** —— U05/U13/U02/U06a/U14/U08/U10a 全部 INTEGRATED。累计 12/12 已派发任务。
+**U09 已解除前置阻塞**：U08 集成后 `S08-SHADOW-GATE-LEAK` 的处置方（U09）就绪；U09 定义方向候选分母前**必须**先给 `release_evidence.py` 加 `source` 过滤。
 
 **W2 派发已内联 W1 的 7 条血教训**（见 §「复验范围经验」与 §「派发新任务时的强制要求」）：两态可跑的测试、迁移版本推进必须带伴随补丁并给 delta、禁止 SKIP/直接注入内部字段、共享适配必须交付 diff 文件、冒烟须登记、增量提交、自证 pristine delta。
 
@@ -117,31 +123,27 @@
     - 附带发现：该会话的 Bash **无法把命令行里字面写出的中文路径透传给子进程**（`ls`/`python -c` 报 No such file or directory），它改用 `$(cd <glob>/mat-wt && pwd)` 动态取值绕过。派发时若涉及中文路径，宜让作者/复验者用动态取值而非字面量。
 
 > **判定规则（按序判断，避免重复派发）：**
-> 1. 若 `mat-wt/A|B|CD|EF` 四个 worktree 尚未创建 → 走 §2 步骤 1
-> 2. 若某 worktree 的 `task/U01|U04|U03|U15` 上**无作者提交**，且**确实没有**该线作者会话在运行 → 作者会话已中断 → 走 §5 恢复流程，**不要**重新派发整条线
-> 3. 若某任务已有作者提交但 `docs/dispatch/reviews/<ID>/<candidate>/` 下无对应审查报告，且无审查会话在运行 → 审查会话中断 → 重新派发**审查**（不是作者）
-> 4. 若作者会话**仍在运行** → 本回合**什么也不要做**，直接结束（避免并发重复劳动）
+> 1. W1/W2 已收口（12/12 INTEGRATED）。**当前应做的是 §2 步骤 1：派发 W3 的 U09**。
+> 2. 若 `task/U09` 上**已有作者提交**但 `docs/dispatch/reviews/U09/<candidate>/` 下无对应审查报告，且无审查会话在运行 → 审查会话中断 → 重新派发**审查**（不是作者）
+> 3. 若 U09 的 `task/U09` 上**无作者提交**，且**确实没有** U09 作者会话在运行 → 作者会话已中断 → 走 §5 恢复流程
+> 4. 若 U09 作者/审查会话**仍在运行** → 本回合**什么也不要做**，直接结束（避免并发重复劳动）
+> 5. 若 U09 已 INTEGRATED → 进入 U12 BUILD（注意 D01/D02 未决则 U12 的宿主/渠道验收不可做，其余离线部分照做）
 >
 > 判断"是否仍在运行"：看 worktree 内 `git log`/`git status` 是否仍在变化，而不是凭 RESUME 的文字。
 
 ## 2. next_action（按顺序）
 
-1. **建实现线 worktree**（从 contract_commit；若目录已存在则停止核对，禁止强制覆盖）：
-   ```bash
-   R="C:/Users/Tao/Desktop/币安/multi-agent-trader"; C=ffdab443cae45c1451b5cc13b24e3e73c22038ff
-   git -C "$R" worktree add ../mat-wt/A  -b task/U01 $C
-   git -C "$R" worktree add ../mat-wt/B  -b task/U04 $C
-   git -C "$R" worktree add ../mat-wt/CD -b task/U03 $C
-   git -C "$R" worktree add ../mat-wt/EF -b task/U15 $C
-   ```
-2. **W1 派发**（手册 §4 统一模板 + 角色卡 + 任务卡 + JSON 条目）：
-   - A 线 U01（作者 A；审查 B、Q）
-   - B 线 U04（作者 B；审查 A、Q）
-   - CD 线 U03（作者 C；审查 D、B、Q）
-   - EF 线 U15（作者 F；审查 E、B、C、Q）
-3. 每条线作者交付后：派发交叉审查 → 修 CHANGES_REQUESTED → Q 独立验收 → I 组候选并 ff 晋级 → 标 INTEGRATED
-4. W2：B 线 →U02；CD 线 →U05→U06a→U08；EF 线 →U13/U14→U10a；I 按依赖就绪队列集成
-5. W3：U09 → U12 BUILD；隔离恢复演练（F14/F18）；Q 全量 F01–F25 矩阵
+> **W0 / W1 / W2 均已完成**（W1 5/5、W2 7/7 全部 INTEGRATED）。以下为 W3 起点。
+
+1. **W3 第一步：派发 U09**（发布门禁口径与影子隔离收口；作者 C 或 D，审查 A/B + Q）。
+   派发前必读：`S08-SHADOW-GATE-LEAK`（**硬前置**：`release_evidence.py` 未按 `source` 过滤，50+50 影子样本使方向候选 200→300）。
+   - `task_base_commit` 取**当时已审核的集成 HEAD**（`17b1d6f` 或其后），并在提示词写明该 base 已含哪些任务（W1 5 个 + W2 7 个）。
+   - 提示词内联约束：只读契约实现与目标源文件；**必须**交付完整 unified diff 到 `docs/dispatch/patches/U09/<head>/`；**尽早写代码、尽早提交**；测试两态可跑、不硬编码迁移版本集合、冒烟须登记。
+2. **U09 集成后 → U12 BUILD**：RC 集成、故障矩阵（F01–F25）、隔离恢复演练（F14/F18）、真实宿主/渠道验收（**依赖 D01/D02 决策**）。
+   U12 必须一并消费的跨任务挂账：`W1-JOINT-WIRING`（U03 接线 × U15 身份，解开开仓 fail-closed）、`U08-U12-WIRING`（graph.py 整轮聚合）、`U08-R5-FU1`（N10 更正）、`AlertQueue` 无生产消费者（监控 `errors`，注意 `PERSIST_FAILED` 不在其中）。
+3. **W4 不可在窗口内完成**（7 天挂钟观察窗、D01–D05 外部待决、实盘启用须用户另行授权）——须如实报告，**不得标记为通过**。
+
+**W1/W2 已完成动作（存档，勿重做）**：建 A/B/CD/EF 四个 worktree → W1 派发 U01/U04/U03/U15 → 交叉审查 → 修复轮 → Q 验收 → 集成；W2 派发 B线U02、CD线U05→U06a→U08、EF线U13/U14→U10a。
 
 合法集成顺序（JSON `dispatch.first_release_example_order`）：
 `U00 → U01 → U04 → U03 → U15 → U02 → U05 → U06a → U08 → U13 → U14 → U10a → U09 → U12`
