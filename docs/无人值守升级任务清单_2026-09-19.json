@@ -2017,6 +2017,33 @@
           ],
           "new_p3": "N4/N5 两条",
           "unfinished": "真实集成树合批回归、真实多实例、DB 侧勾稽权威性 —— 需 U12 或改 I 树"
+        },
+        {
+          "type": "author_fix_r3",
+          "head_commit": "fbef4e0",
+          "commits": [
+            "692bf81",
+            "0c131f2",
+            "e1b5070",
+            "08bb2f6",
+            "fbef4e0"
+          ],
+          "n3_fixed": "strategy_trader.py 收尾 ledger.save() 改为 except (LedgerLockTimeout, LedgerCorrupt)，本轮照常返回已构造 intents，并登记轮级故障 LEDGER_SAVE_DEFERRED。前后：修复前**异常穿出整个执行器**、decision 未返回、**本轮 intents 全部作废** -> 修复后无异常穿出，details={TICKET_LEDGER_UNAVAILABLE:1, LEDGER_SAVE_DEFERRED:1}、round_faults=[LEDGER_SAVE_DEFERRED]；注入 save 场景 decision=open intents=1 且盘上 orphan_consumed=['t-inj']（孤儿可审计）",
+          "n1_fixed": "scan() 先 _load_cards_or_fault() 再 _load_strategy_lab(cards)（后者不再自读卡册）。可达性：修复前 scan_exception=JSONDecodeError、round_faults=[STRATEGY_LAB_DRIFT] -> 修复后 scan_exception=''、round_faults=[CARDS_INVALID, NO_TICKETS_AVAILABLE]、verdict=blocked、primary_reason=VALIDATION_REJECTED；反例：真漂移仍记 STRATEGY_LAB_DRIFT",
+          "n2_fixed": "选 (b)：graph.py 无 funnel/ledger（grep 0 命中），README §五 第 3 行由'可达'改为**'生产不可达（待 U12）'**并写明理由与'不算本包已完成'",
+          "n4_fixed": "exec_round_id 在未注入漏斗时取 exec:<iso>；release 生效 release_count=1",
+          "n5_registered": "classify_no_open docstring/注释 + docs/策略扫描原因码.md §4 写明区分靠 verdict+round_faults；注册表未改",
+          "old_pkgs_superseded": "c147895/README.md 顶部 SUPERSEDED + 新增 SUPERSEDED.md；ec8fd1c/README.md 顶部 SUPERSEDED；目录命名口径写明'跟被投递内容的源提交，不跟创建目录的提交'",
+          "patches": "0c131f2/（基线 32ecf635）；**3 配置 x 5/5 --check OK**；交付后 HEAD 漂到 95360552（只动 docs/、5 目标 blob 未变）**已复验 5/5**；重放进沙箱后 5 文件与已验证树逐字节相同",
+          "delta": "base=83 / head=84 / added=[smoke_u08_strategy_funnel.py] / **NEW_FAIL=[] / 非零 rc=[]**",
+          "tests": "测试两态 127/0、187/0；冒烟两态 53/0、76/0；契约 173/0；沙箱 check_quality **OK files=290 untracked=3**（secret scan OK 525）",
+          "intentional_change": "**N1 有一处有意行为变化**：卡册损坏不再整轮中断（改为 CARDS_INVALID + 空卡册继续），已在 README §二.6 写明",
+          "known_limits": [
+            "graph.py 未接线 -> 执行侧逐票原因与跨进程去重生产上未生效（U12）",
+            "NO_TICKETS_AVAILABLE 主因字面仍是 NO_EDGE（N5，靠 verdict 区分）",
+            "_load_state() 损坏静默清去重记忆（未改，已登记）"
+          ],
+          "unfinished": "无（1-5 全部已修或已如实登记）；真实宿主多实例并发、DB 侧勾稽、浏览器渲染未验证（同 r2）"
         }
       ],
       "blockers": [],
@@ -2074,6 +2101,16 @@
           ],
           "verdict": "PENDING",
           "reports_dir": "docs/dispatch/reviews/U08/<r3head>/"
+        },
+        {
+          "round": "r4",
+          "stage": "修复复验",
+          "candidate": "fbef4e0",
+          "sessions": [
+            "Q (reviews/U08/R4/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U08/fbef4e0/"
         }
       ],
       "qa_runs": []
