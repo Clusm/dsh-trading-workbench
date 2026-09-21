@@ -1,0 +1,40 @@
+
+[4] fail-closed 负例（真实篡改，不是断言注入）
+  PASS  篡改已登记文件后自检失败（哈希不符）
+  PASS  包内出现未登记运行状态文件后自检失败
+  PASS  盘上出现未登记的禁止路径后 forbidden_paths_absent 报出（P3-5：覆盖 on_disk）
+  PASS  缺失必需策略卡后自检失败
+  PASS  新增相对断链后自检失败
+  PASS  已登记文件被写入明文凭据后自检报出凭据命中
+  PASS  存在未归类文件时构建失败（防漏包闸门）
+  PASS  source 包在 runtime 之上补齐 tests/CI（且仍排除 data/.env）
+  PASS  新增未登记的 scripts/ 入口 → 构建失败（禁止静默归类为 source-only）
+  PASS  runtime 启动入口改名后（落 source-only）→ 构建硬失败，不再静默出包
+
+[5] 共享适配（运行时行为探测；不以补丁是否已应用为前提）
+  FAIL  run_web.py --verify-package 非预期失败  rc=2 
+  PASS  发布包目录缺解释器时 fail-closed（不再回退到包外解释器）
+  PASS  开发检出行为不变（无清单时照旧回退）
+  PASS  显式 require_package_interpreter=False 可覆盖为外置解释器
+  PASS  包内存在配置声明的解释器时按 config 解析
+
+结果: 32 通过 / 5 失败
+备注: 沙箱已跟踪文件 657 个，release_id=rel-7c15e9f018a72dd6f61a；按 KI04 范围豁免未扫描（仓库扫描器登记一致）：['docs/无人值守升级任务清单_2026-09-19.json']
+  FAILED  解压目录自检 CLI 退出码 0
+  FAILED  自检报告 ok=true 且逐项通过
+  FAILED  所有相对文档链接可达（独立解析，39 篇 md）
+  FAILED  自检可重复运行（不在被测目录留下 __pycache__ 自我污染）
+  FAILED  run_web.py --verify-package 非预期失败
+Traceback (most recent call last):
+  File "C:\Users\Tao\Desktop\币安\mat-wt\W3-rc\scripts\run_offline_regression.py", line 184, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "C:\Users\Tao\Desktop\币安\mat-wt\W3-rc\scripts\run_offline_regression.py", line 177, in main
+    subprocess.run([sys.executable, script], cwd=PROJECT_ROOT,
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                   env=env, check=True)
+                   ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Tao\AppData\Local\Programs\Python\Python313\Lib\subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['C:\\Users\\Tao\\Desktop\\币安\\multi-agent-trader\\.venv\\Scripts\\python.exe', 'scripts/smoke_u10a_release_package.py']' returned non-zero exit status 1.
