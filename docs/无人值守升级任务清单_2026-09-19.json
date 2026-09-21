@@ -2532,6 +2532,28 @@
           "p1_4": "**P1-4（P1）**两种逃逸向量，后果与 F 原报 P1-1 **逐条相同**：① **transport.submit() 自身抛出的任何异常**（TimeoutError/OSError/RuntimeError…）直接穿出 dispatch_due -> 整批中断 + 该行无退避 + **每轮复发**；真实网关接线（U12）后一次网络抖动即可让整条告警通路**永久停摆**。② 本模块**自己**为'空白回执'抛的**裸 ValueError**（非 AlertReceiptRejected），以及 int(outcome.delivered_at_ms) 对非数值抛的 ValueError/TypeError，同样漏网。向量 1 在 sb/68903f8 上结果完全一致 => **属 r2 未触及的残留，非新引入回归**",
           "new_p3": "P3-6 `_record_failure` 对阶梯拒绝写 TRANSPORT_FAILED 审计标签（语义不符）；P3-7 README §5.2 与 §2 的两处引用/适用范围问题",
           "env_note": "该复验会话的 Bash 无法把命令行里字面写出的中文路径透传给子进程（ls/python -c 均报 No such file or directory），改用 $(cd <glob>/mat-wt && pwd) 动态取值；不影响结论。**另：其工作区并非 git worktree 而是普通目录（I 未建成功该 worktree），复验者用 git archive 沙箱自行实现 detached 语义** —— 结果可用，但暴露了 I 的一个流程缺口（建 worktree 后须回读确认）"
+        },
+        {
+          "type": "author_fix_r3",
+          "head_commit": "2722efe",
+          "fix_commit": "ad2c57d",
+          "commits": [
+            "ad2c57d",
+            "2722efe"
+          ],
+          "scope": "只改独占路径（+429/-32）；共享适配只交 diff",
+          "p1_4_fixed": "单条隔离单元改为**对任意异常 fail-closed**。三向量前后对照：①TimeoutError：每轮 escaped:True、{'UNKNOWN':3}、坏行 attempts=0 -> round0 submitted=2/confirmed=2/failed=1、后 2 条 DELIVERED、坏行 next=now+30s 且 last_error=TRANSPORT_EXCEPTION:TimeoutError、审计 TRANSPORT_FAILED；RuntimeError/OSError 与 Timeout 逐字同构 ②空白回执：穿出裸 ValueError、{'SUBMITTED':1,'UNKNOWN':2} 每轮复发 -> rejected=1/RECEIPT_EMPTY、有退避、审计 TRANSITION_REJECTED ③delivered_at_ms 非数值：穿出 ValueError/TypeError -> rejected=1/RECEIPT_TYPE_INVALID、有退避、未伪造送达。兜底桶：通道返回 None 由每轮 AttributeError -> errors=1/INTERNAL_ERROR:AttributeError 且其余照常送达。**不过度捕获**：KeyboardInterrupt 修复前后都穿出。_isolate_failure 保证连'记失败+退避'写不进去也不中断整批（PERSIST_FAILED:OperationalError）",
+          "p3_fixed": "P3-6 _record_failure 增 transition（TRANSPORT_FAILED / TRANSITION_REJECTED / INTERNAL_ERROR）；P3-7 引用更正 + 04 改**尾部锚定** hunk（0 前导+4 后随），在 59660b2 与 fdd208c 两基线都正确",
+          "patches": "ad2c57d/（01/02/03 sha256 与 r2 相同）；**apply --check 在 59660b2 与当前集成 HEAD fdd208c × 两配置 = 16/16 rc=0**；两树落盘一致（4 files +424/-12）",
+          "tests": "验收 未打补丁 **244/0**、打过补丁 **262/0**；冒烟 51/0 与 55/0；契约 173/0（两态）；沙箱 check_quality **OK files=264**",
+          "delta": "三树逐脚本：s0 79/79、s_r2 80/80、s_r3 80/80；**失败集合差集 ∅**",
+          "known_limits": [
+            "真实通道送达属 U12/D02；真实宿主断电演练、多进程队列写压力未做",
+            "'退避在库完全不可用时仍成立'登记为 PERSIST_FAILED",
+            "**兜底桶会把新 bug 表现为'该条持续退避'而非崩溃 -> 接线时须监控 errors**"
+          ],
+          "observation_registered": "镜像侧 strip() 与队列侧严格相等口径不同；audit.database 反向依赖 ops 常量",
+          "rollback": "git revert ad2c57d；补丁 git apply -R 顺序 04->01"
         }
       ],
       "blockers": [],
@@ -2599,6 +2621,16 @@
           ],
           "verdict": "PENDING",
           "reports_dir": "docs/dispatch/reviews/U14/<r3head>/"
+        },
+        {
+          "round": "r4",
+          "stage": "修复复验",
+          "candidate": "ad2c57d",
+          "sessions": [
+            "Q (reviews/U14/R4/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U14/ad2c57d/"
         }
       ],
       "qa_runs": []
