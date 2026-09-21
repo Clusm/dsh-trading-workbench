@@ -745,7 +745,9 @@ def test_lifecycle_cost_authority_and_net_unknown() -> None:
               (block["eligible_closed_lifecycles"], block["net_realized_unknown_lifecycles"]))
         check("计入 30 的样本净收益一律可算（None 与 0.0 不混淆）",
               all(item.get("net_realized") is not None
-                  for item in block["eligible_closed_rows"]), block)
+                  for item in block["eligible_closed_rows"]),
+              f"net=None 的行数="
+              f"{sum(1 for item in block['eligible_closed_rows'] if item.get('net_realized') is None)}")
     else:
         check("基线态：净收益未知的样本仍被计入 30（缺陷证据）",
               block["eligible_closed_lifecycles"] == 30, block["eligible_closed_lifecycles"])
