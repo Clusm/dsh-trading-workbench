@@ -4324,10 +4324,27 @@
       {
         "id": "U12-BUILD-F1",
         "title": "身份采集在真实 src/ 树必然抛 CredentialLeakError -> release_readiness 永远不可能 GO（**RELEASE 阻断**）",
-        "status": "OPEN",
+        "status": "FIXED",
         "owner": "U15 线修复会话 U12-BF1（worktree mat-wt/W3-bfix）",
         "blocks": "**整个首批发布**：身份 NO_DATA -> release_readiness 不可能为 GO",
-        "note": "**I 已独立复现**（集成树 7885e6a，sys.path 加 src）：`from core.contracts.common import SENSITIVE_KEY_MARKERS` -> 含 'authorization'；`collect_artifact_files('.')` -> `CredentialLeakError: credential-bearing fields rejected: artifacts.src/core/management_authorization.py`。机理：`runtime_identity.py:547-552` 的 relatives 缺省为 `src/**/*.py`，每个路径过 `_safe_artifact_name()`，后者用 SENSITIVE_KEY_MARKERS 做**子串**匹配；U02 交付的模块名 `src/core/management_authorization.py` 命中 'authorization'。后果链：身份采集失败 -> `release_manifest.py:41/224` 记 IDENTITY_COLLECT_FAILED -> service.py 启动路径降级，runtime_instance_id/effective_config_hash/model_route_hash 全空 -> 身份 NO_DATA -> release_readiness 不可能 GO。**U15 验收套件对此全盲**（只用合成根/显式 relatives，从不跑真实 src/ 树）—— 这是『单元已验证、适配未落地』的又一例。修法取向：SENSITIVE_KEY_MARKERS 是**键名/载荷字段名**守卫（契约 L1），拿它做**文件名**子串匹配属过度匹配；应给文件名一条独立守卫，只拒凭据文件形态（.env*、*.pem、id_rsa*、含 secret/credential/apikey/private_key/password 的容器词），且**冻结契约一个字不许改**。"
+        "note": "**I 已独立复现**（集成树 7885e6a，sys.path 加 src）：`from core.contracts.common import SENSITIVE_KEY_MARKERS` -> 含 'authorization'；`collect_artifact_files('.')` -> `CredentialLeakError: credential-bearing fields rejected: artifacts.src/core/management_authorization.py`。机理：`runtime_identity.py:547-552` 的 relatives 缺省为 `src/**/*.py`，每个路径过 `_safe_artifact_name()`，后者用 SENSITIVE_KEY_MARKERS 做**子串**匹配；U02 交付的模块名 `src/core/management_authorization.py` 命中 'authorization'。后果链：身份采集失败 -> `release_manifest.py:41/224` 记 IDENTITY_COLLECT_FAILED -> service.py 启动路径降级，runtime_instance_id/effective_config_hash/model_route_hash 全空 -> 身份 NO_DATA -> release_readiness 不可能 GO。**U15 验收套件对此全盲**（只用合成根/显式 relatives，从不跑真实 src/ 树）—— 这是『单元已验证、适配未落地』的又一例。修法取向：SENSITIVE_KEY_MARKERS 是**键名/载荷字段名**守卫（契约 L1），拿它做**文件名**子串匹配属过度匹配；应给文件名一条独立守卫，只拒凭据文件形态（.env*、*.pem、id_rsa*、含 secret/credential/apikey/private_key/password 的容器词），且**冻结契约一个字不许改**。",
+        "fix": "两跳均已修：hop1 = U12-BF1 @ a401633（已 merge 进集成树）；hop2 = CONTRACT-ERRATUM-1 @ 4eca189（I 亲自应用）。验证：collect_artifact_files(.) = 125 文件含 management_authorization.py；IDENTITY_COLLECT_FAILED 消失（余 MODEL_ROUTE_MOCK 属环境条件）。"
+      },
+      {
+        "id": "U13FU2-N2-CONTROL-RELAXATION",
+        "title": "U13-FU2 的 N2 修复把控制面放松了：非 ENTRY 未收口单不再阻断 set_control(normal)（**放松方向**）",
+        "status": "OPEN",
+        "owner": "U13-FU3（同一分支修复中）",
+        "blocks": "U13-FU2 的集成（CHANGES_REQUESTED）；削弱 U13/F14『不允许把控制面拨回 normal』的既有整改",
+        "note": "Q r1 最小复现：门禁 CLEARED 后账本出现 purpose=EXIT/status=UNKNOWN 单 -> pristine 阻断启动/停 close_only/拒 set_control(normal)；**patched(2ac0d6f) 放行/normal/set_control(normal) 成功**。根因结构性：service.py:891 附近 _recovery_gate_ledger_facts(facts=None) 的 unknown_orders/submitting_orders 取自形参、**缺省硬编码 0**；FU2 新接线两条路径均无参调用 -> 这两列恒 0，绕过门禁的真实账本读取（门禁不分 purpose 全表计数）。**这是『修复反而放松』的典型，比不改更糟。** 修法要求：这两列取真实账本，而非打 purpose 特判；必须以 Q 原场景做两态测试且 pristine 结论一致。"
+      },
+      {
+        "id": "U12-BF1-RESIDUAL",
+        "title": "U12-BF1 保守残差：文件名含 secret 子串一律拒（P3，fail-closed）",
+        "status": "OPEN",
+        "owner": "U12/U15",
+        "blocks": "无（真实 src/ 无此类文件名）",
+        "note": "secretary_roster.py 之类含 secret 子串的合法名会被拒。方向 fail-closed；改『整词匹配』会放过 mysecret.txt，属削弱防护，故不做。已作为用例显式登记。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -4423,7 +4440,7 @@
       "U13-FU2": {
         "title": "恢复门禁生产接线收口（N1 裸形态 fail-open + N2 service.py 未注入 + N3 文档）",
         "owner_role": "E线",
-        "status": "READY_FOR_REVIEW",
+        "status": "CHANGES_REQUESTED",
         "head_commit": "2ac0d6f",
         "base": "7885e6a",
         "branch": "task/U13-FU2（worktree mat-wt/W3-fix2）",
@@ -4456,24 +4473,62 @@
         "verification": {
           "session": "Q (reviews/U13-FU2/R1/q)",
           "candidate": "2ac0d6f",
-          "verdict": "PENDING",
+          "verdict": "Q r1 **CHANGES_REQUESTED**（1 个阻塞项：N2）",
           "reports_dir": "docs/dispatch/reviews/U13-FU2/2ac0d6f/",
-          "focus": "重点：N2 的『无行为差异』判定是否属实（作者自认）；绕过尝试（尤其 complete_reconcile 自声明 CLEARED 是否真不产生放行能力）；test_supervision.py 改动是否算放宽断言（逐行核对）。"
-        }
+          "focus": "重点：N2 的『无行为差异』判定是否属实（作者自认）；绕过尝试（尤其 complete_reconcile 自声明 CLEARED 是否真不产生放行能力）；test_supervision.py 改动是否算放宽断言（逐行核对）。",
+          "report": "docs/dispatch/reviews/U13-FU2/2ac0d6f/Q_r1.md（源 reviews/U13-FU2/R1/q/_scratch_Q/Q_U13-FU2_r1.md）",
+          "results": {
+            "N1": "**PASS** —— Q 自有探针（10 场景，唯一变量=账本形态）独立复现前后翻转：pristine 8通过/3失败 exit1（S1 无账本文件、S2 无 order_outbox 表、S7 注入 not_applicable 三处 fail-open）-> patched 11/0 exit0。方向核查：GATE_NOT_INSTALLED 前置放行实测成立（未恢复过的部署不被误伤），干净账本仍放行。",
+            "N2": "**CHANGES_REQUESTED（唯一阻塞项）** —— 作者『无可达行为差异』自述**被推翻**：门禁 CLEARED 后账本出现**非 ENTRY** 单（purpose=EXIT / status=UNKNOWN）时，pristine 阻断启动/停 close_only/拒 set_control(normal)，**patched 放行/normal/set_control(normal) 成功**。根因（结构性）：service.py:891 附近 _recovery_gate_ledger_facts(facts=None) 的 unknown_orders/submitting_orders 取自形参、**缺省硬编码 0**；FU2 新接线的两条路径都是无参调用 -> 这两列恒 0，绕过门禁的真实账本读取（门禁不分 purpose 全表计数）。**削弱了 U13/F14『不允许把控制面拨回 normal』的既有整改 = 放松方向**。作者验证器结构上查不到：N2 的 4 条 check 全是 bare==0 的接线 spy，其 [dirty_wal] 场景恰为两态同结论。",
+            "N3": "**PASS** —— assert_environment_bound(demo) 实测抛 RuntimePathsError(...STATE_ROOT_MISSING)；代码零改动，README/JSON 更正与实测一致（pristine 4/2 -> patched 6/0），生产零调用点。",
+            "bypass": "9 组绕过尝试全部符合预期（patched 13/0）；作者自述『complete_reconcile 不可读时自声明 CLEARED 不产生放行能力』**成立**（before_entry 返回 EVIDENCE_UNVERIFIED），但状态位**确实被写脏**为 CLEARED，口子本身未收紧（作者已登记）。",
+            "test_supervision_change": "**不算放宽断言**：diff 纯 +21/-0，断言文本零改动；反证：patched recovery.py + pristine 测试文件 -> 恰好 2 条失败，且都是『合法对账后应放行』的断言（旧夹具靠 N1 的 fail-open 才通过）。新夹具是前提修正。",
+            "delta": "**NEW_FAIL=∅ / FIXED=∅ / BOTH_NONZERO=∅**（85/85 两树各 0 非零）；真实工作树官方入口 OFFLINE REGRESSION OK scripts=85 exit 0",
+            "patches": "9/9 全绿（3 配置 x 3 补丁，0 Skipped）；pristine+补丁 01-03 与 head 2ac0d6f 三文件 CR-insensitive 逐字节一致",
+            "quality": "check_quality 两树均绿（files=295 untracked=0），check_quality.py 逐字节未改、无新增 exclude。**补丁 05 确认不必要**：base ruff check . 已 All checks passed；把归档探针 .py.txt 改回 .py 立刻报 30 错 —— 独立佐证红灯源自归档证据而非产品代码。"
+          },
+          "not_verified": [
+            "真实交易所侧/真实断电撕裂写/真实凭据/SCM 部署",
+            "demo 档 broker 的 order_outbox 归属未逐一实测（影响 N2 放松面在 demo 档的可达性）",
+            "未在 mat-wt/I 等他人 worktree 上验证"
+          ]
+        },
+        "fix_round": "U13-FU3（同一分支 task/U13-FU2 上继续提交）：修 N2 的放松回归 —— 让 unknown_orders/submitting_orders 取真实账本，而不是形参缺省 0；必须用 Q 的原场景做两态测试。"
+      },
+      "U12-BF1": {
+        "title": "修 U12-BUILD-F1（RELEASE 阻断）：身份采集在真实 src/ 树必然抛 CredentialLeakError",
+        "owner_role": "U15 线",
+        "status": "INTEGRATED",
+        "head_commit": "a401633",
+        "code_patch_commit": "178f4fc",
+        "base": "7885e6a",
+        "branch": "task/U12-BF1（worktree mat-wt/W3-bfix）",
+        "changed_in_branch": [
+          "src/core/runtime_identity.py(-3/+68)",
+          "tests/acceptance/test_runtime_identity.py(+145)"
+        ],
+        "frozen_contract_untouched": "git diff 7885e6a..HEAD -- src/core/contracts/ 为空；SENSITIVE_KEY_MARKERS 逐字未动；pyproject.toml 未动（无新 ruff exclude）",
+        "hop1": "工件路径改用**独立文件名守卫**，不再复用 K01 键名标记表。前后：collect_artifact_files(真实根) 由抛 CredentialLeakError -> OK 125 个文件且含 src/core/management_authorization.py。反向证据 15/15 凭据文件名仍被拒（.env/.env.local/config/.env.production/credentials.json/id_rsa/id_rsa.pub/api_secret.pem/secrets.yaml/server.key/cert.p12/app.keystore/db_password.txt/tls/private_key.pem/auth/passwd/src/api_key_store.py）；**顺带加强**：id_rsa(.pub)/cert.p12 在 pristine 下根本没被拒，现在被拒。",
+        "hop2": "**超出该会话授权（src/core/contracts/ 属 I 独占），它只交未应用提案** 03_PROPOSED_contract_hop2_NOT_APPLIED.diff（34 行）并证明应用后身份三字段全部非空、IDENTITY_COLLECT_FAILED 消失。**I 已亲自应用**（见 dispatch.contract_erratum）。",
+        "delta": "两态同一新增用例 pristine 10 FAIL -> patched 0 FAIL；全量离线回归两侧 exit 0/scripts=85，失败集合增量 = ∅（两侧仅有的 10 行 FAIL 逐字相同，来自 smoke_u02 的 N2 负向对照）",
+        "unfinished": [
+          "保守残差：文件名含 secret 子串一律拒（secretary_roster.py 亦拒），方向 fail-closed，真实 src/ 无此名；已作用例显式登记",
+          "未跑真实运行目录与 demo 服务"
+        ]
       }
     },
     "w3_status": {
       "state": "IN_PROGRESS",
       "integrated_in_w3": [
         "U09",
-        "U13-FU1"
+        "U13-FU1",
+        "U12-BF1(hop1) + CONTRACT-ERRATUM-1(hop2)"
       ],
       "delivered_pending_integration": [
         "U12（RC DRAFT，head 044fccf）"
       ],
       "in_flight": {
-        "U12-BF1": "修 U12-BUILD-F1（RELEASE 阻断）—— 进行中",
-        "U13-FU2-verify": "Q 复验进行中（candidate 2ac0d6f）"
+        "U13-FU3": "修 U13-FU2 的 N2 放松回归（同一分支 task/U13-FU2）"
       },
       "gates": {
         "offline_regression": "OFFLINE REGRESSION OK scripts=85",
@@ -4481,10 +4536,23 @@
         "contracts": "PASS 173 / FAIL 0 (golden 160)"
       },
       "rc_freeze_blockers": [
-        "U12-BUILD-F1（身份采集失败 -> release_readiness 不可能 GO）",
+        "U13-FU2 尚未集成（CHANGES_REQUESTED，N2 放松回归在修）",
         "D05（SLO 时限冻结）",
-        "观察窗三项 NOT_STARTED（7天/200/30）—— 结构性不可压缩"
+        "观察窗三项 NOT_STARTED（7天/200/30）—— 结构性不可压缩",
+        "MODEL_ROUTE_MOCK：身份三字段在**未配置真实模型路由**时仍为 None（环境条件，须在真实路由下复验）"
       ]
+    },
+    "contract_erratum": {
+      "id": "CONTRACT-ERRATUM-1",
+      "title": "路径键映射不得用字段名口径的敏感守卫（hop 2）",
+      "status": "APPLIED",
+      "integration_commit": "4eca189",
+      "file": "src/core/contracts/k01_identity.py",
+      "why": "U12-BUILD-F1 的第 2 跳：hash_artifact 文档即『相对路径 -> 内容』，却把该 Mapping 过 ensure_no_sensitive_fields（按**字段名**做子串匹配）-> 合法模块名 src/core/management_authorization.py 命中 authorization -> SensitiveInputError -> 身份 NO_DATA -> release_readiness 不可能 GO。属**契约自身的缺陷**（把字段名守卫施于路径键），非下游残留，故必须修而非登记。",
+      "change": "新增 _structured_path_mapping() 供路径键映射（artifact_files / dependency lock files）使用：保留 ensure_structured_payload（原始文本、KEY=value 行列表照旧拒绝）与 Mapping 形态检查，**去掉**字段名守卫（文件名级凭据守卫由 runtime_identity._safe_artifact_name 承担）。字段名键的映射（effective_config / strategy / model_route）守卫**不变**。",
+      "freeze_note": "**这是对冻结契约的修改**，属 I 的独占范围；已作为**显式勘误**记录，而非静默改动。行为保持性：它只把一次**误报的抛错**变成正确行为 —— 契约冒烟仍 PASS 173 / FAIL 0、golden 160 **逐字未变**。",
+      "reverse_evidence": "hash_effective_config({api_key: ...}) 仍拒绝；hash_artifact(API_KEY=abc 原始文本) 仍拒绝；collect_artifact_files(.) = 125 文件含 management_authorization.py",
+      "honest_limit": "修完后 build_release_manifest 的 identity_blockers 只剩 (MODEL_ROUTE_MOCK,)，身份三字段仍为 None（**环境条件：未配置真实模型路由**）。故本条**不能**单独推出『release_readiness 可达 GO』；真实路由配置下须另验。"
     }
   },
   "dispatch_version": "v1.1",

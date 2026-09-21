@@ -161,10 +161,18 @@
 2. **U12 BUILD（作者已交付 · DRAFT，待集成）**：RC 交付物与 F01–F25 矩阵已产出（head `044fccf`，16 文件 +1298/−2，9 提交），**RC 未冻结**。矩阵覆盖：COVERED_OFFLINE 4 · PARTIAL_OFFLINE 20 · **DEFERRED 1（F11，逐字 `F11:v2_labels=DEFERRED`）** · 缺能力 9 类（§D 逐条列出），**25/25 有离线证据但 15 条带 ⚠**；`observed_status` 三项显式 `NOT_STARTED`。
    - **⚠ 新发现的 RELEASE 阻断 —— `U12-BUILD-F1`（I 已独立复现）**：`collect_artifact_files('.')` 在真实 `src/` 树抛 `CredentialLeakError: ... artifacts.src/core/management_authorization.py` —— U02 的模块名命中冻结契约里 `SENSITIVE_KEY_MARKERS` 的 **`"authorization"` 子串**。后果：身份采集失败 → `IDENTITY_COLLECT_FAILED` → 身份三字段全空 → **`release_readiness` 永远不可能 GO**。**U15 验收套件对此全盲**（只用合成根/显式 relatives）。**修复已派发**：`U12-BF1`（工作树 `mat-wt/W3-bfix`，`task/U12-BF1` @ `7885e6a`）—— 取向：给**文件名**一条独立守卫，只拒凭据文件形态，**冻结契约一个字不改**，且必须给出"凭据文件名仍被拒"的**反向证据**。
    - U12 待裁决项 A1–A13 已全部登记台账（含 **A12 = D05 阻断 RC_FREEZE**）。
-   - **RC 冻结前置阻断项（三条）**：`U12-BUILD-F1`（在修）、`D05`（SLO 时限冻结，需外部决策）、观察窗三项 `NOT_STARTED`（结构性不可压缩）。
+   - **`U12-BUILD-F1` 已 FIXED（两跳）**：hop1 = `U12-BF1` @ `a401633`（已 merge：工件路径改用**独立文件名守卫**；`collect_artifact_files('.')` 由**抛** `CredentialLeakError` 变 **OK 125 文件且含 `management_authorization.py`**；**反向 15/15 凭据文件名仍被拒**，且 `id_rsa`/`cert.p12` 在 pristine 下**根本未被拒**、现在被拒）；hop2 = **`CONTRACT-ERRATUM-1` @ `4eca189`（I 亲自应用）** —— `hash_artifact` 文档即"相对路径 → 内容"，却把该映射过**字段名**守卫 → 合法模块名命中 `authorization`。新增 `_structured_path_mapping()`（保留结构化载荷/Mapping 检查，去掉字段名守卫）；**字段名键的映射守卫不变**。契约冒烟仍 **PASS 173 / FAIL 0、golden 160 逐字未变**（只把误报的抛错变成正确行为）。**这是对冻结契约的修改，已作显式勘误登记**（`dispatch.contract_erratum`）。
+   - **诚实边界**：修完后 `identity_blockers` 只剩 `('MODEL_ROUTE_MOCK',)`，**身份三字段仍为 `None`**（未配置真实模型路由 = 环境条件）。故本条**不能**单独推出"`release_readiness` 可达 GO"。
+   - **RC 冻结前置阻断项（四条）**：`U13-FU2/FU3` 尚未集成（N2 放松回归在修）、`D05`（SLO 时限冻结，需外部决策）、观察窗三项 `NOT_STARTED`（结构性不可压缩）、`MODEL_ROUTE_MOCK`（身份三字段须在真实路由下复验）。
 
 ### W3 收尾修复（并行）
-- **`U13-FU2`（作者已交付 → Q 复验中）**：head `2ac0d6f`，补丁包 `docs/dispatch/patches/U13-FU2/ce412fa/`（3 diff）。
+- **`U13-FU2`（Q 复验 = CHANGES_REQUESTED，修复轮 `U13-FU3` 进行中）**：head `2ac0d6f`，补丁包 `docs/dispatch/patches/U13-FU2/ce412fa/`（3 diff）。**尚未集成。**
+  - **N2 的"无可达行为差异"自述被 Q 推翻，且方向是放松（比不改更糟）**：门禁 CLEARED 后账本出现**非 ENTRY** 单（`purpose=EXIT`/`status=UNKNOWN`）时，pristine 阻断启动/停 `close_only`/拒 `set_control('normal')`；**patched 放行 / `normal` / `set_control('normal')` 成功**。
+  - **根因（结构性）**：`service.py:891` 附近 `_recovery_gate_ledger_facts(facts=None)` 的 `unknown_orders`/`submitting_orders` **取自形参、缺省硬编码 0**；FU2 新接线的两条路径都是**无参调用** → 这两列恒 0，绕过门禁的**真实账本读取**（门禁不分 purpose 全表计数）。
+  - **N1 PASS**（10 场景独立复现三处 fail-open 翻转）、**N3 PASS**、9 组绕过符合预期、`test_supervision.py` 的改动**不算放宽断言**（断言文本零改动；反证：patched `recovery.py` + pristine 测试 → 恰好 2 条失败，都是旧夹具**靠 N1 的 fail-open 才通过**的"合法对账应放行"断言）、full delta `NEW_FAIL=∅`、补丁 9/9、check_quality 两树均绿。Q 还独立确认**补丁 05 不必要**（base `ruff check .` 已全绿；把归档探针改回 `.py` 立刻报 30 错）。
+  - **修复已派发**：`U13-FU3`（**同一分支 `task/U13-FU2` 继续提交**，工作树复用 `mat-wt/W3-fix2`）。要求：`unknown_orders`/`submitting_orders` 取**真实账本**（不是打 purpose 特判），并以 Q 原场景做两态测试且 pristine 结论一致。**仍在运行，勿重复派发。**
+
+- **`U13-FU2`（首次派发记录，保留备查）**：head `2ac0d6f`，补丁包 `docs/dispatch/patches/U13-FU2/ce412fa/`（3 diff）。
   - **N1 修好**：状态根**没有账本文件** / **没有 `order_outbox` 表** 两种形态由 `allowed=True`（fail-open）变为 `allowed=False / EVIDENCE_UNVERIFIED`；四态对照无回归无误伤；**复用** `EVIDENCE_UNVERIFIED` 无新码；before exit=1(4/3) → after exit=0(7/0)。
   - **N2 修好（接线形态）**：启动期 2 次调用由"1 次裸"变"0 次裸"并注入账本事实；`set_control` 由裸变注入。**作者如实说明：无"可达的行为翻转证据"**（服务开库即创建 `-shm`，把门禁读取从 `immutable` 切成 WAL 感知，行为结果两态相同）。**已要求 Q 独立判定这条"无行为差异"是否属实**——若构造得出可区分窗口即为重要发现。
   - **N3 修好**（README 与代码措辞一致）。副作用：`tests/acceptance/test_supervision.py` 的 [7]/[7b] 补了 `_make_gate_ledger()`，**断言原文一行未改**（已要求 Q 逐行核对是否算"放宽断言"）。
