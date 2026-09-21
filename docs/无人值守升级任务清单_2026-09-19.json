@@ -1762,7 +1762,7 @@
       "title": "影子v2固定时点标签",
       "owner_role": "D",
       "actual_assignee": null,
-      "status": "READY_FOR_REVIEW",
+      "status": "INTEGRATED",
       "required_for_first_release": false,
       "depends_on": [
         "U00",
@@ -1816,6 +1816,37 @@
           "patches_applicability": "2 个补丁 x 3 种 git 配置 = 6/6 干净（Checking=1、Skipped=0）。database.py 原文件本身 mixed 行尾，已用**字节级插入**保持行尾不变，故 diff 仅 +168/-0 无整文件重写。",
           "integration_order": "**必须先合 `src/intel/shadow_v2/`（分支已提交），再应用两个补丁** —— 否则 service.py 的 `from intel import shadow_status, shadow_v2` 会 ImportError。",
           "f11_note": "**首批记录不变**：F11:v2_labels=DEFERRED 仍是首批口径；U06b 是后置线交付，不得伪称首批 F11 已通过。"
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "8ae0f65",
+          "verdict": "Q r1 **PASS-with-notes**（无阻塞项）",
+          "report": "docs/dispatch/reviews/U06b/8ae0f65/Q_r1.md",
+          "merge": "先合 src/intel/shadow_v2/（owned 逐字节一致：git diff 8ae0f65 HEAD = 0 行），再按作者注明顺序应用补丁 01->02（集成提交 d9a0734）",
+          "integration_order_verified": "Q 独立核实作者声明**为真且必要**：单独把补丁 02 打到无 shadow_v2/ 的树 -> `ImportError: cannot import name 'shadow_v2'` exit 1",
+          "gate_invariance_verified": "Q **自建夹具**（A 3 方向 + A 2 非方向 + A 1 NO_EDGE + B 5 + C 4 + 3 条闭合生命周期 + 61 分钟观察窗）独立复现：directional_candidates **3 -> 3**、release_readiness **NO_GO -> NO_GO**、门禁报告除 generated_at 外**逐字相同**、gates/blocking_item_count 不变。**反向加压**：再灌 500 条 v2 缺失行，候选仍 3、结论仍 NO_GO。**越权测试**：传 `counts_toward_release_gate=True` -> 落库仍 50/50 全 0。**根因**：`grep -rn shadow_v2 src/core/` 0 命中，`build_release_readiness_report` 根本不读该表；`log_shadow_v2_labels` 只写 shadow_v2_labels，无触发器不触 shadow_decisions/outcomes。",
+          "blob_identity": "`src/intel/shadow_status.py` blob `afa53766be` 前后相同；`src/core/release_evidence.py` blob `c146b89c75` 前后相同（两者 diff 均 0 字节）",
+          "other_claims_verified": {
+            "F11_480s": "OVER_TOLERANCE + MISSING，未退回 legacy、未静默丢弃，unexplained==0；对照 +30s -> LABELED",
+            "no_future_info": "assert_no_future 抛 LeakageError；now < window_close 且有目标后样本 -> PENDING；路径严格 [decided_at,target)，**加 10000 尖峰后 path_samples/MFE 不变**",
+            "version_isolation": "同键重写新增 **0 行**、旧值 LABELED/11.0 未被覆盖；换 experiment_key 才新增",
+            "clock_f17": "回拨/monotonic 倒退/boot 变化/墙钟超前 -> UNTRUSTED；1970/2026/2099 同判；+08:00 与跨 UTC 日切不误报；无硬编码日期；整批 CLOCK_UNTRUSTED 且 unexplained==0",
+            "no_overstep": "shadow_status.py / pyproject.toml / release_evidence.py diff 全 0 字节；current_schema_version() pristine=17 patched=17，迁移集合 [1..17] 写 v2 前后不变；无新 exclude；delta 11 项**全为 A**（0 删 0 改）",
+            "readonly_wiring": "补丁只有 +import 与 +shadow_v2_status()；运行期实测 `snapshot()` 调用前后**逐字节相同**，enabled=False、execution_weight=0.0、缺数据给 None 不冒充 0"
+          },
+          "integration_tests": "shadow v2 套件 **100/0**；`smoke_u06a_shadow_isolation` **52/0**；`smoke_u09_release_evidence` **60/0**（PATCHED=True, SHARED=True）；契约 **173/0**；`check_quality OK files=301 untracked=0`；`SMOKE MANIFEST OK included=81 excluded=1`；**`OFFLINE REGRESSION OK scripts=85`**",
+          "new_p3": [
+            "N1 风格：补丁 02 的 `return status` 与 `def record_liquidation` 之间缺空行（ruff select=E4/E7/E9/F 不含 E3xx，故 check_quality 不报）",
+            "N2 环境：`core.autocrlf=true` 下 git apply 会把被打补丁的整文件转 CRLF（worktree 侧，提交归一化回 LF）；不影响 --check/导入/测试，但字节比较会全文件差异",
+            "N3 死代码：`sampler.clock_verdict_for_window()` 全仓无调用方且未导出"
+          ],
+          "not_verified": [
+            "真实库上的门禁不倒性（硬约束只读合成库）",
+            "真实主机时钟跳变",
+            "v2 采集调度（作者已如实登记未接线）",
+            "U07 消费侧",
+            "跨平台"
+          ]
         }
       ],
       "blockers": [],
@@ -1851,7 +1882,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "8ae0f65",
       "review_assignments": [
         {
           "round": "r1",
@@ -1860,7 +1891,7 @@
           "sessions": [
             "Q (reviews/U06b/R1/q)"
           ],
-          "verdict": "PENDING",
+          "verdict": "Q r1 PASS-with-notes（无阻塞项；8 条核心主张全部独立复现，无一条被推翻）",
           "reports_dir": "docs/dispatch/reviews/U06b/8ae0f65/",
           "focus": "重点：用**自建夹具**独立复现『发布门禁不受影响』（不得采信作者的 evidence 脚本）；F11 反例 OVER_TOLERANCE；未来信息回填 LeakageError；版本隔离不可改写；F17 时钟可信；未越界（shadow_status/schema 版本/ruff exclude）。"
         }
@@ -4462,6 +4493,14 @@
         "owner": "U12/U15",
         "blocks": "无（不阻断集成）；影响『身份完整』的判据精度",
         "note": "实测：`build_release_manifest(...).to_dict()['runtime_instance_id'] == 'unknown'`（字面量，非空）。U12 验收的 `complete = bool(artifact_hash) and bool(runtime_instance_id)` 因此判为『完整』。真值语义：`runtime_instance_id` 是运行代标识，服务启动若未能持久化运行代会降级为占位值（service.py 记 `run_generation_error` / 'identity evidence incomplete'）。**静默把占位符当完整身份**是口径缺口（方向 fail-open）。建议 U12/U15 在 RC 收口时明确：`'unknown'` 应视为『运行代缺失』而非完整身份（例如纳入 blockers 或改用显式 `runtime_instance_id_known` 标志）。"
+      },
+      {
+        "id": "U06B-P3-CLUSTER",
+        "title": "U06b 三条非阻塞观察（P3）",
+        "status": "OPEN",
+        "owner": "U07/U12",
+        "blocks": "无",
+        "note": "①补丁 02 缺空行（ruff E3xx 未启用故不报）②`core.autocrlf=true` 下 git apply 会把整文件转 CRLF（worktree 侧，提交归一化回 LF；不影响 check/导入/测试，但字节比较会全文件差异）③`sampler.clock_verdict_for_window()` 死代码（全仓无调用方且未导出）。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -4735,8 +4774,8 @@
           "note": "U12 集成后依赖就绪。最大风险已内联：_validate_smoke_manifest 强制 scripts/smoke_*.py 恰好登记一次，移动/改名须同批交 run_offline_regression 登记补丁；移出 scripts/ 顶层 = 削减回归覆盖，不得静默做；改后必须复跑 smoke_u10a_release_package。"
         },
         "U07": {
-          "status": "BLOCKED",
-          "note": "等待 U06b"
+          "status": "READY（依赖 U06b 已集成）",
+          "note": "U06b 已 INTEGRATED -> U07 依赖就绪，可派发。"
         },
         "U11": {
           "status": "BLOCKED",
