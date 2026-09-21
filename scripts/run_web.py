@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import threading
@@ -39,6 +40,27 @@ import uvicorn  # noqa: E402
 from core.config_loader import load_settings  # noqa: E402
 from core.service import TradingService  # noqa: E402
 from dashboard.app import create_app  # noqa: E402
+
+
+def verify_release_package(package_root: Path | str | None = None) -> int:
+    """对**已解压的发布包目录**做启动前自检，返回退出码。
+
+    U10a：发布包解压后必须先能证明"这份工件就是清单里那一份"，再谈启动。本函数
+    只做只读校验（哈希清单、未登记文件、必需运行资产、包内相对文档链接、Python
+    语法、SCM 配置语义、凭据与运行状态），**不加载配置、不读 ``.env``、不构造
+    ``TradingService``、不绑定端口、不写被测目录**，因此可以在只读介质或封存目录
+    里重复运行。判定与打包器共用同一实现（``scripts/create_release_package.py``），
+    不新建第二套口径。
+    """
+    target = Path(package_root or PROJECT_ROOT)
+    scripts_dir = str(PROJECT_ROOT / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from create_release_package import verify_release_package as _verify
+
+    report = _verify(target)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["ok"] else 2
 
 
 def run_web_app(
@@ -96,8 +118,15 @@ def main() -> None:
         "--state-root", default=None,
         help="显式状态根（等价于 MTA_STATE_ROOT）；换代码目录部署时用它保持同一份账本",
     )
+    parser.add_argument(
+        "--verify-package", nargs="?", const="", default=None, metavar="DIR",
+        help="只校验一个已解压的发布包目录后退出（缺省当前项目根）；不启动服务",
+    )
     args = parser.parse_args()
 
+    if args.verify_package is not None:
+        # 只读自检分支：不加载配置、不绑定端口，退出码 0=通过、2=不通过。
+        raise SystemExit(verify_release_package(args.verify_package or None))
     if args.host.strip().lower() not in {"127.0.0.1", "localhost", "::1"}:
         parser.error("控制台当前没有用户认证，只允许绑定到本机回环地址")
     if args.state_root:

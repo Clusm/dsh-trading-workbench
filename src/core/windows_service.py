@@ -26,6 +26,9 @@ _FORBIDDEN_CONFIG_TOKENS = {
 
 #: 显式注入解释器的环境变量（优先级高于配置里的相对路径）。
 PYTHON_EXECUTABLE_ENV_VAR = "MTA_PYTHON"
+#: 发布包自检清单：该文件出现在目录第一层即表示"这是一份已解压的发布包"。
+#: 用于把"交付工件"与"开发检出"区分开——判据是**工件自身的清单**，不是目录名或环境变量。
+RELEASE_PACKAGE_MANIFEST = "package_manifest.json"
 #: 项目内约定虚拟环境（与配置里声明的 ``.venv/...`` 同义）。
 PYTHON_DEFAULT_RELATIVE = (
     ".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python"
@@ -58,6 +61,15 @@ def _inside(root: Path, candidate: Path, *, label: str) -> Path:
     return resolved
 
 
+def is_release_package_root(root: Path) -> bool:
+    """目录是否为一份**已解压的发布包**（第一层存在 ``package_manifest.json``）。
+
+    判据取工件自身的清单文件：开发检出、worktree、CI 检出都没有它，因此这里返回
+    ``False``，行为与升级前逐字节一致（不引入新的默认闸门）。
+    """
+    return (Path(root) / RELEASE_PACKAGE_MANIFEST).is_file()
+
+
 def resolve_python_executable(
     root: Path,
     declared: Any,
@@ -67,6 +79,7 @@ def resolve_python_executable(
     strict: bool = False,
     allow_fallback: bool = True,
     env: Any = None,
+    require_in_root: bool = False,
 ) -> tuple[Path, str]:
     """解析托管服务使用的 Python 解释器，返回 ``(路径, 来源)``。
 
@@ -138,6 +151,31 @@ def resolve_python_executable(
         if not declared_path.is_file():
             raise ValueError(f"python_executable 不存在（strict）: {declared_path}")
         return declared_path, PYTHON_SOURCE_CONFIG
+
+    if require_in_root:
+        # 发布包只能使用**包内**解释器。解压到新目录后配置里声明的相对 ``.venv``
+        # 通常还不存在；若此时回退到进程的 ``sys.executable``，就会把 SCM 服务的
+        # ``binPath`` 指到**另一份检出/另一个项目**的解释器上（实测：解压目录里
+        # 运行 ``validate_windows_service_plan.py --print-install`` 会打印出
+        # 构建机的 venv 路径），"这次部署的是哪个工件"随即不可复核。这里改为
+        # fail-closed：要么包内确有解释器，要么由部署方显式声明（``MTA_PYTHON`` /
+        # 注入参数 / ``require_in_root=False``），不猜。
+        inside: list[tuple[Path, str]] = []
+        for candidate, source in candidates:
+            try:
+                candidate.resolve().relative_to(resolved_root)
+            except (ValueError, OSError):
+                continue
+            inside.append((candidate, source))
+        candidates = inside
+        if not any(candidate.is_file() for candidate, _ in candidates):
+            tried = ", ".join(f"{path}({source})" for path, source in candidates) or "无"
+            raise ValueError(
+                "发布包内没有可用解释器：请把虚拟环境放在包目录内（配置声明的 "
+                f"{PYTHON_DEFAULT_RELATIVE}），或显式处理外置解释器"
+                f"（{PYTHON_EXECUTABLE_ENV_VAR} / 注入参数 / require_in_root=False）；"
+                f"已尝试包内候选: {tried}"
+            )
 
     for candidate, source in candidates:
         if candidate.is_file():
@@ -254,7 +292,7 @@ class WindowsServiceConfig:
 def load_windows_service_config(
     config_path: Path, *, project_root: Path | None = None, require_files: bool = False,
     python_executable: str | Path | None = None, strict_python: bool = False,
-    allow_fallback: bool = True,
+    allow_fallback: bool = True, require_package_interpreter: bool | None = None,
 ) -> WindowsServiceConfig:
     """读取并严格校验托管模板。
 
@@ -267,6 +305,12 @@ def load_windows_service_config(
 
     ``allow_fallback=False``（r2 收口）用于**安装期/宿主脚本**：只接受显式来源，
     拒绝猜测性回退（不存在的声明 → 失败，而不是回退后只打印 warn）。
+
+    ``require_package_interpreter``（U10a）默认按目录形态判定：``require_files=True``
+    且根目录含 ``package_manifest.json``（= 已解压的发布包）时，解释器必须位于包内
+    （见 :func:`resolve_python_executable` 的 ``require_in_root``）。开发检出/worktree
+    没有该清单，判定恒为 ``False``，行为不变。显式传 ``False`` 可覆盖为"允许外置
+    解释器"。
     """
     path = Path(config_path).resolve()
     root = Path(project_root or path.parents[1]).resolve()
@@ -335,10 +379,12 @@ def load_windows_service_config(
         raw.get("log_backup_count", 5), label="log_backup_count", minimum=1, maximum=20,
     )
 
+    if require_package_interpreter is None:
+        require_package_interpreter = require_files and is_release_package_root(root)
     python_executable, python_source = resolve_python_executable(
         root, raw.get("python_executable"),
         override=python_executable, require_files=require_files, strict=strict_python,
-        allow_fallback=allow_fallback,
+        allow_fallback=allow_fallback, require_in_root=require_package_interpreter,
     )
     entrypoint = _inside(
         root, root / str(raw.get("entrypoint") or ""), label="entrypoint",
