@@ -1969,6 +1969,34 @@
           "verified_ok": "必达③④⑤经独立核验成立（attribute_position 与 U02 classify_position 6 例逐例一致；validate_detail_table() 非空转；预留池不被研究触碰三条断言复算通过）——**但 position_class 是字符串字面量巧合一致而非同源 import，meets_management_demand() 恒真空转**",
           "delta": "git archive 双树 + 同一 81 条清单 + 同一 env，逐条非 fail-fast 跑满 162 次 -> base_fail=0/head_fail=0/**NEW_FAIL=∅ / FIXED=∅**；日志里 78 处 FAIL 字样全是 rc=0 脚本的负向对照，未误报",
           "next": "U08 r2：①提交补丁包并**真正接线 4 个集成目标**（src/ 从 0 处 import 变为可见调用）②修 P0-3 跨进程重复消费（跨进程锁 + tmp 名去冲突 + 重读语义）③修'故障读成 no_edge'三通路与反向误标 ④position_class 改为同源 import、meets_management_demand() 去空转 ⑤I 侧登记冒烟"
+        },
+        {
+          "type": "author_fix_r2",
+          "head_commit": "cc9287a",
+          "commits": [
+            "81143bb",
+            "03ddfff",
+            "4ed2012",
+            "55792f1",
+            "9190a28",
+            "ec8fd1c",
+            "76381b7",
+            "cc9287a"
+          ],
+          "scope": "git diff --name-status 2c90642..HEAD = 仅独占路径 + 补丁包；contracts/run_offline_regression 改动 0；**共享文件提交进分支 0 个**",
+          "wiring_proof": "**grep 0->7**：未打补丁 `grep -rn strategy_funnel src/`=0；打过补丁=7（scanner.py:24、signal_ticket.py:9、strategy_trader.py:22、app.py:23/1089/1138/1139）；沙箱 TestClient 实测 GET /funnel 200、GET /api/funnel 200、/channels 200；last_scan.funnel/no_open_verdict 与 ticket_skip_detail() 均有真实生产者（文档承诺已成实测项）",
+          "p0_3_fixed": "consume = 取跨进程锁（msvcrt/fcntl sidecar）-> 重读 -> 判定 -> 落盘的读-改-写；tmp 名带 pid+uuid。前后：4 子进程 barrier 下 CONSUMED=4 -> **CONSUMED=1/ALREADY=3**（落盘已消费=1）；8 进程 x 5 轮全部恰好 1 个",
+          "fault_vs_noedge_fixed": "DETAIL_NATURE(fault/edge/handled/scope) + RoundFault 轮级通道 + classify_no_open() 单一判定。前后：[B]卡未指标化 no_edge/NO_EDGE -> **no_candidates/VALIDATION_REJECTED**；[C]票据源失败 NO_EDGE -> **blocked/DATA_UNAVAILABLE**；[C2]卡册缺失/损坏/运行时不可用/漂移/预算0 通道不存在 -> **blocked+对应故障码**；[D][G] 内嵌 no_edge -> **内嵌 blocked 且与顶层逐字一致**；**右侧** [右] 仍 no_edge/NO_EDGE、[反向] blocked/READINESS_BLOCKED -> **no_edge/NO_EDGE（两侧都没坏）**",
+          "others": "P1-1/P1-2 已修（register/save 损坏态抛 LedgerCorrupt；release 需同轮次+留痕；新增 orphan_consumed）；P1-3 已登记；**position_class 直接取 U02 PositionClass 枚举**；meets_management_demand() 改按 management_shortfall 真判定；P3-1..6 已修。**P0-4 已修**",
+          "patches": "docs/dispatch/patches/U08/76381b7/（5 diff + README）；**3 种 git 配置各 5/5 OK**；对当前集成 HEAD c7783d9 执行；apply 到 pristine 树后逐文件与验证沙箱 **SAME（9/9）**；行尾改写 0 行",
+          "delta": "manifest_base=82 head_head=83；base_fail=0/head_fail=0/**NEW_FAIL=[] / FIXED=[] / BOTH_FAIL=[]**；ABSENT_IN_BASE=[smoke_u08_strategy_funnel.py]。本树基线数字实为 82（B 报的 81 是旧树）；登记后 OFFLINE REGRESSION OK scripts=83",
+          "tests": "test_strategy_funnel 两态 **127/0、177/0**；smoke_u08 两态 **51/0 -> 68/0**；契约 173/0；沙箱 check_quality **OK files=289**",
+          "known_limits": [
+            "**classify_cycle/reason_from_source_errors/round_explanation 生产可达性仍为 0**（只被测试调用；真正调用点是 graph.py 的整轮聚合 -> **U12**）；已按'可达/不可达'重列进 README §五，**不再记'已接'**",
+            "PROVIDER_RATE_LIMITED 无生产者",
+            "_load_state() 损坏静默清去重记忆（冲击必达②）-> 登记 U12"
+          ],
+          "unfinished": "graph.py 整轮聚合接线、run_offline_regression.py 登记行落地（I 独占）"
         }
       ],
       "blockers": [],
@@ -2006,7 +2034,18 @@
       "dependency_commits": {},
       "pending_dependencies": [],
       "integration_candidate_commit": null,
-      "review_assignments": [],
+      "review_assignments": [
+        {
+          "round": "r3",
+          "stage": "修复复验",
+          "candidate": "cc9287a",
+          "sessions": [
+            "Q (reviews/U08/R3/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U08/cc9287a/"
+        }
+      ],
       "qa_runs": []
     },
     {
