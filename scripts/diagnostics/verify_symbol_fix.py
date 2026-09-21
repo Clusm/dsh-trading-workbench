@@ -11,7 +11,8 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+# U10b 归档：本项目根深度已 +1（见 docs/archive/README.md 的归档索引）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 import httpx  # noqa: E402
 

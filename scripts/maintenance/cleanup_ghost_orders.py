@@ -21,7 +21,8 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# U10b 归档：本项目根深度已 +1（见 docs/archive/README.md 的归档索引）。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
 
 from audit.database import AuditDatabase, utc_now
 
@@ -32,7 +33,7 @@ def main() -> int:
     ap.add_argument("--db", default=None, help="数据库路径，默认 data/agent_trader.sqlite")
     args = ap.parse_args()
 
-    db_path = args.db or str(Path(__file__).resolve().parent.parent / "data" / "agent_trader.sqlite")
+    db_path = args.db or str(Path(__file__).resolve().parent.parent.parent / "data" / "agent_trader.sqlite")
     db = AuditDatabase(Path(db_path))
 
     # ---- 1. orders：保护单只保留最新 NEW ----

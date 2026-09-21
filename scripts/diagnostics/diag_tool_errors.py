@@ -10,7 +10,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+# U10b 归档：本项目根深度已 +1（见 docs/archive/README.md 的归档索引）。
+ROOT = Path(__file__).resolve().parents[2]
 DB = ROOT / "data" / "agent_trader.sqlite"
 RAW_DIR = ROOT / "data" / "logs"
 
