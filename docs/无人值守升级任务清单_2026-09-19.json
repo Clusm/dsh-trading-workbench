@@ -5095,6 +5095,43 @@
       "reverse_evidence": "hash_effective_config({api_key: ...}) 仍拒绝；hash_artifact(API_KEY=abc 原始文本) 仍拒绝；collect_artifact_files(.) = 125 文件含 management_authorization.py",
       "honest_limit": "**更正（I 先前写错，以实测为准）**：本条先前写『身份三字段仍为 None』——**错误**。当时我读的是 `manifest['identity']` 这个**并不存在**的嵌套键，取到空 dict 才得到 None。实测：修复后 `build_release_manifest` 的**顶层** `artifact_hash=9bd477f4…`、`effective_config_hash=3cdc7708…`、`model_route_hash=e3704987…`、`runtime_instance_id='unknown'` **均已非空，身份是完整的**。唯一剩余的 `identity_blockers=('MODEL_ROUTE_MOCK',)` 是**环境条件**（未配置真实模型路由）。结论更正为：U12-BUILD-F1 已真正修复；因身份带环境级阻断，`release_readiness` 在 Mock 路由下仍不可达 GO —— 这是**正确行为**（不该用 Mock 路由发布），不是缺陷。",
       "residual": "`runtime_instance_id` 实测值为字面量 `'unknown'`（占位符），见 known_issues 的 U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER。"
+    },
+    "session_closeout": {
+      "date": "2026-09-22",
+      "tasks_integrated": "18/18（首批 14 + 后置 P2 4）",
+      "fix_rounds": [
+        "U13-FU1",
+        "U13-FU2",
+        "U13-FU3",
+        "U12-BF1",
+        "U09-FU1"
+      ],
+      "contract_erratum": "CONTRACT-ERRATUM-1（路径键映射不得用字段名口径的敏感守卫）",
+      "branch_integrity": "全部 22 条 task/* 分支对 integration/unattended-v3 的 unmerged commit 计数 = 0",
+      "gates": {
+        "offline_regression": "OFFLINE REGRESSION OK scripts=94",
+        "quality": "QUALITY CHECK OK files=303 untracked=0",
+        "contracts": "PASS 173 / FAIL 0 (golden 160)",
+        "release_package": "37/0（0 BROKEN_LINK）"
+      },
+      "known_issues": {
+        "total": 40,
+        "fixed": 13,
+        "open": 24
+      },
+      "running_repo_compliance": "multi-agent-trader HEAD 仍 05d28e0；src/config/knowledge/scripts/tests 改动为空；其 docs/ 下的改动与未跟踪文件 mtime 全为 2026-09-19~09-20（本会话之前），非本会话造成，按只读约束未清理。",
+      "not_done_reasoning": {
+        "p3_hygiene": "真实但低风险，不改变 RC 结论；可随时做",
+        "deferred_wiring": "W1-JOINT-WIRING / U08-U12-WIRING 属功能而非缺陷，计划归 U12 BUILD；接线会改变运行时行为，不宜在收尾阶段无人确认时动",
+        "needs_external": "MODEL_ROUTE_MOCK 需真实模型路由；D05 需决策；观察窗需挂钟；U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER 需 U12/U15 确认语义"
+      },
+      "hard_blocker": "W4 结构性不可完成（7 天挂钟 / 200 / 30；D01-D05；实盘须用户授权）。RC 仍为 DRAFT，未冻结。",
+      "rc_freeze_blockers": [
+        "D05",
+        "观察窗三项 NOT_STARTED",
+        "MODEL_ROUTE_MOCK",
+        "U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER"
+      ]
     }
   },
   "dispatch_version": "v1.1",

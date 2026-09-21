@@ -6,6 +6,31 @@
 
 ---
 
+## 0. 停止点（本会话终态，2026-09-22 03:0x）
+
+**计划内的全部工作已完成，本会话到此为止，不再自行派生新的实现类任务。**
+
+### 交付终态
+- **18/18 任务全部 INTEGRATED**（首批 14 项 + 后置 P2 四项 U06b/U07/U10b/U11），另有 **5 轮缺陷修复**（U13-FU1/FU2/FU3、U12-BF1、U09-FU1）与 **1 次契约勘误**（`CONTRACT-ERRATUM-1`）。
+- **稳定性证据**：`git rev-list --count <branch> ^integration/unattended-v3` 对 **全部 22 条 `task/*` 分支均为 0** —— 无任何已交付提交游离在集成分支之外。
+- **常设门禁**：`OFFLINE REGRESSION OK scripts=94`（U11 修复轮把 9 个 `tests/` 套件补进回归，85→94）、`QUALITY CHECK OK files=303 untracked=0`、契约 `PASS 173 / FAIL 0`（golden 160）、打包器 `37/0`（0 断链）。
+- **台账**：`known_issues` 共 40 条 —— **13 FIXED / 24 OPEN**（其余为已修或已决）。
+
+### 运行目录合规性（已核查）
+- `multi-agent-trader` 的 **HEAD 仍为 `05d28e0`**，`src/`、`config/`、`knowledge/`、`scripts/`、`tests/` **改动为空** —— 本会话**未**在其上做任何 checkout/合并/改配置/执行开发代码；demo 服务跑的是未变代码。
+- 该目录 `git status` 里 `docs/` 的改动与未跟踪文件（`文档索引.md`、`docs/dispatch/` 仅含 `任务卡.md`/`角色卡.md` 等）**mtime 全为 2026-09-19 ~ 09-20**，属**本会话开始之前**的规划阶段产物，**不是本会话造成的**；按硬约束**未做清理**（清理本身即为修改）。
+
+### 为什么不再自行开工
+剩余 OPEN 项分三类，**没有一类适合在当前条件下由我单方面推进**：
+1. **P3 卫生类**（`U09FU1-STRIP-NONMONOTONE`、`U09-REVISION-CONFLICT-DEAD-BRANCH`、`U09-P3-CLUSTER`、`U12-BF1-RESIDUAL`、`U06B/U07/U10B-P3-CLUSTER` 等）—— 真实但低风险，可随时做，不改变 RC 结论。
+2. **显式延期的能力接线**（`W1-JOINT-WIRING`、`U08-U12-WIRING`）—— 属**功能**而非缺陷，计划明确归 U12 BUILD；接线会**改变运行时行为**，不宜在收尾阶段无人确认时动。
+3. **需要外部条件或决策**——`MODEL_ROUTE_MOCK`（需配真实模型路由）、`D05`（SLO 时限冻结）、观察窗三项、`U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER`（需 U12/U15 确认语义）、D01–D05 待决项。
+
+### 唯一的硬阻断（结构性，非工作量问题）
+**W4 不可完成**：7 天挂钟观察窗（规格 §12 固定 7 天 / 200 方向候选 / 30 完整闭合，手册 §3 明示不可并行加速）、D01–D05 外部决策、实盘启用须用户另行明确授权。**RC 仍为 DRAFT，未冻结**。
+
+---
+
 更新时间：2026-09-21 13:4x（北京时间）
 更新者：I（claude-code 编排会话，接自 opencode 交接）
 
