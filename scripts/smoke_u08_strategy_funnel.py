@@ -182,6 +182,16 @@ def test_module_registry() -> None:
           and ScanFunnel(round_id="r").record_round_fault(
               funnel_mod.DETAIL_CARDS_UNAVAILABLE).reason
           == trace.REASON_READINESS_BLOCKED)
+    # B-r3 N3：收尾落盘被推迟也是一个**轮级故障**，必须登记齐全（否则
+    # record_round_fault 会 ValueError，故障反而变成崩溃）。
+    check("收尾落盘推迟码 LEDGER_SAVE_DEFERRED 登记为轮级故障",
+          funnel_mod.DETAIL_LEDGER_SAVE_DEFERRED in ROUND_ONLY_DETAILS
+          and DETAIL_REASON[funnel_mod.DETAIL_LEDGER_SAVE_DEFERRED]
+          == trace.REASON_READINESS_BLOCKED
+          and DETAIL_NATURE[funnel_mod.DETAIL_LEDGER_SAVE_DEFERRED] == NATURE_FAULT
+          and ScanFunnel(round_id="r").record_round_fault(
+              funnel_mod.DETAIL_LEDGER_SAVE_DEFERRED).reason
+          == trace.REASON_READINESS_BLOCKED)
 
 
 def test_faults_are_not_read_as_no_edge() -> None:
@@ -424,6 +434,46 @@ def test_scan_round_end_to_end() -> None:
                   funnel_mod.FUNNEL_REPORT_KEY not in last_scan)
             check("未接线时旧状态无法区分跳过原因（本补丁要修的事）",
                   "no_open_reason" not in last_scan and "no_open_verdict" not in last_scan)
+
+        # --- B-r3 N1：卡册损坏必须在**主路径**（注册表尚未加载）上记 CARDS_INVALID ---
+        broken_root = root / "broken_cards_first_run"
+        broken_root.mkdir()
+        (broken_root / "strategy_cards.json").write_text("{ nope", encoding="utf-8")
+        broken_funnel = ScanFunnel(round_id="smoke-broken-cards")
+        # 用**独立的库**：上面的扫描已经把一张 ticket 落库，同一个库会让"本轮票据"
+        # 非空，从而掩盖"卡册损坏时本轮没有新候选"这个事实。
+        broken_db = AuditDatabase(root / "audit_broken.sqlite")
+        broken_scanner = SignalScanner(        # 注意：**不**预置 _registry/_features_mod
+            knowledge_dir=broken_root, strategy_lab_src="unused",
+            state_file=root / "state_broken.json", db=broken_db)
+        if patched:
+            broken_scanner.funnel = broken_funnel
+        broken_error = ""
+        broken_tickets: list = []
+        original_fetch = scanner_module.fetch_klines
+        scanner_module.fetch_klines = lambda *a, **k: frame
+        try:
+            broken_tickets = broken_scanner.scan(now=now, scan_symbols=["BTCUSDT"])
+        except Exception as exc:  # noqa: BLE001 - 修复前会抛 JSONDecodeError
+            broken_error = type(exc).__name__
+        finally:
+            scanner_module.fetch_klines = original_fetch
+        if patched:
+            broken_report = broken_funnel.no_open_explanation()
+            broken_faults = [f["detail"] for f in broken_report["round_faults"]]
+            check("N1 卡册损坏在主路径上记 CARDS_INVALID"
+                  "（修复前被误标成 STRATEGY_LAB_DRIFT，主路径不可达）",
+                  broken_error == "" and broken_tickets == []
+                  and funnel_mod.DETAIL_CARDS_INVALID in broken_faults
+                  and funnel_mod.DETAIL_STRATEGY_LAB_DRIFT not in broken_faults
+                  and broken_report["verdict"] == "blocked"
+                  and broken_report["primary_reason"] == trace.REASON_VALIDATION_REJECTED,
+                  (broken_error, broken_faults))
+        else:
+            check("未接线时卡册损坏的失败方向不变（仍是整轮中断，不是 no_edge）",
+                  broken_error != "" and broken_tickets == [],
+                  broken_error)
+        broken_db.close()
         db.close()
 
 
@@ -502,6 +552,57 @@ def test_execution_and_ledger() -> None:
               len(expired_decision.intents) == 0
               and expired_f.detail_counts.get(funnel_mod.DETAIL_TICKET_EXPIRED) == 1,
               expired_decision.reasoning)
+
+        # --- B-r3 N3：收尾落盘取不到锁不得毁掉整轮 ---------------------------- #
+        # 构造：只让收尾的 save() 抛真类型 LedgerLockTimeout（consume()/release() 走
+        # 内部 _save_locked()，不受影响），精确复刻"消费已落盘、只有合并写取不到锁"。
+        class _LockedOutLedger(TicketLedger):
+            def save(self) -> None:  # noqa: D102 - 构造用替身
+                raise funnel_mod.LedgerLockTimeout("构造：收尾落盘取不到跨进程锁")
+
+        n3_path = Path(tmp) / "led_n3.json"
+        n3_ledger = _LockedOutLedger(n3_path, clock=lambda: 1_700_000_000_000)
+        n3 = ScanFunnel(round_id="smoke-ledger-timeout")
+        n3_decision = run_strategy_trader(tickets=[live_ticket("t-n3")],
+                                          prices={"BTCUSDT": 100.0}, funnel=n3,
+                                          ledger=n3_ledger)
+        check("N3 收尾 save() 锁超时不再穿出执行器，本轮仍有明确结论",
+              n3_decision.decision == "open", n3_decision.reasoning[:160])
+        check("N3 已构造的 intents 不被丢弃（仍回带 1 笔）",
+              len(n3_decision.intents) == 1, n3_decision.intents)
+        check("N3 落盘被推迟登记为轮级故障 LEDGER_SAVE_DEFERRED",
+              n3.detail_counts.get(funnel_mod.DETAIL_LEDGER_SAVE_DEFERRED) == 1
+              and [f.detail for f in n3.round_faults]
+              == [funnel_mod.DETAIL_LEDGER_SAVE_DEFERRED], n3.as_dict())
+        reread = TicketLedger(n3_path, clock=lambda: 1_700_000_000_000)
+        check("N3 消费事实仍在盘上（orphan_consumed 可定位，补单不重发）",
+              reread.is_consumed("t-n3")
+              and [r.ticket_id for r in reread.orphan_consumed()] == ["t-n3"])
+
+        # --- B-r3 N4：未注入漏斗时 release 也必须真的撤销 ---------------------- #
+        import agents.strategy_trader as trader_mod
+
+        n4_ledger = TicketLedger(Path(tmp) / "led_n4.json",
+                                 clock=lambda: 1_700_000_000_000)
+        original_build = trader_mod.build_intent_from_ticket
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise ValueError("构造：建意图失败")
+
+        try:
+            trader_mod.build_intent_from_ticket = _boom
+            n4_decision = run_strategy_trader(tickets=[live_ticket("t-n4")],
+                                              prices={"BTCUSDT": 100.0}, ledger=n4_ledger)
+        finally:
+            trader_mod.build_intent_from_ticket = original_build
+        n4_record = n4_ledger.get("t-n4")
+        check("N4 未注入漏斗时建意图失败 → 同轮释放，票据不被永久占死",
+              n4_decision.intents == [] and not n4_ledger.is_consumed("t-n4"),
+              None if n4_record is None else n4_record.as_dict())
+        check("N4 释放有审计留痕（release_count=1 / release_round_id 非空）",
+              n4_record is not None and n4_record.release_count == 1
+              and bool(n4_record.release_round_id),
+              None if n4_record is None else n4_record.as_dict())
 
 
 def test_attribution() -> None:

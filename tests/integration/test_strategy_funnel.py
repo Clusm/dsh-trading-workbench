@@ -135,6 +135,11 @@ def no_signal(frame: pd.DataFrame, _params: dict) -> pd.DataFrame:
     return pd.DataFrame({"signal": 0, "side": ""}, index=frame.index)
 
 
+def _raise_build_error(*_args: object, **_kwargs: object) -> None:
+    """构造：让执行器在建意图这一步失败（B-r3 N4 的释放路径）。"""
+    raise ValueError("构造：建意图失败")
+
+
 def live_ticket(ticket_id: str = "t-1", *, hours: float = 4.0,
                 strategy_id: str = "card_a", symbol: str = "BTCUSDT") -> dict:
     """一张**真的没过期**的 ticket（真实判定走 core.signal_ticket）。"""
@@ -972,6 +977,60 @@ def case_scanner_wiring() -> None:
                   and broken_funnel.detail_counts.get(
                       funnel_mod.DETAIL_CARDS_INVALID) == 1, broken_report)
 
+            # B-r3 N1：上面那条是**注册表已预置**的路径（`_registry = {}` 绕过了
+            # `_load_strategy_lab()`）。真正的主路径是"注册表尚未加载"——修复前
+            # `_load_strategy_lab()` 自己先 `load_cards()`，损坏的 JSON 在那里先抛
+            # `JSONDecodeError`，外层按"REGISTRY 是不是 dict / build_features 可不可
+            # 调用"推断成 `STRATEGY_LAB_DRIFT`：**`CARDS_INVALID` 在主路径上不可达**。
+            first_root = root / "broken_cards_first_run"
+            first_root.mkdir()
+            (first_root / "strategy_cards.json").write_text("{ nope", encoding="utf-8")
+            first_funnel = ScanFunnel(round_id="cards-broken-first-run")
+            scanner_first = SignalScanner(          # 注意：**不**预置 _registry/_features_mod
+                knowledge_dir=first_root, strategy_lab_src="unused",
+                state_file=root / "state_broken_first.json", db=db2,
+                funnel=first_funnel)
+            first_error = ""
+            with patch_fetch(frame):
+                try:
+                    first_tickets = scanner_first.scan(now=now,
+                                                       scan_symbols=["BTCUSDT"])
+                except Exception as exc:  # noqa: BLE001 - 修复前会抛 JSONDecodeError
+                    first_error = type(exc).__name__
+                    first_tickets = []
+            first_report = first_funnel.no_open_explanation()
+            first_faults = [fault["detail"] for fault in first_report["round_faults"]]
+            check("N1：首轮（注册表未加载）卡册损坏 → CARDS_INVALID（主路径可达）",
+                  first_error == "" and first_tickets == []
+                  and first_funnel.detail_counts.get(funnel_mod.DETAIL_CARDS_INVALID) == 1
+                  and first_report["verdict"] == "blocked"
+                  and first_report["primary_reason"] == trace.REASON_VALIDATION_REJECTED,
+                  (first_error, first_report))
+            check("N1：'卡册损坏'与'运行时漂移'确实可区分（漂移码没被误冒出来）",
+                  funnel_mod.DETAIL_CARDS_INVALID in first_faults
+                  and funnel_mod.DETAIL_STRATEGY_LAB_DRIFT not in first_faults
+                  and funnel_mod.DETAIL_STRATEGY_LAB_UNAVAILABLE not in first_faults,
+                  first_faults)
+
+            # 反向：**真的**漂移（卡要的 signal_fn 不在运行时注册表里）仍必须是
+            # STRATEGY_LAB_DRIFT，不能被"卡册"顶掉。
+            drift_funnel = ScanFunnel(round_id="lab-drift")
+            scanner_drift = SignalScanner(
+                knowledge_dir=root, strategy_lab_src="unused",
+                state_file=root / "state_drift.json", db=db2, funnel=drift_funnel)
+            drift_error = ""
+            try:
+                scanner_drift.scan(now=now, scan_symbols=["BTCUSDT"])
+            except Exception as exc:  # noqa: BLE001 - 既有语义是整轮中断
+                drift_error = type(exc).__name__
+            drift_faults = [fault["detail"]
+                            for fault in drift_funnel.no_open_explanation()["round_faults"]]
+            check("N1：真的漂移仍记 STRATEGY_LAB_DRIFT（没有被卡册故障顶掉）",
+                  drift_error == "RuntimeError"
+                  and funnel_mod.DETAIL_STRATEGY_LAB_DRIFT in drift_faults
+                  and funnel_mod.DETAIL_CARDS_INVALID not in drift_faults,
+                  (drift_error, drift_faults))
+
             lab_funnel = ScanFunnel(round_id="lab-down")
             scanner_lab = SignalScanner(
                 knowledge_dir=root, strategy_lab_src="unused",
@@ -1010,6 +1069,7 @@ def case_trader_wiring() -> None:
     patched = trader_supports_funnel()
     print(f"  当前态：strategy_trader funnel 接线 {'已应用' if patched else '未应用'}")
     from agents.strategy_trader import run_strategy_trader
+    import agents.strategy_trader as trader_mod
 
     prices = {"BTCUSDT": 100.0}
     if patched:
@@ -1098,6 +1158,62 @@ def case_trader_wiring() -> None:
                                          funnel=third, ledger=reloaded)
                 check("重启后（重新加载账本）仍不重复消费", len(d3.intents) == 0,
                       d3.reasoning)
+
+                # --- B-r3 N3：收尾落盘取不到锁**必须局部化**（不得毁掉整轮） ----
+                # 构造：只让"收尾的 save()"抛 LedgerLockTimeout。consume()/release()
+                # 走的是内部 _save_locked()（不是 save()），所以这个替身精确复刻
+                # "每票消费都已单独落盘、只有合并写取不到跨进程锁"的现场；
+                # 抛的是**真类型** LedgerLockTimeout，捕获路径也是真路径。
+                class _LockedOutLedger(TicketLedger):
+                    def save(self) -> None:  # noqa: D102 - 构造用替身
+                        raise funnel_mod.LedgerLockTimeout(
+                            "构造：收尾落盘取不到跨进程锁")
+
+                n3_path = Path(tmp) / "led_n3.json"
+                n3_ledger = _LockedOutLedger(n3_path, clock=lambda: 1_700_000_000_000)
+                n3 = ScanFunnel(round_id="ledger-save-timeout")
+                n3_decision = run_strategy_trader(tickets=[live_ticket("t-n3")],
+                                                  prices=prices, funnel=n3,
+                                                  ledger=n3_ledger)
+                check("N3 收尾 save() 锁超时不再穿出执行器，本轮仍有明确结论",
+                      n3_decision.decision == "open", n3_decision.reasoning[:160])
+                check("N3 已构造的 intents 不再被丢弃（仍回带 1 笔）",
+                      len(n3_decision.intents) == 1, n3_decision.intents)
+                check("N3 落盘被推迟如实登记为轮级故障 LEDGER_SAVE_DEFERRED",
+                      n3.detail_counts.get(
+                          funnel_mod.DETAIL_LEDGER_SAVE_DEFERRED) == 1
+                      and any(f.detail == funnel_mod.DETAIL_LEDGER_SAVE_DEFERRED
+                              for f in n3.round_faults), n3.as_dict())
+                check("N3 note 带原因码，运维可直接读",
+                      "LEDGER_SAVE_DEFERRED" in n3_decision.reasoning)
+                n3_reread = TicketLedger(n3_path, clock=lambda: 1_700_000_000_000)
+                check("N3 消费事实仍在盘上（orphan_consumed 可定位，供补单不重发）",
+                      n3_reread.is_consumed("t-n3")
+                      and [r.ticket_id for r in n3_reread.orphan_consumed()] == ["t-n3"],
+                      [r.ticket_id for r in n3_reread.orphan_consumed()])
+
+                # --- B-r3 N4：未注入漏斗（funnel=None）时 release 也必须真的撤销 ----
+                # 修复前 release(round_id="") 被门禁直接拒绝 → 该 ticket 被永久占死
+                # （一次异常 = 该信号再也不能开仓）。
+                n4_path = Path(tmp) / "led_n4.json"
+                n4_ledger = TicketLedger(n4_path, clock=lambda: 1_700_000_000_000)
+                n4_decision = None
+                original_build = trader_mod.build_intent_from_ticket
+                try:
+                    trader_mod.build_intent_from_ticket = _raise_build_error
+                    n4_decision = run_strategy_trader(tickets=[live_ticket("t-n4")],
+                                                      prices=prices, ledger=n4_ledger)
+                finally:
+                    trader_mod.build_intent_from_ticket = original_build
+                n4_record = n4_ledger.get("t-n4")
+                check("N4 未注入漏斗时建意图失败 → 同轮释放，票据不被永久占死",
+                      n4_decision is not None and n4_decision.intents == []
+                      and not n4_ledger.is_consumed("t-n4"),
+                      None if n4_record is None else n4_record.as_dict())
+                check("N4 释放有审计留痕（release_count=1 / release_round_id 非空）",
+                      n4_record is not None and n4_record.release_count == 1
+                      and bool(n4_record.release_round_id),
+                      None if n4_record is None else n4_record.as_dict())
         else:
             check("未打补丁时执行器不接受 ledger 参数（消费一次只在库层，不冒充已接线）",
                   "ledger" not in inspect.signature(run_strategy_trader).parameters)
