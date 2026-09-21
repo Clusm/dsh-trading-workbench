@@ -1,0 +1,14 @@
+diff --git a/scripts/run_offline_regression.py b/scripts/run_offline_regression.py
+index 1e1ad0b..0c5bbd6 100644
+--- a/scripts/run_offline_regression.py
++++ b/scripts/run_offline_regression.py
+@@ -102,6 +102,9 @@ SCRIPTS = (
+     "scripts/smoke_u02_strategy_position_manager.py",
+     # U06a（D 影子研究）：影子最小隔离与旧口径披露。全程离线。
+     "scripts/smoke_u06a_shadow_isolation.py",
++    # U08（C 决策证据）：策略漏斗逐项原因/ticket 消费一次/管理责任归属/
++    # 管理优先预算；看板展示面。全程离线（行情层用模块内桩）。
++    "scripts/smoke_u08_strategy_funnel.py",
+ )
+ EXCLUDED_SMOKE_SCRIPTS = {
+     # 第[6]节直接调用 query_symbol_detail/query_symbol_cards 打公共行情接口，
