@@ -20,6 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from core.runtime_identity import authorize_control_request, verify_control_write
 from core.service import TradingService
+from core import strategy_funnel
 from data.market_query import get_live_prices
 from data.price_stream import PriceStream
 from data.kline_store import kline_store_status
@@ -1043,6 +1044,204 @@ def _signal_scanner_status(service: TradingService) -> dict[str, Any]:
         return {}
 
 
+def _scanner_state(service: TradingService) -> dict[str, Any]:
+    """读取扫描器状态文件全量内容（含漏斗）；只读本地小文件，不请求交易所。"""
+    try:
+        cfg = service.settings.raw_settings.get("signal_scanner", {}) or {}
+        path = service.settings.project_root / str(
+            cfg.get("signal_state_file", "data/signal_scanner_state.json")
+        )
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _funnel_report(service: TradingService) -> dict[str, Any]:
+    """最近一轮的策略漏斗（U08/DL07/DC10）。
+
+    三种形态**必须可区分**，不允许把"没数据"读成"没有信号"：
+
+    - 旧状态文件没有 ``funnel`` 段 → ``available=False`` + 原因；
+    - 有漏斗段 → ``available=True``，直接给出 verdict/主因/闸门/细分码；
+    - 漏斗段不可信（被篡改/含未登记码）→ 读侧 fail-closed，``available=False``
+      且 ``verdict=unavailable``（展示层不会因此报 500）。
+    """
+    last_scan = dict(_scanner_state(service).get("last_scan") or {})
+    payload = last_scan.get("funnel")
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "verdict": "unavailable",
+            "reason": "state 文件里没有 funnel 段（旧格式或尚未运行过扫描器）",
+            "at": last_scan.get("at") or "",
+            "tickets": last_scan.get("tickets", 0),
+        }
+    report = dict(payload)
+    report["available"] = True
+    report["at"] = last_scan.get("at") or ""
+    report["tickets"] = last_scan.get("tickets", 0)
+    report["expired_tickets"] = last_scan.get("expired_tickets", 0)
+    report["status"] = last_scan.get("status", "")
+    # **不直接采信**嵌入的 no_open：先用读侧重建器校验（未登记码 fail-closed），
+    # 再用重建结果与嵌入摘要**对账**。二者任一不成立就标 unavailable——
+    # fail-closed，不拿一份被篡改/损坏的摘冒充"没有信号"（B-r1 P3-2）。
+    rebuilt = strategy_funnel.funnel_from_report(report)
+    recomputed = rebuilt.no_open_explanation()
+    no_open = report.get("no_open")
+    if isinstance(no_open, dict):
+        report.setdefault("reasons", no_open.get("reasons"))
+        report.setdefault("details", no_open.get("details"))
+        report.setdefault("stopped_at", no_open.get("stopped_at"))
+        report.setdefault("round_faults", no_open.get("round_faults"))
+        report.setdefault("evaluated", no_open.get("evaluated"))
+    corrupt = str(report.get("report_corrupt_reason") or "") or rebuilt.report_corrupt_reason
+    mismatch = isinstance(no_open, dict) and (
+        no_open.get("verdict") != recomputed["verdict"]
+        or no_open.get("primary_reason") != recomputed["primary_reason"])
+    if corrupt or mismatch or recomputed["verdict"] == "unavailable":
+        report["available"] = False
+        report["verdict"] = "unavailable"
+        report["primary_reason"] = ""
+        report["reason"] = (corrupt
+                            or ("漏斗摘要与计数不一致（状态文件被改写？）" if mismatch
+                                else str(recomputed.get("error") or "funnel 段不可信")))
+        return report
+    report["verdict"] = recomputed["verdict"]
+    report["primary_reason"] = recomputed["primary_reason"]
+    report["evaluated"] = recomputed["evaluated"]
+    report["candidates"] = recomputed["candidates"]
+    return report
+
+
+def _position_attribution(service: TradingService) -> dict[str, Any]:
+    """每个仓位"谁在管 + 用哪一版规则开的"（DC10/F19 的展示面）。
+
+    只读本地数据库与策略卡文件；不请求交易所。策略卡读不到时规则版本显式标
+    ``rule_known=False``，**不**冒充已知版本。
+    """
+    try:
+        rows = service.db.fetch_all(
+            "SELECT symbol, side, qty, source, strategy_id, ticket_id, status, opened_at "
+            "FROM positions WHERE status='open' ORDER BY id DESC LIMIT 200")
+    except Exception as exc:
+        return {"total": 0, "positions": [], "rule_unknown": [], "by_manager": {},
+                "by_position_class": {}, "legacy_pending": 0,
+                "error": f"{type(exc).__name__}: {exc}"}
+    cards: list[dict[str, Any]] = []
+    try:
+        path = Path(service.settings.knowledge_dir) / "strategy_cards.json"
+        if path.exists():
+            cards = list(json.loads(path.read_text(encoding="utf-8")).get("cards", []))
+    except Exception:
+        cards = []
+    summary = strategy_funnel.attribution_summary(
+        strategy_funnel.attribute_positions(rows, cards, strategy_hash=_runtime_hash(service)))
+    summary["cards_loaded"] = len(cards)
+    return summary
+
+
+def _runtime_hash(service: TradingService) -> str:
+    """K01 运行代身份里的 ``strategy_hash``（取不到就返回空串，不猜）。"""
+    try:
+        identity = service.runtime_identity
+    except Exception:
+        return ""
+    for attr in ("strategy_hash", "deployment_hash"):
+        value = getattr(identity, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _funnel_page_html(report: dict[str, Any], attribution: dict[str, Any]) -> str:
+    """自包含漏斗页（不改模板即可上线；字段与 ``/api/funnel`` 同源）。"""
+    esc = html.escape
+
+    def reason_rows(items: Any) -> str:
+        if not isinstance(items, list) or not items:
+            return "<tr><td colspan='4' class='muted'>—</td></tr>"
+        out = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            out.append(
+                "<tr><td><code>{}</code></td><td>{}</td><td>{}</td>"
+                "<td class='num'>{}</td></tr>".format(
+                    esc(str(item.get("detail") or item.get("reason") or "")),
+                    esc(str(item.get("reason") or "")),
+                    esc(str(item.get("nature") or "")),
+                    esc(str(item.get("count") or 0))))
+        return "".join(out)
+
+    gates = "".join(
+        "<tr><td><code>{}</code></td><td class='num'>{}</td></tr>".format(
+            esc(str(stage)), esc(str(count)))
+        for stage, count in sorted((report.get("stopped_at") or {}).items())
+    ) or "<tr><td colspan='2' class='muted'>没有任何候选停在闸门上</td></tr>"
+    faults = "".join(
+        "<tr><td><code>{}</code></td><td>{}</td><td>{}</td></tr>".format(
+            esc(str(item.get("detail") or "")), esc(str(item.get("reason") or "")),
+            esc(str(item.get("note") or "")))
+        for item in (report.get("round_faults") or []) if isinstance(item, dict)
+    ) or "<tr><td colspan='3' class='muted'>本轮没有轮级故障</td></tr>"
+    positions = "".join(
+        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>"
+        "<td><code>{}</code></td></tr>".format(
+            esc(str(item.get("symbol") or "")), esc(str(item.get("position_side") or "")),
+            esc(str(item.get("manager") or "")), esc(str(item.get("position_class") or "")),
+            esc(str(item.get("strategy_id") or "")),
+            esc(str(item.get("rule_version") or "")))
+        for item in (attribution.get("positions") or []) if isinstance(item, dict)
+    ) or "<tr><td colspan='6' class='muted'>当前没有未平仓仓位</td></tr>"
+    if report.get("available"):
+        head = (
+            f"<p class='muted'>最近扫描 {esc(str(report.get('at') or '尚未运行')[:19])} · "
+            f"status={esc(str(report.get('status') or '-'))} · "
+            f"tickets={esc(str(report.get('tickets', 0)))}</p>")
+    else:
+        head = (
+            "<p class='muted'>没有可用漏斗数据：{}"
+            "（verdict={}）</p>".format(
+                esc(str(report.get("reason") or "")),
+                esc(str(report.get("verdict") or "unavailable"))))
+    return (
+        "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+        "<title>策略漏斗 · 本地控制台</title>"
+        "<style>body{font-family:system-ui,'Segoe UI',sans-serif;background:#0b1016;"
+        "color:#dbe3ee;margin:24px}table{border-collapse:collapse;width:100%;margin:8px 0 20px}"
+        "th,td{border-bottom:1px solid #1e2635;padding:6px 8px;text-align:left;font-size:13px}"
+        "th{color:#8fa3bf;font-weight:600}code{color:#7fd1ff}.num{text-align:right}"
+        ".muted{color:#7b8aa0}h1{font-size:18px}h2{font-size:15px;margin-top:24px}"
+        ".pill{display:inline-block;padding:2px 8px;border-radius:10px;background:#16202f;"
+        "border:1px solid #24314a;margin-right:6px}</style></head><body>"
+        "<h1>策略漏斗与管理责任</h1>"
+        "<p><a href='/channels'>← 双通道</a> · <a href='/api/funnel'>JSON</a></p>"
+        f"{head}"
+        f"<p><span class='pill'>verdict "
+        f"{esc(str(report.get('verdict') or '-'))}</span>"
+        f"<span class='pill'>主因 {esc(str(report.get('primary_reason') or '-'))}</span>"
+        f"<span class='pill'>候选 {esc(str(report.get('candidates', 0)))}</span>"
+        f"<span class='pill'>已评估 {esc(str(report.get('evaluated', 0)))}</span>"
+        f"<span class='pill'>发射票据 {esc(str(report.get('tickets_emitted', 0)))}</span>"
+        f"<span class='pill'>恢复票据 {esc(str(report.get('tickets_recovered', 0)))}</span>"
+        f"<span class='pill'>开仓 {esc(str(report.get('opened', 0)))}</span></p>"
+        "<h2>停在哪个闸门（为什么没开）</h2>"
+        f"<table><tr><th>闸门</th><th class='num'>计数</th></tr>{gates}</table>"
+        "<h2>轮级故障（整轮没跑成 / 没跑全）</h2>"
+        "<table><tr><th>细分码</th><th>九码</th><th>说明</th></tr>"
+        f"{faults}</table>"
+        "<h2>细分原因 → 九码（含性质）</h2>"
+        "<table><tr><th>细分码</th><th>原因码（U05 九码）</th><th>性质</th>"
+        "<th class='num'>计数</th></tr>"
+        f"{reason_rows(report.get('details'))}</table>"
+        "<h2>仓位管理责任（谁在管 / 有无策略归属 / 哪一版规则）</h2>"
+        "<table><tr><th>标的</th><th>方向</th><th>管理者</th><th>归属类别</th>"
+        "<th>策略</th><th>规则版本</th></tr>"
+        f"{positions}</table></body></html>"
+    )
+
+
 def _maybe_snapshot(service: TradingService, equity: float,
                     unrealized_pnl: float, positions: list[dict[str, Any]]) -> None:
     global _last_snapshot_mono, _last_bad_snapshot_log_mono
@@ -1491,7 +1690,24 @@ def create_app(service: TradingService) -> FastAPI:
             "signals": signals,
             "tickets": tickets,
             "scanner": _signal_scanner_status(service),
+            # U08：模板可选消费（channels.html 自带兜底），因此不改模板也能上线；
+            # 独立页 /funnel 一定展示它们。
+            "funnel": _funnel_report(service),
+            "attribution": _position_attribution(service),
             "console_token": _write_token,
+        })
+
+    @app.get("/funnel", response_class=HTMLResponse)
+    def funnel_page(request: Request):
+        """策略漏斗：任意一轮"为什么没开仓" + 每个仓位的管理者与规则版本。"""
+        return HTMLResponse(_funnel_page_html(_funnel_report(service),
+                                             _position_attribution(service)))
+
+    @app.get("/api/funnel")
+    def api_funnel():
+        return JSONResponse({
+            "scanner_funnel": _funnel_report(service),
+            "positions": _position_attribution(service),
         })
 
     @app.get("/orders", response_class=HTMLResponse)
