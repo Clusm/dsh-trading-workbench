@@ -1,0 +1,292 @@
+scripts pristine=94 patched=94
+
+== NEW_FAIL (pristine pass -> patched fail) ==
+  ∅ (empty)
+== FIXED (pristine fail -> patched pass) ==
+  ∅ (empty)
+== CHANGED (both fail, different counts) ==
+  ∅ (empty)
+
+== per-script PASS/FAIL 摘要（pristine -> patched） ==
+  scripts/check_binance_request_policy.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/check_execution_boundaries.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_account_mirror.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_baseline_guard.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_binance_transport.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_channels.py
+      pristine: PASS  5U 浮盈只进入 AI 实时权益
+      patched : PASS  5U 浮盈只进入 AI 实时权益
+  scripts/smoke_close_reconcile.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_contracts_v3.py
+      pristine: 结果：PASS 173 / FAIL 0；golden cases=160 (positive=45, negative=115)
+      patched : 结果：PASS 173 / FAIL 0；golden cases=160 (positive=45, negative=115)
+  scripts/smoke_dashboard_health.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_db_backup.py
+      pristine: PASS  24小时内不重复备份
+      patched : PASS  24小时内不重复备份
+  scripts/smoke_db_migrations.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_decision_pipeline.py
+      pristine: 结果：PASS 17 / FAIL 0
+      patched : 结果：PASS 17 / FAIL 0
+  scripts/smoke_decision_policy.py
+      pristine: 结果：PASS 18 / FAIL 0
+      patched : 结果：PASS 18 / FAIL 0
+  scripts/smoke_detached_profiles.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_entry_readiness.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_exchange_event_inbox.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_exchange_safety_monitor.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_fault_matrix.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_force_submit.py
+      pristine: 结果：PASS 15 / FAIL 0
+      patched : 结果：PASS 15 / FAIL 0
+  scripts/smoke_graph_barrier.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_health_watch.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_intel_sidecar.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_kline_finality.py
+      pristine: 结果：PASS 13 / FAIL 0
+      patched : 结果：PASS 13 / FAIL 0
+  scripts/smoke_llm_coordinator.py
+      pristine: PASS  120秒冷却已登记 | PASS  401不进入网络重试 | 结果：PASS 13 / FAIL 0
+      patched : PASS  120秒冷却已登记 | PASS  401不进入网络重试 | 结果：PASS 13 / FAIL 0
+  scripts/smoke_llm_deadline.py
+      pristine: 结果：PASS 6 / FAIL 0
+      patched : 结果：PASS 6 / FAIL 0
+  scripts/smoke_llm_failover.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_market_data_gateway.py
+      pristine: PASS  15m同步聚合全部高周期 | PASS  15m底座已产生本地高周期更新 | 结果：PASS 18 / FAIL 0
+      patched : PASS  15m同步聚合全部高周期 | PASS  15m底座已产生本地高周期更新 | 结果：PASS 18 / FAIL 0
+  scripts/smoke_market_query_tools.py
+      pristine: 结果：PASS 35 / FAIL 0
+      patched : 结果：PASS 35 / FAIL 0
+  scripts/smoke_minimum_research_gate.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_order_mirror.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_order_outbox.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_p0_account_safety.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_p0b.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_p0b_loop.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_p1.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_p2.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_portfolio_policy.py
+      pristine: 结果：PASS 14 / FAIL 0
+      patched : 结果：PASS 14 / FAIL 0
+  scripts/smoke_position_guardian.py
+      pristine: PASS  30秒快循环调用Guardian | 结果：PASS 21 / FAIL 0
+      patched : PASS  30秒快循环调用Guardian | 结果：PASS 21 / FAIL 0
+  scripts/smoke_profile_isolation.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_protection_mirror.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_public_rate_limit.py
+      pristine: PASS  418不再重复撞限流出口且遵守服务端更长封禁 | 结果：PASS 9 / FAIL 0
+      patched : PASS  418不再重复撞限流出口且遵守服务端更长封禁 | 结果：PASS 9 / FAIL 0
+  scripts/smoke_rate_limit_multiprocess.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_recovery_bundle.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_release_acceptance.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_release_observation_freshness.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_release_package.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_request_policy.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_review_worker.py
+      pristine: PASS  7天缺口全部生成 | 结果：PASS 6 / FAIL 0
+      patched : PASS  7天缺口全部生成 | 结果：PASS 6 / FAIL 0
+  scripts/smoke_risk_incidents.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_service_lifecycle.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_signal_scanner_integration.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_snapshot_guard.py
+      pristine: 结果：PASS 12 / FAIL 0
+      patched : 结果：PASS 12 / FAIL 0
+  scripts/smoke_step0.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_strategy_evaluation.py
+      pristine: 结果：PASS 18 / FAIL 0
+      patched : 结果：PASS 18 / FAIL 0
+  scripts/smoke_strategy_prefix_invariance.py
+      pristine: PASS  9张策略卡决策输出无前视  [cards=9 probes=108 mismatch=0]
+      patched : PASS  9张策略卡决策输出无前视  [cards=9 probes=108 mismatch=0]
+  scripts/smoke_takeover_compatibility.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_trade_lifecycle.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_trade_reconciliation.py
+      pristine: PASS  3+8+9 数量完整守恒
+      patched : PASS  3+8+9 数量完整守恒
+  scripts/smoke_trading_scope.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_u01_income.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_u01_review_statistics.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_u02_strategy_position_manager.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_u03_market_evidence_quality.py
+      pristine: 结果：PASS 52 / FAIL 0
+      patched : 结果：PASS 52 / FAIL 0
+  scripts/smoke_u03_research_evidence.py
+      pristine: PASS  744.13 > 744.9 为假 → 拒绝 | PASS  78550 < 78443 为假 → 拒绝 | 结果：PASS 138 / FAIL 0
+      patched : PASS  744.13 > 744.9 为假 → 拒绝 | PASS  78550 < 78443 为假 → 拒绝 | 结果：PASS 138 / FAIL 0
+  scripts/smoke_u04_execution_faults.py
+      pristine: PASS  503/响应丢失后进入 UNKNOWN
+      patched : PASS  503/响应丢失后进入 UNKNOWN
+  scripts/smoke_u05_background_refresh_budget.py
+      pristine: 结果：PASS 48 / FAIL 0
+      patched : 结果：PASS 48 / FAIL 0
+  scripts/smoke_u05_cross_process_admission.py
+      pristine: PASS  429 冷却可登记（限流事实不靠猜） | 结果：PASS 45 / FAIL 0
+      patched : PASS  429 冷却可登记（限流事实不靠猜） | 结果：PASS 45 / FAIL 0
+  scripts/smoke_u05_decision_trace.py
+      pristine: PASS  5 次请求 / 0 失败轮次 可表达（旧单计数器无法区分） | PASS  4 次剩余尝试各自 2s | PASS  5 次尝试都拿到了正预算（没有一次被前一次吃掉） | 结果：PASS 115 / FAIL 0
+      patched : PASS  5 次请求 / 0 失败轮次 可表达（旧单计数器无法区分） | PASS  4 次剩余尝试各自 2s | PASS  5 次尝试都拿到了正预算（没有一次被前一次吃掉） | 结果：PASS 115 / FAIL 0
+  scripts/smoke_u05_model_route_safety.py
+      pristine: PASS  401 等不可重试错误不被备用链路掩盖 | 结果：PASS 63 / FAIL 0
+      patched : PASS  401 等不可重试错误不被备用链路掩盖 | 结果：PASS 63 / FAIL 0
+  scripts/smoke_u06a_shadow_isolation.py
+      pristine: 结果：PASS 52 / FAIL 0
+      patched : 结果：PASS 52 / FAIL 0
+  scripts/smoke_u08_strategy_funnel.py
+      pristine: PASS  4 个进程抢同一张票：恰好 1 个 CONSUMED | PASS  4 个进程抢同一张票：其余全部 ALREADY_CONSUMED | 结果：PASS 91 / FAIL 0
+      patched : PASS  4 个进程抢同一张票：恰好 1 个 CONSUMED | PASS  4 个进程抢同一张票：其余全部 ALREADY_CONSUMED | 结果：PASS 101 / FAIL 0
+  scripts/smoke_u09_release_evidence.py
+      pristine: PASS  30 笔完整闭合按 lifecycle_id 计数
+      patched : PASS  30 笔完整闭合按 lifecycle_id 计数
+  scripts/smoke_u10a_release_package.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_u13_supervision.py
+      pristine: U13 SUPERVISION ACCEPTANCE PASS: 166 checks in 1.15s
+      patched : U13 SUPERVISION ACCEPTANCE PASS: 166 checks in 1.17s
+  scripts/smoke_u14_alert_delivery.py
+      pristine: PASS  60 条积压后交易库目录零新增/零修改
+      patched : PASS  60 条积压后交易库目录零新增/零修改
+  scripts/smoke_ui.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_usdm_replay.py
+      pristine: 结果：PASS 26 / FAIL 0
+      patched : 结果：PASS 26 / FAIL 0
+  scripts/smoke_user_stream_lifecycle.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_user_stream_transport.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_windows_service_lifecycle.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_windows_service_plan.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_workbuddy_adapter.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/smoke_ws_routes.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/test_precheck_fixes.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  scripts/test_secret_scanner.py
+      pristine: 结果：PASS 36 / FAIL 0
+      patched : 结果：PASS 36 / FAIL 0
+  tests/acceptance/test_alert_delivery.py
+      pristine: PASS  200 条告警积压 + 投递后交易库目录零新增/零修改
+      patched : PASS  200 条告警积压 + 投递后交易库目录零新增/零修改
+  tests/acceptance/test_control_boundary.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  tests/acceptance/test_release_evidence_v2.py
+      pristine: PASS  30 笔完整闭合按 lifecycle_id 计数（同毫秒满页不吞并）
+      patched : PASS  30 笔完整闭合按 lifecycle_id 计数（同毫秒满页不吞并）
+  tests/acceptance/test_runtime_identity.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  tests/acceptance/test_unattended_release.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  tests/integration/test_shadow_labels.py
+      pristine: <no summary line>
+      patched : <no summary line>
+  tests/integration/test_shadow_statistics.py
+      pristine: PASS  6/6 同号 → 双侧精确 p = 2*(1/64) = 0.03125 | PASS  2 正 2 负 → p = 1.0（无方向性证据） | PASS  1 倍为正、3 倍转负，逐点标记 unprofitable
+      patched : PASS  6/6 同号 → 双侧精确 p = 2*(1/64) = 0.03125 | PASS  2 正 2 负 → p = 1.0（无方向性证据） | PASS  1 倍为正、3 倍转负，逐点标记 unprofitable
+  tests/integration/test_shadow_status.py
+      pristine: 结果：PASS 264 / FAIL 0
+      patched : 结果：PASS 264 / FAIL 0
+  tests/integration/test_strategy_funnel.py
+      pristine: U08 STRATEGY FUNNEL: PASS 208 / FAIL 0
+      patched : U08 STRATEGY FUNNEL: PASS 208 / FAIL 0

@@ -1,0 +1,169 @@
+diff --git a/scripts/smoke_u08_strategy_funnel.py b/scripts/smoke_u08_strategy_funnel.py
+index 26ee6e8..21b2d80 100644
+--- a/scripts/smoke_u08_strategy_funnel.py
++++ b/scripts/smoke_u08_strategy_funnel.py
+@@ -741,6 +741,155 @@ def test_ledger_write_failure_contained() -> None:
+               be_escaped == "KeyboardInterrupt", be_escaped)
+ 
+ 
++def test_audit_unavailability_contained() -> None:
++    """U08-R5-FU2：审计库 ``db.*`` 抛 ``sqlite3.OperationalError`` 时不得整轮被打断。
++
++    **两态可跑**：修复前本节的 check 会失败（异常穿出执行器、decision 不返回），
++    修复后全过；两条路径都不改被测逻辑、不联网、不落真实 ``data/``。
++
++    方向（本修复最关键的一点，做反了比不修更糟）：
++    - 去重读取（``signal_ticket_has_order``）是"这张票**已经**下过单吗"的**跨进程
++      权威**。**读不出答案 -> 不交易**：该票 fail-closed 跳过并披露
++      ``AUDIT_UNAVAILABLE``；**绝不**当成"没下过单"放行（那会**重复下单**），
++      也不谎报"已消费"（那会**永久丢票**）。
++    - 纯审计写入（``log_risk_event`` / ``update_signal_ticket``）失败：局部化 +
++      留痕 + 本轮继续（该开的仓照开）。
++    - 只吞 ``Exception``：``KeyboardInterrupt`` 必须继续穿出。
++    """
++    note("审计库不可用收敛（U08-R5-FU2）")
++    if not (trader_supports_funnel() and trader_supports_ledger()):
++        check("未接线时不冒充已接线（审计库护栏随 funnel/ledger 接线一并交付）",
++              not trader_supports_funnel() and not trader_supports_ledger())
++        return
++
++    # 注册表常量优先；未应用本修复时退化为字面量，让 check 干净地失败而不是
++    # AttributeError（"两态可跑"要求异常不冒充结果）。
++    audit_code = getattr(funnel_mod, "DETAIL_AUDIT_UNAVAILABLE", "AUDIT_UNAVAILABLE")
++
++    class _ReadBoomDB:
++        """去重读取抛 OperationalError（如 database is locked）。"""
++
++        def signal_ticket_has_order(self, ticket_id: str) -> bool:
++            raise sqlite3.OperationalError("database is locked")
++
++        def log_risk_event(self, **_kw: object) -> None:
++            pass
++
++        def update_signal_ticket(self, **_kw: object) -> None:
++            pass
++
++    class _OneBadTicketDB:
++        """只让 t-bad 这张票的读取抛错。"""
++
++        def signal_ticket_has_order(self, ticket_id: str) -> bool:
++            if str(ticket_id) == "t-bad":
++                raise sqlite3.OperationalError("database is locked")
++            return False
++
++        def log_risk_event(self, **_kw: object) -> None:
++            pass
++
++        def update_signal_ticket(self, **_kw: object) -> None:
++            pass
++
++    class _WriteBoomDB:
++        """去重读取正常，纯审计写入抛 OperationalError。"""
++
++        def signal_ticket_has_order(self, ticket_id: str) -> bool:
++            return False
++
++        def log_risk_event(self, **_kw: object) -> None:
++            raise sqlite3.OperationalError("database is locked")
++
++        def update_signal_ticket(self, **_kw: object) -> None:
++            raise sqlite3.OperationalError("database is locked")
++
++    class _InterruptDB:
++        """BaseException 通道：读取时 KeyboardInterrupt。"""
++
++        def signal_ticket_has_order(self, ticket_id: str) -> bool:
++            raise KeyboardInterrupt("构造：审计库读取时 Ctrl-C")
++
++        def log_risk_event(self, **_kw: object) -> None:
++            pass
++
++        def update_signal_ticket(self, **_kw: object) -> None:
++            pass
++
++    def _run(**kwargs: object):
++        """返回 ``(decision, escaped_exc_name)``：异常不冒充结果。"""
++        try:
++            return run_strategy_trader(**kwargs), None  # type: ignore[arg-type]
++        except Exception as inner:  # noqa: BLE001 - 修复前这里就是穿出点
++            return None, type(inner).__name__
++
++    with tempfile.TemporaryDirectory(prefix="mta-u08-smoke-audit-") as tmp:
++        clock = lambda: 1_700_000_000_000  # noqa: E731
++
++        # (1) 去重读取不可用 -> fail-closed 跳过 + 如实披露；**不**放行、**不**烧票
++        led = TicketLedger(Path(tmp) / "audit_read.json", clock=clock)
++        f1 = ScanFunnel(round_id="smoke-audit-read")
++        d1, esc1 = _run(tickets=[live_ticket("t-a")], prices={"BTCUSDT": 100.0},
++                        funnel=f1, db=_ReadBoomDB(), ledger=led)
++        check("FU2 去重读取抛 OperationalError 不再穿出执行器（decision 仍返回）",
++              esc1 is None and d1 is not None, (esc1, None if d1 is None else d1.decision))
++        check("FU2 读取不可用 -> fail-closed 跳过：0 笔 intent 且披露 AUDIT_UNAVAILABLE",
++              d1 is not None and d1.intents == []
++              and f1.detail_counts.get(audit_code) == 1
++              and "OperationalError" in (d1.reasoning or ""),
++              (None if d1 is None else d1.reasoning[:200], f1.as_dict()))
++        check("FU2 跳过不等于'没下过单'放行，也不谎报已消费（三种事实不混）",
++              f1.detail_counts.get(funnel_mod.DETAIL_TICKET_ALREADY_CONSUMED) is None
++              and f1.detail_counts.get(audit_code) == 1, f1.as_dict())
++        check("FU2 跳过**不烧票**（账本未消费，审计库恢复后下一轮仍可评估）",
++              not led.is_consumed("t-a"))
++        check("FU2 未注册自由文本不得冒充原因码（细分码走注册表）",
++              audit_code in funnel_mod.DETAIL_REASON
++              and audit_code in funnel_mod.DETAIL_NATURE
++              and audit_code in funnel_mod.DETAIL_STAGES,
++              audit_code)
++
++        # (2) 单票读取不可用不得牵连同轮其余票
++        f2 = ScanFunnel(round_id="smoke-audit-partial")
++        d2, esc2 = _run(tickets=[live_ticket("t-bad"), live_ticket("t-good")],
++                        prices={"BTCUSDT": 100.0}, funnel=f2, db=_OneBadTicketDB())
++        check("FU2 坏票跳过、同轮其余票照常开仓（不因一张票读不出而整轮停摆）",
++              esc2 is None and d2 is not None and len(d2.intents) == 1
++              and f2.detail_counts.get(audit_code) == 1,
++              (esc2, None if d2 is None else d2.reasoning[:200]))
++
++        # (3) 纯审计写入失败：局部化 + 留痕 + 已构造的 intent 不丢
++        f3 = ScanFunnel(round_id="smoke-audit-write")
++        good_eth = dict(live_ticket("t-good"), symbol="ETHUSDT", signal_id="sig-t-good")
++        d3, esc3 = _run(tickets=[good_eth, live_ticket("t-hold")],
++                        prices={"BTCUSDT": 100.0, "ETHUSDT": 100.0}, funnel=f3,
++                        db=_WriteBoomDB(),
++                        portfolio={"positions": [{"symbol": "BTCUSDT", "source": "ai"}]})
++        check("FU2 纯审计写入抛 OperationalError 不再穿出，已构造的 intent 不丢",
++              esc3 is None and d3 is not None and d3.decision == "open"
++              and len(d3.intents) == 1,
++              (esc3, None if d3 is None else d3.reasoning[:200]))
++        check("FU2 审计写入失败如实披露（note 带操作名与底层异常名，不静默吞掉）",
++              d3 is not None and "审计写入失败" in (d3.reasoning or "")
++              and "OperationalError" in (d3.reasoning or ""),
++              None if d3 is None else d3.reasoning[:240])
++        check("FU2 写入失败不改变既有跳过语义（仍记 SYMBOL_ALREADY_HELD）",
++              f3.detail_counts.get(funnel_mod.DETAIL_SYMBOL_ALREADY_HELD) == 1,
++              f3.as_dict())
++
++        # (4) 只吞 Exception：KeyboardInterrupt 必须继续穿出
++        ki_escaped = None
++        try:
++            run_strategy_trader(tickets=[live_ticket("t-ki")],
++                                prices={"BTCUSDT": 100.0}, db=_InterruptDB())
++        except KeyboardInterrupt as inner:
++            ki_escaped = type(inner).__name__
++        except Exception:  # noqa: BLE001 - 退化成普通异常 = 护栏吞了 Ctrl-C
++            ki_escaped = None
++        check("FU2 只吞 Exception：KeyboardInterrupt 仍穿出执行器（未被护栏吞掉）",
++              ki_escaped == "KeyboardInterrupt", ki_escaped)
++
++
+ def test_attribution() -> None:
+     """必达要点 3：每仓能定位管理者与规则版本。"""
+     positions = [
+@@ -909,6 +1058,8 @@ def main() -> int:
+     run_case("[8] 看板展示", test_dashboard_display)
+     run_case("[9] 账本写盘失败收敛（N6，两态都跑）",
+              test_ledger_write_failure_contained)
++    run_case("[10] 审计库不可用收敛（FU2，两态都跑）",
++             test_audit_unavailability_contained)
+     print("\n" + "=" * 72)
+     print(f"结果：PASS {PASS} / FAIL {FAIL}")
+     if FAILURES:
