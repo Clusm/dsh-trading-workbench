@@ -28,9 +28,9 @@
 |---|---|---|
 | `§3.1` 块数 | 3 块（实际 ≥6），表止于 960 行 | **B1–B13 + B14 门面行**，覆盖 72–1799 全文 |
 | `decision_trace` 未映射段 | 961–1799（839 行 = 46.6%，24 个顶层公开定义） | 归入 **B8**（`run_protection_first`）、**B9**（`ModelRouteGuard` 族）、**B10/B11**（`shared_admission`：`Lease`/`LeaseRegistry`/`shared_quota_lease`/`owner_alive`/`lock_path_for`/`credential_alias`）、**B12**（`SourceCache`/`background_refresh`/`RefreshBudget`）、**B13**（`EvidenceLink`/`evidence_links`） |
-| `§4.1` 映射表 | 7 行，覆盖 42/63 名 | **14 行（M1–M14）**，覆盖 **63/63 = 100%** |
+| `§4.1` 映射表 | 7 行，覆盖 **28/63** 名（V1b 实测 44.4%） | **14 行（M1–M14）**，覆盖 **63/63 = 100%** |
 | `strategy_funnel` 未映射段 | 1804–2138（4 名，均在 `__all__`） | **F6** → `core/funnel_explanation.py` |
-| `§4.2` 映射表 | 5 行，覆盖 27/122 名 | **6 行（F1–F6）**，覆盖 **122/122 = 100%** |
+| `§4.2` 映射表 | 5 行，覆盖 **27/122** 名（V1b 实测 22.1%） | **6 行（F1–F6）**，覆盖 **122/122 = 100%** |
 | 出口能否发现漏块 | **不能**（`dir()` 名集合不变，只搬前半照过） | **能**：新增 `§7 V1b`，见下 |
 
 ### 阻塞 2 —— `§5` 不动清单里没有任何 `tests/`
