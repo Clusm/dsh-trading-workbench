@@ -1,0 +1,157 @@
+{
+  "schema": "u06b-shadow-v2-labels-fixture-v1",
+  "fixture_kind": "synthetic",
+  "time_base": "seconds_offset_from_decision_at",
+  "decision_at": "T0（夹具内以 offset_seconds 相对表示，不含真实日期）",
+  "horizon_minutes_default": 5,
+  "tolerance_seconds_default": 90,
+  "expected_interval_seconds_default": 300,
+  "derivation": "每个 case 的期望状态由独立判别式给出（见 derivation 字段），不复制被测实现输出。判别式：now_offset < horizon*60 + tolerance ⇒ PENDING/NOT_MATURED；窗口内最近样本 |偏差| <= tolerance ⇒ LABELED；窗口内无样本且目标两侧都有样本且中间空洞 > expected_interval ⇒ DATA_GAP；窗口内无样本其余情形 ⇒ OVER_TOLERANCE（若一条样本也没有 ⇒ NO_PRICE）。",
+  "cases": [
+    {
+      "case_id": "fx-exact",
+      "intent": "恰在固定目标时刻取价",
+      "symbol": "BTCUSDT",
+      "signal": "bullish",
+      "reference_price": 100.0,
+      "samples": [
+        {
+          "symbol": "BTCUSDT",
+          "offset_seconds": 300.0,
+          "price": 101.0
+        }
+      ],
+      "now_offset_minutes": 7.0,
+      "expect_state": "LABELED",
+      "expect_missing_reason": null,
+      "expect_return_pct_delta": 1.0,
+      "derivation": "目标时刻=决策+5min；样本 offset=300s 恰为目标 ⇒ 偏差 0 ≤ 容差 90s ⇒ LABELED；now=7min 已过窗口关闭时刻(5min+90s) ⇒ 不再挂 PENDING；退出价=参考价×(1+1%)。"
+    },
+    {
+      "case_id": "fx-f11-late-8min",
+      "intent": "F11 反例：5 分钟标签晚 8 分钟（迟 480s）必须判超容差 MISSING，不得当合格标签",
+      "symbol": "BTCUSDT",
+      "signal": "bullish",
+      "reference_price": 100.0,
+      "samples": [
+        {
+          "symbol": "BTCUSDT",
+          "offset_seconds": 780.0,
+          "price": 108.0
+        }
+      ],
+      "now_offset_minutes": 15.0,
+      "expect_state": "MISSING",
+      "expect_missing_reason": "OVER_TOLERANCE",
+      "derivation": "偏差 480s > 容差 90s ⇒ 超容差；legacy v1 会把这条当 5 分钟标签（正是 F11 缺陷），v2 必须拒绝。样本价 108 是好价，但不许用。"
+    },
+    {
+      "case_id": "fx-within-tolerance-late",
+      "intent": "迟到 60s 仍在 90s 容差内 ⇒ 合格，偏差如实记录",
+      "symbol": "BTCUSDT",
+      "signal": "bearish",
+      "reference_price": 100.0,
+      "samples": [
+        {
+          "symbol": "BTCUSDT",
+          "offset_seconds": 360.0,
+          "price": 98.0
+        }
+      ],
+      "now_offset_minutes": 7.0,
+      "expect_state": "LABELED",
+      "expect_missing_reason": null,
+      "expect_return_pct_delta": -2.0,
+      "derivation": "偏差 +60s ≤ 90s ⇒ LABELED（now=7min 已过窗口关闭 6.5min）；bearish + 价格下跌 ⇒ 方向收益为正。"
+    },
+    {
+      "case_id": "fx-not-matured",
+      "intent": "容差窗口未关闭 ⇒ PENDING/NOT_MATURED，禁止用未来价回填",
+      "symbol": "BTCUSDT",
+      "signal": "bullish",
+      "reference_price": 100.0,
+      "samples": [
+        {
+          "symbol": "BTCUSDT",
+          "offset_seconds": 300.0,
+          "price": 101.0
+        }
+      ],
+      "now_offset_minutes": 5.2,
+      "expect_state": "PENDING",
+      "expect_missing_reason": "NOT_MATURED",
+      "derivation": "now=312s < 目标 300s + 容差 90s = 390s ⇒ 窗口未关闭（此刻仍有更近样本到达的可能）⇒ 未成熟。"
+    },
+    {
+      "case_id": "fx-no-price",
+      "intent": "窗口关闭且一条样本都没有 ⇒ 缺价（legacy v1 会把该样本直接丢掉）",
+      "symbol": "BTCUSDT",
+      "signal": "bullish",
+      "reference_price": 100.0,
+      "samples": [],
+      "now_offset_minutes": 10.0,
+      "expect_state": "MISSING",
+      "expect_missing_reason": "NO_PRICE",
+      "derivation": "无任何样本 ⇒ NO_PRICE（与断流/超容差可区分）。"
+    },
+    {
+      "case_id": "fx-data-gap",
+      "intent": "目标两侧都有样本但中间是长空洞 ⇒ 断流 DATA_GAP，不是缺价",
+      "symbol": "BTCUSDT",
+      "signal": "bullish",
+      "reference_price": 100.0,
+      "samples": [
+        {
+          "symbol": "BTCUSDT",
+          "offset_seconds": -200.0,
+          "price": 100.0
+        },
+        {
+          "symbol": "BTCUSDT",
+          "offset_seconds": 500.0,
+          "price": 101.0
+        }
+      ],
+      "now_offset_minutes": 10.0,
+      "expect_state": "MISSING",
+      "expect_missing_reason": "DATA_GAP",
+      "derivation": "目标两侧最近样本间隔 700s > 预期采样间隔 300s ⇒ 采样在目标处断流 ⇒ DATA_GAP。"
+    },
+    {
+      "case_id": "fx-over-tolerance-one-side",
+      "intent": "只有目标之后的样本且超容差 ⇒ 超容差（与断流可区分）",
+      "symbol": "BTCUSDT",
+      "signal": "bullish",
+      "reference_price": 100.0,
+      "samples": [
+        {
+          "symbol": "BTCUSDT",
+          "offset_seconds": 500.0,
+          "price": 101.0
+        }
+      ],
+      "now_offset_minutes": 10.0,
+      "expect_state": "MISSING",
+      "expect_missing_reason": "OVER_TOLERANCE",
+      "derivation": "只有单侧样本、无法构成「中间空洞」⇒ 归因超容差而非断流。"
+    },
+    {
+      "case_id": "fx-other-symbol-isolated",
+      "intent": "别的标的的价不得参与本标的标签（防串样本）",
+      "symbol": "BTCUSDT",
+      "signal": "bullish",
+      "reference_price": 100.0,
+      "samples": [
+        {
+          "symbol": "ETHUSDT",
+          "offset_seconds": 300.0,
+          "price": 101.0
+        }
+      ],
+      "now_offset_minutes": 10.0,
+      "expect_state": "MISSING",
+      "expect_missing_reason": "NO_PRICE",
+      "derivation": "按 symbol 过滤后本标的无样本 ⇒ NO_PRICE。"
+    }
+  ]
+}

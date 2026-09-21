@@ -163,7 +163,9 @@ def _path_metrics(request: LabelRequest, samples: Iterable[PriceSample],
     entry = float(request.reference_price)
     cutoff = as_utc(target)
     inside = _sampler.samples_before(samples, cutoff)
-    inside = [item for item in inside if item.sampled_at >= as_utc(request.decided_at)]
+    # 严格早于目标时刻：恰在目标时刻的那条就是退出价本身，不能既算路径点又当退出。
+    inside = [item for item in inside
+              if as_utc(request.decided_at) <= item.sampled_at < cutoff]
     # 无未来信息：任何晚于目标时刻的观测都不允许进入路径（退出价单独追加）。
     _sampler.assert_no_future(inside, cutoff)
     path = [entry] + [float(item.price) for item in inside] + [float(exit_price)]
