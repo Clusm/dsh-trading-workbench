@@ -5080,6 +5080,17 @@
           },
           "integration_commit": "9edd2d0",
           "integration_tests": "集成态实测：U09 冒烟 **67/0**、U09 验收 **86/0**、`smoke_release_acceptance` **17/0**、契约 **173/0**、`check_quality OK files=303 untracked=0`、`SMOKE MANIFEST OK included=81 excluded=1`、**`OFFLINE REGRESSION OK scripts=94`**"
+        },
+        "U08-FU2": {
+          "status": "IN_PROGRESS",
+          "branch": "task/U08-FU2",
+          "worktree": "mat-wt/U08F2",
+          "base": "b0c61ba",
+          "targets_issue": "U08-R5-FU2",
+          "defect": "src/agents/strategy_trader.py 对审计库 db.* 调用无护栏：:184 db.signal_ticket_has_order 位于顶部普通 for 循环内、无 try/except；:227/:235/:245 db.log_risk_event、:237 db.update_signal_ticket 同类。审计库抛 sqlite3.OperationalError 时异常穿出整个执行器、本轮 intents 全部作废 -> 无人值守下审计库一抖动就丢整轮入场。与已修的 N6 同形（N6 只覆盖 ledger.*）。",
+          "i_verified_exists": "I 复核（b0c61ba）：`grep -n db\\.signal_ticket_has_order|db\\.log_risk_event|db\\.update_signal_ticket src/agents/strategy_trader.py` 命中 :184/:227/:235/:237/:245；`:170-215` 该循环内确无 try/except。",
+          "direction_requirement": "**去重读取必须 fail-closed** —— 读不出『是否已下单』时不得当成『没下过』（会重复下单），必须**跳过该票并如实披露**（如 AUDIT_UNAVAILABLE）；纯审计写入失败局部化 + 留痕；不得吞 KeyboardInterrupt/SystemExit；异常名进 note；正常路径行为逐字不变。",
+          "note_on_my_earlier_stop": "**I 更正自己先前的『停止点』判断**：那一步基于『剩余项多为 P3』的归纳而未逐条查看；逐条核对后发现本条是**活路径上的真缺陷**（非 P3 卫生），故恢复有限度的修复工作。其余 23 条仍按三类不动（P3 卫生 / 显式延期的功能接线 / 需外部条件）。"
         }
       }
     },
