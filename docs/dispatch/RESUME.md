@@ -17,8 +17,8 @@
 - 集成区分支：`integration/unattended-v3` @ `ffdab44`（契约冻结后又有 1 个台账提交 `4fdc6bf`）
 - 四个实现线 worktree **已创建**（均从 `ffdab44`）：`mat-wt/A`(task/U01)、`mat-wt/B`(task/U04)、`mat-wt/CD`(task/U03)、`mat-wt/EF`(task/U15)
 - 当前步骤：**17/18 任务已 INTEGRATED（仅 U11 在修复轮）；W1/W2/W3 工程侧全部完成** —— **首批 14 项任务全部 INTEGRATED**（含 U09、U12、U13-FU1/FU2/FU3、U12-BF1+契约勘误 `CONTRACT-ERRATUM-1`）。**RC 仍未冻结**（DRAFT）；**W4 结构性不可在本窗口完成**。
-- **后置线（P2，非首批必需）进行中**：`U06b` **已 INTEGRATED**；`U10b` 作者已交付→Q 复验中；`U07` 已派发；`U11` 等 U10b。
-- 最新门禁：**`OFFLINE REGRESSION OK scripts=85`**、**`QUALITY CHECK OK files=301 untracked=0`**、契约 `PASS 173 / FAIL 0`。
+- **后置线（P2，非首批必需）**：`U06b` ✅ INTEGRATED、`U10b` ✅ INTEGRATED、`U07` ✅ INTEGRATED；**`U11` = CHANGES_REQUESTED，修复轮 `U11-FU1` 进行中**（唯一未集成项）。
+- 最新门禁：**`OFFLINE REGRESSION OK scripts=85`**、**`QUALITY CHECK OK files=303 untracked=0`**、契约 `PASS 173 / FAIL 0`。
 - **恢复门禁三条（N1/N2/N3）已全部闭合并复验**：Q 的 110 格 `purpose×status` 矩阵 **0 处放松格**（pristine/FU2 各 8 处 → 修复 0），集成提交 `57a4e97`。
 - **RC 冻结仍待四项**：`D05`（SLO 时限冻结，需外部决策）、观察窗三项 `NOT_STARTED`（7天/200/30，结构性不可压缩）、`MODEL_ROUTE_MOCK`（须配真实模型路由后重铸 manifest）、`U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER`。
 
