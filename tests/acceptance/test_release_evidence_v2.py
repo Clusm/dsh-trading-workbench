@@ -156,19 +156,23 @@ def add_closed_lifecycle(db: AuditDatabase, index: int, *, closed_at: datetime,
                          entry_price: float = 100.0, exit_price: float = 101.0,
                          gross: float = 1.0, entry_fee: float = 0.1, exit_fee: float = 0.1,
                          funding: float = 0.0, cost_status: str = "COMPLETE",
+                         lifecycle_cost_status: str | None = None,
                          outcome_id: str | None = None, recorded_at: str | None = None,
                          environment: str = "demo", account_ref: str = "demo:acc",
                          release_id: str | None = None) -> None:
+    """``lifecycle_cost_status`` 默认 ``None`` ⇒ 与 ``cost_status`` 同值（既有夹具行为
+    逐字不变）；显式给出时可构造"lifecycle 权威态 vs outcome 快照"分歧（U09-FU1）。"""
+    authority_cost = cost_status if lifecycle_cost_status is None else lifecycle_cost_status
     db.create_position_lifecycle(
         lifecycle_id=lifecycle_id, environment=environment, account_ref=account_ref,
         symbol=symbol, position_side=side, entry_qty=1.0, entry_notional=entry_price,
-        attribution_status="ATTRIBUTED", cost_status=cost_status,
+        attribution_status="ATTRIBUTED", cost_status=authority_cost,
         opened_at_ms=1_700_000_000_000, release_id=release_id,
     )
     db.update_position_lifecycle(
         lifecycle_id=lifecycle_id, status="CLOSED",
         closed_at_ms=int(closed_at.timestamp() * 1000), exit_qty=1.0, remaining_qty=0.0,
-        exit_notional=exit_price, attribution_status="ATTRIBUTED", cost_status=cost_status,
+        exit_notional=exit_price, attribution_status="ATTRIBUTED", cost_status=authority_cost,
     )
     db.log_trade_outcome(
         outcome_id=outcome_id or f"outcome-{lifecycle_id}", intent_id=f"intent-{lifecycle_id}",
@@ -638,6 +642,134 @@ def _unknown_net_is_none(db: AuditDatabase, path: Path, meta: dict[str, Any],
 
 
 # --------------------------------------------------------------------------- #
+# 4b. U09-FU1：成本以 lifecycle 权威态为准；净收益未知不得充数
+# --------------------------------------------------------------------------- #
+def test_lifecycle_cost_authority_and_net_unknown() -> None:
+    """两条 P2·fail-open 的**两态**验收（记录缺陷 → 断言修复后的口径）。
+
+    * `U09-OUTCOME-VS-LIFECYCLE-COST`：``_eligible_lifecycle`` 读的是
+      ``trade_outcomes`` 快照，而权威态是 ``position_lifecycles``（唯一成本重算写方
+      ``trade_reconciliation`` 只更新 lifecycle；``binance_futures`` 亦只降级
+      lifecycle），快照是首写即冻结（``INSERT OR IGNORE``）。
+    * `U09-NET-UNKNOWN-PADDING`：``net_realized is None`` 的样本仍被计入 30。
+
+    本函数只断言**两条方向**：修前 wrong-allow 的构造成立、修后被拒；并且
+    **反向证据**（两表都 COMPLETE / ``net_realized == 0.0``）两态都不被误伤。
+    """
+    section("4b. U09-FU1：lifecycle 成本权威态 + 净收益可算性")
+    start = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+    end = start + timedelta(minutes=30)
+    closed_at = start + timedelta(minutes=10)
+    thresholds = {"min_observation_days": 0.0, "min_eligible_closed_trades": 30}
+
+    def fixture_for(name: str, filler) -> tuple[AuditDatabase, Path, dict[str, Any]]:
+        db, path = new_db(name)
+        add_observations(db, release_id="rel-acc", environment="demo",
+                         account_ref="demo:acc", start=start, count=31, session_id="s1")
+        filler(db)
+        return db, path, manifest("rel-acc", "demo", "demo:acc", db=db)
+
+    def both_complete(db: AuditDatabase) -> None:
+        for index in range(30):
+            add_closed_lifecycle(db, index, closed_at=closed_at, lifecycle_id=f"lc-{index}")
+
+    def authority_incomplete(db: AuditDatabase) -> None:
+        for index in range(30):
+            add_closed_lifecycle(db, index, closed_at=closed_at, lifecycle_id=f"lc-{index}",
+                                 lifecycle_cost_status="INCOMPLETE", cost_status="COMPLETE")
+
+    def snapshot_incomplete(db: AuditDatabase) -> None:
+        for index in range(30):
+            add_closed_lifecycle(db, index, closed_at=closed_at, lifecycle_id=f"lc-{index}",
+                                 lifecycle_cost_status="COMPLETE", cost_status="INCOMPLETE")
+
+    def net_unknown_padding(db: AuditDatabase) -> None:
+        for index in range(29):
+            add_closed_lifecycle(db, index, closed_at=closed_at, lifecycle_id=f"lc-{index}")
+        add_closed_lifecycle(db, 29, closed_at=closed_at, lifecycle_id="lc-29", funding=None)
+
+    def legit_zero_net(db: AuditDatabase) -> None:
+        for index in range(30):
+            add_closed_lifecycle(db, index, closed_at=closed_at, lifecycle_id=f"lc-{index}",
+                                 gross=0.0, entry_fee=0.0, exit_fee=0.0, funding=0.0)
+
+    # ---- (a) 反向证据：两表都 COMPLETE 的正常样本，**两态**都必须计入 30 ----
+    db, path, meta = fixture_for("fu1-normal", both_complete)
+    block = build(path, meta, since=iso(start), until=iso(end),
+                  thresholds=thresholds)["release_evidence"]
+    check("反向证据（两态）：两表都 COMPLETE 的正常样本仍计入 30",
+          block["eligible_closed_lifecycles"] == 30, block["eligible_closed_lifecycles"])
+    db.close()
+
+    # ---- (b) 缺陷 1：lifecycle 权威态 vs outcome 快照 ----
+    db, path, meta = fixture_for("fu1-authority", authority_incomplete)
+    report = build(path, meta, since=iso(start), until=iso(end), thresholds=thresholds)
+    block = report["release_evidence"]
+    if APPLIED:
+        excluded = block.get("eligible_closed_exclusion_reasons") or {}
+        check("lifecycle 说 INCOMPLETE → 不计入 30（权威态拉回乐观快照）",
+              block["eligible_closed_lifecycles"] == 0
+              and report["gates"]["eligible_closed_trades"]["state"] == "FAIL"
+              and excluded.get("COST_AUTHORITY_INCOMPLETE") == 30,
+              (block["eligible_closed_lifecycles"], excluded))
+        mismatches = block.get("cost_status_snapshot_mismatches") or []
+        check("快照乐观于权威态的分歧被披露（交叉校验，快照不被删除）",
+              len(mismatches) == 30
+              and all(item["snapshot_more_optimistic"] is True for item in mismatches),
+              mismatches[:2])
+    else:
+        check("基线态：lifecycle 的 INCOMPLETE 被无视，快照 COMPLETE 即放行（缺陷证据）",
+              block["eligible_closed_lifecycles"] == 30, block["eligible_closed_lifecycles"])
+    db.close()
+
+    # ---- (c) 反向：快照悲观时**不得**放宽（两态都不放行） ----
+    db, path, meta = fixture_for("fu1-snapshot-pessimistic", snapshot_incomplete)
+    report = build(path, meta, since=iso(start), until=iso(end), thresholds=thresholds)
+    check("反向证据（两态）：outcome 快照说 INCOMPLETE 一律不放行",
+          report["release_evidence"]["eligible_closed_lifecycles"] == 0
+          and report["gates"]["eligible_closed_trades"]["state"] == "FAIL",
+          report["release_evidence"]["eligible_closed_lifecycles"])
+    db.close()
+
+    # ---- (d) 缺陷 2：净收益未知不得充数（29 真凭证 + 1 未知不得凑成 30） ----
+    db, path, meta = fixture_for("fu1-net-unknown", net_unknown_padding)
+    report = build(path, meta, since=iso(start), until=iso(end), thresholds=thresholds)
+    block = report["release_evidence"]
+    if APPLIED:
+        excluded = block.get("eligible_closed_exclusion_reasons") or {}
+        check("净收益未知不计入 30（29 真凭证 + 1 未知 → 29，门禁 FAIL）",
+              block["eligible_closed_lifecycles"] == 29
+              and report["gates"]["eligible_closed_trades"]["state"] == "FAIL"
+              and block["net_realized_unknown_lifecycles"] == 1
+              and excluded.get("NET_REALIZED_UNKNOWN") == 1,
+              (block["eligible_closed_lifecycles"], block["net_realized_unknown_lifecycles"]))
+        check("计入 30 的样本净收益一律可算（None 与 0.0 不混淆）",
+              all(item.get("net_realized") is not None
+                  for item in block["eligible_closed_rows"]),
+              f"net=None 的行数="
+              f"{sum(1 for item in block['eligible_closed_rows'] if item.get('net_realized') is None)}")
+    else:
+        check("基线态：净收益未知的样本仍被计入 30（缺陷证据）",
+              block["eligible_closed_lifecycles"] == 30, block["eligible_closed_lifecycles"])
+    db.close()
+
+    # ---- (e) 反向证据：合法零收益（net_realized == 0.0）不得被误伤 ----
+    db, path, meta = fixture_for("fu1-zero-net", legit_zero_net)
+    report = build(path, meta, since=iso(start), until=iso(end), thresholds=thresholds)
+    block = report["release_evidence"]
+    check("反向证据（两态）：合法零收益（net=0.0，非 None）仍计入 30",
+          block["eligible_closed_lifecycles"] == 30
+          and report["gates"]["eligible_closed_trades"]["state"] == "PASS",
+          block["eligible_closed_lifecycles"])
+    if APPLIED:
+        check("合法零收益不得被读成「净收益未知」",
+              block["net_realized_unknown_lifecycles"] == 0
+              and all(item["net_realized"] == 0.0 for item in block["eligible_closed_rows"]),
+              (block["net_realized_unknown_lifecycles"], block["eligible_closed_rows"][:1]))
+    db.close()
+
+
+# --------------------------------------------------------------------------- #
 # 5. F12：ACK ≠ 送达、ACK ≠ 恢复
 # --------------------------------------------------------------------------- #
 def test_ack_is_not_recovery() -> None:
@@ -970,6 +1102,7 @@ def main() -> int:
         test_window_boundaries()
         test_window_invalid()
         test_lifecycle_revision_and_identity()
+        test_lifecycle_cost_authority_and_net_unknown()
         test_ack_is_not_recovery()
         test_restart_versus_release_change()
         test_k06_groups()

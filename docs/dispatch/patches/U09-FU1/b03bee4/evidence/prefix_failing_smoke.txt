@@ -1,0 +1,102 @@
+U09 证据版本标记: True  health_watch 共享接线: True
+U09 冒烟工作目录: C:\Users\Tao\AppData\Local\Temp\u09-smoke-sjlsjdlq
+
+[1] F16/S08：B/C 研究影子样本不得进 200 方向候选分母
+    A-only: candidates=200 rows=200
+    A+B+C:  candidates=200 rows=300 source_rows={'A_current_baseline': 200, 'B_contract_market': 50, 'C_contract_plus_web3': 50}
+  PASS  补丁态：分母只计 A 组（200），B/C 不再抬升（300 → 200）
+  PASS  补丁态：口径可撤销、可重算（去掉 B/C 前后分母同为 200）
+  PASS  补丁态：B/C 只在诊断字段里出现（如实披露但不计分）
+  PASS  补丁态：来源口径来自 intel.shadow_status（不是第二份 source 名单）
+  PASS  补丁态：研究影子被排除且原因可核（research_only_source=100）
+
+[1b] F24：纯 NO_EDGE / 无方向信号不得凑 200
+  PASS  补丁态：NO_EDGE/无方向样本不改变分母（仍为 200）
+  PASS  补丁态：被排除原因逐项可核（no_edge_declared=60, non_directional_signal=50）
+  PASS  补丁态：候选来源计数只含执行决策来源
+
+[2] F24：窗口首尾断档计入分母，禁止自动截到首末健康记录
+    expected=31 observed=26 head_missing=3 tail_missing=2 days=0.020833
+  PASS  窗口首尾缺失计入分母（expected=31，不是观察到的 26）
+  PASS  首尾缺失被单独披露（head=3, tail=2）
+  PASS  覆盖率因此不通过（不得用 26/26=100% 冒充）
+  PASS  窗口不来自观察数据（derived_from_observations=False）
+  PASS  观察者断档分钟与窗口比对披露（head=3, tail=2）
+  PASS  补丁态：未声明窗口 → NO_DATA + WINDOW_MISSING（不再自动截断）
+  PASS  补丁态：窗口不成立时方向候选/闭合交易不为 0 冒充，而是 NO_DATA
+
+[3] K06：畸形窗口 FAIL + WINDOW_INVALID，报告不崩溃
+  PASS  畸形窗口 'not-a-date' → FAIL + WINDOW_INVALID
+  PASS  畸形窗口 inf → FAIL + WINDOW_INVALID
+  PASS  畸形窗口 '1e400' → FAIL + WINDOW_INVALID
+  PASS  畸形窗口 nan → FAIL + WINDOW_INVALID
+  PASS  畸形窗口 18446744073709551616 → FAIL + WINDOW_INVALID
+  PASS  畸形窗口 18446744073709551617 → FAIL + WINDOW_INVALID
+  PASS  畸形窗口 '99999999999999999999' → FAIL + WINDOW_INVALID
+  PASS  反向窗口 → FAIL + WINDOW_INVALID（不抛异常）
+
+[4] F23/F10：lifecycle 去重、迟到修订重算、冲突隔离
+  PASS  30 笔完整闭合按 lifecycle_id 计数
+  PASS  同一毫秒多笔互不吞并（满页不虚报也不漏报）
+  PASS  净收益按 gross - 费用 + 资金费重算（零资金费不等于缺证据）
+  PASS  迟到修订不重复计数（lifecycle 仍为 30，不是 31）
+  PASS  迟到修订被登记（revised_lifecycles 含 lc-0 且记录被取代的 outcome）
+  PASS  净收益随修订重算（不是把两条相加，也不是保留旧值）
+  PASS  最新修订的成本被真正采信（exit_fee 0.1 → 0.4）
+  PASS  成本修订改变证据 hash（发布证据可修订、可复核）
+  PASS  同一 recorded_at 上内容冲突 → 冲突隔离（lc-20 被排除）
+  PASS  冲突生命周期不计入 30（29 笔，拒绝统计伪通过）
+  PASS  冲突被登记为 REVISION_CONFLICT 且不虚报覆盖
+  PASS  重复 outcome_id 不同内容 → REVISION_CONFLICT（不静默挑一条）
+  PASS  正常迟到修订不定为冲突（时点可定序）
+  PASS  成本未完成 → 不计入 30（未知仍未知）
+  PASS  闭合总数如实披露（含不完整/冲突，不虚报覆盖）
+
+[4b] U09-FU1：成本权威态 + 净收益可算性
+  PASS  反向证据：两表都 COMPLETE 的正常样本仍计入 30
+  FAIL  lifecycle 说 INCOMPLETE → 不计入 30（权威态可拉回乐观快照）  (30, {})
+  FAIL  快照比权威态乐观的分歧被单独披露（交叉校验，不删快照）  []
+  PASS  outcome 快照说 INCOMPLETE → 同样不计入（任一说不完整即不放行）
+  FAIL  净收益未知的生命周期不得充数（29 真凭证 + 1 未知 → 29，门禁 FAIL）  (30, 1)
+  FAIL  计入 30 的样本净收益一律可算（IS None 与 == 0.0 不混淆）  23.2
+  PASS  反向证据：合法零收益（net=0.0，非 None）仍计入 30 且不算未知
+
+[5] F12/K05：已 ACK 不得读成已送达/已恢复
+    delivered=1 ack_without_delivery=1 provider_accepted_only=1 reason=['ACK_WITHOUT_RECOVERY', 'ACK_WITHOUT_DELIVERY', 'MANUAL_ACK_ONLY', 'NO_CONFIRMED_DELIVERY']
+  PASS  真实回执才算送达（只有 delivered_at_ms + device_receipt 的那条）
+  PASS  已 ACK 无设备回执 → 列入 ack_without_delivery，不冒充送达
+  PASS  供应商接受但不送达 → 计为未送达（不是 delivered）
+  PASS  ACK 口径显式声明（ack_is_not_delivery / ack_is_not_recovery）
+  PASS  告警证据判 FAIL 且原因码来自 U14（MANUAL_ACK_ONLY/NO_CONFIRMED_DELIVERY）
+  PASS  已 ACK 未 resolved 的 incident 不计为恢复
+  PASS  critical_open_incidents 门禁同时披露 acknowledged_but_unresolved
+  PASS  补上真实回执后才算送达（2 条 confirmed，ack_only 清空）
+
+[6] F24：同工件重启不得读成换版，不同配置混样必须暴露
+    verdict=RESTART_SAME_ARTIFACT sessions=2 reason=[]
+  PASS  同工件的两次 session → RESTART_SAME_ARTIFACT（不是换版）
+  PASS  重启次数如实披露
+  PASS  同窗口两种 config_hash → CONFIG_CHANGED_WITHIN_WINDOW + MIXED_CONFIG_SAMPLES
+  PASS  换版使 runtime_observation 组不得 PASS
+  PASS  窗口内其它发布的观察被披露为 MIXED_RELEASE_SAMPLES
+
+[7] K06：五组独立、NO_DATA != PASS、声明 PASS 必须自证
+  PASS  K06 固定五组齐全
+  PASS  报告不新增整体 GO 字段（release_readiness 仍在且为既有语义）
+  PASS  K06 报告 hash 可复算且稳定
+  PASS  无任何闭合交易时 accounting=NO_DATA（不是 PASS）
+  PASS  NO_DATA 组必须带阻断项
+  PASS  声明 PASS 而窗口缺失 → FAIL + PASS_WITHOUT_EVIDENCE/WINDOW_MISSING
+  PASS  身份引用可解析时 engineering 声明 PASS 但窗口缺失仍 FAIL
+  PASS  缺运行工件身份 → IDENTITY_REF_MISSING 阻断（不得凭声明通过）
+
+[8] 只读性：报告不修改数据库文件
+  PASS  报告前后数据库文件字节一致
+
+（保留失败现场以便排查：C:\Users\Tao\AppData\Local\Temp\u09-smoke-sjlsjdlq）
+
+U09 冒烟: 63 通过 / 4 失败  (PATCHED=True, SHARED=True)
+  FAILED: lifecycle 说 INCOMPLETE → 不计入 30（权威态可拉回乐观快照）
+  FAILED: 快照比权威态乐观的分歧被单独披露（交叉校验，不删快照）
+  FAILED: 净收益未知的生命周期不得充数（29 真凭证 + 1 未知 → 29，门禁 FAIL）
+  FAILED: 计入 30 的样本净收益一律可算（IS None 与 == 0.0 不混淆）

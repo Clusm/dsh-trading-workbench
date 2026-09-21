@@ -68,6 +68,23 @@ CODE_MIXED_CONFIG_SAMPLES = "MIXED_CONFIG_SAMPLES"
 #: 成本/归因证据自相矛盾（同一生命周期同一修订时点内容不同，F23）。
 CODE_REVISION_CONFLICT = "REVISION_CONFLICT"
 
+#: ---- 完整闭合分母的排除原因码（U09-FU1） ---------------------------------- #
+#: 生命周期（``position_lifecycles``）自我声明的成本未闭合。该表是**当前权威态**：
+#: ``trade_reconciliation`` 是唯一的成本重算写方且 ``UPDATE position_lifecycles``；
+#: ``binance_futures`` 在拿到开仓手续费后只把 lifecycle 降级为 INCOMPLETE。
+CODE_COST_AUTHORITY_INCOMPLETE = "COST_AUTHORITY_INCOMPLETE"
+#: outcome 快照（``trade_outcomes``）声明的成本未闭合。快照是**首写即冻结**的
+#: （``log_trade_outcome`` 用 ``INSERT OR IGNORE``，同键复写被静默丢弃），因此它
+#: 不能推翻权威态，但两表都必须闭合才放行（单调收紧，任一说不完整即不计入）。
+CODE_COST_SNAPSHOT_INCOMPLETE = "COST_SNAPSHOT_INCOMPLETE"
+#: 归因证据未闭合（lifecycle 或 outcome 任一侧非 ATTRIBUTED）。
+CODE_ATTRIBUTION_INCOMPLETE = "ATTRIBUTION_INCOMPLETE"
+#: 净收益**不可算**（``net_realized is None``：成本项缺失，不用 0 冒充）。
+#: 注意与 ``net_realized == 0.0``（合法零收益）严格区分，后者照常计入。
+CODE_NET_REALIZED_UNKNOWN = "NET_REALIZED_UNKNOWN"
+#: 生命周期未处于 CLOSED / 缺 outcome 证据 / 价格数量不可用。
+CODE_CLOSED_EVIDENCE_INCOMPLETE = "CLOSED_EVIDENCE_INCOMPLETE"
+
 PASS = "PASS"
 FAIL = "FAIL"
 NO_DATA = "NO_DATA"
@@ -779,17 +796,48 @@ def select_lifecycle_revisions(
     return selected
 
 
+def _status_of(row: Mapping[str, Any], key: str) -> str:
+    """取一列的规范枚举值；缺列（None）返回空串（**不得**被读成合格）。"""
+    return str(row.get(key) or "").strip().upper()
+
+
+def lifecycle_authority_reason(row: Mapping[str, Any]) -> str | None:
+    """返回该行**因证据不完整**而不计入「30 完整闭合」的原因码；合格返回 ``None``。
+
+    权威性口径（U09-FU1，修正 `U09-OUTCOME-VS-LIFECYCLE-COST`）：
+
+    * ``position_lifecycles`` 是**当前权威态**（可变）：``trade_reconciliation`` 是
+      唯一做成本重算的写方且 ``UPDATE position_lifecycles``；``binance_futures`` 两处
+      在拿到开仓手续费后**只降级 lifecycle**、不碰 outcome。因此 lifecycle 说
+      "未闭合"时**一律不得**计入 30（门禁必须能被它拉回不 eligible）。
+    * ``trade_outcomes`` 是**首写即冻结的快照**（``log_trade_outcome`` 用
+      ``INSERT OR IGNORE``，同键复写被静默丢弃），它**不能**推翻权威态；但两表都
+      必须闭合才放行 —— 这是相对旧口径的**单调收紧**（合格集合只减不增），
+      避免"拿乐观快照放行"的 fail-open。
+    * 两列都缺（旧行/合成行）时返回 ``COST_AUTHORITY_INCOMPLETE``：缺证据不等于
+      合格，宁可分母少 1 也不凭乐观值放行。
+    """
+    if _status_of(row, "lifecycle_status") != "CLOSED" or _status_of(row, "status") != "CLOSED":
+        return CODE_CLOSED_EVIDENCE_INCOMPLETE
+    if not row.get("outcome_id") or not row.get("actual_closed_at"):
+        return CODE_CLOSED_EVIDENCE_INCOMPLETE
+    if _status_of(row, "lifecycle_attribution_status") != "ATTRIBUTED" or \
+            _status_of(row, "attribution_status") != "ATTRIBUTED":
+        return CODE_ATTRIBUTION_INCOMPLETE
+    # 权威态（lifecycle）先判：它说未闭合就到此为止，不再看快照。
+    if _status_of(row, "lifecycle_cost_status") != "COMPLETE":
+        return CODE_COST_AUTHORITY_INCOMPLETE
+    if _status_of(row, "cost_status") != "COMPLETE":
+        return CODE_COST_SNAPSHOT_INCOMPLETE
+    if not (float(row.get("entry_price") or 0) > 0
+            and float(row.get("exit_price") or 0) > 0
+            and float(row.get("qty") or 0) > 0):
+        return CODE_CLOSED_EVIDENCE_INCOMPLETE
+    return None
+
+
 def _eligible_lifecycle(row: Mapping[str, Any]) -> bool:
-    return (
-        str(row.get("status") or "").upper() == "CLOSED"
-        and bool(row.get("outcome_id"))
-        and bool(row.get("actual_closed_at"))
-        and str(row.get("attribution_status") or "").upper() == "ATTRIBUTED"
-        and str(row.get("cost_status") or "").upper() == "COMPLETE"
-        and float(row.get("entry_price") or 0) > 0
-        and float(row.get("exit_price") or 0) > 0
-        and float(row.get("qty") or 0) > 0
-    )
+    return lifecycle_authority_reason(row) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -1096,7 +1144,10 @@ def build_release_readiness_report(
                                                   window_start, window_end)
         lifecycle_rows = connection.execute(
             f"""SELECT l.lifecycle_id,l.status AS lifecycle_status,l.release_id AS lifecycle_release_id,
-                       l.account_ref,o.outcome_id,o.status,o.actual_closed_at,o.entry_price,
+                       l.account_ref,
+                       l.attribution_status AS lifecycle_attribution_status,
+                       l.cost_status AS lifecycle_cost_status,
+                       o.outcome_id,o.status,o.actual_closed_at,o.entry_price,
                        o.exit_price,o.qty,o.attribution_status,o.cost_status,o.pnl,
                        o.gross_realized,o.entry_fee,o.exit_fee,o.funding_cashflow,o.recorded_at
                 FROM position_lifecycles l
@@ -1113,6 +1164,8 @@ def build_release_readiness_report(
         conflicted_lifecycles: list[dict[str, Any]] = []
         net_realized_total = 0.0
         net_realized_unknown = 0
+        exclusion_reasons: dict[str, int] = {}
+        cost_snapshot_mismatches: list[dict[str, Any]] = []
         for lifecycle_id, record in revisions.items():
             latest = record.get("latest")
             if record["conflicted"]:
@@ -1132,19 +1185,40 @@ def build_release_readiness_report(
                     "evidence_revision_hash": record["evidence_revision_hash"],
                     "net_realized": record["net_realized"],
                 })
-            if not _eligible_lifecycle(latest):
+            # 两表分歧只作**交叉校验/披露**：outcome 是首写即冻结的快照，不能推翻
+            # lifecycle 的当前权威态（U09-FU1）。
+            authority_cost = _status_of(latest, "lifecycle_cost_status")
+            snapshot_cost = _status_of(latest, "cost_status")
+            if authority_cost != snapshot_cost:
+                cost_snapshot_mismatches.append({
+                    "lifecycle_id": lifecycle_id,
+                    "lifecycle_cost_status": authority_cost or None,
+                    "outcome_cost_status": snapshot_cost or None,
+                    # 快照比权威态"更乐观"正是旧口径的 fail-open 入口，单独标出。
+                    "snapshot_more_optimistic": (snapshot_cost == "COMPLETE"
+                                                 and authority_cost != "COMPLETE"),
+                })
+            reason = lifecycle_authority_reason(latest)
+            if reason is not None:
+                exclusion_reasons[reason] = exclusion_reasons.get(reason, 0) + 1
+                continue
+            # 净收益**未知**（``net_realized is None``）不得充当"完整闭合"：不计入 30。
+            # 注意与 ``net_realized == 0.0``（合法零收益，如合法 ZeroFeeProof 场景）
+            # 严格区分 —— 本判据只看 ``is None``，零值照常计入。
+            net_realized = record["net_realized"]
+            if net_realized is None:
+                net_realized_unknown += 1
+                exclusion_reasons[CODE_NET_REALIZED_UNKNOWN] = (
+                    exclusion_reasons.get(CODE_NET_REALIZED_UNKNOWN, 0) + 1)
                 continue
             eligible_lifecycles.add(lifecycle_id)
             row = dict(latest)
             row["lifecycle_id"] = lifecycle_id
             row["revisions"] = record["revisions"]
             row["evidence_revision_hash"] = record["evidence_revision_hash"]
-            row["net_realized"] = record["net_realized"]
-            row["cost_recomputed"] = record["net_realized"] is not None
-            if record["net_realized"] is None:
-                net_realized_unknown += 1
-            else:
-                net_realized_total += float(record["net_realized"])
+            row["net_realized"] = net_realized
+            row["cost_recomputed"] = True
+            net_realized_total += float(net_realized)
             eligible_rows.append(row)
         current_closed_count = int(connection.execute(
             """SELECT COUNT(*) FROM position_lifecycles
@@ -1270,10 +1344,15 @@ def build_release_readiness_report(
             "eligible_closed_trades": _gate(
                 closed_state, actual=(len(eligible_lifecycles) if window_ready else None),
                 required=int(threshold["min_eligible_closed_trades"]),
-                reason="仅计入完整生命周期、归因和成本证据的闭合交易（按 lifecycle_id 去重）",
+                reason=("仅计入完整生命周期、归因和成本证据、且净收益可算的闭合交易"
+                        "（按 lifecycle_id 去重；成本以 position_lifecycles 当前权威态为准）"),
                 current_closed=current_closed_count, incomplete_closed=incomplete_closed_count,
                 missing_outcome=missing_outcome_count, carryover_closed=carryover_count,
                 revised=len(revised_lifecycles), conflicted=len(conflicted_lifecycles),
+                cost_authority="position_lifecycles.cost_status",
+                excluded_by_reason=dict(exclusion_reasons),
+                net_unknown_excluded=net_realized_unknown,
+                cost_snapshot_mismatches=len(cost_snapshot_mismatches),
             ),
             "observation_coverage": _gate(
                 str(coverage.get("state") or NO_DATA), actual=coverage.get("coverage"),
@@ -1324,6 +1403,8 @@ def build_release_readiness_report(
                 detail={"eligible_closed_lifecycles": len(eligible_lifecycles),
                         "net_realized_total": round(net_realized_total, 10),
                         "net_realized_unknown": net_realized_unknown,
+                        "excluded_by_reason": dict(exclusion_reasons),
+                        "cost_snapshot_mismatches": len(cost_snapshot_mismatches),
                         "revised_lifecycles": len(revised_lifecycles),
                         "conflicted_lifecycles": len(conflicted_lifecycles),
                         "current_closed_lifecycles": current_closed_count},
@@ -1412,7 +1493,21 @@ def build_release_readiness_report(
                 "eligible_closed_rows": eligible_rows if window_ready else [],
                 "eligible_net_realized_total": (round(net_realized_total, 10)
                                                 if window_ready else None),
+                # 净收益**不可算**、因而**未计入** 30 的生命周期条数（不是披露性的
+                # "计入了但没算"）：未知不得充当完整闭合凭证（U09-FU1）。
                 "net_realized_unknown_lifecycles": net_realized_unknown if window_ready else None,
+                "eligible_closed_exclusion_reasons": (dict(exclusion_reasons)
+                                                      if window_ready else {}),
+                "cost_authority": {
+                    "authority_table": "position_lifecycles",
+                    "authority_column": "cost_status",
+                    "snapshot_table": "trade_outcomes",
+                    "snapshot_role": "cross_check_only",
+                    "rule": ("lifecycle 与 outcome 两表都必须是 COMPLETE 才计入 30；"
+                             "任一说不完整即不计入（单调收紧）"),
+                },
+                "cost_status_snapshot_mismatches": (cost_snapshot_mismatches
+                                                    if window_ready else []),
                 "revised_lifecycles": revised_lifecycles if window_ready else [],
                 "conflicted_lifecycles": conflicted_lifecycles if window_ready else [],
                 "current_closed_lifecycles": current_closed_count if window_ready else None,

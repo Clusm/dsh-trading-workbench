@@ -1,0 +1,170 @@
+"""U09-FU1 前后对照探针：两条 fail-open 缺陷的最小构造。
+
+    PY=.../venv/Scripts/python.exe; export PYTHONUTF8=1
+    $PY _fu1_probe.py
+
+只在系统临时目录造合成 SQLite；不读真实 data/.env、不联网、不下单、不发告警。
+输出为稳定的 KV 行，便于修前/修后 diff。
+"""
+from __future__ import annotations
+
+import json
+import shutil
+import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "src"))
+
+from audit.database import AuditDatabase  # noqa: E402
+from core import release_evidence as evidence  # noqa: E402
+
+START = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+END = START + timedelta(minutes=30)
+CLOSED = START + timedelta(minutes=10)
+
+
+def iso(moment: datetime) -> str:
+    return moment.isoformat(timespec="milliseconds")
+
+
+def new_db(root: Path, name: str) -> AuditDatabase:
+    path = root / f"{name}.sqlite"
+    db = AuditDatabase(path)
+    db.set_release_context(release_id="rel-fu1", environment="demo", account_ref="demo:fu1")
+    return db
+
+
+def add_observations(db: AuditDatabase, *, count: int = 31) -> None:
+    with db.transaction() as connection:
+        for index in range(count):
+            observed = START + timedelta(minutes=index)
+            connection.execute(
+                """INSERT OR IGNORE INTO release_observations(
+                    observation_id,release_id,environment,account_ref,session_id,
+                    observed_at,observed_minute,health_state,component_status_json,
+                    config_hash,rate_limit_json,coverage_json,entry_readiness_json,raw_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (f"obs-rel-fu1-s1-{index}", "rel-fu1", "demo", "demo:fu1", "s1",
+                 iso(observed), observed.replace(second=0, microsecond=0).isoformat(timespec="minutes"),
+                 "healthy", "{}", "cfg-a",
+                 json.dumps({"responses_by_status": {}, "coordination_available": True}),
+                 "{}", json.dumps({"new_entry_allowed": True}), "{}"),
+            )
+
+
+def add_lifecycle(db: AuditDatabase, index: int, *, lifecycle_cost: str = "COMPLETE",
+                  outcome_cost: str = "COMPLETE", attribution: str = "ATTRIBUTED",
+                  funding: float | None = 0.0, gross: float = 1.0,
+                  entry_fee: float | None = 0.1, exit_fee: float | None = 0.1,
+                  lifecycle_id: str | None = None) -> None:
+    """lifecycle 行与 outcome 行的 cost_status **可以不同**（两表分歧的最小构造）。"""
+    lifecycle = lifecycle_id or f"lc-{index}"
+    db.create_position_lifecycle(
+        lifecycle_id=lifecycle, environment="demo", account_ref="demo:fu1",
+        symbol="BTCUSDT", position_side="BOTH", entry_qty=1.0, entry_notional=100.0,
+        attribution_status=attribution, cost_status=lifecycle_cost,
+        opened_at_ms=1_700_000_000_000, release_id="rel-fu1",
+    )
+    db.update_position_lifecycle(
+        lifecycle_id=lifecycle, status="CLOSED",
+        closed_at_ms=int(CLOSED.timestamp() * 1000), exit_qty=1.0, remaining_qty=0.0,
+        exit_notional=101.0, attribution_status=attribution, cost_status=lifecycle_cost,
+    )
+    db.log_trade_outcome(
+        outcome_id=f"outcome-{lifecycle}", intent_id=f"intent-{lifecycle}",
+        decision_id=f"decision-{lifecycle}", symbol="BTCUSDT", side="BUY",
+        entry_price=100.0, exit_price=101.0, qty=1.0, pnl=gross, status="CLOSED",
+        opened_at=iso(CLOSED - timedelta(hours=1)), closed_at=iso(CLOSED),
+        actual_closed_at=iso(CLOSED), lifecycle_id=lifecycle,
+        attribution_status=attribution, cost_status=outcome_cost,
+        gross_realized=gross, entry_fee=entry_fee, exit_fee=exit_fee,
+        funding_cashflow=funding, recorded_at=iso(CLOSED),
+        environment="demo", release_id="rel-fu1",
+    )
+
+
+def build(db: AuditDatabase, path: Path) -> dict[str, Any]:
+    manifest = {
+        "manifest_schema": 1, "release_id": "rel-fu1", "environment": "demo",
+        "account_ref": "demo:fu1", "schema_version": db.current_schema_version(),
+        "artifact_hash": "sha256:fu1", "content_hash": "sha256:fu1",
+        "runtime_instance_id": "run-fu1",
+    }
+    return evidence.build_release_readiness_report(
+        path, manifest, environment="demo", since=iso(START), until=iso(END),
+        thresholds={"min_observation_days": 0.0, "min_eligible_closed_trades": 30},
+    )
+
+
+def summarize(label: str, db: AuditDatabase, path: Path) -> None:
+    report = build(db, path)
+    block = report["release_evidence"]
+    gate = report["gates"]["eligible_closed_trades"]
+    rows = block["eligible_closed_rows"]
+    computable = sum(1 for row in rows if row.get("net_realized") is not None)
+    print(f"[{label}]")
+    print(f"  gate_state={gate['state']} actual={gate['actual']} required={gate['required']}")
+    print(f"  eligible_closed_lifecycles={block['eligible_closed_lifecycles']}")
+    print(f"  net_realized_unknown_lifecycles={block['net_realized_unknown_lifecycles']}")
+    print(f"  eligible_net_realized_total={block['eligible_net_realized_total']}")
+    print(f"  eligible_rows={len(rows)} net_computable_rows={computable}")
+    print(f"  cost_recomputed_values={sorted({bool(r.get('cost_recomputed')) for r in rows})}")
+    print(f"  incomplete_closed={gate.get('incomplete_closed')}")
+    print(f"  release_readiness={report['release_readiness']}")
+
+
+def scenario(name: str, root: Path, builder) -> None:
+    db = new_db(root, name)
+    add_observations(db)
+    builder(db)
+    summarize(name, db, db.path if hasattr(db, "path") else root / f"{name}.sqlite")
+    db.close()
+
+
+def main() -> int:
+    root = Path(tempfile.mkdtemp(prefix="u09fu1-"))
+    try:
+        def d1_both_complete(db: AuditDatabase) -> None:
+            for index in range(30):
+                add_lifecycle(db, index)
+
+        def d1_lifecycle_incomplete_outcome_complete(db: AuditDatabase) -> None:
+            for index in range(30):
+                add_lifecycle(db, index, lifecycle_cost="INCOMPLETE", outcome_cost="COMPLETE")
+
+        def d1_lifecycle_complete_outcome_incomplete(db: AuditDatabase) -> None:
+            for index in range(30):
+                add_lifecycle(db, index, lifecycle_cost="COMPLETE", outcome_cost="INCOMPLETE")
+
+        def d2_all_net_unknown(db: AuditDatabase) -> None:
+            for index in range(30):
+                add_lifecycle(db, index, funding=None)
+
+        def d2_one_unknown_pads_29(db: AuditDatabase) -> None:
+            for index in range(29):
+                add_lifecycle(db, index)
+            add_lifecycle(db, 29, funding=None)
+
+        def d2_legit_zero_net(db: AuditDatabase) -> None:
+            for index in range(30):
+                add_lifecycle(db, index, gross=0.0, entry_fee=0.0, exit_fee=0.0, funding=0.0)
+
+        scenario("D1-both-COMPLETE(正常)", root, d1_both_complete)
+        scenario("D1-lifecycle-INCOMPLETE/outcome-COMPLETE", root,
+                 d1_lifecycle_incomplete_outcome_complete)
+        scenario("D1-lifecycle-COMPLETE/outcome-INCOMPLETE", root,
+                 d1_lifecycle_complete_outcome_incomplete)
+        scenario("D2-30条净收益未知", root, d2_all_net_unknown)
+        scenario("D2-29真凭证+1未知", root, d2_one_unknown_pads_29)
+        scenario("D2-30条合法零收益(net=0.0)", root, d2_legit_zero_net)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
