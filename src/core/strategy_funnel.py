@@ -930,17 +930,27 @@ def rule_version_of(strategy_id: str, cards: Iterable[Mapping[str, Any]] | None 
     return f"rv1:{digest}@{global_digest}" if global_digest else f"rv1:{digest}"
 
 
+#: 仓位归属类别，与 U02 ``PositionClass`` 同口径（**引用同一个语义，不另立**）：
+#: 有 ``strategy_id`` 或 ``ticket_id`` ⇒ ATTRIBUTED，否则 LEGACY_UNATTRIBUTED。
+POSITION_CLASS_ATTRIBUTED = "ATTRIBUTED"
+POSITION_CLASS_LEGACY = "LEGACY_UNATTRIBUTED"
+
+
 def manager_of(position: Mapping[str, Any]) -> tuple[str, str]:
-    """返回 ``(manager, detail)``。
+    """返回 ``(manager, detail)``：**谁在执行侧负责这个仓位**。
 
     判定只看**既有消费者用的同一批字段**（``source``/``strategy_id``/``ticket_id``），
     不新增列、不猜语义：
 
-    - ``source == "strategy"`` 且有 ``strategy_id`` → 策略卡在管（``strategy``）；
-    - 有 ``strategy_id``/``ticket_id`` 但 ``source`` 不是 ``strategy`` → 仍是策略仓
-      （历史行 source 缺省为 ``ai``），标 ``strategy`` 且 detail 记来源；
-    - 两者都缺 → ``legacy_unattributed``（U02 的 ``LEGACY_UNATTRIBUTED`` 同口径，
-      重启不产生隐式退出）。
+    - 有 ``strategy_id``/``ticket_id`` → 策略卡在管（``strategy``），detail 记来源；
+    - 否则 ``source == "ai"`` → ``ai`` 通道在管，``source == "guardian"`` → 监护人；
+    - 既无归属、``source`` 也未知/为空 → ``legacy_unattributed``。
+
+    **注意两个正交事实**：``manager``（谁在管）与 :data:`POSITION_CLASS_*`
+    （是否属于某个策略生命周期）不是同一件事。``source="ai"`` 且无策略归属的仓位
+    既是"AI 通道在管"，也是 U02 语义下的 ``LEGACY_UNATTRIBUTED``——两者都要能读到，
+    所以 :class:`PositionAttribution` **同时**给出 ``manager`` 与 ``position_class``，
+    不用一个字段冒充另一个。
     """
     source = str(position.get("source") or "").strip().lower()
     strategy_id = str(position.get("strategy_id") or "").strip()
@@ -950,31 +960,38 @@ def manager_of(position: Mapping[str, Any]) -> tuple[str, str]:
             f"strategy_attributed(source={source or 'unset'})")
         return MANAGER_STRATEGY, detail
     if source == MANAGER_AI:
-        return MANAGER_AI, "ai_channel"
-    if source == "guardian":
+        return MANAGER_AI, "ai_channel(no_strategy_attribution)"
+    if source == MANAGER_GUARDIAN:
         return MANAGER_GUARDIAN, "guardian_inferred"
-    return MANAGER_LEGACY, "no_strategy_id_no_ticket_id"
+    return MANAGER_LEGACY, "no_source_no_strategy_attribution"
 
 
 @dataclass(frozen=True)
 class PositionAttribution:
-    """一个仓位的管理责任：谁在管、用哪版规则、依据哪张 ticket。"""
+    """一个仓位的管理责任：谁在管、属于哪个策略生命周期、用哪版规则开的。"""
 
     lifecycle_id: str
     symbol: str
     position_side: str
     manager: str
     manager_detail: str
+    position_class: str
     strategy_id: str = ""
     ticket_id: str = ""
     rule_version: str = ""
     rule_known: bool = False
 
+    @property
+    def attributed(self) -> bool:
+        return self.position_class == POSITION_CLASS_ATTRIBUTED
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "lifecycle_id": self.lifecycle_id, "symbol": self.symbol,
             "position_side": self.position_side, "manager": self.manager,
-            "manager_detail": self.manager_detail, "strategy_id": self.strategy_id,
+            "manager_detail": self.manager_detail,
+            "position_class": self.position_class, "attributed": self.attributed,
+            "strategy_id": self.strategy_id,
             "ticket_id": self.ticket_id, "rule_version": self.rule_version,
             "rule_known": self.rule_known,
         }
@@ -985,16 +1002,19 @@ def attribute_position(position: Mapping[str, Any],
                        *, strategy_hash: str = "") -> PositionAttribution:
     """单仓归属；``rule_known=False`` 表示策略卡已不在当前卡册（不得冒充已知版本）。"""
     strategy_id = str(position.get("strategy_id") or "").strip()
+    ticket_id = str(position.get("ticket_id") or "").strip()
     manager, detail = manager_of(position)
     rule_version = rule_version_of(strategy_id, cards, strategy_hash=strategy_hash)
     return PositionAttribution(
         lifecycle_id=str(position.get("lifecycle_id")
-                        or position.get("ticket_id") or position.get("symbol") or ""),
+                        or ticket_id or position.get("symbol") or ""),
         symbol=str(position.get("symbol") or ""),
         position_side=str(position.get("side") or position.get("position_side") or ""),
         manager=manager, manager_detail=detail,
+        position_class=(POSITION_CLASS_ATTRIBUTED if (strategy_id or ticket_id)
+                        else POSITION_CLASS_LEGACY),
         strategy_id=strategy_id,
-        ticket_id=str(position.get("ticket_id") or ""),
+        ticket_id=ticket_id,
         rule_version=rule_version,
         rule_known=not rule_version.endswith("unknown")
         and not rule_version.startswith("rv1:unknown"),
