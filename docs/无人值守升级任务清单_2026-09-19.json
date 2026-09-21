@@ -2060,6 +2060,27 @@
           "gates": "files=290 / secret 525，全绿；抽样 7 项全过（接线 7、8x5 跨进程全 1、31 个 FAULT 码无一 no_edge、预算、同源）",
           "new": "N6(P2 阻塞)、N7(P3 README 写 exec:<iso> 实为 exec-<iso>)、N8/N9 观察",
           "unfinished": "OSError 真实触发频率、生产端到端（归 U12）无法离线验证"
+        },
+        {
+          "type": "author_fix_r4",
+          "head_commit": "08ca75d",
+          "commits": [
+            "9195782",
+            "08ca75d"
+          ],
+          "n6_fixed": "三异常 x 四路径 = 12 条前后对照。前后：save()->OSError / executor consume()->OSError / ledger.consume() 写盘->sqlite3.OperationalError / release()->PermissionError **全部 ESCAPED**；修复后全部 NO_ESCAPE：save 路径 decision=open intents=1 round_faults=[LEDGER_SAVE_DEFERRED] disk_consumed=true **orphan=[t-a]**；executor consume 路径同类票据跳过并注明异常名（诊断未丢）；**ledger.consume() 写盘失败回滚内存**（state=LEDGER_WRITE_FAILED, mem_consumed=false, disk_consumed=false，不留脏'已消费'）；release 路径注明'票据可能仍被占死'",
+          "keyboardinterrupt": "**仍穿出**（except Exception 不吞 BaseException）：KeyboardInterrupt/SystemExit 前后两态一致 ESCAPED(正确)",
+          "n7_fixed": "0c131f2/README.md §六 exec:<iso> -> exec-<iso>；实测字面 'exec-2026-09-21T04:25:38…'、startswith('exec:')=False。台账 JSON 另有同款描述属派发台账（非独占路径），未动",
+          "patches": "9195782/（目录名=独占产物源提交）；对集成 HEAD 1a412440 三种配置 **15/15 --check OK**（均有 Checking patch、无 Skipped）；git apply --stat = 5 files changed, 706 insertions(+), 61 deletions(-)（纯 03 变化）；01/02/04/05 与 r3 逐字节相同；I 树未被写",
+          "delta": "base=83 / head=84，**NEW_FAIL=[]**，167 次执行全 rc=0；harness **OFFLINE REGRESSION OK scripts=84**",
+          "tests": "test 两态 135/0、208/0；smoke 两态 58/0、91/0；契约 173/0；check_quality **OK files=290 untracked=0**；secrets 525 OK",
+          "known_limits": [
+            "真磁盘满/只读挂载未端到端演练（仅确定性构造）",
+            "release() 落盘失败返回 True（盘上可能短暂仍记已消费，同 r3 口径）",
+            "生产端到端仍需 U12 接线"
+          ],
+          "rollback": "git revert 08ca75d 9195782；或回用 0c131f2/（会重新引入 N6）",
+          "unfinished": "无"
         }
       ],
       "blockers": [],
@@ -2137,6 +2158,16 @@
           ],
           "verdict": "PENDING",
           "reports_dir": "docs/dispatch/reviews/U08/<r4head>/"
+        },
+        {
+          "round": "r5",
+          "stage": "修复复验",
+          "candidate": "08ca75d",
+          "sessions": [
+            "Q (reviews/U08/R5/r1)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U08/08ca75d/"
         }
       ],
       "qa_runs": []
