@@ -64,6 +64,11 @@ from core.decision_trace import (
     reason_from_source_errors,
 )
 
+#: 仓位归属枚举**与 U02 同源**（P2-1）：直接引用 ``strategy_position_manager``
+#: 的 ``PositionClass``，不在本地复制字面量——U02 改枚举值时这里跟着变，
+#: 不会静默漂移成"看起来对但其实是巧合"。
+from core.strategy_position_manager import PositionClass
+
 SCHEMA_VERSION = "u08-strategy-funnel-1"
 
 #: 审计库/看板读取漏斗摘要时使用的状态文件键名（共享适配写入点）。
@@ -199,11 +204,30 @@ DETAIL_EVIDENCE_GATE_FAILED = "EVIDENCE_GATE_FAILED"
 DETAIL_EVIDENCE_DATA_UNAVAILABLE = "EVIDENCE_DATA_UNAVAILABLE"
 DETAIL_EVIDENCE_VALIDATION_REJECTED = "EVIDENCE_VALIDATION_REJECTED"
 
+# -- 轮级故障（B-r1 P0-4：轮级前置失败原先完全没有表达，被压成 no_edge/no_candidates） --
+#: 策略卡册不存在/读不到（``knowledge_dir/strategy_cards.json`` 缺失）。
+DETAIL_CARDS_UNAVAILABLE = "CARDS_UNAVAILABLE"
+#: 策略卡册存在但不可解析（JSON 损坏 / 根形态非法）。
+DETAIL_CARDS_INVALID = "CARDS_INVALID"
+#: 策略运行时不可用（``strategy_runtime.REGISTRY`` 缺失 / ``build_features`` 缺失）。
+DETAIL_STRATEGY_LAB_UNAVAILABLE = "STRATEGY_LAB_UNAVAILABLE"
+#: 策略卡与运行时注册表**漂移**（卡所需 ``signal_fn`` 不在注册表里）。
+DETAIL_STRATEGY_LAB_DRIFT = "STRATEGY_LAB_DRIFT"
+#: 票据源读取失败（审计库 ``fetch_open_signal_tickets`` 抛错）——与"本轮没有票据"
+#: （:data:`DETAIL_NO_TICKETS_AVAILABLE`）是两件事。
+DETAIL_TICKET_SOURCE_UNAVAILABLE = "TICKET_SOURCE_UNAVAILABLE"
+#: 轮级未捕获异常（整轮中断时的兜底留痕）。
+DETAIL_ROUND_EXCEPTION = "ROUND_EXCEPTION"
+#: 研究预算总额为 0/负（"没有预算可谈"与"预算被管理占用"是两件事，B-r1 P2-3）。
+DETAIL_RESEARCH_BUDGET_ZERO = "RESEARCH_BUDGET_ZERO"
+
 #: 细分码 -> 九码之一。**这是本模块唯一的分类轴**；任何细分码都必须在此登记，
 #: 未登记码在 :func:`detail_reason` 处 fail-closed（:class:`UnknownDetailCode`）。
 DETAIL_REASON: dict[str, str] = {
     # -- 扫描侧 -------------------------------------------------------- #
-    DETAIL_CARD_NOT_INDICATORIZED: REASON_NO_EDGE,
+    # 卡片未指标化 = 该卡未通过"是信号来源"这道配置校验（B-r1 P0-4a：原先映射到
+    # ``NO_EDGE``，会把"卡册配置缺陷"读成"没有信号"）。
+    DETAIL_CARD_NOT_INDICATORIZED: REASON_VALIDATION_REJECTED,
     DETAIL_SIGNAL_FN_MISSING: REASON_VALIDATION_REJECTED,
     DETAIL_SIGNAL_FN_OUTPUT_INVALID: REASON_VALIDATION_REJECTED,
     DETAIL_SYMBOL_NOT_USDT: REASON_READINESS_BLOCKED,
@@ -243,9 +267,162 @@ DETAIL_REASON: dict[str, str] = {
     DETAIL_EVIDENCE_GATE_FAILED: REASON_RESEARCH_INCOMPLETE,
     DETAIL_EVIDENCE_DATA_UNAVAILABLE: REASON_DATA_UNAVAILABLE,
     DETAIL_EVIDENCE_VALIDATION_REJECTED: REASON_VALIDATION_REJECTED,
+    # -- 轮级故障 ------------------------------------------------------ #
+    DETAIL_CARDS_UNAVAILABLE: REASON_READINESS_BLOCKED,
+    DETAIL_CARDS_INVALID: REASON_VALIDATION_REJECTED,
+    DETAIL_STRATEGY_LAB_UNAVAILABLE: REASON_READINESS_BLOCKED,
+    DETAIL_STRATEGY_LAB_DRIFT: REASON_VALIDATION_REJECTED,
+    DETAIL_TICKET_SOURCE_UNAVAILABLE: REASON_DATA_UNAVAILABLE,
+    DETAIL_ROUND_EXCEPTION: REASON_VALIDATION_REJECTED,
+    DETAIL_RESEARCH_BUDGET_ZERO: REASON_MODEL_DEADLINE,
 }
 
 DETAIL_CODES: frozenset[str] = frozenset(DETAIL_REASON)
+
+# --------------------------------------------------------------------------- #
+# 二之二、细分码的**性质**（B-r1 P0-4：故障不得被读成"没有信号"）
+# --------------------------------------------------------------------------- #
+#: 故障：本轮**某项能力受损**（数据取不到 / 校验失败 / 就绪阻断 / 模型类）。
+#: 只要出现一个故障，本轮 `verdict` 就是 ``blocked``——故障永远**不**降级成
+#: "没有信号"。
+NATURE_FAULT = "fault"
+#: 真的没有边际（候选**评估过**了，就是没有可下单边际）。
+NATURE_EDGE = "edge"
+#: 已在处理（已持仓 / 已消费 / 同 symbol 冲突）：不是"没有信号"，也**不是**故障。
+NATURE_HANDLED = "handled"
+#: 范围界定 / 配置态（标的不在白名单、卡未指标化、通道只扫描不下单）：正常跳过，
+#: 既不是故障也不是"没有边际"。它们**不**让整轮变成 blocked——否则真实轮次里
+#: "有一张范围外的卡"是常态，verdict 会永久失去区分力（B-r1 §2.0 反向误标）。
+NATURE_SCOPE = "scope"
+
+NATURES: frozenset[str] = frozenset({NATURE_FAULT, NATURE_EDGE,
+                                     NATURE_HANDLED, NATURE_SCOPE})
+
+#: 细分码 -> 性质。**每个**细分码都必须登记，未登记在
+#: :func:`validate_detail_table` 处 fail-closed。
+DETAIL_NATURE: dict[str, str] = {
+    # 扫描侧：前置筛里的配置/范围界定
+    DETAIL_CARD_NOT_INDICATORIZED: NATURE_SCOPE,
+    DETAIL_SYMBOL_NOT_USDT: NATURE_SCOPE,
+    DETAIL_SYMBOL_NOT_IN_SCOPE: NATURE_SCOPE,
+    DETAIL_TICKET_SYMBOL_NOT_IN_SCOPE: NATURE_SCOPE,
+    DETAIL_SYMBOL_NOT_ALLOWED: NATURE_SCOPE,
+    DETAIL_CHANNEL_BUDGET_ZERO: NATURE_SCOPE,
+    # 扫描侧：故障
+    DETAIL_SIGNAL_FN_MISSING: NATURE_FAULT,
+    DETAIL_SIGNAL_FN_OUTPUT_INVALID: NATURE_FAULT,
+    DETAIL_TIMEFRAME_UNSUPPORTED: NATURE_FAULT,
+    DETAIL_MARKET_TRANSPORT_OUTAGE: NATURE_FAULT,
+    DETAIL_MARKET_BUDGET_DEFERRED: NATURE_FAULT,
+    DETAIL_KLINE_FETCH_FAILED: NATURE_FAULT,
+    DETAIL_KLINE_QUALITY_REJECTED: NATURE_FAULT,
+    DETAIL_KLINE_ROWS_INSUFFICIENT: NATURE_FAULT,
+    DETAIL_FEATURES_INCOMPLETE: NATURE_FAULT,
+    DETAIL_SCAN_EXCEPTION: NATURE_FAULT,
+    DETAIL_PROVIDER_RATE_LIMITED: NATURE_FAULT,
+    DETAIL_SIDE_NOT_ALLOWED_BY_CARD: NATURE_FAULT,
+    # 扫描侧：真的没有边际
+    DETAIL_NO_SIGNAL_ON_CLOSED_BAR: NATURE_EDGE,
+    DETAIL_BAR_ALREADY_SEEN: NATURE_EDGE,
+    DETAIL_SIGNAL_ALREADY_PERSISTED: NATURE_EDGE,
+    # 票据形状/时效
+    DETAIL_TICKET_SHAPE_INVALID: NATURE_FAULT,
+    DETAIL_TICKET_EXPIRED: NATURE_FAULT,
+    DETAIL_TICKET_EXPIRING_BEFORE_USE: NATURE_FAULT,
+    DETAIL_TICKET_LEDGER_UNAVAILABLE: NATURE_FAULT,
+    DETAIL_ENTRY_ZONE_INVERTED: NATURE_FAULT,
+    DETAIL_TICKET_ALREADY_CONSUMED: NATURE_HANDLED,
+    # 执行侧
+    DETAIL_SYMBOL_ALREADY_HELD: NATURE_HANDLED,
+    DETAIL_STRATEGY_ALREADY_HELD: NATURE_HANDLED,
+    DETAIL_NO_LATEST_PRICE: NATURE_FAULT,
+    DETAIL_STRATEGY_TRADER_EXCEPTION: NATURE_FAULT,
+    DETAIL_PRICE_OUTSIDE_ENTRY_ZONE: NATURE_EDGE,
+    DETAIL_MANAGEMENT_PRIORITY_BUDGET: NATURE_FAULT,
+    # 研究证据侧
+    DETAIL_EVIDENCE_GATE_FAILED: NATURE_FAULT,
+    DETAIL_EVIDENCE_DATA_UNAVAILABLE: NATURE_FAULT,
+    DETAIL_EVIDENCE_VALIDATION_REJECTED: NATURE_FAULT,
+    # 轮级
+    DETAIL_NO_TICKETS_AVAILABLE: NATURE_EDGE,
+    DETAIL_CARDS_UNAVAILABLE: NATURE_FAULT,
+    DETAIL_CARDS_INVALID: NATURE_FAULT,
+    DETAIL_STRATEGY_LAB_UNAVAILABLE: NATURE_FAULT,
+    DETAIL_STRATEGY_LAB_DRIFT: NATURE_FAULT,
+    DETAIL_TICKET_SOURCE_UNAVAILABLE: NATURE_FAULT,
+    DETAIL_ROUND_EXCEPTION: NATURE_FAULT,
+    DETAIL_RESEARCH_BUDGET_ZERO: NATURE_FAULT,
+}
+
+#: 九码 -> 性质（外部码没有细分码可查时用；同码冲突时以 `FAULT` 为准）。
+REASON_NATURE: dict[str, str] = {
+    REASON_MODEL_DEADLINE: NATURE_FAULT,
+    REASON_MODEL_RATE_LIMITED: NATURE_FAULT,
+    REASON_DATA_UNAVAILABLE: NATURE_FAULT,
+    REASON_READINESS_BLOCKED: NATURE_FAULT,
+    REASON_RESEARCH_INCOMPLETE: NATURE_FAULT,
+    REASON_VALIDATION_REJECTED: NATURE_FAULT,
+    REASON_CHANNEL_CONFLICT: NATURE_HANDLED,
+    REASON_NO_EDGE: NATURE_EDGE,
+    REASON_HOLD_EXISTING: NATURE_HANDLED,
+}
+
+#: 细分码 -> 允许登记的**闸门**（空元组 = 只能作为轮级故障登记，不能挂在候选上）。
+#: 这张表让"17 闸门 × N 码"不再是两张各自自洽的表：挂错闸门在
+#: :class:`FunnelItem` 处直接 ``ValueError``（B-r1 P3-5）。
+DETAIL_STAGES: dict[str, tuple[str, ...]] = {
+    DETAIL_CARD_NOT_INDICATORIZED: (Stage.CARD_INDICATORIZED.value,),
+    DETAIL_SIGNAL_FN_MISSING: (Stage.SIGNAL_FN_REGISTERED.value,),
+    DETAIL_SYMBOL_NOT_USDT: (Stage.SYMBOL_IN_SCOPE.value,),
+    DETAIL_SYMBOL_NOT_IN_SCOPE: (Stage.SYMBOL_IN_SCOPE.value,),
+    DETAIL_TICKET_SYMBOL_NOT_IN_SCOPE: (Stage.SYMBOL_IN_SCOPE.value,),
+    DETAIL_TIMEFRAME_UNSUPPORTED: (Stage.TIMEFRAME_SUPPORTED.value,),
+    DETAIL_MARKET_TRANSPORT_OUTAGE: (Stage.MARKET_DATA_READY.value,),
+    DETAIL_MARKET_BUDGET_DEFERRED: (Stage.MARKET_DATA_READY.value,),
+    DETAIL_KLINE_FETCH_FAILED: (Stage.MARKET_DATA_READY.value,),
+    DETAIL_KLINE_QUALITY_REJECTED: (Stage.MARKET_DATA_READY.value,),
+    DETAIL_KLINE_ROWS_INSUFFICIENT: (Stage.MARKET_DATA_READY.value,),
+    DETAIL_PROVIDER_RATE_LIMITED: (Stage.MARKET_DATA_READY.value,
+                                   Stage.SIGNAL_TRIGGERED.value),
+    DETAIL_SIGNAL_FN_OUTPUT_INVALID: (Stage.SIGNAL_TRIGGERED.value,),
+    DETAIL_NO_SIGNAL_ON_CLOSED_BAR: (Stage.SIGNAL_TRIGGERED.value,),
+    DETAIL_SCAN_EXCEPTION: (Stage.SIGNAL_TRIGGERED.value,),
+    DETAIL_SIDE_NOT_ALLOWED_BY_CARD: (Stage.SIDE_ALLOWED.value,),
+    DETAIL_FEATURES_INCOMPLETE: (Stage.FEATURES_COMPLETE.value,),
+    DETAIL_BAR_ALREADY_SEEN: (Stage.BAR_UNSEEN.value,),
+    DETAIL_SIGNAL_ALREADY_PERSISTED: (Stage.BAR_UNSEEN.value,),
+    DETAIL_TICKET_SHAPE_INVALID: (Stage.TICKET_FRESH.value,),
+    DETAIL_TICKET_EXPIRED: (Stage.TICKET_FRESH.value,),
+    DETAIL_TICKET_EXPIRING_BEFORE_USE: (Stage.TICKET_FRESH.value,),
+    DETAIL_TICKET_ALREADY_CONSUMED: (Stage.TICKET_FRESH.value,),
+    DETAIL_TICKET_LEDGER_UNAVAILABLE: (Stage.TICKET_FRESH.value,),
+    DETAIL_ENTRY_ZONE_INVERTED: (Stage.TICKET_FRESH.value,),
+    DETAIL_SYMBOL_NOT_ALLOWED: (Stage.NO_POSITION_CONFLICT.value,),
+    DETAIL_SYMBOL_ALREADY_HELD: (Stage.NO_POSITION_CONFLICT.value,),
+    DETAIL_STRATEGY_ALREADY_HELD: (Stage.NO_POSITION_CONFLICT.value,),
+    DETAIL_NO_LATEST_PRICE: (Stage.PRICE_AVAILABLE.value,),
+    DETAIL_STRATEGY_TRADER_EXCEPTION: (Stage.PRICE_AVAILABLE.value,),
+    DETAIL_PRICE_OUTSIDE_ENTRY_ZONE: (Stage.IN_ENTRY_ZONE.value,),
+    # 轮级：只能经 :meth:`ScanFunnel.record_round_fault` 登记
+    DETAIL_NO_TICKETS_AVAILABLE: (),
+    DETAIL_CHANNEL_BUDGET_ZERO: (),
+    DETAIL_MANAGEMENT_PRIORITY_BUDGET: (),
+    DETAIL_RESEARCH_BUDGET_ZERO: (),
+    DETAIL_CARDS_UNAVAILABLE: (),
+    DETAIL_CARDS_INVALID: (),
+    DETAIL_STRATEGY_LAB_UNAVAILABLE: (),
+    DETAIL_STRATEGY_LAB_DRIFT: (),
+    DETAIL_TICKET_SOURCE_UNAVAILABLE: (),
+    DETAIL_ROUND_EXCEPTION: (),
+    DETAIL_EVIDENCE_GATE_FAILED: (),
+    DETAIL_EVIDENCE_DATA_UNAVAILABLE: (),
+    DETAIL_EVIDENCE_VALIDATION_REJECTED: (),
+}
+
+#: 轮级专用细分码（``DETAIL_STAGES`` 为空元组的那些）。
+ROUND_ONLY_DETAILS: frozenset[str] = frozenset(
+    code for code, stages in DETAIL_STAGES.items() if not stages
+)
 
 #: 九码全集：**直接引用** U05 的冻结集合，不重复定义字面量（防漂移）。
 REASON_ALL: frozenset[str] = frozenset(REASON_CODES)
@@ -265,11 +442,17 @@ def detail_codes_for_reason(reason: str) -> tuple[str, ...]:
 
 
 def validate_detail_table() -> None:
-    """自检注册表：每个细分码都映射到九码，且九码全部有细分码可达。
+    """自检注册表：每个细分码都映射到九码、都有性质、都挂对了闸门；九码全部可达。
 
     ``RESEARCH_INCOMPLETE``/``MODEL_RATE_LIMITED`` 等码由 U05 的
     ``classify_evidence_report`` / ``classify_exception`` 直接产出，这里只要求
     **至少一个**细分码可达，避免注册表与九码漂移。
+
+    负例（抛 :class:`UnknownDetailCode`/``ValueError``）：
+    - 细分码映射到非九码；
+    - 某个九码没有任何细分码可达；
+    - 细分码没有登记性质（:data:`DETAIL_NATURE`）；
+    - 细分码没有登记闸门（:data:`DETAIL_STAGES`）或挂了未知闸门。
     """
     unknown = sorted(code for code, reason in DETAIL_REASON.items()
                      if reason not in REASON_ALL)
@@ -278,6 +461,101 @@ def validate_detail_table() -> None:
     missing = sorted(REASON_ALL - {*DETAIL_REASON.values()})
     if missing:
         raise UnknownDetailCode(missing)
+    bad_nature = sorted(code for code, nature in DETAIL_NATURE.items()
+                        if nature not in NATURES)
+    if bad_nature:
+        raise ValueError(f"细分码性质非法/未登记: {bad_nature}")
+    not_in_nature = sorted(DETAIL_CODES - set(DETAIL_NATURE))
+    if not_in_nature:
+        raise ValueError(f"细分码没有登记性质: {not_in_nature}")
+    not_in_stages = sorted(DETAIL_CODES - set(DETAIL_STAGES))
+    if not_in_stages:
+        raise ValueError(f"细分码没有登记闸门: {not_in_stages}")
+    bad_stage = sorted(f"{code}:{stage}" for code, stages in DETAIL_STAGES.items()
+                       for stage in stages if stage not in STAGE_ORDER)
+    if bad_stage:
+        raise ValueError(f"细分码挂了未知闸门: {bad_stage}")
+
+
+# --------------------------------------------------------------------------- #
+# 二之三、一轮"没开仓"的判定（verdict + 主因）——**唯一**判定入口
+# --------------------------------------------------------------------------- #
+VERDICT_OPENED = "opened"
+VERDICT_NO_EDGE = "no_edge"
+VERDICT_BLOCKED = "blocked"
+VERDICT_NO_CANDIDATES = "no_candidates"
+VERDICT_HANDLED = "handled"
+VERDICT_UNAVAILABLE = "unavailable"
+
+VERDICTS: frozenset[str] = frozenset({
+    VERDICT_OPENED, VERDICT_NO_EDGE, VERDICT_BLOCKED,
+    VERDICT_NO_CANDIDATES, VERDICT_HANDLED, VERDICT_UNAVAILABLE,
+})
+
+
+def bucket_reason_codes(*, details: Iterable[str] = (),
+                        codes: Iterable[str] = ()) -> dict[str, set[str]]:
+    """把细分码与九码按**性质**分桶（故障优先：同码冲突时按故障处理，保守）。
+
+    返回 ``{fault|edge|handled|scope: {九码, ...}}``。未登记的细分码被忽略
+    （读侧可能拿到被篡改的状态文件，这里不抛异常，由调用方显式标注不可用）。
+    """
+    buckets: dict[str, set[str]] = {NATURE_FAULT: set(), NATURE_EDGE: set(),
+                                    NATURE_HANDLED: set(), NATURE_SCOPE: set()}
+    from_details: set[str] = set()
+    for detail in details:
+        text = str(detail or "").strip()
+        nature = DETAIL_NATURE.get(text)
+        reason = DETAIL_REASON.get(text)
+        if nature and reason:
+            buckets[nature].add(reason)
+            from_details.add(reason)
+    # 九码**已有细分码来源**时以细分码的性质为准（``READINESS_BLOCKED`` 既可能是
+    # "标的不在白名单"（范围界定），也可能是外部传入的就绪阻断（故障）——
+    # 只有后者才走 :data:`REASON_NATURE` 的默认性质）。
+    for code in codes:
+        text = str(code or "").strip()
+        if not text or text in from_details:
+            continue
+        nature = REASON_NATURE.get(text)
+        if nature:
+            buckets[nature].add(text)
+    return buckets
+
+
+def classify_no_open(*, details: Iterable[str] = (), codes: Iterable[str] = (),
+                     opened: int = 0, evaluated: int = 0) -> tuple[str, str]:
+    """返回 ``(verdict, primary_reason)``。**故障绝不降级成"没有信号"。**
+
+    判定顺序（每一步都是**结构化事实**，不做文本推断）：
+
+    1. 有开仓意图 → ``opened`` / ``HOLD_EXISTING``；
+    2. 出现任一**故障**（数据取不到 / 校验失败 / 就绪阻断 / 模型类）→ ``blocked``，
+       主因取故障码里优先级最高者；
+    3. 一个候选都没**评估**过（全部停在前置筛，或本轮根本没有候选）→
+       ``no_candidates``，主因取当前码里优先级最高者（**不**硬塞 ``NO_EDGE``）；
+    4. 有"真的没有边际"的观测 → ``no_edge``，主因取边际类码（范围界定类码只做辅因，
+       否则"有一张范围外的卡"会让整轮常态变成 ``blocked``，verdict 失去区分力）；
+    5. 只有"已在处理"的事实 → ``handled``（已持仓/已消费，**不是**没有信号）；
+    6. 只剩下范围界定类码 → ``blocked``（本轮的处理被范围/配置挡住，且没有任何
+       边际观测）；
+    7. 其余 → ``no_edge``（有评估过）或 ``no_candidates``（没有）。
+    """
+    buckets = bucket_reason_codes(details=details, codes=codes)
+    if opened:
+        return VERDICT_OPENED, REASON_HOLD_EXISTING
+    if buckets[NATURE_FAULT]:
+        return VERDICT_BLOCKED, choose_primary(sorted(buckets[NATURE_FAULT]))
+    if int(evaluated) <= 0:
+        everything = sorted(set().union(*buckets.values()))
+        return VERDICT_NO_CANDIDATES, choose_primary(everything or [REASON_NO_EDGE])
+    if buckets[NATURE_EDGE]:
+        return VERDICT_NO_EDGE, choose_primary(sorted(buckets[NATURE_EDGE]))
+    if buckets[NATURE_HANDLED]:
+        return VERDICT_HANDLED, choose_primary(sorted(buckets[NATURE_HANDLED]))
+    if buckets[NATURE_SCOPE]:
+        return VERDICT_BLOCKED, choose_primary(sorted(buckets[NATURE_SCOPE]))
+    return VERDICT_NO_EDGE, REASON_NO_EDGE
 
 
 # --------------------------------------------------------------------------- #
@@ -289,6 +567,20 @@ ORIGIN_SCAN = "scan"
 ORIGIN_RECOVER = "recover"
 ORIGIN_EXECUTE = "execute"
 ORIGIN_ROUND = "round"
+
+#: **评估型**阶段：到达这些闸门才代表"这个候选真的被评估过"（拉过行情 / 跑过策略函数 /
+#: 检查过票据）。前面的 5 道是**前置筛**（卡册属性与范围界定），停在那里说明候选
+#: 从未进入评估——所以"一个候选都没评估"与"评估过但没有边际"必须可区分。
+PRE_GATE_STAGES: tuple[str, ...] = (
+    Stage.CARD_LOADED.value,
+    Stage.CARD_INDICATORIZED.value,
+    Stage.SIGNAL_FN_REGISTERED.value,
+    Stage.SYMBOL_IN_SCOPE.value,
+    Stage.TIMEFRAME_SUPPORTED.value,
+)
+EVALUATION_STAGES: tuple[str, ...] = tuple(
+    name for name in STAGE_ORDER if name not in PRE_GATE_STAGES
+)
 
 
 @dataclass(frozen=True)
@@ -327,6 +619,27 @@ class FunnelItem:
         if not self.detail and stage not in SUCCESS_STAGES:
             raise ValueError(
                 f"拒绝型闸门 {stage!r} 必须带细分码（未登记的原因不允许静默）")
+        # 反向：**终态/通过型**阶段不得带细分码。"到达终态却带原因"会被
+        # :attr:`passed` 静默算成"被拒绝"（不计入 opened），是真实的漏计通路
+        # （B-r1 P3-4/P2-1）。宁可报错也不让终态被算错。
+        if self.detail and stage in SUCCESS_STAGES:
+            raise ValueError(
+                f"通过型阶段 {stage!r} 不得带细分码（{self.detail!r} 应挂在对应的"
+                f"拒绝型闸门上）")
+        # 细分码必须挂在**允许的闸门**上：让"17 闸门 × N 码"成为一张有约束的表
+        # （B-r1 P3-5），而不是两张各自自洽的表。
+        if self.detail:
+            allowed = DETAIL_STAGES.get(self.detail)
+            if allowed is None:
+                raise UnknownDetailCode((self.detail,))
+            if not allowed:
+                raise ValueError(
+                    f"细分码 {self.detail!r} 是**轮级**码，只能经 "
+                    f"record_round_fault() 登记，不能挂在候选闸门 {stage!r} 上")
+            if self.origin != ORIGIN_ROUND and stage not in allowed:
+                raise ValueError(
+                    f"细分码 {self.detail!r} 不允许挂在闸门 {stage!r}（允许:"
+                    f"{list(allowed)}）")
 
     @property
     def passed(self) -> bool:
@@ -345,6 +658,25 @@ class FunnelItem:
             "timeframe": self.timeframe, "ticket_id": self.ticket_id,
             "origin": self.origin,
         }
+
+
+@dataclass(frozen=True)
+class RoundFault:
+    """**轮级故障**：不是某个候选的结局，而是"这一轮根本没跑成/没跑全"。
+
+    B-r1 P0-4②：轮级前置失败（卡册读不到、运行时注册表不可用/漂移、通道预算为 0、
+    票据源读取失败、轮级异常）原先**完全没有表达**，被压成 ``no_candidates`` 甚至
+    ``no_edge``。轮级故障有独立的登记通道，因此它既不会被算成候选，也不会丢。
+    """
+
+    detail: str
+    reason: str
+    note: str = ""
+    round_id: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"detail": self.detail, "reason": self.reason, "note": self.note,
+                "round_id": self.round_id, "nature": DETAIL_NATURE.get(self.detail, "")}
 
 
 @dataclass
@@ -367,9 +699,15 @@ class ScanFunnel:
     throughput: Counter[str] = field(default_factory=Counter)
     detail_counts: Counter[str] = field(default_factory=Counter)
     reason_counts: Counter[str] = field(default_factory=Counter)
+    #: 轮级故障（不是候选结局；不计入候选数、不计入闸门直方图）。
+    round_faults: list[RoundFault] = field(default_factory=list)
     round_ids: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     truncated: int = 0
+    #: 读侧不可信标记（状态文件被篡改/写入未登记码时置位）。置位后
+    #: :meth:`no_open_explanation` 返回 ``verdict=unavailable``，**不抛异常**——
+    #: 一个坏状态文件不得把展示层打成 500（B-r1 P3-2）。
+    report_corrupt_reason: str = ""
 
     # -- 写入 --------------------------------------------------------- #
 
@@ -412,6 +750,31 @@ class ScanFunnel:
             self.truncated += 1
         return item
 
+    def record_round_fault(self, detail: str, *, note: str = "",
+                           round_id: str = "") -> RoundFault:
+        """登记一个**轮级故障**（卡册读不到 / 运行时不可用 / 通道预算为 0 / ...）。
+
+        与 :meth:`record` 的区别：这不是"某个候选停在哪道闸门"，而是"这一轮本身的
+        能力受损"。因此它**不**进候选计数、**不**进闸门直方图，但**进**原因码与细分码
+        计数（否则"为什么没开"又会只剩一个 verdict）。``detail`` 必须是登记为
+        轮级专用的细分码（:data:`ROUND_ONLY_DETAILS`），否则 ``ValueError``。
+        """
+        code = str(detail or "").strip()
+        reason = detail_reason(code)
+        if code not in ROUND_ONLY_DETAILS:
+            raise ValueError(
+                f"细分码 {code!r} 不是轮级码（它挂在闸门 "
+                f"{list(DETAIL_STAGES.get(code, ()))} 上），请用 record() 登记")
+        rid = str(round_id or self.round_id)
+        if rid not in self.round_ids:
+            self.round_ids.append(rid)
+        fault = RoundFault(detail=code, reason=reason, note=str(note or "")[:200],
+                           round_id=rid)
+        self.round_faults.append(fault)
+        self.detail_counts[code] += 1
+        self.reason_counts[reason] += 1
+        return fault
+
     def note(self, text: str) -> None:
         text = str(text or "").strip()
         if text and text not in self.notes:
@@ -423,6 +786,19 @@ class ScanFunnel:
     def opened(self) -> int:
         """本轮真的产出开仓意图的数量（终态项，含执行侧来源）。"""
         return int(self.reached.get(TERMINAL_STAGE, 0))
+
+    @property
+    def evaluated(self) -> int:
+        """**真的被评估过**的项数（到达评估型闸门；轮级条目不参与）。
+
+        这是"no_edge 与 no_candidates 的分界线"：全部候选都停在前置筛（卡未指标化 /
+        标的不在白名单）时，本轮**没有评估过任何东西**，此时不允许报 ``no_edge``。
+        """
+        return sum(int(self.throughput.get(stage, 0)) for stage in EVALUATION_STAGES)
+
+    @property
+    def round_fault_details(self) -> tuple[str, ...]:
+        return tuple(fault.detail for fault in self.round_faults)
 
     @property
     def tickets_emitted(self) -> int:
@@ -453,68 +829,97 @@ class ScanFunnel:
         return choose_primary(codes)
 
     def explanation(self, *, extra_codes: Iterable[str] = (),
-                    details: Iterable[str] = ()) -> DecisionReason:
+                    details: Iterable[str] = (),
+                    primary: str | None = None) -> DecisionReason:
         """本轮"为什么没开/开了什么"的原因：主因唯一、辅因可多。
 
         ``extra_codes`` 供调用方补充管理面事实（如渠道冲突、就绪阻断）；
         仍走 U05 的 :class:`DecisionReason`，因此码域与九码完全一致。
+
+        主因由 :func:`classify_no_open` **按性质**决定（故障 > 边际 > 已处理 >
+        范围界定），不按出现次数投票，也不用 U05 的固定优先级直接压——否则
+        "一张范围外的卡"（``READINESS_BLOCKED``）会把真实的 ``NO_EDGE`` 挤成主因
+        （B-r1 P0-4 反向误标）。
         """
         codes = list(self.reason_counts)
         codes.extend(str(code) for code in extra_codes if str(code or "").strip())
-        # 有开仓时本轮结论是"仓在手、其余候选各有理由"：主因取 ``HOLD_EXISTING``
-        # （用 ``prefer`` 而不是删码——删码会让"其余候选为什么没开"从辅因里消失）。
-        if self.opened and REASON_HOLD_EXISTING not in codes:
-            codes.append(REASON_HOLD_EXISTING)
-        prefer = REASON_HOLD_EXISTING if self.opened else None
+        code_list = list(dict.fromkeys(codes)) or [REASON_NO_EDGE]
+        chosen = primary or self.verdict_pair(extra_codes=extra_codes)[1]
         payload = tuple(self.detail_counts.most_common())
-        return DecisionReason.from_codes(
-            codes or [REASON_NO_EDGE],
+        return DecisionReason(
+            primary=chosen,
+            secondary=tuple(code for code in code_list if code != chosen),
             details=tuple([f"{code}x{count}" for code, count in payload][:20])
             + tuple(str(item) for item in details if str(item or "").strip()),
-            prefer=prefer,
         )
 
-    def no_open_explanation(self) -> dict[str, Any]:
+    def verdict_pair(self, *, extra_codes: Iterable[str] = ()) -> tuple[str, str]:
+        """``(verdict, primary_reason)``；顶层结论与内嵌 ``no_open`` **共用**它，
+        因此同一份工件不可能给出两个互相打脸的结论（B-r1 P0-4c）。"""
+        return classify_no_open(
+            details=self.detail_counts,
+            codes=(*self.reason_counts, *[str(code) for code in extra_codes
+                                          if str(code or "").strip()]),
+            opened=self.opened,
+            evaluated=self.evaluated,
+        )
+
+    def no_open_explanation(self, *, extra_codes: Iterable[str] = ()) -> dict[str, Any]:
         """任意一轮的"为什么没开"答复（F09：扫描异常不得报全成功）。
 
         ``verdict``：
         - ``opened``：本轮有开仓意图，``reasons`` 只是"其余候选为什么没开"；
-        - ``no_edge``：候选都评估过了，就是没有可下单边际；
-        - ``blocked``：本轮有闸门级故障（数据/校验/就绪），**不得**读成"没有信号"。
+        - ``no_edge``：候选**评估过**了，就是没有可下单边际；
+        - ``handled``：本轮的动作都在"已在处理"（已持仓/已消费），不是没有信号；
+        - ``blocked``：本轮有**故障**（数据/校验/就绪/模型/配置），
+          **不得**读成"没有信号"；
+        - ``no_candidates``：一个候选都没评估过（全部停在前置筛或本轮没有候选）；
+        - ``unavailable``：读侧数据不可信（被篡改/无法解析），**不猜**结论。
+
+        ``extra_codes`` 是漏斗之外的九码（源级错误 / 预算 / 证据门禁 / 模型异常）；
+        给了就让判定看**整轮**，而不是只看漏斗内部。
         """
-        reason = self.explanation()
-        blocked_codes = {REASON_DATA_UNAVAILABLE, REASON_VALIDATION_REJECTED,
-                         REASON_READINESS_BLOCKED, REASON_RESEARCH_INCOMPLETE,
-                         REASON_MODEL_DEADLINE, REASON_MODEL_RATE_LIMITED,
-                         REASON_CHANNEL_CONFLICT}
-        if self.opened:
-            verdict = "opened"
-        elif set(reason.codes) & blocked_codes:
-            verdict = "blocked"
-        elif self.total_candidates == 0:
-            verdict = "no_candidates"
-        else:
-            verdict = "no_edge"
+        if self.report_corrupt_reason:
+            return {
+                "round_id": self.round_id,
+                "verdict": VERDICT_UNAVAILABLE,
+                "opened": self.opened,
+                "candidates": self.total_candidates,
+                "evaluated": self.evaluated,
+                "primary_reason": "",
+                "reason_codes": [],
+                "reasons": [],
+                "details": [],
+                "stopped_at": {},
+                "reached": {},
+                "round_faults": [],
+                "error": self.report_corrupt_reason,
+            }
+        verdict, primary = self.verdict_pair(extra_codes=extra_codes)
         return {
             "round_id": self.round_id,
             "verdict": verdict,
             "opened": self.opened,
             "candidates": self.total_candidates,
-            "primary_reason": reason.primary,
-            "reason_codes": list(reason.codes),
+            "evaluated": self.evaluated,
+            "primary_reason": primary,
+            "reason_codes": list(self.explanation(extra_codes=extra_codes,
+                                                  primary=primary).codes),
             # 按 U05 的九码优先级排序（同一份数据每次呈现同一顺序，便于比对）。
             "reasons": [
                 {"reason": code, "count": self.reason_counts[code]}
                 for code in REASON_ORDER if self.reason_counts.get(code)
             ],
             "details": [
-                {"detail": code, "reason": DETAIL_REASON.get(code, ""), "count": count}
+                {"detail": code, "reason": DETAIL_REASON.get(code, ""),
+                 "nature": DETAIL_NATURE.get(code, ""), "count": count}
                 for code, count in self.detail_counts.most_common()
             ],
             "stopped_at": {stage: self.stopped_at[stage] for stage in GATE_STAGES
                            if self.stopped_at.get(stage)},
             "reached": {stage: self.reached[stage] for stage in STAGE_ORDER
                         if self.reached.get(stage)},
+            "round_faults": [fault.as_dict() for fault in self.round_faults],
         }
 
     def as_dict(self) -> dict[str, Any]:
@@ -525,6 +930,7 @@ class ScanFunnel:
             "rounds": list(self.round_ids[-8:]),
             "opened": self.opened,
             "candidates": self.total_candidates,
+            "evaluated": self.evaluated,
             "tickets_emitted": self.tickets_emitted,
             "tickets_recovered": self.tickets_recovered,
             "stopped_at": {stage: self.stopped_at[stage] for stage in GATE_STAGES
@@ -538,8 +944,10 @@ class ScanFunnel:
             "reason_codes": [{"reason": code, "count": count}
                              for code, count in self.reason_counts.most_common()],
             "details": [{"detail": code, "reason": DETAIL_REASON.get(code, ""),
-                         "count": count}
+                         "nature": DETAIL_NATURE.get(code, ""), "count": count}
                         for code, count in self.detail_counts.most_common()],
+            "round_faults": [fault.as_dict() for fault in self.round_faults],
+            "report_corrupt_reason": self.report_corrupt_reason,
             "no_open": self.no_open_explanation(),
             "notes": list(self.notes[:20]),
             "items": [item.as_dict() for item in self.items],
@@ -552,33 +960,75 @@ def funnel_from_report(payload: Mapping[str, Any] | None) -> ScanFunnel:
 
     重建只承诺计数与原因码（明细在写入侧已按 :data:`MAX_ITEMS_IN_REPORT` 截断），
     因此看板/回归在"进程重启后"仍能回答"上一轮为什么没开"，而不是只剩 ``ok``。
+
+    **不可信输入 fail-closed 但不抛异常**（B-r1 P3-2）：状态文件被手工篡改、
+    塞进未登记的原因码/细分码时，这些条目被**丢弃**并置
+    :attr:`ScanFunnel.report_corrupt_reason`；此后 :meth:`ScanFunnel.no_open_explanation`
+    返回 ``verdict=unavailable``，**不猜**结论，也不会把展示路径打成 500。
     """
     data = dict(payload or {})
     funnel = ScanFunnel(round_id=str(data.get("round_id") or ""))
+    dropped: list[str] = []
+
+    def _keep_reason(value: Any) -> bool:
+        text = str(value or "").strip()
+        if text in REASON_ALL:
+            return True
+        dropped.append(f"reason:{text}"[:60])
+        return False
+
+    def _keep_detail(value: Any) -> bool:
+        text = str(value or "").strip()
+        if text in DETAIL_CODES:
+            return True
+        dropped.append(f"detail:{text}"[:60])
+        return False
+
     funnel.reason_counts.update({
         str(entry.get("reason")): int(entry.get("count") or 0)
-        for entry in data.get("reason_codes") or [] if entry.get("reason")
+        for entry in data.get("reason_codes") or []
+        if entry.get("reason") and _keep_reason(entry.get("reason"))
     })
     funnel.detail_counts.update({
         str(entry.get("detail")): int(entry.get("count") or 0)
-        for entry in data.get("details") or [] if entry.get("detail")
+        for entry in data.get("details") or []
+        if entry.get("detail") and _keep_detail(entry.get("detail"))
     })
     funnel.stopped_at.update({
         str(stage): int(count or 0) for stage, count in (data.get("stopped_at") or {}).items()
+        if str(stage) in STAGE_ORDER
     })
     funnel.reached.update({
         str(stage): int(count or 0) for stage, count in (data.get("reached") or {}).items()
+        if str(stage) in STAGE_ORDER
     })
     funnel.passed_stages.update({
         str(stage): int(count or 0)
         for stage, count in (data.get("passed_stages") or {}).items()
+        if str(stage) in STAGE_ORDER
     })
     funnel.throughput.update({
         str(stage): int(count or 0) for stage, count in (data.get("throughput") or {}).items()
+        if str(stage) in STAGE_ORDER
     })
+    for entry in data.get("round_faults") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        detail = str(entry.get("detail") or "").strip()
+        if detail in ROUND_ONLY_DETAILS:
+            funnel.round_faults.append(RoundFault(
+                detail=detail, reason=DETAIL_REASON[detail],
+                note=str(entry.get("note") or "")[:200],
+                round_id=str(entry.get("round_id") or "")))
+        else:
+            dropped.append(f"round_fault:{detail}"[:60])
     funnel.round_ids.extend(str(item) for item in data.get("rounds") or [])
     funnel.notes.extend(str(item) for item in data.get("notes") or [])
     funnel.truncated = int(data.get("items_truncated") or 0)
+    if dropped:
+        reason = "状态文件含未登记条目，已丢弃: " + ", ".join(sorted(set(dropped))[:5])
+        funnel.report_corrupt_reason = reason[:200]
+        funnel.note(reason)
     return funnel
 
 
@@ -1230,19 +1680,34 @@ def round_explanation(
         evidence_report=evidence_report,
         model_error=model_error,
     )
-    # 有开仓时本轮结论是"仓在手"（与 :meth:`ScanFunnel.explanation` 同口径）；
-    # 其余情况一律让 U05 的九码确定性优先级决定主因，**不**用漏斗的计数投票去压
-    # 模型/数据类根因（那会让 MODEL_DEADLINE 被 NO_EDGE 掩盖）。
-    prefer = REASON_HOLD_EXISTING if (funnel is not None and funnel.opened) else None
-    merged = DecisionReason.from_codes(
-        (*reasons, *reason.codes),
+    # **顶层结论与内嵌 no_open 共用同一次判定**（B-r1 P0-4c）：先按性质算出
+    # `(verdict, primary)`，再用它构造 DecisionReason 与 no_open——否则
+    # "故障只在漏斗之外发生"（源级错误/证据门禁/模型异常）时会出现
+    # "顶层 blocked、内嵌 no_edge"两个互相打脸的结论。
+    merged_codes = [*reasons, *reason.codes]
+    if funnel is not None:
+        verdict, primary = funnel.verdict_pair(extra_codes=merged_codes)
+        if funnel.opened:
+            verdict, primary = VERDICT_OPENED, REASON_HOLD_EXISTING
+    else:
+        # 没有漏斗（调用方只给了外部事实）：按九码性质判定；有码即视为
+        # "本轮确实评估过"，无码则视为没有候选。
+        verdict, primary = classify_no_open(
+            codes=merged_codes, opened=0, evaluated=1 if merged_codes else 0)
+    merged = DecisionReason(
+        primary=primary,
+        secondary=tuple(code for code in dict.fromkeys(merged_codes) if code != primary),
         details=tuple(dict.fromkeys((*details, *reason.details))),
-        prefer=prefer,
     )
-    no_open = funnel.no_open_explanation() if funnel is not None else None
+    no_open = (funnel.no_open_explanation(extra_codes=[*reasons, *reason.codes])
+               if funnel is not None else None)
+    if no_open is not None:
+        # 内嵌块与顶层逐字一致（不是各算一次）。
+        no_open = {**no_open, "verdict": verdict, "primary_reason": primary}
     return {
         "reason": merged.as_dict(),
-        "primary_reason": merged.primary,
+        "primary_reason": primary,
+        "verdict": verdict,
         "reason_codes": list(merged.codes),
         "hold_existing": bool(list(positions)),
         "opened": funnel.opened if funnel is not None else 0,
@@ -1258,8 +1723,32 @@ __all__ = [
     "DEFAULT_MANAGEMENT_RESERVE_RATIO",
     "DEFAULT_RETENTION_MS",
     "DETAIL_CODES",
+    "DETAIL_NATURE",
     "DETAIL_REASON",
+    "DETAIL_STAGES",
+    "EVALUATION_STAGES",
     "FUNNEL_REPORT_KEY",
+    "NATURES",
+    "NATURE_EDGE",
+    "NATURE_FAULT",
+    "NATURE_HANDLED",
+    "NATURE_SCOPE",
+    "ORIGIN_ROUND",
+    "POSITION_CLASS_ATTRIBUTED",
+    "POSITION_CLASS_LEGACY",
+    "PRE_GATE_STAGES",
+    "ROUND_ONLY_DETAILS",
+    "REASON_NATURE",
+    "RoundFault",
+    "VERDICTS",
+    "VERDICT_BLOCKED",
+    "VERDICT_HANDLED",
+    "VERDICT_NO_CANDIDATES",
+    "VERDICT_NO_EDGE",
+    "VERDICT_OPENED",
+    "VERDICT_UNAVAILABLE",
+    "bucket_reason_codes",
+    "classify_no_open",
     "FunnelItem",
     "LEDGER_CORRUPT",
     "LEDGER_SCHEMA_VERSION",
