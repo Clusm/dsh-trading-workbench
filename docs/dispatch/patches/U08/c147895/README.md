@@ -1,3 +1,18 @@
+> # SUPERSEDED —— 请勿使用本包（2026-09-21 r3 明确标注）
+>
+> **本包已作废，不要再应用它。**
+> - 复验报告 `docs/dispatch/reviews/U08/cc9287a/Q_r3.md` §A.2 实测：本包的
+>   `05_run_offline_regression_scripts.diff` 在集成树 `b97ae0d`（以及当前
+>   `695023cc`）上 **4 种 git 配置全部 `git apply` 失败** —— 它期望
+>   `"scripts/smoke_u06a_shadow_isolation.py",` 后面**紧跟** `)`，而现状是 U14
+>   新增的 `"scripts/smoke_u14_alert_delivery.py",` 那一行。应用错包 =
+>   离线回归入口直接 `RuntimeError`。
+> - 本包基线 `2ed2e5d` 已过期（不含 U14 登记行）。
+> - **请改用 `../0c131f2/`**（r3 包，基线 = 集成 HEAD `695023cc`）。
+>   `../ec8fd1c/`（r2 包）也已同时标注 superseded。
+>
+> 以下内容仅作历史留档，**不代表当前可用状态**。
+
 # U08 共享适配补丁包（作者 C-U08 / 交 I 应用）
 
 - **补丁基线 = 本目录名所指的 `task/U08` head `c147895`**，其父链等于集成 HEAD `2ed2e5d`
