@@ -126,20 +126,28 @@ def add_lifecycle(db: AuditDatabase, index: int, *, closed_at: datetime,
                   gross: float = 1.0, entry_fee: float = 0.1, exit_fee: float = 0.1,
                   funding: float = 0.0, side: str = "BOTH",
                   cost_status: str = "COMPLETE",
+                  lifecycle_cost_status: str | None = None,
                   outcome_id: str | None = None, recorded_at: str | None = None,
                   release_id: str | None = None, environment: str = "demo",
                   account_ref: str = "demo:u09") -> None:
+    """落一条闭合生命周期 + 一条 outcome。
+
+    ``lifecycle_cost_status`` 默认 ``None`` ⇒ 与 ``cost_status`` 同值（既有夹具行为
+    不变）。显式给出时可以构造"lifecycle 权威态 vs outcome 快照"分歧的最小夹具
+    （U09-FU1）。
+    """
     lifecycle = lifecycle_id or f"lc-{index}"
+    authority_cost = cost_status if lifecycle_cost_status is None else lifecycle_cost_status
     db.create_position_lifecycle(
         lifecycle_id=lifecycle, environment=environment, account_ref=account_ref,
         symbol=symbol, position_side=side, entry_qty=1.0, entry_notional=entry_price,
-        attribution_status="ATTRIBUTED", cost_status=cost_status,
+        attribution_status="ATTRIBUTED", cost_status=authority_cost,
         opened_at_ms=1_700_000_000_000, release_id=release_id,
     )
     db.update_position_lifecycle(
         lifecycle_id=lifecycle, status="CLOSED",
         closed_at_ms=int(closed_at.timestamp() * 1000), exit_qty=1.0, remaining_qty=0.0,
-        exit_notional=exit_price, attribution_status="ATTRIBUTED", cost_status=cost_status,
+        exit_notional=exit_price, attribution_status="ATTRIBUTED", cost_status=authority_cost,
     )
     db.log_trade_outcome(
         outcome_id=outcome_id or f"outcome-{lifecycle}", intent_id=f"intent-{lifecycle}",
@@ -529,6 +537,118 @@ def scenario_lifecycle_revision(root: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# [4b] U09-FU1：成本以 lifecycle 权威态为准；净收益未知不得充数
+# --------------------------------------------------------------------------- #
+def scenario_cost_authority_and_net_unknown(root: Path) -> None:
+    """两条 fail-open 的修复证据（`U09-OUTCOME-VS-LIFECYCLE-COST`/`U09-NET-UNKNOWN-PADDING`）。
+
+    三份互不干扰的夹具，各自 30 条基线样本，只改一件事：
+
+    * 分歧夹具：lifecycle 说 ``INCOMPLETE``，outcome 快照说 ``COMPLETE``
+      → 旧口径凭快照放行（PASS 30）；新口径被权威态拉回（不计入 30）。
+    * 反向夹具：lifecycle ``COMPLETE``、outcome 快照 ``INCOMPLETE``
+      → 两态都不放行（**不得**因新口径而反向放宽）。
+    * 未知净收益夹具：两表都 ``COMPLETE`` 但 ``funding_cashflow=NULL``
+      → 旧口径 PASS 30（净收益可算样本 0）；新口径不计入。
+    * 合法零收益夹具：``net_realized == 0.0``（合法 ZeroFeeProof 场景）
+      → **照常计入**（不得把"未知"和"合法零"混为一谈）。
+    """
+    print("\n[4b] U09-FU1：成本权威态 + 净收益可算性")
+    start = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+    end = start + timedelta(minutes=30)
+    closed_at = start + timedelta(minutes=10)
+    thresholds = {"min_observation_days": 0.0, "min_eligible_closed_trades": 30}
+
+    def report_for(name: str, filler) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+        fixture = Fixture(root / name)
+        add_observations(fixture.db, release_id=fixture.release_id,
+                         environment=fixture.environment, account_ref=fixture.account_ref,
+                         start=start, count=31, session_id="session-1")
+        filler(fixture.db)
+        report = build_report(fixture, since=iso(start), until=iso(end), thresholds=thresholds)
+        fixture.close()
+        return fixture, report["release_evidence"], report
+
+    def both_complete(db) -> None:
+        for index in range(30):
+            add_lifecycle(db, index, closed_at=closed_at, lifecycle_id=f"lc-{index}")
+
+    def authority_veto(db) -> None:
+        for index in range(30):
+            add_lifecycle(db, index, closed_at=closed_at, lifecycle_id=f"lc-{index}",
+                          lifecycle_cost_status="INCOMPLETE", cost_status="COMPLETE")
+
+    def snapshot_pessimistic(db) -> None:
+        for index in range(30):
+            add_lifecycle(db, index, closed_at=closed_at, lifecycle_id=f"lc-{index}",
+                          lifecycle_cost_status="COMPLETE", cost_status="INCOMPLETE")
+
+    def net_unknown_padding(db) -> None:
+        for index in range(29):
+            add_lifecycle(db, index, closed_at=closed_at, lifecycle_id=f"lc-{index}")
+        add_lifecycle(db, 29, closed_at=closed_at, lifecycle_id="lc-29", funding=None)
+
+    def legit_zero_net(db) -> None:
+        for index in range(30):
+            add_lifecycle(db, index, closed_at=closed_at, lifecycle_id=f"lc-{index}",
+                          gross=0.0, entry_fee=0.0, exit_fee=0.0, funding=0.0)
+
+    # (a) 反向证据：两表都 COMPLETE 的正常样本照旧计入 30。
+    _, block, report = report_for("fu1-normal", both_complete)
+    check("反向证据：两表都 COMPLETE 的正常样本仍计入 30",
+          block["eligible_closed_lifecycles"] == 30
+          and report["gates"]["eligible_closed_trades"]["state"] == "PASS",
+          block["eligible_closed_lifecycles"])
+
+    # (b) 缺陷 1：lifecycle 权威态被无视（快照更乐观即放行）。
+    _, block, report = report_for("fu1-authority", authority_veto)
+    excluded = block.get("eligible_closed_exclusion_reasons") or {}
+    check("lifecycle 说 INCOMPLETE → 不计入 30（权威态可拉回乐观快照）",
+          block["eligible_closed_lifecycles"] == 0
+          and report["gates"]["eligible_closed_trades"]["state"] == "FAIL"
+          and excluded.get("COST_AUTHORITY_INCOMPLETE") == 30,
+          (block["eligible_closed_lifecycles"], excluded))
+    mismatches = block.get("cost_status_snapshot_mismatches") or []
+    check("快照比权威态乐观的分歧被单独披露（交叉校验，不删快照）",
+          len(mismatches) == 30
+          and all(item["snapshot_more_optimistic"] is True
+                  and item["outcome_cost_status"] == "COMPLETE"
+                  and item["lifecycle_cost_status"] == "INCOMPLETE"
+                  for item in mismatches),
+          mismatches[:2])
+
+    # (c) 反向：快照悲观时**不得**因新口径而放宽（旧口径也是不放行）。
+    _, block, report = report_for("fu1-snapshot-pessimistic", snapshot_pessimistic)
+    check("outcome 快照说 INCOMPLETE → 同样不计入（任一说不完整即不放行）",
+          block["eligible_closed_lifecycles"] == 0
+          and report["gates"]["eligible_closed_trades"]["state"] == "FAIL",
+          block["eligible_closed_lifecycles"])
+
+    # (d) 缺陷 2：净收益未知不得充当"完整闭合"凭证（29 真 + 1 未知不得凑成 30）。
+    _, block, report = report_for("fu1-net-unknown", net_unknown_padding)
+    excluded = block.get("eligible_closed_exclusion_reasons") or {}
+    check("净收益未知的生命周期不得充数（29 真凭证 + 1 未知 → 29，门禁 FAIL）",
+          block["eligible_closed_lifecycles"] == 29
+          and report["gates"]["eligible_closed_trades"]["state"] == "FAIL"
+          and block["net_realized_unknown_lifecycles"] == 1
+          and excluded.get("NET_REALIZED_UNKNOWN") == 1,
+          (block["eligible_closed_lifecycles"], block["net_realized_unknown_lifecycles"]))
+    check("计入 30 的样本净收益一律可算（IS None 与 == 0.0 不混淆）",
+          all(item.get("net_realized") is not None for item in block["eligible_closed_rows"])
+          and block["eligible_net_realized_total"] == round(29 * 0.8, 10),
+          block["eligible_net_realized_total"])
+
+    # (e) 合法零收益（net_realized == 0.0）不得被误伤。
+    _, block, report = report_for("fu1-zero-net", legit_zero_net)
+    check("反向证据：合法零收益（net=0.0，非 None）仍计入 30 且不算未知",
+          block["eligible_closed_lifecycles"] == 30
+          and block["net_realized_unknown_lifecycles"] == 0
+          and all(item["net_realized"] == 0.0 for item in block["eligible_closed_rows"])
+          and report["gates"]["eligible_closed_trades"]["state"] == "PASS",
+          (block["eligible_closed_lifecycles"], block["net_realized_unknown_lifecycles"]))
+
+
+# --------------------------------------------------------------------------- #
 # [5] F12：ACK ≠ 送达、ACK ≠ 恢复
 # --------------------------------------------------------------------------- #
 def scenario_ack_not_recovery(root: Path) -> None:
@@ -754,6 +874,7 @@ def main() -> int:
             scenario_observation_window(root)
             scenario_window_invalid(root)
             scenario_lifecycle_revision(root)
+            scenario_cost_authority_and_net_unknown(root)
             scenario_ack_not_recovery(root)
             scenario_restart_versus_release_change(root)
             scenario_k06_groups(root)
