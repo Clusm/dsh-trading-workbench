@@ -170,7 +170,12 @@
   - **N2 的"无可达行为差异"自述被 Q 推翻，且方向是放松（比不改更糟）**：门禁 CLEARED 后账本出现**非 ENTRY** 单（`purpose=EXIT`/`status=UNKNOWN`）时，pristine 阻断启动/停 `close_only`/拒 `set_control('normal')`；**patched 放行 / `normal` / `set_control('normal')` 成功**。
   - **根因（结构性）**：`service.py:891` 附近 `_recovery_gate_ledger_facts(facts=None)` 的 `unknown_orders`/`submitting_orders` **取自形参、缺省硬编码 0**；FU2 新接线的两条路径都是**无参调用** → 这两列恒 0，绕过门禁的**真实账本读取**（门禁不分 purpose 全表计数）。
   - **N1 PASS**（10 场景独立复现三处 fail-open 翻转）、**N3 PASS**、9 组绕过符合预期、`test_supervision.py` 的改动**不算放宽断言**（断言文本零改动；反证：patched `recovery.py` + pristine 测试 → 恰好 2 条失败，都是旧夹具**靠 N1 的 fail-open 才通过**的"合法对账应放行"断言）、full delta `NEW_FAIL=∅`、补丁 9/9、check_quality 两树均绿。Q 还独立确认**补丁 05 不必要**（base `ruff check .` 已全绿；把归档探针改回 `.py` 立刻报 30 错）。
-  - **修复已派发**：`U13-FU3`（**同一分支 `task/U13-FU2` 继续提交**，工作树复用 `mat-wt/W3-fix2`）。要求：`unknown_orders`/`submitting_orders` 取**真实账本**（不是打 purpose 特判），并以 Q 原场景做两态测试且 pristine 结论一致。**仍在运行，勿重复派发。**
+  - **修复已交付：`U13-FU3` @ `1e9f760`（代码 head `5651531`）→ Q 复验进行中**（同一分支 `task/U13-FU2` 继续提交，工作树 `mat-wt/W3-fix2`）。
+    - **修的是结构问题，不是特判**：新增 `_ledger_outbox_counts()`，三列**一律**从本进程 `order_outbox` 实读；SQL 谓词与门禁 `ledger_reconcile_facts` **逐字同源**（`FACTS_KEYS`/`UNRESOLVED_ORDER_STATUSES` 从 `core.ops.recovery` **导入**）；`unknown_orders`/`submitting_orders` 的 WHERE **无 purpose 条件** → 任意 purpose × 任意 status 同规则覆盖。形参 `facts` 降级为**额外下界（逐列 max）**：只可能更严、绝不更松。
+    - Q 的原探针 `[C] unknown_exit` 三方对照：pristine **阻断/close_only/拒** → FU2 **放行/normal/成功** → **修复 阻断/close_only/拒，`unknown_orders`=1（账本实读），exit 0（10/0）**。扩展验证器 pristine 47/11 → FU2 54/4 → 修复 **58/0**。
+    - N1/N3 未回退（`recovery.py` 未改；probe_n1 11/0、bypass 13/0、n3 6/0）；delta **NEW_FAIL=∅**；`check_quality.py` 两树逐字节相同、`OK files=295`、无新增 exclude；补丁 `01` 两种 base × 3 配置 6/6 干净、`02` 为分支内独占。
+    - **如实登记**：`[unknown_exit] 冷启动就绪快照` 在 pristine 上本就 FAIL（其 `service.py:411` 本来也是无参调用）→ 属**顺带收严**，非"修复态比要求更严"；新计数**不按 `environment` 过滤**（刻意与门禁一致，多环境共库面未实测）；读不出账本时多开一次只读连接。
+    - 复验会话：`reviews/U13-FU3/R1/q`（detached @ `1e9f760`）。**仍在运行，勿重复派发。**
 
 - **`U13-FU2`（首次派发记录，保留备查）**：head `2ac0d6f`，补丁包 `docs/dispatch/patches/U13-FU2/ce412fa/`（3 diff）。
   - **N1 修好**：状态根**没有账本文件** / **没有 `order_outbox` 表** 两种形态由 `allowed=True`（fail-open）变为 `allowed=False / EVIDENCE_UNVERIFIED`；四态对照无回归无误伤；**复用** `EVIDENCE_UNVERIFIED` 无新码；before exit=1(4/3) → after exit=0(7/0)。

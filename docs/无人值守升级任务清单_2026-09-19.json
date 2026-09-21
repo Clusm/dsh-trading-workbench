@@ -4440,7 +4440,7 @@
       "U13-FU2": {
         "title": "恢复门禁生产接线收口（N1 裸形态 fail-open + N2 service.py 未注入 + N3 文档）",
         "owner_role": "E线",
-        "status": "CHANGES_REQUESTED",
+        "status": "CHANGES_REQUESTED -> 修复由 U13-FU3 承接（待独立复验）",
         "head_commit": "2ac0d6f",
         "base": "7885e6a",
         "branch": "task/U13-FU2（worktree mat-wt/W3-fix2）",
@@ -4493,7 +4493,7 @@
             "未在 mat-wt/I 等他人 worktree 上验证"
           ]
         },
-        "fix_round": "U13-FU3（同一分支 task/U13-FU2 上继续提交）：修 N2 的放松回归 —— 让 unknown_orders/submitting_orders 取真实账本，而不是形参缺省 0；必须用 Q 的原场景做两态测试。"
+        "fix_round": "U13-FU3 @ 1e9f760（同一分支 task/U13-FU2 继续提交）—— 已提交修复，待 Q 复验。"
       },
       "U12-BF1": {
         "title": "修 U12-BUILD-F1（RELEASE 阻断）：身份采集在真实 src/ 树必然抛 CredentialLeakError",
@@ -4515,6 +4515,48 @@
           "保守残差：文件名含 secret 子串一律拒（secretary_roster.py 亦拒），方向 fail-closed，真实 src/ 无此名；已作用例显式登记",
           "未跑真实运行目录与 demo 服务"
         ]
+      },
+      "U13-FU3": {
+        "title": "修 U13-FU2 的 N2 放松回归：门禁两列改从账本实读",
+        "owner_role": "E线",
+        "status": "READY_FOR_REVIEW",
+        "head_commit": "1e9f760",
+        "code_head": "5651531",
+        "base": "2ac0d6f（即 U13-FU2 分支 head）",
+        "branch": "task/U13-FU2（同分支继续提交；worktree mat-wt/W3-fix2）",
+        "changed_in_branch": [
+          "src/core/service.py(+74/-21)",
+          "scripts/ops/verify_u13f1_recovery_gate.py(+81/-18)",
+          "docs/dispatch/patches/U13-FU2/ce412fa/README.md(追加 §8 更正被推翻的两处结论，不改原文)"
+        ],
+        "untouched": "src/core/ops/recovery.py **未改**（N1/N3 原样）；`git diff 5651531 HEAD -- src/ scripts/ tests/` 为空",
+        "patch_package": "docs/dispatch/patches/U13-FU3/5651531/（01 service_ledger_outbox_counts.diff、02 verify_gate_n2_unknown_exit.diff + README + evidence/）",
+        "fix_is_structural": "新增 `_ledger_outbox_counts()`：三列**一律**从本进程 `order_outbox` 实读；SQL 三条 `SUM(CASE …)` 与门禁 `ledger_reconcile_facts` **逐字同谓词**，且 `FACTS_KEYS`/`UNRESOLVED_ORDER_STATUSES` 从 `core.ops.recovery` **导入**（口径只存一份）。`unknown_orders`/`submitting_orders` 的 WHERE **无任何 purpose 条件**，`unresolved_entry_orders` 的 purpose 条件与门禁一致 -> 门禁会数到的行 = 这里会数到的行，**任意 purpose × 任意 status** 都同规则覆盖。形参 `facts` 降级为**额外下界（逐列 max）**：只可能更严、绝不更松；读不出账本 -> 退回门禁自身账本读取（与裸形态同源）-> 仍读不出则三元组全 1；`not_applicable` 原样透传给 `_facts_unreadable` 判阻断。干净账本对照仍 0/0/0 不误伤。",
+        "before_after": {
+          "probe": "复用 Q 的 probe_n2.py case [C] unknown_exit（未改一行）",
+          "pristine_7885e6a": "启动期阻断 RECONCILE_REQUIRED_BEFORE_ENTRY / state=close_only / set_control(normal) ok=False / 注入 unknown_orders=0 / exit 1(7/3)",
+          "fu2_2ac0d6f": "**放行 GATE_CLEARED / state=normal / set_control(normal) ok=True / unknown_orders=0** / exit 1(7/3, 失败=C1/C2/C3)",
+          "fix_5651531": "阻断 RECONCILE_REQUIRED_BEFORE_ENTRY / state=close_only / set_control(normal) ok=False / **unknown_orders=1（账本实读）** / **exit 0(10/0)**",
+          "extended_verifier": "pristine 47/11 exit1 -> FU2 54/4 exit1（4 条全在 [unknown_exit]）-> 修复 58/0 exit0"
+        },
+        "n1_n3_unchanged": "probe_n1.py pristine 8/3 exit1 -> FU2 11/0 -> 修复 11/0 exit0（[none]/[no_outbox]/[injected:not_applicable] -> EVIDENCE_UNVERIFIED 仍阻断）；probe_bypass.py 13/0；probe_n3.py 6/0",
+        "delta": "两树解包后立刻 git init；逐脚本 full delta **85/85 同集合，nonzero 0/0，NEW_FAIL=∅、FIXED=∅、BOTH=∅**；官方入口 patched 侧 OFFLINE REGRESSION OK scripts=85 exit 0",
+        "gates": "check_quality QUALITY CHECK OK files=295 untracked=0（check_quality.py 两树**逐字节相同**，未新增 ruff exclude）；smoke_u13_supervision（内含扩展验证器 58/0）；smoke_contracts_v3 173/0；smoke_recovery_bundle 11/0",
+        "patches_applicability": "01 在 7885e6a 与 2ac0d6f 两种 base × 3 配置 = 6/6 rc=0 Checking=1 Skipped=0；02 是**分支内独占文件**（集成树不带），在 2ac0d6f 上 3/3 干净、在 7885e6a 上按预期 rc=1（缺 FU2 的验证器小节）。集成顺序：FU2 补丁 01-03 -> FU3 的 01。等价性：ap_fu2+01+02 == git archive 5651531 对应文件逐字节一致。",
+        "unfinished": [
+          "**pristine 基线差异**：`[unknown_exit] 冷启动就绪快照` 这条断言在 pristine 上是 FAIL（pristine 快照 service.py:411 本来就无参调用、本来就放行），在修复态 PASS —— 它是『顺带收严』，不是『修复态比要求更严』，登记以免误读",
+          "新计数**不按 environment 过滤**（刻意与门禁口径一致）；一个状态根一环境的现行约定下无影响，但多环境共库的额外阻断面未实测",
+          "`_ledger_outbox_counts()` 读不出时会多开一次只读连接（退回 gate.live_reconcile_facts()），只在异常窗口触发，未做高频路径性能计量",
+          "未修其它 P2/P3（含复验 N4 补丁 05 不必要），留给 U12",
+          "全部证据来自进程内假 broker + 系统临时目录合成状态根；无真实交易所/断电/多账户验证"
+        ],
+        "verification": {
+          "session": "Q (reviews/U13-FU3/R1/q)",
+          "candidate": "1e9f760",
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U13-FU3/1e9f760/",
+          "focus": "重点：用 Q 自己的原探针复现三方对照；**遍历 purpose×status 矩阵找剩余放松面**（任何一格修复态比 pristine 松 = 阻塞）；验证『facts 形参只增不减』；两条已登记边界（不按 environment 过滤 / 读不出时退回）会不会产生放松；complete_reconcile 口子现状。"
+        }
       }
     },
     "w3_status": {
@@ -4528,7 +4570,7 @@
         "U12（RC DRAFT，head 044fccf）"
       ],
       "in_flight": {
-        "U13-FU3": "修 U13-FU2 的 N2 放松回归（同一分支 task/U13-FU2）"
+        "U13-FU3-verify": "Q 复验进行中（candidate 1e9f760）"
       },
       "gates": {
         "offline_regression": "OFFLINE REGRESSION OK scripts=85",
