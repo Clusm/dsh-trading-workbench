@@ -139,7 +139,8 @@
    - 交付：`src/core/release_evidence.py`（扩展，不重写）＋ `tests/acceptance/test_release_evidence_v2.py` ＋ `scripts/smoke_u09_release_evidence.py` ＋ 补丁包 `docs/dispatch/patches/U09/<head>/`（含 `database.py`/`health_watch.py`/`report_release_readiness.py` 适配 + `run_offline_regression.py` 登记）。
    - 已内联进提示词：S08 泄漏的具体行号与修法（**从 `src.intel.shadow_status` 导入 gate_role 口径，禁止硬编码第二份 source 名单**）、NO_EDGE 不计分母、**窗口首尾缺失计入分母**（现 `observation_coverage` 自动取首尾健康行 = 规格 §12 明禁）、lifecycle 去重 + 晚到成本重算、ACK≠恢复、重启 vs 换版、不建第二套 GO 判断器、F10/F12/F16/F23/F24 证据、3 种 git 配置补丁可应用、两态测试、禁止硬编码迁移版本集合。
    - **作者会话仍在运行 → 本回合不要重复派发 U09。**
-2. **U09 集成后 → U12 BUILD**：RC 集成、故障矩阵（F01–F25）、隔离恢复演练（F14/F18）、真实宿主/渠道验收（**依赖 D01/D02 决策**）。
+2. **U09 集成后 → U12 BUILD**：RC 集成、故障矩阵（F01–F25）、隔离恢复演练（F14/F18 **已完成，见下**）、真实宿主/渠道验收（**依赖 D01/D02 决策**）。
+   **RC 前置阻断项（4 条 P1）**：`F14-DRILL-GATE-NOT-INSTALLED`、`F14-LIVE-GATE-LAYOUT`、`F14-GATE-EVIDENCE-SELFASSERTED`、`F18-STATE-ROOT-MISSING-UNREACHABLE` —— 由 `U13-FU1` 修复并复验后才可谈 RC 冻结。**F14/F18 的必达结果在这 4 条修好之前不算成立**，U12 的矩阵不得把它们记成通过。
    U12 必须一并消费的跨任务挂账：`W1-JOINT-WIRING`（U03 接线 × U15 身份，解开开仓 fail-closed）、`U08-U12-WIRING`（graph.py 整轮聚合）、`U08-R5-FU1`（N10 更正）、`AlertQueue` 无生产消费者（监控 `errors`，注意 `PERSIST_FAILED` 不在其中）。
 3. **W4 不可在窗口内完成**（7 天挂钟观察窗、D01–D05 外部待决、实盘启用须用户另行授权）——须如实报告，**不得标记为通过**。
 
@@ -148,7 +149,11 @@
   - 进度快照：已落**首个提交 `79d5c4a`**（独占产物：扩展后的 `release_evidence.py` 等）。
   - **注意（中断恢复要点）**：该分支工作树当前**有 4 个共享文件处于未提交修改态** —— `src/audit/database.py`、`src/core/health_watch.py`、`scripts/report_release_readiness.py`、`scripts/run_offline_regression.py`。按规则这些**不得提交进任务分支**。若该会话中断：接续会话必须**先把它们导出为 unified diff 到 `docs/dispatch/patches/U09/<head>/`，再用 `git checkout 448a4e9 -- <这 4 个文件>` 从分支还原**（lesson 13）。
   - 该分支**当前无作者提交**才走重派；有 `79d5c4a` 则走 §5 接续流程，**不要**重派整条线。
-- **W3 隔离恢复演练会话（F14/F18）**：工作树 `mat-wt/W3-drill`（**detached @ `448a4e9`**，只做验证、只写报告）。已在自树内建出 `docs/dispatch/reviews/U12/`；报告将落在其 `docs/dispatch/reviews/U12/drill_F14_F18/`，由 I 归档进 `mat-wt/I`。
+- **W3 隔离恢复演练（F14/F18）**：**✅ 已完成**（`mat-wt/W3-drill`，detached @ `448a4e9`）。报告与原始证据已归档：`docs/dispatch/reviews/U12/drill_F14_F18/REPORT.md` + `raw/`（7 个可复跑探针 + 22 份原始输出）。
+  - **判定：F14 = PASS-with-notes（有条件的）；F18 = PASS-with-notes**。F14 在**生产恢复脚本**路径上必达成立（先对账再开仓、不重复下单，`broker.posts` 全程未增加）；F18 在**显式状态根**下必达成立（换代码根不换锁/不换身份、PID 复用拒启动、迁移回滚不损坏）。
+  - **4 条 P1（I 已独立核对源码证实）**：`F14-DRILL-GATE-NOT-INSTALLED`、`F14-LIVE-GATE-LAYOUT`、`F14-GATE-EVIDENCE-SELFASSERTED`、`F18-STATE-ROOT-MISSING-UNREACHABLE`；另有 5 条 P2（`RECOVERY-BUNDLE-P2-CLUSTER`，含**既有**缺陷"截断锁文件单方接管 → 双持锁"）与 4 条 P3。全部已登记进台账 `dispatch.known_issues`。
+  - KI02 天然检验通过：该树**无 `.venv`**，`smoke_windows_service_plan.py` 仍 24/0 无 `ValueError`；官方入口 `OFFLINE REGRESSION OK scripts=84` exit 0。
+- **E 线修复会话 `U13-FU1`**：工作树 `mat-wt/W3-fix`（`task/U13-FU1` @ `943d839`）—— 修上述 4 条 P1（P1-1 core 演练不装门禁 / P1-2 live 布局 fail-open / P1-3 门禁证据自证 / P1-4 `STATE_ROOT_MISSING` 不可达）。**仍在运行，勿重复派发。**
   - F14 = 从恢复包启动期间有交易所已成交订单 → **先全量对账/增量回拉再开仓，不重复下单**。
   - F18 = 新代码目录/旧状态根/PID 复用/两账户同 profile·同账户不同 profile → **状态路径与身份一致、单账户互斥、不新建错误基线、迁移可回滚**。
   - 注意：该工作树**没有 `.venv`**，正好检验 **KI02**（解释器解析）是否真的修好。
