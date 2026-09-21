@@ -113,6 +113,20 @@ SCRIPTS = (
     # U09（I 发布证据门禁）：影子来源口径/窗口首尾/NO_EDGE/迟到修订/ACK≠恢复/
     # 重启≠换版。全程离线，只写系统临时目录里的合成 SQLite。
     "scripts/smoke_u09_release_evidence.py",
+    # --- tests/ 下的行为套件 ---
+    # 以下 suites 此前**不被任何 smoke_*.py 调起**（U11 修复轮发现：它们只被
+    # 各任务集成时手工跑过一次，不在常设回归里）。后果是 `scripts=N` 全绿
+    # **不等于**这些套件绿 —— 一次静默回归不会有人发现。逐条实测在 harness
+    # 环境下 rc=0 后登记于此（见 RESUME 的 U11 修复轮记录）。
+    "tests/acceptance/test_alert_delivery.py",
+    "tests/acceptance/test_control_boundary.py",
+    "tests/acceptance/test_release_evidence_v2.py",
+    "tests/acceptance/test_runtime_identity.py",
+    "tests/acceptance/test_unattended_release.py",
+    "tests/integration/test_shadow_labels.py",
+    "tests/integration/test_shadow_statistics.py",
+    "tests/integration/test_shadow_status.py",
+    "tests/integration/test_strategy_funnel.py",
 )
 EXCLUDED_SMOKE_SCRIPTS = {
     # 第[6]节直接调用 query_symbol_detail/query_symbol_cards 打公共行情接口，
