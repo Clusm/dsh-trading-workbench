@@ -1581,6 +1581,22 @@ def check_artifact_filename_guard_is_separate() -> None:
                   (CredentialLeakError,),
                   collect_artifact_files, ROOT, relatives=["src/core/secretary_roster.py"])
 
+    # ⑨ **非静默诊断**（不算 FAIL）：U12-BF1 的第 2 跳在**冻结契约**层
+    #    （``src/core/contracts/k01_identity.hash_artifact`` → ``ensure_no_sensitive_fields``
+    #    把 ``artifact_files`` 的**路径键**当字段名做键名匹配）。本模块（U15 独占路径）
+    #    修不到它；归属 I。这里只打印观察值，让残余**不被静默**。
+    if real is not None:
+        _hop2 = "n/a"
+        try:
+            from core.contracts import hash_artifact  # noqa: PLC0415
+            hash_artifact(real)
+            _hop2 = "已消解（契约层已适配）"
+        except SensitiveInputError as exc:
+            _hop2 = f"仍阻断：{exc}"
+        except BaseException as exc:  # noqa: BLE001
+            _hop2 = f"其它异常：{type(exc).__name__}: {exc}"
+        print(f"  ----  [U12-BF1 hop2 / I] hash_artifact(真实工件) -> {_hop2}")
+
 
 def main() -> int:
     check_identity_inputs_change_hash()
