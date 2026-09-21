@@ -49,6 +49,7 @@ python tests/acceptance/test_unattended_release.py  # 期望 exit 0
 |---|---|---|
 | `evidence/check_quality.log` | `scripts/check_quality.py` | `All checks passed!` / `SECRET SCAN OK ... registered_false_positives=2` / `QUALITY CHECK OK files=295 untracked=0`，**exit 0** |
 | `evidence/offline_regression_round2.tail.txt` | `scripts/run_offline_regression.py` | `OFFLINE REGRESSION OK scripts=85`，**exit 0** |
+| `evidence/offline_regression_round3_final.tail.txt` | 同上（**含本补丁包的最终 head**） | `SMOKE MANIFEST OK included=81 excluded=1` / `OFFLINE REGRESSION OK scripts=85` / `OFFLINE_EXIT=0` |
 | `evidence/offline_regression_round1_FAIL.tail.txt` | 同上（**首轮**） | **FAIL**：`smoke_u10a_release_package.py` 5 项失败——本 RC 文档的 3 个相对链接指向**尚未落盘**的文件。**门禁真实生效**（详见交付物 README §6.1） |
 | `evidence/acceptance_u12_release.log` | `tests/acceptance/test_unattended_release.py` | `U12 UNATTENDED RELEASE ACCEPTANCE PASS=46 FAIL=0`，**exit 0** |
 | `evidence/acceptance_all_suites.exitcodes.txt` | 6 个既有 `tests/acceptance/*.py` 逐个运行 | 全部 `EXIT=0`（U04 168/0、U09 78/0、U13 166 checks、U14 262/0、U15 identity/control PASS） |
