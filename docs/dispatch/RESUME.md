@@ -149,8 +149,12 @@
   - **集成顺序（作者注明）**：**先合 `src/intel/shadow_v2/`，再应用两个补丁**，否则 `service.py` 的 `from intel import shadow_status, shadow_v2` 会 ImportError。
   - **未做（如实登记）**：v2 **未接入采集循环**（默认开关 `False`）、未做采集调度编排、未做 U07 的配对统计。
   - **复验已派发**：Q（`reviews/U06b/R1/q`，detached @ `8ae0f65`），重点用**自建夹具**独立复现门禁不倒性（不采信作者 evidence 脚本）。**仍在运行，勿重复派发。**
-- **`U10b` 旧脚本与历史文档整理**：工作树 `mat-wt/F2`（`task/U10b` @ `0706db1`）。**已内联最大坑**：`_validate_smoke_manifest()` 强制 `scripts/` 下每个 `smoke_*.py` 恰好登记一次 → 移动/改名必须**同时**交 `run_offline_regression.py` 登记补丁；且移出 `scripts/` 顶层 = **削减回归覆盖，不得静默做**；改完必须复跑 `smoke_u10a_release_package.py` 证明打包仍绿。
-- **两者均在运行，勿重复派发。**
+- **`U10b` 旧脚本与历史文档整理**：**作者已交付 → Q 复验中**。工作树 `mat-wt/F2`，head `0416408`（base `0706db1`）。
+  - 18 个脚本 `git mv`（**文件名不变**）→ `scripts/diagnostics/`(13) / `scripts/maintenance/`(5)，其中 16 个修根深度 `parents[1]→parents[2]`；8 篇文档 `git mv` → `docs/archive/`（称 `-M` 全 `R100`）。30 个文件全在独占路径。
+  - **覆盖未减少（作者实测）**：`SMOKE MANIFEST OK included=81 excluded=1`、`OFFLINE REGRESSION OK scripts=85` **前后同值**；**一个 `smoke_*.py` 都没动**（移出 `scripts/` 顶层 = 静默削减覆盖，已写成归档规则首条）。打包器 `smoke_u10a_release_package` 37/0 两态；delta `NEW_FAIL=∅`；`check_quality OK files=296`；补丁 3 配置干净。
+  - **分支本身是"红"的（刻意）**：不应用补丁时 `docs/文档索引.md` 有 8 条入链断；共享补丁 `docs/dispatch/patches/U10b/273892c/01_docs_index_archive_links.diff` 应用后恢复。
+  - **空删除清单**：`docs/archive/README.md` 给出核验方式（`--no-renames` 下 `D=26`、26/26 都有同名新增配对、孤儿删除=0）+ "已核实但不归档"保留清单及逐条理由。
+  - **复验已派发**：Q（`reviews/U10b/R1/q`，detached @ `0416408`），重点：**自己算**每个改过的 `parents[...]`、**应用补丁后**是否仍有断链、**归档脚本是否还在发布包内**。**仍在运行，勿重复派发。**
 - 依赖它们的：`U07`（等 U06b）、`U11`（等 U10b）。
 
 ### 后置线完成后
