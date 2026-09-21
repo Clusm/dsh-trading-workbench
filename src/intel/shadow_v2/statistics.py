@@ -55,7 +55,6 @@ from intel import shadow_status as _ss
 from intel.shadow_v2.labels import coverage_report as _coverage_report
 from intel.shadow_v2.models import (
     COUNTS_TOWARD_RELEASE_GATE,
-    STATE_LABELED,
     V2_CALIBER_ID,
     LabelResult,
     as_utc,
