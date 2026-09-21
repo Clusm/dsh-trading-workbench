@@ -27,6 +27,10 @@ def utc_now() -> str:
 #: "作者 worktree"与"集成树"两态下各自断言各自应有的行为（U14 同款做法）。
 U09_INTEGRATION = "u09.database.v1"
 
+
+#: U06b 接线标记：v2 固定时点标签的**只读研究**落库能力是否已接入本层。
+#: 与 ``U09_INTEGRATION`` 同款：下游据此在两态下断言各自应有的行为。
+U06B_INTEGRATION = "u06b.shadow_v2.v1"
 #: 影子来源的**存储别名** → 规范来源名。
 #:
 #: 这只是存储归一化（与迁移 10 把 ``binance_top_trader_proxy`` 改成
@@ -387,6 +391,44 @@ CREATE TABLE IF NOT EXISTS alert_deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_alert_deliveries_state
 ON alert_deliveries(environment, state, first_occurred_at_ms);
+
+-- U06b（影子 v2 固定时点标签，**后置研究线**）：v2 结果的留痕表。
+-- 职责边界（F11/DL08）：
+--   * 本表只存**研究参考**行，`counts_toward_release_gate` 恒为 0；
+--   * 与 legacy v1 的 `shadow_outcomes` **分表存放**，两套口径不可能被混读；
+--   * 主键 (decision_id, horizon_minutes, experiment_key)：同一实验版本内标签
+--     一经生成即**不可被后续轮次改写**（改口径必须换 experiment_key），
+--     从而杜绝"后来才知道的价回填历史标签"。
+-- 版本策略（沿 U14 alert_deliveries 先例）：随 SCHEMA 每次打开幂等
+-- CREATE TABLE IF NOT EXISTS 落地，**不**占用 schema_migrations 版本号，
+-- 因此不改变 current_schema_version()，也不打破既有
+-- `list(range(1, N))` 迁移版本断言。
+CREATE TABLE IF NOT EXISTS shadow_v2_labels (
+    decision_id TEXT NOT NULL,
+    horizon_minutes INTEGER NOT NULL,
+    experiment_key TEXT NOT NULL,
+    computed_at TEXT NOT NULL,
+    target_at TEXT NOT NULL,
+    observed_at TEXT,
+    state TEXT NOT NULL,
+    missing_reason TEXT,
+    source TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT '',
+    signal TEXT NOT NULL DEFAULT '',
+    deviation_seconds REAL,
+    tolerance_seconds REAL,
+    gross_return_pct REAL,
+    net_return_pct REAL,
+    correct INTEGER,
+    mfe_pct REAL,
+    mae_pct REAL,
+    counts_toward_release_gate INTEGER NOT NULL DEFAULT 0,
+    caliber TEXT NOT NULL DEFAULT '',
+    row_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (decision_id, horizon_minutes, experiment_key)
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_v2_labels_state
+ON shadow_v2_labels(state, experiment_key, target_at);
 """
 
 
@@ -1621,6 +1663,132 @@ class AuditDatabase:
             self.conn.commit()
         return inserted
 
+
+    def log_shadow_v2_labels(self, rows: Iterable[Mapping[str, Any]], *,
+                             computed_at: str | None = None) -> int:
+        """幂等写入 U06b 的 v2 固定时点标签行；返回本次实际新增行数。
+
+        研究侧边界（F11 / DL08）：
+
+        * 只写 ``shadow_v2_labels``，**不触** ``shadow_decisions``/``shadow_outcomes``，
+          因此 legacy v1 口径与发布门禁分母都不受影响；
+        * ``counts_toward_release_gate`` 与 ``caliber`` 一律由本层**强制**写死：
+          即便调用方传了 ``counts_toward_release_gate=True``，落库仍是 0——v2 结果
+          不得计入 200 方向候选 / 30 完整闭合；
+        * ``INSERT OR IGNORE`` + 主键 ``(decision_id, horizon_minutes, experiment_key)``：
+          同一实验版本内标签不可被后续轮次覆盖，改口径必须换 ``experiment_key``。
+        """
+        moment = str(computed_at or utc_now())
+        payload: list[tuple[Any, ...]] = []
+        for raw in rows:
+            row = dict(raw) if isinstance(raw, Mapping) else {}
+            decision_id = str(row.get("decision_id") or "")
+            if not decision_id:
+                continue
+            try:
+                horizon = int(row.get("horizon_minutes"))
+            except (TypeError, ValueError):
+                continue
+            experiment_key = str(row.get("experiment_key") or "")
+            if not experiment_key:
+                continue
+            payload.append((
+                decision_id, horizon, experiment_key, moment,
+                str(row.get("target_at") or ""), row.get("observed_at"),
+                str(row.get("state") or ""), row.get("missing_reason"),
+                str(row.get("source") or ""), str(row.get("symbol") or ""),
+                str(row.get("signal") or ""), row.get("deviation_seconds"),
+                row.get("tolerance_seconds"), row.get("gross_return_pct"),
+                row.get("net_return_pct"), row.get("correct"),
+                row.get("mfe_pct"), row.get("mae_pct"),
+                0,  # 强制：v2 研究行恒不计入门禁
+                str(row.get("caliber") or ""),
+                json.dumps(row, ensure_ascii=False, default=str),
+            ))
+        if not payload:
+            return 0
+        with self.lock:
+            before = int(self.conn.execute(
+                "SELECT COUNT(*) FROM shadow_v2_labels").fetchone()[0])
+            self.conn.executemany(
+                """INSERT OR IGNORE INTO shadow_v2_labels(
+                   decision_id,horizon_minutes,experiment_key,computed_at,target_at,
+                   observed_at,state,missing_reason,source,symbol,signal,
+                   deviation_seconds,tolerance_seconds,gross_return_pct,net_return_pct,
+                   correct,mfe_pct,mae_pct,counts_toward_release_gate,caliber,row_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                payload,
+            )
+            after = int(self.conn.execute(
+                "SELECT COUNT(*) FROM shadow_v2_labels").fetchone()[0])
+            self.conn.commit()
+        return max(0, after - before)
+
+    def fetch_shadow_v2_labels(self, *, experiment_key: str | None = None,
+                               state: str | None = None,
+                               limit: int = 1000) -> list[dict[str, Any]]:
+        """按实验版本/状态读取 v2 标签行（只读，仅供研究展示与 U07 消费）。"""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if experiment_key:
+            clauses.append("experiment_key=?")
+            params.append(str(experiment_key))
+        if state:
+            clauses.append("state=?")
+            params.append(str(state))
+        sql = "SELECT * FROM shadow_v2_labels"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY target_at, decision_id LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self.lock:
+            rows = self.conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def shadow_v2_coverage(self, *, experiment_key: str | None = None) -> dict[str, Any]:
+        """返回 v2 标签的逐状态/逐原因计数（**不是** GO 判断器）。
+
+        这里只给事实：计数、覆盖率与「不进门禁」声明。任何发布判定仍由
+        ``src/core/release_evidence.py``（U09 固定并版本化）作出；本方法刻意
+        不产出 ``promotion_ready``/``GO`` 之类结论，避免建立第二套门禁判断器。
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if experiment_key:
+            clauses.append("experiment_key=?")
+            params.append(str(experiment_key))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT state, missing_reason, COUNT(*) AS n FROM shadow_v2_labels"
+                + where + " GROUP BY state, missing_reason", tuple(params)).fetchall()
+        by_state: dict[str, int] = {}
+        by_reason: dict[str, int] = {}
+        for row in rows:
+            count = int(row["n"] or 0)
+            state = str(row["state"] or "")
+            by_state[state] = by_state.get(state, 0) + count
+            reason = row["missing_reason"]
+            if reason:
+                by_reason[str(reason)] = by_reason.get(str(reason), 0) + count
+        decided = sum(by_state.values())
+        labeled = by_state.get("LABELED", 0)
+        closed = decided - by_state.get("PENDING", 0)
+        return {
+            "schema": "u06b-shadow-v2-labels-v1",
+            "experiment_key": (str(experiment_key) if experiment_key else None),
+            "decided": decided,
+            "labeled": labeled,
+            "pending": by_state.get("PENDING", 0),
+            "missing": sum(by_state.get(key, 0) for key in ("MISSING",)),
+            "coverage": (round(labeled / closed, 6) if closed else None),
+            "by_state": dict(sorted(by_state.items())),
+            "by_reason": dict(sorted(by_reason.items())),
+            "counts_toward_release_gate": False,
+            "execution_weight": 0.0,
+            "authority": "src/core/release_evidence.py (U09 固定并版本化)",
+            "note": "v2 研究标签逐原因计数；不参与发布门禁，不产生执行后果。",
+        }
     def intel_observability(self) -> dict[str, Any]:
         """情报覆盖率与影子样本进度；供看板读取，不参与风控。"""
         with self.lock:
