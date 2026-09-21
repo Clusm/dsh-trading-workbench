@@ -16,7 +16,8 @@
 - 已验收候选：`71f8109`（Q r5 复验 PASS-with-notes；与 tag 的差异仅为 dispatch 文档，`src/core/contracts` 与 `docs/contracts` 逐字节相同）
 - 集成区分支：`integration/unattended-v3` @ `ffdab44`（契约冻结后又有 1 个台账提交 `4fdc6bf`）
 - 四个实现线 worktree **已创建**（均从 `ffdab44`）：`mat-wt/A`(task/U01)、`mat-wt/B`(task/U04)、`mat-wt/CD`(task/U03)、`mat-wt/EF`(task/U15)
-- 当前步骤：**W2 已完成（7/7）** → 下一步 **W3：U09**（W3 尚未开始）
+- 当前步骤：**W3 进行中** —— **U09 已 INTEGRATED**；**U13-FU1 待复验**；**U12（RC 集成）** 为剩余最后一项。
+- 最新门禁：**`OFFLINE REGRESSION OK scripts=85`**、**`QUALITY CHECK OK files=294 untracked=0`**、契约 `PASS 173 / FAIL 0`。
 
 ### W1 进度（每轮更新）
 
@@ -140,6 +141,15 @@
 
 > **W0 / W1 / W2 均已完成**（W1 5/5、W2 7/7 全部 INTEGRATED）。以下为 W3 起点。
 
+1. **W3 第一步：U09（✅ 已 INTEGRATED）** —— 工作树 `mat-wt/W3`，分支 `task/U09`，base `448a4e9`。
+   - 集成：merge `b675118`（owned 路径逐字节一致）→ 应用 `docs/dispatch/patches/U09/7cb6a71/` 的 01–04 补丁（04 承载 SCRIPTS 登记）→ 集成提交 `4e164a1`。
+   - **双审查均无阻塞项**：`Q r1 = PASS`（10 项核心主张独立复现，且 **monkeypatch `release_gate_role` 使分母 200→300，证明同源非巧合**；三态 A 26/0 · B 65/0+冒烟 9/0 · C 78/0+冒烟 60/0）；`A r1 = PASS-with-notes`。报告归档 `docs/dispatch/reviews/U09/b675118/{Q_r1.md,A_r1.md}`。
+   - 集成态实测：`SMOKE MANIFEST OK included=81`、U09 验收 78/0、smoke_u09 60/0、契约 173/0、`QUALITY CHECK OK files=294`、**`OFFLINE REGRESSION OK scripts=85`**。
+   - **S08 泄漏已闭合**：方向候选分母 300→200（只计 `gate_role==execution_decision_copy` 的 A 组），且**无第二份 source 名单**。
+   - **登记的两条 P2（U12 须裁决，不阻断集成）**：`U09-OUTCOME-VS-LIFECYCLE-COST`（门禁读 outcome 快照而非 lifecycle 权威态，**继承自基线**）、`U09-NET-UNKNOWN-PADDING`（净收益未知仍计入 30，1 个未知样本可把 29 条真凭证凑成 30）。另有 P3 若干。
+   - **A 的关键定论**：`[S3]` 与 `[T5a]` 不矛盾（S3 的"冲突"因 `INSERT OR REPLACE` 同键就地覆盖而**根本不是冲突**，`PASS 30` 正确；T5a 是真冲突 -> `FAIL 29` fail-closed）-> **未发现"用冲突样本凑数"的 fail-open**。
+
+<!-- 以下为 U09 首次派发时的记录，保留备查
 1. **W3 第一步：U09（作者已交付，独立审查进行中）** —— 工作树 `mat-wt/W3`，分支 `task/U09`，base `448a4e9`。
    - **作者 head `7cb6a71`**（补丁包提交 `b675118`）。独占交付：`src/core/release_evidence.py`（538→1483）、`tests/acceptance/test_release_evidence_v2.py`（新 989）、`scripts/smoke_u09_release_evidence.py`（新 783）。补丁包 `docs/dispatch/patches/U09/7cb6a71/`（4 diff + README + evidence/）。
    - 作者自述关键数：**S08 泄漏 300→200（Δ−100）**；三态 A 26/0（基线证明缺陷存在）· B 65/0 · C 78/0，冒烟 9/0 → 60/0；沙箱 delta pristine 84 → patched 85、**NEW_FAIL=∅**；3 种 git 配置 4/4 干净应用。
@@ -241,3 +251,5 @@ export PYTHONUTF8=1
 - **D01–D05 外部待决项**阻断 DEPLOY_DEMO / OPS / RELEASE（D01 宿主托管、D03 账户风险覆盖需用户决策）
 - 实盘启用需用户**另行明确授权**
 - 真实宿主/渠道验收（U12 OPS）需 D01/D02 决策后才能进行
+
+-->
