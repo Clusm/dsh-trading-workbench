@@ -674,7 +674,8 @@ def paired_statistics(pairs: Iterable[PairedSample], *,
     """对配对差给出「朴素区间 + 分块区间 + 符号检验」，并标明哪个才可信。
 
     朴素区间把每一对当独立样本；只要存在重叠块，它就会**低估**区间宽度。
-    因此两个区间都报，并给出 ``naive_is_conservative=False`` 与块数，交给下游判断。
+    因此两个区间都报，并用 ``naive_understates``（是否真的更窄）与
+    ``independent_blocks``（真实独立单元数）如实披露，交给下游判断。
     """
     rows = list(pairs)
     diffs = [item.net_diff_pct for item in rows]
@@ -934,6 +935,8 @@ def statistics_isolation_facts() -> dict[str, Any]:
         "gate_role_by_source": {spec.source: spec.gate_role for spec in _ss.COHORTS},
         "release_gate_authority": "src/core/release_evidence.py (U09 固定并版本化)",
         "shadow_status_v2_state": _ss.V2_LABELS_STATE,
-        "produced_tables": ("shadow_v2_statistics（只读研究表，非门禁输入）",),
+        "research_tables": (
+            "shadow_v2_statistics（U07 共享适配补丁新增的**只读研究**表；"
+            "未接线时不存在，接线后也不被任何门禁查询读取）",),
         "note": PAIRED_STATISTICS_SCOPE_NOTE,
     }
