@@ -276,6 +276,35 @@ def case_round_explanation_uses_u05() -> None:
           and explained3["primary_reason"] != trace.REASON_NO_EDGE,
           explained3["reason"])
 
+    # U05 数据侧原因码链路（reason_from_source_errors）经漏斗接线生效
+    explained4 = round_explanation(
+        funnel=f, source_errors=["macro_public: yahoo 5xx"],
+        source_labels=["macro_public"], source_degraded=True)
+    check("源级错误进入本轮原因码（DATA_UNAVAILABLE）",
+          trace.REASON_DATA_UNAVAILABLE in explained4["reason_codes"], explained4["reason"])
+    check("用了陈旧/部分数据时附加 RESEARCH_INCOMPLETE（与完全取不到区分）",
+          trace.REASON_RESEARCH_INCOMPLETE in explained4["reason_codes"],
+          explained4["reason"])
+    check("无源级错误时不硬塞数据原因（source_error_reason 返回 None）",
+          funnel_mod.source_error_reason([]) is None
+          and funnel_mod.source_error_reason(["x"]).primary == trace.REASON_DATA_UNAVAILABLE)
+
+    # U03 证据报告经 U05 classify_evidence_report 进入本轮原因码
+    class FakeEvidence:
+        def __init__(self) -> None:
+            self.intents: list = []
+
+        def decision_gate(self) -> dict:
+            return {"ok": False, "identity_pinned": False}
+
+    explained5 = round_explanation(funnel=f, evidence_report=FakeEvidence())
+    check("U03 证据门禁未放行时本轮原因是 RESEARCH_INCOMPLETE（不是 NO_EDGE）",
+          explained5["primary_reason"] == trace.REASON_RESEARCH_INCOMPLETE,
+          explained5["reason"])
+    check("证据门禁失败的线索进 details（可审计到具体阻断项）",
+          any("evidence_gate_failed" in str(item)
+              for item in explained5["reason"]["details"]), explained5["reason"])
+
     plan = ManagementPriorityPlan.from_total(4, reserve_ratio=1.0)
     plan.claim_management(4)
     starved = round_explanation(funnel=f, plan=plan)

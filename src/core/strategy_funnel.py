@@ -61,6 +61,7 @@ from core.decision_trace import (
     DecisionReason,
     choose_primary,
     normalise_reason_codes,
+    reason_from_source_errors,
 )
 
 SCHEMA_VERSION = "u08-strategy-funnel-1"
@@ -1166,6 +1167,18 @@ class ManagementPriorityPlan:
 # --------------------------------------------------------------------------- #
 # 七、逐轮解释（把漏斗 + 预算 + 持仓合成一句"为什么"）
 # --------------------------------------------------------------------------- #
+def source_error_reason(source_errors: Sequence[Any] = (),
+                        *, labels: Sequence[str] = (),
+                        degraded: bool = False) -> DecisionReason | None:
+    """数据适配层的**源级错误** → 原因码（U05 ``reason_from_source_errors`` 的接线点）。
+
+    U05 的补丁包 §二.4 明确把这条链路的接线留给 U08（``market_query`` 侧适配被
+    撤回，理由是该文件被 U03 的双态测试按内容锁定）。本函数是漏斗侧的入口：
+    数据适配层只负责"我取不到哪些源"，是否"没有边际"仍由漏斗/执行侧决定。
+    """
+    return reason_from_source_errors(source_errors, labels=labels, degraded=degraded)
+
+
 def round_explanation(
     *,
     funnel: ScanFunnel | None = None,
@@ -1174,6 +1187,9 @@ def round_explanation(
     channel_conflicts: Sequence[str] = (),
     readiness_blockers: Sequence[str] = (),
     data_unavailable: Sequence[str] = (),
+    source_errors: Sequence[Any] = (),
+    source_labels: Sequence[str] = (),
+    source_degraded: bool = False,
     evidence_report: Any | None = None,
     model_error: BaseException | None = None,
 ) -> dict[str, Any]:
@@ -1182,6 +1198,9 @@ def round_explanation(
     ``hold_existing`` 由持仓事实决定（确有一笔在管仓位），``intents`` 由漏斗的
     开仓计数决定（漏斗到达终态才算"有边际"）——两者都是**结构化事实**，
     本函数不猜。
+
+    ``source_errors`` 是数据适配层收集的源级错误（U05 ``reason_from_source_errors``
+    的入参形态）；给了就并入原因码，与 :func:`source_error_reason` 同一条链路。
     """
     # 延迟导入：避免与 U05 的循环引用风险，同时保持"九码只有一处定义"。
     from core.decision_trace import classify_cycle
@@ -1192,6 +1211,11 @@ def round_explanation(
         own = funnel.explanation()
         reasons.extend(own.codes)
         details.extend(own.details)
+    data_reason = source_error_reason(source_errors, labels=source_labels,
+                                      degraded=source_degraded)
+    if data_reason is not None:
+        reasons.extend(data_reason.codes)
+        details.extend(data_reason.details)
     if plan is not None:
         budget_reason = plan.research_reason()
         if budget_reason is not None:
@@ -1269,5 +1293,6 @@ __all__ = [
     "manager_of",
     "round_explanation",
     "rule_version_of",
+    "source_error_reason",
     "validate_detail_table",
 ]
