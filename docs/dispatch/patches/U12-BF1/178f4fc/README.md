@@ -6,6 +6,9 @@
 
 **base**：`7885e6a`　**branch**：`task/U12-BF1`　**worktree**：`mat-wt/W3-bfix`
 
+> 目录名 `178f4fc` = **代码补丁提交**（`git diff 7885e6a..178f4fc` 即本包 01/02）。
+> 其后仅追加本补丁包文档（README/evidence），不改动 01/02 的内容。
+
 ---
 
 ## 0. 结论摘要（先读这段）
