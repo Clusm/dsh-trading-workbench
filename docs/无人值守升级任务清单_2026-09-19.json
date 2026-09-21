@@ -2029,8 +2029,8 @@
       "id": "U10a",
       "title": "可运行发布包与准确运维说明",
       "owner_role": "F",
-      "actual_assignee": null,
-      "status": "PLANNED",
+      "actual_assignee": "U10a 作者会话",
+      "status": "IN_PROGRESS",
       "required_for_first_release": true,
       "depends_on": [
         "U00",
@@ -2079,7 +2079,7 @@
       "dl_work_packages": [
         "DL06"
       ],
-      "task_base_commit": null,
+      "task_base_commit": "f5e4790",
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
@@ -2427,7 +2427,7 @@
       "title": "外部告警送达与主机失联检测",
       "owner_role": "E",
       "actual_assignee": "U14 作者会话",
-      "status": "READY_FOR_REVIEW",
+      "status": "INTEGRATED",
       "required_for_first_release": true,
       "depends_on": [
         "U00"
@@ -2554,6 +2554,23 @@
           ],
           "observation_registered": "镜像侧 strip() 与队列侧严格相等口径不同；audit.database 反向依赖 ops 常量",
           "rollback": "git revert ad2c57d；补丁 git apply -R 顺序 04->01"
+        },
+        {
+          "type": "integration",
+          "verified_candidate": "2722efe",
+          "verdict": "Q r4 PASS-with-notes",
+          "code_identity": "git diff 2722efe HEAD -- <U14 路径> 为空",
+          "patches": "ad2c57d/ 4 个补丁干净应用（04 承载 SCRIPTS 登记）",
+          "i_registration": "MANIFEST OK included=78",
+          "tests": "test_alert_delivery **262/0**；smoke_u14 55/0；smoke_health_watch 28/0；契约 173/0；check_quality **OK files=286**",
+          "offline_regression": "**OFFLINE REGRESSION OK scripts=82**（exit 0）",
+          "r4_verification": "P1-4 真闭合（三向量 prev 全抛穿/整批停摆 -> fix 收敛为 TRANSPORT_EXCEPTION:<类名> 且该行退避、其余照常送达；七行混合批无早退）；**反向检查**：KeyboardInterrupt/SystemExit 仍穿出、空白回执不被当送达、全模块仅 4 处 except Exception 无 BaseException 误吞；_isolate_failure 用 **SQLite 触发器**（非 monkeypatch）阻断写库仍不中断整批；P3-6/P3-7 已修；**delta 四树全 ∅**；门禁全绿",
+          "new_p3": "P3-8 delivered_at_ms 类型收紧使数值字符串/float 由'送达'变'拒绝'（fail-closed，README 未点名）；P3-9 PERSIST_FAILED **不入 errors** -> '监控 errors'有计数盲区；另 1 条观察（attempt=0 兜底使退避不升级，可自愈）",
+          "residual_for_u12": [
+            "AlertQueue **仍无生产消费者** -> 门禁全绿不代表无人值守告警已可用",
+            "兜底桶把新 bug 表现为'该条持续退避'而非崩溃 -> 接线须监控 errors（注意 PERSIST_FAILED 不在其中）",
+            "真实通道送达/真实宿主断电演练归 U12(D02)"
+          ]
         }
       ],
       "blockers": [],
@@ -2590,7 +2607,7 @@
       "contract_commit": null,
       "dependency_commits": {},
       "pending_dependencies": [],
-      "integration_candidate_commit": null,
+      "integration_candidate_commit": "f5e4790",
       "review_assignments": [
         {
           "round": "r2",
