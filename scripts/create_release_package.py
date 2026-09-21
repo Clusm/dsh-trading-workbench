@@ -35,6 +35,14 @@
 """
 from __future__ import annotations
 
+#: 自检可能在**只读或已封存的发布目录**里运行：写入 ``__pycache__`` 会让
+#: ``package_manifest.json`` 的"未登记文件"校验在第二次运行时自我污染（同一目录
+#: 第一次自检通过、第二次失败）。这里在导入任何被扫描模块**之前**关掉字节码写入，
+#: 子进程（读取包内声明清单/SCM 语义）另行通过 ``PYTHONDONTWRITEBYTECODE=1`` 约束。
+import sys as _sys
+
+_sys.dont_write_bytecode = True
+
 import argparse
 import hashlib
 import json
@@ -241,6 +249,14 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _subprocess_env() -> dict[str, str]:
+    """子进程环境：禁止写字节码，避免自检污染被测目录。"""
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 def _tracked_files(root: Path) -> set[str]:
     """返回 Git 索引中的相对路径。
 
@@ -252,6 +268,7 @@ def _tracked_files(root: Path) -> set[str]:
     try:
         result = subprocess.run(
             ["git", "ls-files", "-z"], cwd=root, check=False, capture_output=True,
+            env=_subprocess_env(),
         )
     except OSError:
         return set()
@@ -457,7 +474,7 @@ def _declared_runtime_lists(package_root: Path) -> dict[str, list[str]] | None:
         result = subprocess.run(
             [sys.executable, "-c", _CROSS_CHECK_PROGRAM, str(package_root / SRC_DIRNAME)],
             cwd=package_root, check=False, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
+            encoding="utf-8", errors="replace", env=_subprocess_env(),
         )
     except OSError:
         return None
@@ -722,7 +739,7 @@ def _check_windows_service_config(package_root: Path) -> list[str]:
             [sys.executable, "-c", program, str(package_root / SRC_DIRNAME),
              str(config), str(package_root)],
             cwd=package_root, check=False, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
+            encoding="utf-8", errors="replace", env=_subprocess_env(),
         )
     except OSError as exc:
         return [f"WINDOWS_SERVICE_CONFIG_UNVERIFIED: {type(exc).__name__}"]
@@ -924,8 +941,10 @@ def create_release_package(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="创建并自检不含状态/凭据的代码发布包")
+    parser.add_argument("--project-root", type=Path, default=ROOT,
+                        help="要打包的代码根（默认本脚本所在仓库；manifest 必须位于其内）")
     parser.add_argument("--manifest", type=Path,
-                        default=ROOT / "data" / "release_manifest.json")
+                        default=None, help="默认 <project-root>/data/release_manifest.json")
     parser.add_argument("--out", type=Path, help="输出 ZIP；必须不存在")
     parser.add_argument("--kind", choices=KINDS, default=KIND_RUNTIME,
                         help="runtime=可部署运行工件（默认）；source=含测试与维护工具")
@@ -935,16 +954,18 @@ def main() -> int:
                         help="构建到临时目录并解压自检，不写 dist/")
     args = parser.parse_args()
 
+    project_root = Path(args.project_root).resolve()
+    manifest_path = args.manifest or (project_root / "data" / "release_manifest.json")
     try:
         if args.verify is not None:
             report = verify_release_package(args.verify)
         elif args.self_check:
             report = self_check(
-                ROOT, manifest_path=args.manifest, kind=args.kind,
+                project_root, manifest_path=manifest_path, kind=args.kind,
             )
         elif args.out is not None:
             report = build_release_package(
-                ROOT, args.out, manifest_path=args.manifest, kind=args.kind,
+                project_root, args.out, manifest_path=manifest_path, kind=args.kind,
             )
         else:
             parser.error("必须给出 --out、--verify 或 --self-check 之一")
