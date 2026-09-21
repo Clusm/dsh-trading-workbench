@@ -1,5 +1,5 @@
 diff --git a/scripts/run_offline_regression.py b/scripts/run_offline_regression.py
-index ed0fe17..9baa54f 100644
+index 2113d65..9371836 100644
 --- a/scripts/run_offline_regression.py
 +++ b/scripts/run_offline_regression.py
 @@ -102,6 +102,9 @@ SCRIPTS = (
@@ -11,4 +11,4 @@ index ed0fe17..9baa54f 100644
 +    "scripts/smoke_u08_strategy_funnel.py",
      # U14（E 运维）：外部告警送达/心跳交易证据/主机失联检测离线冒烟。
      "scripts/smoke_u14_alert_delivery.py",
- )
+     # U10a（F 发布）：发布包不漏包/不入凭据/解压自检与相对文档链接。全程离线，
