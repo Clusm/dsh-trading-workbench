@@ -1611,10 +1611,13 @@ def rule_version_of(strategy_id: str, cards: Iterable[Mapping[str, Any]] | None 
     return f"rv1:{digest}@{global_digest}" if global_digest else f"rv1:{digest}"
 
 
-#: 仓位归属类别，与 U02 ``PositionClass`` 同口径（**引用同一个语义，不另立**）：
+#: 仓位归属类别，**与 U02 ``PositionClass`` 同源**：直接取枚举值，不在本地写
+#: 字面量（B-r1 P2-1：原先靠"字符串字面量巧合一致"，U02 改枚举值时会静默漂移）。
 #: 有 ``strategy_id`` 或 ``ticket_id`` ⇒ ATTRIBUTED，否则 LEGACY_UNATTRIBUTED。
-POSITION_CLASS_ATTRIBUTED = "ATTRIBUTED"
-POSITION_CLASS_LEGACY = "LEGACY_UNATTRIBUTED"
+POSITION_CLASS_ATTRIBUTED = PositionClass.ATTRIBUTED.value
+POSITION_CLASS_LEGACY = PositionClass.LEGACY_UNATTRIBUTED.value
+POSITION_CLASSES: frozenset[str] = frozenset(
+    {POSITION_CLASS_ATTRIBUTED, POSITION_CLASS_LEGACY})
 
 
 def manager_of(position: Mapping[str, Any]) -> tuple[str, str]:
@@ -1711,16 +1714,29 @@ def attribute_positions(positions: Iterable[Mapping[str, Any]],
 
 
 def attribution_summary(attributions: Sequence[PositionAttribution]) -> dict[str, Any]:
-    """按管理者聚合 + 列出"规则未知"的仓位（改卡/删卡后必须可见，不得静默）。"""
+    """按管理者聚合 + 按归属类别聚合 + 列出"规则未知"的仓位。
+
+    ``manager``（谁在管）与 ``position_class``（有无策略归属）是两个正交事实，
+    所以要**分别**聚合（B-r1 P3-6：原先只按 manager 聚合，看板上"需要迁移的旧仓"
+    不能一眼看出）。``legacy_pending`` 是"存在 LEGACY 仓位"的显式提示位。
+    """
     by_manager: dict[str, list[dict[str, Any]]] = {}
+    by_position_class: dict[str, list[dict[str, Any]]] = {}
     unknown: list[dict[str, Any]] = []
     for item in attributions:
         by_manager.setdefault(item.manager, []).append(item.as_dict())
+        by_position_class.setdefault(item.position_class, []).append(item.as_dict())
         if not item.rule_known:
             unknown.append(item.as_dict())
+    legacy = [item.as_dict() for item in attributions
+              if item.position_class == POSITION_CLASS_LEGACY]
     return {
         "total": len(attributions),
         "by_manager": {manager: len(rows) for manager, rows in sorted(by_manager.items())},
+        "by_position_class": {cls: len(rows)
+                             for cls, rows in sorted(by_position_class.items())},
+        "legacy_pending": len(legacy),
+        "legacy_positions": legacy,
         "positions": [item.as_dict() for item in attributions],
         "rule_unknown": unknown,
     }
@@ -1740,10 +1756,14 @@ class ManagementPriorityPlan:
 
     1. **管理优先**：管理侧可取的量 = 全池剩余，**不受**预留比例限制；
        新仓研究最多只能用 :meth:`research_available`。
-    2. **研究不挤占管理**：研究侧的取用**永远**不减少管理侧仍可取的量，
-       即 ``claim_research`` 后 ``management_available()`` 不下降。
+    2. **预留池不被研究触碰**：研究侧**永远**碰不到管理预留那一份，
+       即 ``management_used + management_available >= management_reserve`` 恒成立。
+       （**注意措辞**：不是"``claim_research`` 后 ``management_available`` 不下降"——
+       研究取用自然会减少全池剩余，B-r1 P2-4 指出原 docstring 的说法与实现不符。）
     3. **可见的让路**：研究池为 0 时 :meth:`research_reason` 给出
-       ``MODEL_DEADLINE`` + ``MANAGEMENT_PRIORITY_BUDGET``，而不是"没有信号"。
+       ``MODEL_DEADLINE`` + ``MANAGEMENT_PRIORITY_BUDGET``；总预算为 0/负时给出
+       ``MODEL_DEADLINE`` + ``RESEARCH_BUDGET_ZERO``（"没有预算可谈"与"预算被管理
+       占用"是两件事），都不是静默的"这轮没信号"。
     """
 
     total_budget: int
@@ -1752,6 +1772,10 @@ class ManagementPriorityPlan:
     management_used: int = 0
     research_used: int = 0
     management_demands: int = 0
+    #: 管理侧**没拿到**的累计量（>0 表示研究侧/预算上限把管理挤下去过）。
+    management_shortfall: int = 0
+    #: 实际生效的预留比例（非法比例退化为 0 预留时这里显式为 0，B-r1 P3-3）。
+    reserve_ratio_effective: float = 0.0
 
     def __post_init__(self) -> None:
         self.total_budget = max(0, int(self.total_budget))
@@ -1759,6 +1783,9 @@ class ManagementPriorityPlan:
         self.management_reserve = reserve
         self.management_used = max(0, int(self.management_used))
         self.research_used = max(0, int(self.research_used))
+        self.management_shortfall = max(0, int(self.management_shortfall))
+        self.reserve_ratio_effective = (
+            min(1.0, reserve / self.total_budget) if self.total_budget > 0 else 0.0)
 
     @classmethod
     def from_total(cls, total_budget: int, *,
@@ -1767,8 +1794,8 @@ class ManagementPriorityPlan:
                    label: str = "cycle") -> "ManagementPriorityPlan":
         """按比例切分；比例非法（非有限/<=0/>1）时退化为"全部留给研究"的显式形态。
 
-        退化时 ``management_reserve=0`` 是**显式可见**的（``as_dict`` 里有
-        ``reserve_ratio_effective``），不是静默把管理饿死。
+        退化时 ``management_reserve=0`` 是**显式可见**的：``as_dict()`` 里有
+        ``reserve_ratio_effective``（实际生效比例，退化时为 0.0），不是静默把管理饿死。
         """
         total = max(0, int(total_budget))
         ratio = float(reserve_ratio)
@@ -1796,7 +1823,13 @@ class ManagementPriorityPlan:
 
     @property
     def research_starved(self) -> bool:
+        """研究池被**管理占用**吃光（总预算为 0/负不算：那是 :attr:`no_budget`）。"""
         return self.research_available <= 0 and self.total_budget > 0
+
+    @property
+    def no_budget(self) -> bool:
+        """总预算为 0/负：**没有预算可谈**（与"预算被管理占用"是两件事）。"""
+        return self.total_budget <= 0
 
     # -- 写 ----------------------------------------------------------- #
 
@@ -1806,6 +1839,7 @@ class ManagementPriorityPlan:
         if want:
             self.management_demands += 1
         granted = min(want, self.management_available)
+        self.management_shortfall += want - granted
         self.management_used += granted
         return granted
 
@@ -1816,11 +1850,29 @@ class ManagementPriorityPlan:
         return granted
 
     def meets_management_demand(self) -> bool:
-        """管理侧是否得到了它要的全部预算（DC10：不允许研究把管理挤下去）。"""
-        return self.management_demands == 0 or self.research_available >= 0
+        """管理侧是否**每一次请求都拿到了它要的量**（DC10：不允许研究把管理挤下去）。
+
+        B-r1 P2-2：原先的实现是 ``management_demands == 0 or research_available >= 0``，
+        而 ``research_available`` 是 ``max(0, ...)`` 恒 >= 0 ⇒ **恒真空转**。现在按
+        :meth:`claim_management` 累计的"没拿到的量"判定，是一个真有约束力的谓词。
+        """
+        return int(self.management_shortfall) == 0
 
     def research_reason(self) -> DecisionReason | None:
-        """研究池被管理吃光时的原因码；有预算时返回 ``None``（不硬塞原因）。"""
+        """研究侧拿不到预算时的原因码；有预算时返回 ``None``（不硬塞原因）。
+
+        - 总预算为 0/负 → ``MODEL_DEADLINE`` + ``RESEARCH_BUDGET_ZERO``
+          （B-r1 P2-3：原先这种情况静默返回 ``None``，上层只能读成"没有信号"）；
+        - 研究池被管理占用吃光 → ``MODEL_DEADLINE`` + ``MANAGEMENT_PRIORITY_BUDGET``。
+        """
+        if self.no_budget:
+            return DecisionReason.from_codes(
+                [REASON_MODEL_DEADLINE],
+                details=(DETAIL_RESEARCH_BUDGET_ZERO,
+                         f"total={self.total_budget}",
+                         f"management_reserve={self.management_reserve}",
+                         f"management_used={self.management_used}"),
+            )
         if not self.research_starved:
             return None
         return DecisionReason.from_codes(
@@ -1836,10 +1888,15 @@ class ManagementPriorityPlan:
             "label": self.label,
             "total_budget": self.total_budget,
             "management_reserve": self.management_reserve,
+            "reserve_ratio_effective": self.reserve_ratio_effective,
             "management_used": self.management_used,
             "research_used": self.research_used,
             "management_available": self.management_available,
             "research_available": self.research_available,
+            "management_demands": self.management_demands,
+            "management_shortfall": self.management_shortfall,
+            "meets_management_demand": self.meets_management_demand(),
+            "no_budget": self.no_budget,
             "research_starved": self.research_starved,
         }
 
