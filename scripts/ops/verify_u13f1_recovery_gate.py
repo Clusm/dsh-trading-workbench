@@ -54,21 +54,41 @@ def note(text: str) -> None:
 # --------------------------------------------------------------------------
 _MISSING: list[str] = []
 
-try:
-    from core.ops.recovery import (  # noqa: E402
-        GATE_CLEARED,
-        RECONCILE_REQUIRED_BEFORE_ENTRY,
-        RecoveryGate,
-        create_epoch_bundle,
-        drill_epoch_bundle,
-        facts_digest,
-        gate_install_marker,
-        ledger_reconcile_facts,
-        restored_gate_path,
-        restored_state_root,
-    )
-except ImportError as exc:  # pragma: no cover - 仅在补丁未应用时触发
-    print(f"FATAL 无法导入 core.ops.recovery 的验收符号: {exc}")
+import core.ops.recovery as _recovery  # noqa: E402
+
+#: 补丁未应用时缺失的符号（逐条判失败，不 ImportError 崩掉整个脚本）。
+MISSING_SYMBOLS: list[str] = []
+
+
+def _sym(name: str, fallback: object = None) -> object:
+    value = getattr(_recovery, name, None)
+    if value is None:
+        MISSING_SYMBOLS.append(name)
+        return fallback
+    return value
+
+
+GATE_CLEARED = _sym("GATE_CLEARED", "")
+RECONCILE_REQUIRED_BEFORE_ENTRY = _sym("RECONCILE_REQUIRED_BEFORE_ENTRY", "")
+RecoveryGate = _sym("RecoveryGate")
+create_epoch_bundle = _sym("create_epoch_bundle")
+drill_epoch_bundle = _sym("drill_epoch_bundle")
+gate_install_marker = _sym("gate_install_marker")
+
+#: 布局口径（P1-2）。补丁未应用时退回"旧实现实际用的落点"，这样本脚本仍能
+#: 观察到"门禁不在状态根 / 状态文件不在状态根"这些**缺陷本身**并判失败，
+#: 而不是因为缺符号直接崩掉——这正是"两态可跑"的要求。
+restored_state_root = _sym(
+    "restored_state_root",
+    lambda target, _profile: Path(target) / "data")
+restored_gate_path = _sym(
+    "restored_gate_path",
+    lambda target, profile: restored_state_root(target, profile) / "ops" / "recovery_gate.json")
+ledger_reconcile_facts = _sym("ledger_reconcile_facts", lambda _db: None)
+facts_digest = _sym("facts_digest", lambda _facts: "UNAVAILABLE")
+
+if RecoveryGate is None or drill_epoch_bundle is None or create_epoch_bundle is None:
+    print("FATAL core.ops.recovery 缺少验收所需的基础符号（RecoveryGate/drill/create）")
     raise SystemExit(2)
 
 try:
@@ -191,7 +211,8 @@ def check_p1_1_and_p1_2(tmp: Path) -> None:
               str(result.get("recovery_gate_file")))
 
         # 非循环性：删掉**还原根里那个真实门禁**（安装戳仍在）→ 判定必须翻转。
-        gate_file.unlink()
+        if gate_file.is_file():
+            gate_file.unlink()
         after_unlink = RecoveryGate.load(gate_file).before_entry()
         check(f"{label} 删掉真实门禁文件 → GATE_MISSING 阻断（证明用的就是它）",
               (not after_unlink.allowed) and "GATE_MISSING" in after_unlink.reason_codes,
@@ -357,6 +378,10 @@ def check_p1_4(tmp: Path) -> None:
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="u13f1-gate-"))
     print(f"U13-FU1 verify tmp = {tmp}")
+    if MISSING_SYMBOLS:
+        # 不是崩溃：显式登记"补丁未应用"，并让每个受影响的小节继续跑出可读结论。
+        print(f"  NOTE  缺失符号（视作补丁未应用）: {', '.join(sorted(set(MISSING_SYMBOLS)))}")
+        NOTES.append(f"missing symbols: {', '.join(sorted(set(MISSING_SYMBOLS)))}")
     try:
         check_p1_1_and_p1_2(tmp)
         check_p1_3(tmp)
