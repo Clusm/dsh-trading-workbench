@@ -529,7 +529,6 @@ def case_scanner_wiring() -> None:
     print("\n[8] 扫描器接线（两态各自断言，不假定补丁是否已应用）")
     patched = scanner_supports_funnel()
     print(f"  当前态：scanner funnel 接线 {'已应用' if patched else '未应用'}")
-    import signal_engine.scanner as scanner_module
     from signal_engine import SignalScanner
     from audit.database import AuditDatabase
 

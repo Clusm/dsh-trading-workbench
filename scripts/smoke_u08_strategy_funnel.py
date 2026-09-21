@@ -42,7 +42,6 @@ from agents.strategy_trader import run_strategy_trader  # noqa: E402
 from audit.database import AuditDatabase  # noqa: E402
 from core import decision_trace as trace  # noqa: E402
 from core.strategy_funnel import (  # noqa: E402
-    ALREADY_CONSUMED,
     DETAIL_REASON,
     ManagementPriorityPlan,
     ScanFunnel,
