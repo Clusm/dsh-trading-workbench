@@ -1,0 +1,49 @@
+C:\Users\Tao\Desktop\币安\multi-agent-trader\.venv\Lib\site-packages\langgraph\cache\base\__init__.py:8: LangChainPendingDeprecationWarning: The default value of `allowed_objects` will change in a future version. Pass an explicit value (e.g., allowed_objects='messages' or allowed_objects='core') to suppress this warning.
+  from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+tree = C:\Users\Tao\AppData\Local\Temp\u13fu3\fu2
+tmp  = C:\Users\Tao\AppData\Local\Temp\q-n2-a0aqeiqg
+
+--- case wal_entry (mode=wal_entry) ---
+  [wal_entry] 门禁建立 => allowed=True codes=('GATE_CLEARED',)
+  [wal_entry] 落盘文件 = ['account_risk_state.json', 'agent_trader.sqlite', 'agent_trader.sqlite-wal', 'capital_state.json', 'channel_state.json', 'control_state.json', 'ops']
+  启动期 before_entry x2, 未注入 0, 注入的事实 [{'unknown_orders': 0, 'submitting_orders': 0, 'unresolved_entry_orders': 1}, {'unknown_orders': 0, 'submitting_orders': 0, 'unresolved_entry_orders': 1}]
+  set_control('normal') -> {'ok': False, 'error': 'recovery gate blocked: RECONCILE_REQUIRED_BEFORE_ENTRY（先提交对账证据 /api/recovery/reconcile）'}
+  set_control 期 x1, 未注入 0, 注入的事实 [{'unknown_orders': 0, 'submitting_orders': 0, 'unresolved_entry_orders': 1}]
+
+[W] 接线形态
+  PASS  启动路径注入事实(0 次裸调用)
+  PASS  set_control 路径注入事实
+  PASS  服务账本 == 门禁账本(同一文件)
+
+[A] -wal 里未收口 ENTRY
+  PASS  A 启动期门禁阻断
+
+--- case clean (mode=clean) ---
+  [clean] 门禁建立 => allowed=True codes=('GATE_CLEARED',)
+  [clean] 落盘文件 = ['account_risk_state.json', 'agent_trader.sqlite', 'capital_state.json', 'channel_state.json', 'control_state.json', 'ops']
+  启动期 before_entry x2, 未注入 0, 注入的事实 [{'unknown_orders': 0, 'submitting_orders': 0, 'unresolved_entry_orders': 0}, {'unknown_orders': 0, 'submitting_orders': 0, 'unresolved_entry_orders': 0}]
+  set_control('normal') -> {'ok': True, 'state': 'normal', 'receipts': []}
+  set_control 期 x1, 未注入 0, 注入的事实 [{'unknown_orders': 0, 'submitting_orders': 0, 'unresolved_entry_orders': 0}]
+
+[B] 对照：干净账本
+  PASS  B 启动期门禁放行
+  PASS  B 控制状态保持 normal
+  PASS  B set_control('normal') 成功
+
+--- case unknown_exit (mode=unknown_exit) ---
+  [unknown_exit] 门禁建立 => allowed=True codes=('GATE_CLEARED',)
+  [unknown_exit] 落盘文件 = ['account_risk_state.json', 'agent_trader.sqlite', 'capital_state.json', 'channel_state.json', 'control_state.json', 'ops']
+  启动期 before_entry x2, 未注入 0, 注入的事实 [{'unknown_orders': 0, 'submitting_orders': 0, 'unresolved_entry_orders': 0}, {'unknown_orders': 0, 'submitting_orders': 0, 'unresolved_entry_orders': 0}]
+  set_control('normal') -> {'ok': True, 'state': 'normal', 'receipts': []}
+  set_control 期 x1, 未注入 0, 注入的事实 [{'unknown_orders': 0, 'submitting_orders': 0, 'unresolved_entry_orders': 0}]
+
+[C] 未收口 **非 ENTRY**(EXIT, UNKNOWN) 单 —— 可区分窗口候选
+  C 结果: gate_allowed=True codes=['GATE_CLEARED'] control=normal set_control={'ok': True, 'state': 'normal', 'receipts': []}
+  FAIL  C 启动期门禁阻断(裸形态语义)  allowed=True codes=['GATE_CLEARED']
+  FAIL  C 控制状态收紧为 close_only  normal
+  FAIL  C set_control('normal') 被拒  {'ok': True, 'state': 'normal', 'receipts': []}
+
+PROBE N2: 7 通过 / 3 失败
+  FAILED: C 启动期门禁阻断(裸形态语义)
+  FAILED: C 控制状态收紧为 close_only
+  FAILED: C set_control('normal') 被拒
