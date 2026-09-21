@@ -1,0 +1,151 @@
+{
+  "schema": "u07-shadow-v2-statistics-fixture-v1",
+  "fixture_kind": "synthetic",
+  "time_base": "seconds_offset_from_decision_at",
+  "derivation": "每个 scenario 的期望归宿由**独立判别式**给出，不复制被测实现输出：①两臂都取到固定目标时刻合格价（|偏差| <= tolerance_seconds）且信号方向相同、入场参考价相同 => 配成一对；②某一臂窗口内无样本 => 该臂 NOT_LABELED；③两臂信号不同 => SIGNAL_MISMATCH；④两臂入场参考价相对偏差 > entry_tolerance_bps => ENTRY_DIVERGENT；⑤某臂根本没有决策行 => MISSING_*_ARM。配对差按定义独立计算：gross=(exit/entry-1)*100*direction，net=gross-fee_pct-slip_pct-funding_pct（fee_pct=round_trip_fee_bps/100，slip_pct=slippage_bps/100，资金费按 horizon/480 折算且本例 funding=0）。",
+  "experiment": {
+    "experiment_version": "v2-experiment-1",
+    "release_id": "rel-u07",
+    "config_fingerprint": "cfg-u07"
+  },
+  "costs": {
+    "round_trip_fee_bps": 10.0,
+    "slippage_bps": 4.0,
+    "note": "与 U06b legacy 同口径的研究成本假设，不是真实成交成本。"
+  },
+  "tolerance_seconds": 90.0,
+  "expected_interval_seconds": 300.0,
+  "now_offset_minutes": 10.0,
+  "scenarios": [
+    {
+      "scenario_id": "pair-basic",
+      "intent": "同一机会两臂都出标签、同信号同入场价：配对成功",
+      "symbol": "BTCUSDT",
+      "signal": "bullish",
+      "decided_offset_seconds": 0.0,
+      "horizon_minutes": 5,
+      "treatment": {
+        "decision_id": "t-basic",
+        "reference_price": 100.0,
+        "exit": {"offset_seconds": 300.0, "price": 101.0}
+      },
+      "control": {
+        "decision_id": "c-basic",
+        "reference_price": 100.0,
+        "exit": {"offset_seconds": 300.0, "price": 100.5}
+      },
+      "expect": {"paired": true, "drop_reason": null}
+    },
+    {
+      "scenario_id": "pair-overlap",
+      "intent": "与 pair-basic 同标的、窗口重叠（决策晚 120s）：仍算同一块，不得冒充独立样本",
+      "symbol": "BTCUSDT",
+      "signal": "bearish",
+      "decided_offset_seconds": 120.0,
+      "horizon_minutes": 5,
+      "treatment": {
+        "decision_id": "t-overlap",
+        "reference_price": 100.0,
+        "exit": {"offset_seconds": 420.0, "price": 99.0}
+      },
+      "control": {
+        "decision_id": "c-overlap",
+        "reference_price": 100.0,
+        "exit": {"offset_seconds": 420.0, "price": 99.5}
+      },
+      "expect": {"paired": true, "drop_reason": null}
+    },
+    {
+      "scenario_id": "drop-control-unlabeled",
+      "intent": "对照臂窗口内无任何价格观测 => 不静默丢弃，记 CONTROL_NOT_LABELED",
+      "symbol": "ETHUSDT",
+      "signal": "bullish",
+      "decided_offset_seconds": 0.0,
+      "horizon_minutes": 5,
+      "treatment": {
+        "decision_id": "t-nolabel",
+        "reference_price": 200.0,
+        "exit": {"offset_seconds": 300.0, "price": 202.0}
+      },
+      "control": {
+        "decision_id": "c-nolabel",
+        "reference_price": 200.0,
+        "exit": null
+      },
+      "expect": {"paired": false, "drop_reason": "CONTROL_NOT_LABELED"}
+    },
+    {
+      "scenario_id": "drop-treatment-absent",
+      "intent": "处理臂根本没有决策行 => MISSING_TREATMENT_ARM，不用对照臂充数",
+      "symbol": "SOLUSDT",
+      "signal": "bullish",
+      "decided_offset_seconds": 0.0,
+      "horizon_minutes": 5,
+      "treatment": null,
+      "control": {
+        "decision_id": "c-alone",
+        "reference_price": 50.0,
+        "exit": {"offset_seconds": 300.0, "price": 51.0}
+      },
+      "expect": {"paired": false, "drop_reason": "MISSING_TREATMENT_ARM"}
+    },
+    {
+      "scenario_id": "drop-signal-mismatch",
+      "intent": "同机会但两臂信号方向相反 => 不是同一个样本，SIGNAL_MISMATCH",
+      "symbol": "XRPUSDT",
+      "signal": "bullish",
+      "decided_offset_seconds": 0.0,
+      "horizon_minutes": 5,
+      "treatment": {
+        "decision_id": "t-signal",
+        "reference_price": 1.0,
+        "exit": {"offset_seconds": 300.0, "price": 1.02}
+      },
+      "control": {
+        "decision_id": "c-signal",
+        "reference_price": 1.0,
+        "exit": {"offset_seconds": 300.0, "price": 1.02},
+        "signal": "bearish"
+      },
+      "expect": {"paired": false, "drop_reason": "SIGNAL_MISMATCH"}
+    },
+    {
+      "scenario_id": "drop-entry-divergent",
+      "intent": "同机会但两臂入场参考价差 50bps（>0 容忍）=> 不是同价配对，ENTRY_DIVERGENT",
+      "symbol": "ADAUSDT",
+      "signal": "bullish",
+      "decided_offset_seconds": 0.0,
+      "horizon_minutes": 5,
+      "treatment": {
+        "decision_id": "t-entry",
+        "reference_price": 1.0,
+        "exit": {"offset_seconds": 300.0, "price": 1.01}
+      },
+      "control": {
+        "decision_id": "c-entry",
+        "reference_price": 1.005,
+        "exit": {"offset_seconds": 300.0, "price": 1.01}
+      },
+      "expect": {"paired": false, "drop_reason": "ENTRY_DIVERGENT"}
+    },
+    {
+      "scenario_id": "pair-over-tolerance",
+      "intent": "两臂都取到价但只有处理臂在容差内（对照臂样本晚 480s，F11 反例）=> 对照臂 OVER_TOLERANCE => CONTROL_NOT_LABELED",
+      "symbol": "DOGEUSDT",
+      "signal": "bullish",
+      "decided_offset_seconds": 0.0,
+      "horizon_minutes": 5,
+      "treatment": {
+        "decision_id": "t-late",
+        "reference_price": 1.0,
+        "exit": {"offset_seconds": 300.0, "price": 1.05}
+      },
+      "control": {
+        "decision_id": "c-late",
+        "reference_price": 1.0,
+        "exit": {"offset_seconds": 780.0, "price": 1.05}
+      },
+      "expect": {"paired": false, "drop_reason": "CONTROL_NOT_LABELED"}
+    }
+  ]
+}

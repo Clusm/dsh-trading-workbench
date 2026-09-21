@@ -1,0 +1,50 @@
+{
+  "schema": "u07-shadow-v2-statistics-fixture-v1",
+  "fixture_kind": "synthetic",
+  "time_base": "seconds_offset_from_grid_origin",
+  "derivation": "独立样本分块的期望值由**窗口算术**独立给出，不复制被测实现输出：第 k 个决策的持仓窗口 = [k*interval_seconds, k*interval_seconds + horizon_minutes*60]。合并判据（本夹具与实现共同采用的公开判据）：按决策时刻升序，若 next.start <= prev.end + gap_seconds（gap_seconds 默认 0，即**相接也算一块**）则并入同一块。块是**按标的**独立计算，跨标的不合并。因此：interval=600、horizon=5min => 窗口 [0,300],[600,900],... 两两不相接 => 每块 1 条；interval=300 => 窗口首尾相接 => 全部并入 1 块；interval=150 => 链式重叠 => 1 块；两个标的各自成块。",
+  "horizon_minutes": 5,
+  "gap_seconds": 0.0,
+  "grids": [
+    {
+      "grid_id": "separated-blocks",
+      "intent": "决策间隔 > 持仓窗口：每个样本自成一类独立块",
+      "symbols": ["ETHUSDT"],
+      "interval_seconds": 600.0,
+      "count": 4,
+      "expect_blocks": 4,
+      "expect_largest_block": 1,
+      "expect_state": "INDEPENDENT"
+    },
+    {
+      "grid_id": "touching-blocks",
+      "intent": "决策间隔 = 持仓窗口：首尾相接也算同一块（共享同一段价格路径）",
+      "symbols": ["ETHUSDT"],
+      "interval_seconds": 300.0,
+      "count": 4,
+      "expect_blocks": 1,
+      "expect_largest_block": 4,
+      "expect_state": "OVERLAPPING"
+    },
+    {
+      "grid_id": "chained-overlap",
+      "intent": "决策间隔 < 持仓窗口：链式重叠全部并入 1 块，行数远大于独立块数",
+      "symbols": ["ETHUSDT"],
+      "interval_seconds": 150.0,
+      "count": 5,
+      "expect_blocks": 1,
+      "expect_largest_block": 5,
+      "expect_state": "OVERLAPPING"
+    },
+    {
+      "grid_id": "cross-symbol",
+      "intent": "分块按标的各自计算：两个标的窗口完全相同也不合并",
+      "symbols": ["ETHUSDT", "SOLUSDT"],
+      "interval_seconds": 300.0,
+      "count": 3,
+      "expect_blocks": 2,
+      "expect_largest_block": 3,
+      "expect_state": "OVERLAPPING"
+    }
+  ]
+}
