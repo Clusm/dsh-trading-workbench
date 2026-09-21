@@ -2099,7 +2099,14 @@
             "graph.py 整轮聚合接线未做 -> classify_cycle/reason_from_source_errors/round_explanation 生产可达性仍为 0（只被测试调用）",
             "真实宿主多实例并发、DB 侧勾稽权威性、浏览器渲染未验证",
             "N10 更正（登记文字 + 死代码分支）"
-          ]
+          ],
+          "report_archive": "docs/dispatch/reviews/U08/08ca75d/Q_r5.md（468 行，最终版；先前归档的 381 行是写作中快照，已用最终版覆盖）",
+          "new_p3_observations": {
+            "N11": "观察（测法）：机器全局 core.autocrlf=true 会让 git apply 把目标文件整体转 CRLF -> diffstat 681/36；改用 -c core.autocrlf=false 得 706/61，与 README §六 逐位相同（README 无误，差异属复验方环境）",
+            "N13": "文档计数：README §六 末段写'03 里有 3 行只差行尾 CR 的 -/+ 对'，实测三个口径（numstat 差 25 对 / difflib 4 块 6 行）都不是 3；结论（纯行尾噪声、语义未变、应用后 blob 与作者编辑态逐字节相同）独立证实成立，仅计数写错",
+            "N12": "既有形态（非 U08 引入）：执行器内 db.signal_ticket_has_order()/log_risk_event()/update_signal_ticket() 无护栏，审计库抛 sqlite3.OperationalError 会穿出整个执行器（与 N6 同形）；实测两树同形（pristine 逐字相同）-> U08 未引入未扩大，不在本轮 N6 声明范围内"
+          },
+          "not_found": "故障被读成 no_edge（31 码 + 混合例）、跨进程重复消费、KI/SystemExit 被吞、写失败后留下脏'已消费'、未登记的既有脚本新增失败、补丁应用失败 —— 均未发现"
         }
       ],
       "blockers": [],
@@ -4052,6 +4059,14 @@
         "owner": "U12",
         "blocks": "执行侧逐票原因与跨进程去重在生产上生效",
         "note": "graph.py 未注入 funnel/ledger（grep 0 命中），round_explanation() 唯一调用方是作者自己的测试。U08 README §五 已如实改记'生产不可达（待 U12）'。"
+      },
+      {
+        "id": "U08-R5-FU2",
+        "title": "执行器内审计库调用无护栏（db.* 抛 OperationalError 会穿出整轮）",
+        "status": "OPEN",
+        "owner": "U12/I",
+        "blocks": "无（既有形态，U08 未引入未扩大）",
+        "note": "Q r5 N12 实测：strategy_trader.py 的 db.signal_ticket_has_order()/db.log_risk_event()/db.update_signal_ticket() 未包 except；审计库抛 sqlite3.OperationalError: database is locked 时异常穿出整个执行器、decision=None，与 N6 同形。pristine 树逐字相同 -> 属既有形态。建议 U12 与 U08-R5-FU1 合并处置（同一处收口）。"
       }
     ],
     "contract_candidate": "71f8109",

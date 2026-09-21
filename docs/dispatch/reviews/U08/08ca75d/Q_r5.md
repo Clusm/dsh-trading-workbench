@@ -9,7 +9,7 @@
   `OSError`/`PermissionError` 仍穿出整个执行器且未登记）。
 - 解释器 `C:\Users\Tao\Desktop\币安\multi-agent-trader\.venv\Scripts\python.exe`（`PYTHONUTF8=1`），无 pytest。
 - **集成 HEAD 实测**：进场 `b40a5fa`，出报告时 `3a13c7b`（期间只多了一个 `docs/dispatch/RESUME.md` 提交）。
-  5 个目标文件在 `b40a5fa`/`3a13c7b`/`1a412440`（补丁自述基线）/`32ecf635` 四处 blob **逐文件相同**（§6.1）。
+  5 个目标文件在 `b40a5fa`/`3a13c7b`/`1a412440`（补丁自述基线）/`32ecf635` 四处 blob **逐文件相同**（§4.1）。
 - 纪律：只读；未提交/推送/打标签/切分支；未读 `.env`/`data/`；未联网；未启停服务；未下单撤单；
   **所有产物只在 `reviews/U08/R5/r1/_scratch_Q/` 内**（未写 `mat-wt/I`、`mat-wt/CD` 或任何其它 worktree）。
 
@@ -34,7 +34,7 @@
 | 1 N6 崩溃穿出 | **真闭合**：3 声称异常 × 4 路径 = 12 条全部 `NO_ESCAPE`；**写盘失败真的回滚内存**（`mem_consumed=false`/`disk_consumed=false`，不留脏"已消费"）；孤儿落盘可审计；异常名进 note；**KI/SystemExit/GeneratorExit 仍穿出** ✅ |
 | 2 N7 文档笔误 | **真修**（实测 `exec-<iso>`，`startswith('exec:')=False`；`0c131f2/README.md` 一并更正；全仓有效文档无 `exec:` 残留） ✅ |
 | 3 `release()` 返回 True | **登记属实、不与必达②冲突**（fail-closed：只多占死、不重复发射）；→ 但见新发现 **N10** |
-| 4 补丁 + 全量 delta | 补丁对当前集成 HEAD **15/15 可应用、无 Skipped**；delta 见 §6.2 |
+| 4 补丁 + 全量 delta | 补丁对当前集成 HEAD **15/15 可应用、无 Skipped**；delta `base=83/head=84/NEW_FAIL=[]/167 次全 rc=0`（§4） |
 | 5 门禁 | `QUALITY CHECK OK files=290` / `SECRET SCAN OK files=525` ✅ |
 | 6 回归抽样 ≥5 | 7 项全过（接线 7 处、真实路径、跨进程 8×5、故障 vs no_edge 31 码、管理预算、`position_class` 同源、`CARDS_INVALID` 可达） ✅ |
 
@@ -240,25 +240,106 @@ D release->OSError: NO_ESCAPE | decision=no_trade intents=0
 
 ---
 
-## 4.（任务 4）补丁可应用性 —— **可干净应用到当前集成 HEAD**
+## 4.（任务 4）补丁 + 全量 delta —— **可干净应用到当前集成 HEAD；`NEW_FAIL=[]`**
 
-（详见 §6）
+### 4.1 补丁能否应用到**当前集成 HEAD** —— **能，且不是集成阻塞项**
+
+仓库根 = `C:/Users/Tao/Desktop/币安/mat-wt/I`，**`--check` 时点 HEAD 实测 = `3a13c7b`**
+（我进场时 `b40a5fa`；`3a13c7b` 相对 `b40a5fa` 只多 `docs/dispatch/RESUME.md` 一个提交）。
+
+**基线不变性核查**（硬前提）：5 个目标文件在 `1a412440`（补丁自述基线）/`b40a5fa`/`3a13c7b`/`32ecf635`
+四处 blob **逐文件相同**：
+
+```
+3cee84747c029f3460380680a92398e739e12479  src/signal_engine/scanner.py
+956c2e9a82be0d6f10418b035077fe4b83a8aa61  src/core/signal_ticket.py
+96a035fd28a3e2debc9fdf1db92995384266be5e  src/agents/strategy_trader.py
+1f77be25861f2bc97b9596686ecb8e9d9ae33957  src/dashboard/app.py
+2113d652c871830b5e0ae0246a0ddff865504cde  scripts/run_offline_regression.py
+```
+
+**`git apply --check -v`（在真实集成树 `I` 上跑，3 配置 × 5 补丁 = 15/15）** —— `out/phase4_applycheck.txt`：
+
+```
+cfg=''                                5/5 rc=0  每份都有 "Checking patch ..."
+-c core.autocrlf=false -c core.eol=lf 5/5 rc=0
+-c core.autocrlf=true                 5/5 rc=0
+grep -c "Skipped" = 0        ← 无空炮
+grep -c "Checking patch" = 15
+I 的 git status --porcelain = 空  ← 只读探测，未污染集成树
+```
+
+**真实应用（沙箱 `tree_head` = pristine 集成树 + r4 独占产物 + 5 补丁）** —— `out/build.txt`：
+`rc=0 × 5`，逐条 `Applied patch ... cleanly`。
+`strategy_trader.py` 应用后 `git hash-object` = `c58b7b2570fb2219f6141ad197c8cba84a86027c`
+= README §六 所称"作者编辑态"（注：该 hash 在 `core.autocrlf=true` 下算得，等于 LF 归一化后的内容；
+`git diff` 的 `index` b 侧 `f10c5de` 则是 CRLF 原字节的 hash —— 两者是同一内容的两种行尾口径，非矛盾）。
+
+**额外交叉验证（本轮意外收获）**：出报告时发现 `mat-wt/I` 正被**另一角色并发真实合入**
+（13:09–13:12 写入，`git status` 出现那 5 个 `M` 与 `_scratch_I/`、`docs/dispatch/reviews/U08/08ca75d/`；
+**不是我改的** —— 我在 `out/phase4_applycheck.txt` 里留存的探测时点 `I git status` 是空的，
+且我全程只跑过 `apply --check`）。
+于是我做了一次只读的**字节级交叉比对**：`I` 刚应用出来的 3 个大文件与我的 `tree_head`
+**逐字节完全相同**（`strategy_trader.py` 20710B/386CRLF、`scanner.py` 38319B/254CRLF、
+`app.py` 126768B/1437CRLF，`raw_equal=True`），`signal_ticket.py` / `run_offline_regression.py`
+的归一化 blob 亦相同 ⇒ **补丁在真实集成树上的落点与我的沙箱完全一致** ✅
+（此前那次"blob DIFF"是 `hash-object` 在两仓不同 `core.autocrlf` 下的归一化差异，非内容差异。）
+
+**沙箱保真度**（我自己的独立核验，逐**字节**比对而非 hash，因为 `git hash-object` 会吃
+clean filter 造成假差异）：`tree_head` 的 4 个独占产物与分支 `9195782`、
+`tree_r3` 的 4 个与 `fbef4e0` **全部字节相同**（105353 / 48181 / 92086 / 19200 与
+102572 / 40645 / 81711 / 18927 字节）✅
+
+**diffstat 口径澄清（N11）**：我第一版沙箱用机器全局 `core.autocrlf=true`，
+`git apply` 把目标文件整体转成 CRLF，`git diff --stat` 得 **681/36**；
+用 `-c core.autocrlf=false` 重建后得 **706/61**，与 README §六 **逐位相同**。
+⇒ README 的 diffstat **无误**，差异是我方环境所致。
+
+### 4.2 全量回归 delta（强制）—— **`NEW_FAIL=[]`，167 次执行全 rc=0**
+
+产物：`out/q6_delta_console.txt`、`out/delta_result.json`、`out/delta_{base,head}.log`、
+`out/delta_harness_{base,head}.txt`。
+
+方法：`git archive b40a5fa` → `tree_pristine`；`tree_pristine + r4 独占产物 + 5 补丁` → `tree_head`。
+**同一 SCRIPTS 清单并集**、**同一 env 逐行复刻 harness `main()`**
+（`EXECUTION_MODE=paper`；清 `MTA_PROFILE`/`MTA_STATE_ROOT`/`MTA_DATA_ROOT`；`MTA_NO_PROXY=1`；
+`PYTHONUTF8=1`；`PYTHONIOENCODING=utf-8`；剔除名含 `BINANCE|SENSENOVA` × `KEY|SECRET|TOKEN` 的变量）；
+**逐条非 fail-fast**；判失败**只看退出码**。
+
+```
+base_scripts=83  head_scripts=84  union=84
+added(head-base)=['scripts/smoke_u08_strategy_funnel.py']   removed=[]
+absent_in_base=['scripts/smoke_u08_strategy_funnel.py']     absent_in_head=[]
+base_fail_n=0 []          head_fail_n=0 []
+NEW_FAIL=[]               FIXED=[]        BOTH_FAIL=[]
+非零 rc：base=[]          head=[]
+harness 入口：base rc=0 (SMOKE MANIFEST OK included=79 excluded=1 → OFFLINE REGRESSION OK scripts=83)
+              head rc=0 (SMOKE MANIFEST OK included=80 excluded=1 → OFFLINE REGRESSION OK scripts=84)
+逐条 rc 直方图：167 个脚本执行（base 83 + head 84）全部 rc=0，无一个非零
+```
+
+与作者自述 `base=83 / head=84 / NEW_FAIL=[] / 非零 rc=[]` **完全一致** ✅
+
+`FAIL` 字样核查（**未误报**）：两树各只有 **1 个脚本**含 `FAIL` 行 ——
+`scripts/smoke_u02_strategy_position_manager.py`（各 10 行），其 **`rc=0`**（自带负向对照）；
+**没有任何 `rc!=0` 的脚本含 `FAIL` 行** ✅ 与任务提示一致。
+
+对照性核验：`tree_head` 里 `smoke_u08_strategy_funnel.py` rc=0（其 N6/N7 断言全部 PASS，
+含"只吞 Exception：KeyboardInterrupt 仍从 consume() 穿出"）、`smoke_u10a_release_package.py`
+（73.7s）rc=0、`smoke_u14_alert_delivery.py` rc=0、`run_offline_regression.py` 端到端
+`OFFLINE REGRESSION OK scripts=84` ✅
+
+> **我自己踩到的坑（如实登记，已修正，不影响结论）**：我第一版把 `tree_pristine` 的
+> `git init` 放在**首次 delta 跑完之后**，`git add -A -f` 于是把运行期产生的
+> `__pycache__/*.pyc`（135 个）与 `data/` 产物（7 个）**也提交进了索引**（tracked 712 > 真实 570），
+> 导致 `smoke_u10a_release_package.py` 在 **base** 侧误报 rc=1（4 条 FAIL，全是 `.pyc` 被当"应有文件"）。
+> 我据此**重建** `tree_pristine`（干净解包后再 init，tracked=570 = 真实仓库 `git ls-tree -r b40a5fa`
+> 的 570 逐值相同），预验 u10a 单跑 rc=0（37/0），随后**整轮重跑**得到上表。
+> ⇒ 该失败**纯属我的沙箱卫生问题**，不是产品/补丁问题；最终 `tree_head` 索引 574 = 570 + 4 个独占产物，0 个 `.pyc`。
 
 ---
 
-## 5.（任务 5）门禁 —— **全绿**
-
-（详见 §7）
-
----
-
-## 6.（任务 6）补丁 + 全量 delta
-
-*（本节在 delta 跑完后填写）*
-
----
-
-## 7.（任务 7）门禁 —— 全绿
+## 5.（任务 5）门禁 —— 全绿
 
 沙箱 = `tree_head`（pristine 集成树 + r4 独占产物 + 5 补丁），`out/phase5_gates.txt`：
 
@@ -281,7 +362,7 @@ rc=0
 
 ---
 
-## 8.（任务 8）回归抽样 ≥5 —— 7/7 通过
+## 6.（任务 6）回归抽样 ≥5 —— 7/7 通过
 
 | 抽样项 | 结果 | 原始输出 |
 |---|---|---|
@@ -304,7 +385,7 @@ rc=0
 
 ---
 
-## 9. 新发现汇总
+## 7. 新发现汇总
 
 | # | 级别 | 一句话 | 位置 | 阻塞? |
 |---|---|---|---|---|
@@ -318,7 +399,7 @@ KI/SystemExit 被吞、写失败后留下脏"已消费"、未登记的既有脚�
 
 ---
 
-## 10. 命令清单（可重跑）
+## 8. 命令清单（可重跑）
 
 ```bash
 W="C:/Users/Tao/Desktop/币安/mat-wt/reviews/U08/R5/r1"; S="$W/_scratch_Q"
@@ -327,6 +408,10 @@ I="C:/Users/Tao/Desktop/币安/mat-wt/I"
 export PYTHONUTF8=1 PYTHONIOENCODING=utf-8 MTA_NO_PROXY=1
 
 bash "$S/build.sh" > "$S/out/build.txt" 2>&1          # 建 tree_pristine / tree_r3 / tree_head
+# ⚠ 关键前提（我踩过）：**必须干净解包后立刻 git init**，不能等跑过脚本再 init，
+#   否则 `git add -A -f` 会把运行期 __pycache__/data 产物一起提交进索引（tracked 712≠570），
+#   使 smoke_u10a_release_package.py 在 base 侧误报。
+git -C "$S/tree_pristine" ls-files | wc -l            # 必须 = 570（= git ls-tree -r b40a5fa | wc -l）
 
 # N6/N7 前后对照（自建探针；边界注入 = 只换 os.replace 这个系统调用）
 "$PY" "$S/probes/q1_n6.py" "$S/tree_r3"   BEFORE > "$S/out/q1_n6_BEFORE.txt" 2>&1
@@ -336,6 +421,8 @@ bash "$S/build.sh" > "$S/out/build.txt" 2>&1          # 建 tree_pristine / tree
 "$PY" "$S/probes/q2_n1.py"        "$S/tree_head"    > "$S/out/q2_n1_AFTER.txt" 2>&1
 "$PY" "$S/probes/q4_sampling.py"  "$S/tree_head"    > "$S/out/q4_sampling.txt" 2>&1
 "$PY" "$S/probes/q5_extras.py"    "$S/tree_head"    > "$S/out/q5_extras.txt"   2>&1
+"$PY" "$S/probes/q7_db.py"        "$S/tree_head"    > "$S/out/q7_db.txt"       2>&1   # N12
+"$PY" "$S/probes/q7b_db_pristine.py" "$S/tree_pristine" > "$S/out/q7b_db.txt"   2>&1   # N12 对照
 
 # 补丁矩阵（仓库根 = I，只读；3 种配置 × 5 补丁，全部带 -v）
 git -C "$I" apply --check -v "$W"/docs/dispatch/patches/U08/9195782/0*.diff
@@ -364,7 +451,7 @@ git -C "$I" -c core.autocrlf=true  apply --check -v "$W"/docs/dispatch/patches/U
 
 ---
 
-## 11. 未覆盖 / 无法离线验证
+## 9. 未覆盖 / 无法离线验证
 
 - **真磁盘满（ENOSPC）/ 只读挂载的端到端演练未做**：我用 `os.replace` 边界注入模拟 ENOSPC，
   并用**真实**的文件被占用 / 父路径是文件 / 非法文件名触发真实 `PermissionError`/`OSError`；
