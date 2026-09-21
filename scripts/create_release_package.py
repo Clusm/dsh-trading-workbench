@@ -124,6 +124,15 @@ EXCLUDED_SUFFIXES: dict[str, str] = {
     ".bak": "备份文件",
 }
 #: 目录前缀排除（评审证据与流程台账：不是交付物，且刻意引用凭据模式）。
+#:
+#: 注意：机器可读编排台账 ``docs/无人值守升级任务清单_2026-09-19.json`` **不在此列**，
+#: 因此它随 ``docs/`` 进包。原因是包内多篇文档（``docs/contracts/README.md``、
+#: ``docs/多Agent执行分派手册_2026-09-20.md``、执行规格等）以 markdown 相对链接引用它，
+#: 把它排除会让构建期 ``doc_links_resolve`` 报断链——而其中一篇在**不得改动的**
+#: ``docs/contracts/`` 内。它同时命中仓库扫描器的 KI04 范围豁免，因此包内自检**如实列出**
+#: 它是免内容扫描成员（``credentials_absent.detail.repo_exempt_files``），不是静默跳过；
+#: ``scripts/smoke_u10a_release_package.py`` 对该"如实列出"有断言。要把它移出发布包，
+#: 必须由 I 同批改掉上述 4 篇文档的链接，属跨任务动作。
 EXCLUDED_PATH_PREFIXES: dict[str, str] = {
     "docs/dispatch/reviews/": "评审证据归档，属流程记录而非交付物（且刻意引用凭据模式）",
     "docs/dispatch/patches/": "待应用补丁文本，未合入内容不得随部署工件分发",
@@ -260,10 +269,14 @@ def _subprocess_env() -> dict[str, str]:
 def _tracked_files(root: Path) -> set[str]:
     """返回 Git 索引中的相对路径。
 
-    必须用 ``-z`` 输出：默认输出会对非 ASCII 路径做 C 风格转义加引号
-    （``"docs/\\346\\226\\207..."``），旧实现直接按行取字符串，导致中文名文档
-    在**有 Git 的仓库里被静默漏掉**（无 Git 兜底分支反而不受影响，两条路径行为
-    不一致）。
+    必须用 ``-z`` 输出：默认输出会对非 ASCII 路径做 C 风格转义并加引号
+    （``"docs/\\346\\226\\207..."``）；按行取值会得到转义后的伪路径，它们
+    **命中不了任何分类规则**，于是构建以"存在未归类文件"**硬失败**（fail-closed，
+    不是静默少文件）。
+
+    更正（U10a r2，独立复核反证）：旧打包器丢中文名文档的根因是 ``SAFE_DOCS``
+    白名单只有 5 篇，与 ``-z`` 无关——给旧实现补 ``-z`` 前后成员集合为 0 差异。
+    ``-z`` 是**新设计**（全量归类）下的必需项，缺了会让构建失败。
     """
     try:
         result = subprocess.run(
@@ -320,19 +333,30 @@ def _excluded_reason(relative: str) -> str | None:
     return None
 
 
-def _source_only_script_reason(relative: str) -> str:
+def _source_only_script_reason(relative: str) -> str | None:
+    """返回 ``scripts/`` 文件的 **显式** source-only 理由；未登记时返回 ``None``。
+
+    这里刻意**不再**提供"默认 source-only"的兜底：``scripts/`` 下新增文件若既不
+    在 ``RUNTIME_SCRIPTS``、也不匹配任何 ``SOURCE_ONLY_SCRIPT_PREFIXES``，即属
+    "未归类"，构建会硬失败并要求作者显式登记（维护规范 §11.1）。否则新加的启动
+    入口会被**静默降级**成 source-only，runtime 包悄悄缺文件——这正是 U10a 防护的
+    失效模式。
+    """
     name = Path(relative).name
     for prefix, reason in SOURCE_ONLY_SCRIPT_PREFIXES.items():
         if name.startswith(prefix):
             return reason
-    return "非运行必需脚本（开发/维护工具），保留在 source 包"
+    return None
 
 
 def _classify(relative: str) -> tuple[str, str]:
     """把单个相对路径归类为 ``(class, reason)``。
 
     判定顺序（前面的优先级高）：排除 → 运行必需脚本 → source-only 前缀 →
-    运行资产目录 → 顶层必需文件 → ``scripts/`` 其它 → 未分类。
+    运行资产目录 → 顶层必需文件 → ``scripts/`` 显式前缀 → 未分类。
+
+    ``scripts/`` 分支**只认显式登记**：既不在 ``RUNTIME_SCRIPTS`` 又无前缀理由的
+    脚本一律落到"未归类"（构建失败），不允许静默归类。
     """
     reason = _excluded_reason(relative)
     if reason is not None:
@@ -351,7 +375,13 @@ def _classify(relative: str) -> tuple[str, str]:
     if relative.startswith("docs/"):
         return _CLASS_RUNTIME, "文档（部署与运维需要，且相对链接必须可达）"
     if relative.startswith("scripts/"):
-        return _CLASS_SOURCE_ONLY, _source_only_script_reason(relative)
+        reason = _source_only_script_reason(relative)
+        if reason is not None:
+            return _CLASS_SOURCE_ONLY, reason
+        return "unclassified", (
+            "scripts/ 下未显式登记的脚本（禁止静默归类：请在 RUNTIME_SCRIPTS 登记为"
+            "运行入口，或按 SOURCE_ONLY_SCRIPT_PREFIXES 补一条前缀理由）"
+        )
     return "unclassified", "未归类（构建失败：必须显式登记入包或排除理由）"
 
 
@@ -636,11 +666,19 @@ def build_release_package(
         raise ReleasePackageError("没有可打包的安全文件")
 
     required, problems = required_runtime_assets(root)
-    if kind == KIND_RUNTIME:
-        missing = [relative for relative in required if relative not in set(files)
-                   and (root / relative).exists()]
-        if missing:
-            raise ReleasePackageError(f"运行必需资产未入包: {sorted(missing)[:10]}")
+    # 登记项与仓库脱节必须在**出包路径**就硬失败：早期版本写作
+    # ``... and (root / relative).exists()``，把不存在的必需项直接跳过，于是
+    # ``scripts/run_web.py`` 被重命名后 ``--out`` 仍能**静默出包**（包内没有任何
+    # 启动器）。现在与 ``verify_release_package`` 的判定对齐：必需路径不存在即失败，
+    # 且"存在但没进包"与"根本不存在"分别给出可读原因（两种包都检查）。
+    absent = sorted(relative for relative in required if not (root / relative).is_file())
+    if absent:
+        raise ReleasePackageError(
+            f"运行必需资产在仓库中不存在（登记项与实际仓库脱节，禁止出包）: {absent[:10]}"
+        )
+    missing = sorted(set(required) - set(files))
+    if missing:
+        raise ReleasePackageError(f"运行必需资产未入包: {missing[:10]}")
     if problems:
         raise ReleasePackageError("；".join(problems))
 
@@ -829,7 +867,15 @@ def verify_release_package(package_root: Path) -> dict[str, Any]:
            {"count": len(rows)})
 
     # --- 内容规则：路径 + 凭据 ---------------
-    forbidden: list[str] = []
+    # 路径规则判定遍历**盘上全部文件**（``on_disk``），而不只是清单里列到的文件：
+    # 早期版本用 ``listed & on_disk``，于是"盘上有、清单无"的禁止路径（例如手工放进
+    # 解压目录的 ``server.key``）不会由本项报出，只能靠 ``no_unlisted_files``/
+    # ``runtime_state_absent`` 兜住——检查名与语义不符（P3-5）。
+    forbidden = sorted(
+        f"{relative}({reason})"
+        for relative in (on_disk - ignored)
+        if (reason := _excluded_reason(relative)) is not None
+    )
     texts: dict[str, str] = {}
     secret_hits: list[str] = []
     exempted: list[str] = []
@@ -838,9 +884,6 @@ def verify_release_package(package_root: Path) -> dict[str, Any]:
         ".toml", ".example", ".sh", ".ps1",
     )
     for relative, raw in _iter_members(root, sorted(listed & on_disk)):
-        reason = _excluded_reason(relative)
-        if reason is not None:
-            forbidden.append(f"{relative}({reason})")
         if b"\0" in raw:
             continue
         try:

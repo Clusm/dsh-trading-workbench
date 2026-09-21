@@ -147,6 +147,39 @@ def independent_broken_links(members: dict[str, bytes]) -> list[str]:
     return broken
 
 
+#: 手册 §3.1 自定的标记：带此标记的命令只存在于 ``source`` 包或源码检出。
+SOURCE_ONLY_MARK = "[source 包]"
+_SCRIPT_REF_RE = re.compile(r"scripts[\\/][A-Za-z0-9_./\\]+\.(?:py|bat)")
+_FENCE_RE = re.compile(r"```[a-zA-Z]*\n(.*?)```", re.S)
+
+
+def unmarked_source_only_commands(
+    manual: str, runtime_basenames: set[str],
+) -> list[str]:
+    """返回手册中"引用了 source-only 脚本、却没标 ``[source 包]``"的命令块。
+
+    逐个 fenced code block 抽取 ``scripts[\\/]xxx.py|bat`` 引用；只要有引用不在
+    ``RUNTIME_SCRIPTS`` 内，该 fence **前一段落**（fence 之前最后一个非空段）就必须
+    出现 ``[source 包]``。否则只拿到 runtime 包的运维照抄命令会"文件不存在"
+    （P2-2 的失效模式）。
+    """
+    violations: list[str] = []
+    for match in _FENCE_RE.finditer(manual):
+        body = match.group(1)
+        refs = {
+            Path(name.replace("\\", "/")).name for name in _SCRIPT_REF_RE.findall(body)
+        }
+        source_only = sorted(refs - runtime_basenames)
+        if not source_only:
+            continue
+        lead = manual[:match.start()].rstrip("\n").split("\n\n")[-1]
+        if SOURCE_ONLY_MARK in lead:
+            continue
+        tail = lead.strip().splitlines()[-1] if lead.strip() else ""
+        violations.append(f"{source_only} @ {tail[:60]!r}")
+    return violations
+
+
 def verify_cli(target: Path) -> tuple[int, dict]:
     """通过真实 CLI 路径运行解压自检，返回 ``(退出码, 报告)``。"""
     result = subprocess.run(
@@ -307,6 +340,18 @@ try:
           claimed == actual, {"手册漏写": sorted(actual - claimed),
                               "手册多写": sorted(claimed - actual)})
 
+    # --- [1c] 手册里引用 source-only 脚本的命令块必须标注 [source 包] ----
+    print("\n[1c] 手册命令的包适用性（source-only 命令必须标 [source 包]）")
+    violations = unmarked_source_only_commands(manual, actual)
+    check("手册中引用 source-only 脚本的命令块都已标 [source 包]",
+          not violations, violations[:6])
+    injected = manual + (
+        "\n\n插入的负例段落：\n\n```powershell\n"
+        ".venv\\Scripts\\python.exe scripts\\smoke_zzz_not_in_package.py\n```\n"
+    )
+    check("该门禁非空转（注入未标注的 source-only 命令即报出）",
+          bool(unmarked_source_only_commands(injected, actual)))
+
     # --- [2] 凭据及运行状态不入代码包（对包内容实际扫描） -------------
     print("\n[2] 凭据及运行状态不入代码包（实际扫描包内每一个成员）")
     # ``data``/``logs``/``dist`` 只在**顶层**出现才算运行状态目录；``src/data/``
@@ -355,6 +400,18 @@ try:
           report.get("ok") is True
           and all(item["ok"] for item in report.get("checks", [])),
           [item["name"] for item in report.get("checks", []) if not item["ok"]])
+    # KI04 范围豁免成员（编排台账 JSON）随包时，自检必须**显式列出**它未参与内容扫描，
+    # 不能静默跳过（P2-3 的"免扫"必须可审计）。
+    creds = next((item for item in report.get("checks", [])
+                  if item["name"] == "credentials_absent"), {})
+    reported_exempt = list(creds.get("detail", {}).get("repo_exempt_files", []) or [])
+    if exempted:
+        check("包内 KI04 范围豁免成员在自检报告中被如实列出（不是静默跳过）",
+              sorted(reported_exempt) == sorted(exempted)
+              and set(exempted) <= set(members),
+              {"smoke_exempted": exempted, "report": reported_exempt})
+    else:
+        note("包内无 KI04 范围豁免成员")
     broken = independent_broken_links(members)
     check(f"所有相对文档链接可达（独立解析，{sum(1 for n in members if n.endswith('.md'))} 篇 md）",
           not broken, broken[:8])
@@ -392,6 +449,15 @@ try:
           code_e != 0 and report_e.get("ok") is False
           and any("no_unlisted_files" in item for item in report_e.get("problems", [])),
           report_e.get("problems"))
+
+    forbidden = tmp / "forbidden"
+    crp.extract_archive(archive, forbidden)
+    (forbidden / "server.key").write_bytes(b"not-a-real-key")
+    code_f, report_f = verify_cli(forbidden)
+    check("盘上出现未登记的禁止路径后 forbidden_paths_absent 报出（P3-5：覆盖 on_disk）",
+          code_f != 0 and any("forbidden_paths_absent" in item
+                              for item in report_f.get("problems", [])),
+          report_f.get("problems"))
 
     removed = tmp / "removed"
     crp.extract_archive(archive, removed)
@@ -446,6 +512,34 @@ try:
           in src_content
           and ".github/workflows/ci.yml" in src_content
           and not any(name.startswith("data/") or name == ".env" for name in src_content))
+
+    # P2-1 回归：runtime 启动入口被改名时，`--out` 必须**硬失败**（不再静默出包）。
+    renamed = tmp / "renamed"
+    renamed.mkdir(parents=True)
+    make_sandbox(sandbox, renamed)
+    (renamed / "scripts" / "run_web.py").rename(
+        renamed / "scripts" / "run_web_renamed.py")
+    subprocess.run(["git", "add", "-A"], cwd=renamed, check=True, capture_output=True)
+    write_manifest(renamed)
+    code_ren = build_cli(renamed, tmp / "dist" / "renamed.zip", "runtime")
+    ren_out = code_ren.stdout + code_ren.stderr
+    check("新增未登记的 scripts/ 入口 → 构建失败（禁止静默归类为 source-only）",
+          code_ren.returncode != 0 and "未归类" in ren_out,
+          (code_ren.returncode, ren_out.strip()[-200:]))
+
+    reclassified = tmp / "reclassified"
+    reclassified.mkdir(parents=True)
+    make_sandbox(sandbox, reclassified)
+    (reclassified / "scripts" / "run_web.py").rename(
+        reclassified / "scripts" / "smoke_run_web.py")
+    subprocess.run(["git", "add", "-A"], cwd=reclassified, check=True,
+                   capture_output=True)
+    write_manifest(reclassified)
+    code_rec = build_cli(reclassified, tmp / "dist" / "reclassified.zip", "runtime")
+    rec_out = code_rec.stdout + code_rec.stderr
+    check("runtime 启动入口改名后（落 source-only）→ 构建硬失败，不再静默出包",
+          code_rec.returncode != 0 and "运行必需资产在仓库中不存在" in rec_out,
+          (code_rec.returncode, rec_out.strip()[-200:]))
 
     # --- [5] 共享适配（两态，运行时行为探测） ------------------------
     print("\n[5] 共享适配（运行时行为探测；不以补丁是否已应用为前提）")
