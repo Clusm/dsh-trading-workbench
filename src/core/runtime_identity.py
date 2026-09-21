@@ -279,6 +279,61 @@ LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
 #: 探测标记：载荷键名出现这些子串即判定为“疑似整份 .env 载荷”。
 _RAW_ENV_KEY_MARKERS = (".env", "env_file", "env_text", "raw_env", "dotenv")
 
+#: **文件名**级凭据守卫：只认“凭据容器词”，与 K01 键名标记
+#: （``SENSITIVE_KEY_MARKERS``）是两条**互不相通**的口径。契约 L1 的语义是
+#: “敏感守卫只查键名/载荷形态”，因此这里**不得**复用键名标记表：那是“键名/字段名”
+#: 口径，拿它做文件名子串匹配会把普通**代码模块**（如
+#: ``management_authorization.py`` 命中 ``authorization``）误判为凭据文件，
+#: 属过度匹配（U12-BUILD-F1）。只拒绝真正的凭据**容器**文件名。
+CREDENTIAL_FILE_NAME_MARKERS: tuple[str, ...] = (
+    "secret",
+    "credential",
+    "apikey",
+    "api_key",
+    "private_key",
+    "password",
+    "passwd",
+    "passphrase",
+)
+#: 凭据/私钥文件后缀（文件名以这些结尾即为凭据容器）。
+CREDENTIAL_FILE_NAME_SUFFIXES: tuple[str, ...] = (
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".ppk",
+    ".jks",
+    ".keystore",
+    ".env",
+)
+#: 免后缀也一眼是凭据容器的前缀（``.env`` / ``.env.*`` / SSH 私钥等）。
+CREDENTIAL_FILE_NAME_PREFIXES: tuple[str, ...] = (
+    ".env",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+)
+
+
+def _looks_like_credential_file(name: Any) -> bool:
+    """**文件名**是否呈“凭据文件形态”（独立的文件名守卫，见上）。
+
+    与 :func:`is_sensitive_name` 的区别：后者是**键名/字段名**口径（K01
+    ``SENSITIVE_KEY_MARKERS``，含 ``key``/``token``/``authorization`` 等宽标记），
+    拿来做文件名子串匹配会把 ``management_authorization.py`` 这类**代码模块**
+    误杀。这里只认凭据**容器**词、凭据后缀与 ``.env``/SSH 私钥前缀。
+    """
+    lowered = str(name).lower().replace("\\", "/").rsplit("/", 1)[-1]
+    if not lowered:
+        return False
+    if any(lowered == prefix or lowered.startswith(f"{prefix}.")
+           for prefix in CREDENTIAL_FILE_NAME_PREFIXES):
+        return True
+    if any(marker in lowered for marker in CREDENTIAL_FILE_NAME_MARKERS):
+        return True
+    return any(lowered.endswith(suffix) for suffix in CREDENTIAL_FILE_NAME_SUFFIXES)
+
 
 class RuntimeIdentityError(RuntimeError):
     """本模块所有结构化拒绝的基类。"""
@@ -517,7 +572,13 @@ def _safe_artifact_name(base: Path, name: Any) -> str:
 
     U15 r2 P1-2：此前绝对路径（或足够深的 ``../``）能把 root 之外的任意文件
     ——包括 ``.env``——读进 ``artifact_hash``。现在三类都结构化拒绝：
-    绝对路径 / 逃逸到 root 之外 / 键名或文件名命中凭据或 ``.env`` 标记。
+    绝对路径 / 逃逸到 root 之外 / **文件名**呈凭据容器形态或命中 ``.env`` 标记。
+
+    U12-BUILD-F1：第三类**只**用 :func:`_looks_like_credential_file` 这条**文件名**
+    口径（凭据容器词/后缀/``.env``·SSH 私钥前缀），**不再**复用 K01 键名标记表
+    ``SENSITIVE_KEY_MARKERS``——那是键名口径，用作文件名子串匹配会把
+    ``src/core/management_authorization.py``（普通代码模块）误杀，使真实 ``src/``
+    树恒采集失败、发布门禁永不 GO。
     """
     raw = str(name).replace("\\", "/")
     parts = [part for part in raw.split("/") if part not in ("", ".")]
@@ -526,7 +587,10 @@ def _safe_artifact_name(base: Path, name: Any) -> str:
     if not parts:
         raise MalformedInputError([f"artifact_relatives[{name}] (empty path)"])
     for part in parts:
-        if is_sensitive_name(part) or any(
+        # U12-BUILD-F1：文件名只用**文件名**口径守卫（凭据容器形态），
+        # 不得复用 K01 键名标记表——否则 ``management_authorization.py``
+        # 因含 ``authorization`` 被误杀，真实 src/ 树永远采不到身份。
+        if _looks_like_credential_file(part) or any(
                 marker in part.lower() for marker in _RAW_ENV_KEY_MARKERS):
             raise CredentialLeakError([f"artifacts.{raw}"])
     if not (base / raw).resolve().is_relative_to(base.resolve()):

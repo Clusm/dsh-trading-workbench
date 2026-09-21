@@ -1,0 +1,66 @@
+# U12-BF1 核心验收：真实项目根身份采集
+# CMD: python identity2.py <tree>
+
+########## TREE=sb_pristine ##########
+Traceback (most recent call last):
+  File "C:\Users\Tao\AppData\Local\Temp\u12bf1\identity2.py", line 21, in <module>
+    b = ri.collect_runtime_identity(
+        ROOT, environment="demo", runtime_instance_id="unknown",
+        execution_mode="demo", declared_account_ref="demo:unknown", env={},
+        raw_settings=_direct_yaml(ROOT, "config/settings.yaml"),
+        raw_agents=_direct_yaml(ROOT, "config/agents.yaml"))
+  File "C:\Users\Tao\AppData\Local\Temp\u12bf1\sb_pristine\src\core\runtime_identity.py", line 1908, in collect_runtime_identity
+    artifacts = collect_artifact_files(root, relatives=artifact_relatives)
+  File "C:\Users\Tao\AppData\Local\Temp\u12bf1\sb_pristine\src\core\runtime_identity.py", line 557, in collect_artifact_files
+    safe = _safe_artifact_name(base, name)
+  File "C:\Users\Tao\AppData\Local\Temp\u12bf1\sb_pristine\src\core\runtime_identity.py", line 531, in _safe_artifact_name
+    raise CredentialLeakError([f"artifacts.{raw}"])
+core.runtime_identity.CredentialLeakError: credential-bearing fields rejected: artifacts.src/core/management_authorization.py
+== [D] build_release_manifest -> identity fields ==
+  artifact_hash = '544d176a073d00d2ffedd13378c08e3851a455679b78452f3b1ca2b3285f8d26'
+  runtime_instance_id = ''
+  effective_config_hash = ''
+  model_route_hash = ''
+  identity_blockers = ('IDENTITY_COLLECT_FAILED',)
+  IDENTITY_COLLECT_FAILED present: True
+  three fields all non-empty: False
+== [E] direct collect_runtime_identity (surfacing swallowed exception) ==
+EXIT=0
+
+########## TREE=sb_patched ##########
+Traceback (most recent call last):
+  File "C:\Users\Tao\AppData\Local\Temp\u12bf1\identity2.py", line 21, in <module>
+    b = ri.collect_runtime_identity(
+        ROOT, environment="demo", runtime_instance_id="unknown",
+        execution_mode="demo", declared_account_ref="demo:unknown", env={},
+        raw_settings=_direct_yaml(ROOT, "config/settings.yaml"),
+        raw_agents=_direct_yaml(ROOT, "config/agents.yaml"))
+  File "C:\Users\Tao\AppData\Local\Temp\u12bf1\sb_patched\src\core\runtime_identity.py", line 1975, in collect_runtime_identity
+    identity = build_identity(
+        environment=scope.mode,
+    ...<7 lines>...
+        effective_config=effective.as_payload(),
+    )
+  File "C:\Users\Tao\AppData\Local\Temp\u12bf1\sb_patched\src\core\contracts\k01_identity.py", line 250, in build_identity
+    artifact_hash=hash_artifact(artifact_files),
+                  ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "C:\Users\Tao\AppData\Local\Temp\u12bf1\sb_patched\src\core\contracts\k01_identity.py", line 119, in hash_artifact
+    return canonical_hash(_structured_mapping(files, name="artifact_files"))
+                          ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Tao\AppData\Local\Temp\u12bf1\sb_patched\src\core\contracts\k01_identity.py", line 113, in _structured_mapping
+    ensure_no_sensitive_fields(value)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\Tao\AppData\Local\Temp\u12bf1\sb_patched\src\core\contracts\common.py", line 93, in ensure_no_sensitive_fields
+    raise SensitiveInputError("sensitive keys rejected: " + ", ".join(paths))
+core.contracts.common.SensitiveInputError: sensitive keys rejected: src/core/management_authorization.py
+== [D] build_release_manifest -> identity fields ==
+  artifact_hash = '6c95aa9f309970d7b5890227ffd3c879a9ec51896c56ac204abed6ca47946c52'
+  runtime_instance_id = ''
+  effective_config_hash = ''
+  model_route_hash = ''
+  identity_blockers = ('IDENTITY_COLLECT_FAILED',)
+  IDENTITY_COLLECT_FAILED present: True
+  three fields all non-empty: False
+== [E] direct collect_runtime_identity (surfacing swallowed exception) ==
+EXIT=0
+
