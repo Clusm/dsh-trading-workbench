@@ -75,6 +75,10 @@
 | `-c core.autocrlf=true` | **5/5 OK** |
 | 真应用（独立沙箱树 = `32ecf635` + `git init` 后 `git apply`） | **5/5 APPLIED**，且重放结果与已验证树**逐字节相同** |
 
+- **基线之后的 HEAD 漂移已复验**：交付后集成 HEAD 又前进到 `95360552`
+  （只改 `docs/`，本包 5 个目标 blob 逐文件未变），在该提交上重跑 3 配置
+  `apply --check` 仍 **5/5 OK**。→ 本包对 `32ecf635` 及之后所有只动 `docs/`
+  的提交同样适用；若某个后续提交改了这 5 个文件之一，请按 §二 重新核对上下文。
 - 命令（仓库根 = `C:/Users/Tao/Desktop/币安/mat-wt/I`，逐补丁）：
   ```
   git -C "<I>" apply --check <diff>
