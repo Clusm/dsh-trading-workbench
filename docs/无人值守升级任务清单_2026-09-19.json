@@ -4177,38 +4177,38 @@
       {
         "id": "F14-DRILL-GATE-NOT-INSTALLED",
         "title": "core 恢复演练不安装恢复门禁（P1-1）",
-        "status": "FIX_PENDING_VERIFICATION",
+        "status": "FIXED",
         "owner": "E线（U13 后续）/U12",
         "blocks": "F14 必达结果在 core 路径上不成立；该路径的验收证据是循环证据",
         "note": "drill_epoch_bundle()（src/core/ops/recovery.py:525+）还原后只写 restore_receipt.json，其中 entry_gate 仅是字符串声明，从不写 ops/recovery_gate.json；还原根 before_entry() 返回 allowed=True / GATE_NOT_INSTALLED。全仓 require_reconcile 生产调用点只有 scripts/restore_recovery_bundle.py:252。scripts/ops/verify_recovery_plan.py:90 把门禁装在自己另建的目录再断言其阻断 = 循环证据。I 已独立核对源码证实。处置：钉住生产恢复脚本为唯一入口，或给 drill_epoch_bundle 补装门禁；并修 verify_recovery_plan 的循环断言。",
-        "fix": "U13-FU1 @ af76443（补丁包 docs/dispatch/patches/U13-FU1/bc112fe/）；待 Q 复验通过后置 FIXED 并集成。"
+        "fix": "U13-FU1 @ af76443（补丁 01-04），集成 acf9ced；Q r1 PASS-with-notes 复验通过（原始探针逐条翻转 + 12 项绕过尝试全部挡住）。"
       },
       {
         "id": "F14-LIVE-GATE-LAYOUT",
         "title": "live 档恢复门禁布局 fail-open（P1-2；即 U13 Q r2 的 P2-5 未修项）",
-        "status": "FIX_PENDING_VERIFICATION",
+        "status": "FIXED",
         "owner": "U12（须在集成前定案）+ E线",
         "blocks": "实盘档 F14 未达成",
         "note": "create_recovery_bundle 恒写 epoch.profile=''，门禁落 data/ops/；live 服务 RuntimePaths.state_root=data/live 读 data/live/ops/ 找不到门禁 -> GATE_NOT_INSTALLED -> 允许开仓。反向：若 epoch.profile='live'，门禁去 data/live/ops/ 但四个必需状态 JSON 仍平铺在 data/ -> live 状态根缺全部必需状态文件。U12 必须先定义 live 恢复布局再谈通过。",
-        "fix": "U13-FU1 @ af76443（补丁包 docs/dispatch/patches/U13-FU1/bc112fe/）；待 Q 复验通过后置 FIXED 并集成。"
+        "fix": "U13-FU1 @ af76443（补丁 01-04），集成 acf9ced；Q r1 PASS-with-notes 复验通过（原始探针逐条翻转 + 12 项绕过尝试全部挡住）。"
       },
       {
         "id": "F14-GATE-EVIDENCE-SELFASSERTED",
         "title": "恢复门禁证据是操作者自证裸布尔、读取时不复验（P1-3）",
-        "status": "FIX_PENDING_VERIFICATION",
+        "status": "FIXED",
         "owner": "E线（U13 后续）",
         "blocks": "F14 的“先对账”是流程约束而非 enforced 事实",
         "note": "positions_verified/open_orders_verified 从未由 TradeReconciliationBook/OrderOutbox 的真实对账结果推导；before_entry() 只看 state + reconciled_at_ms。手写 {\"state\":\"CLEARED\",\"reconciled_at_ms\":<now>,\"evidence\":{}} 即 allowed=True。建议：门禁读取时按当前账本事实复验，或要求证据哈希绑定对账结果。",
-        "fix": "U13-FU1 @ af76443（补丁包 docs/dispatch/patches/U13-FU1/bc112fe/）；待 Q 复验通过后置 FIXED 并集成。"
+        "fix": "U13-FU1 @ af76443（补丁 01-04），集成 acf9ced；Q r1 PASS-with-notes 复验通过（原始探针逐条翻转 + 12 项绕过尝试全部挡住）。"
       },
       {
         "id": "F18-STATE-ROOT-MISSING-UNREACHABLE",
         "title": "未声明状态根时 STATE_ROOT_MISSING 原因码不可达 -> 静默新建错误基线（P1-4）",
-        "status": "FIX_PENDING_VERIFICATION",
+        "status": "FIXED",
         "owner": "E线（U13 后续）/U12",
         "blocks": "F18 必达“不得当成全新环境而新建错误基线”在默认部署下无拦截信号",
         "note": "resolve_state_base fallback 分支返回字面量 'data' 作为 state_base_declared（runtime_paths.py:154-156），validate() 的 if not _text(state_base_declared) 因此恒不成立（:428）-> STATE_ROOT_MISSING 不可达；唯一探测口 state_base_explicit 在 src/ 内零消费者。后果：两个代码根 legacy 各得不同 lock 与不同 runtime_instance_id（=新建基线）。I 已独立核对源码证实。",
-        "fix": "U13-FU1 @ af76443（补丁包 docs/dispatch/patches/U13-FU1/bc112fe/）；待 Q 复验通过后置 FIXED 并集成。"
+        "fix": "U13-FU1 @ af76443（补丁 01-04），集成 acf9ced；Q r1 PASS-with-notes 复验通过（原始探针逐条翻转 + 12 项绕过尝试全部挡住）。"
       },
       {
         "id": "RECOVERY-BUNDLE-P2-CLUSTER",
@@ -4257,6 +4257,22 @@
         "owner": "U12",
         "blocks": "无",
         "note": "①`thresholds=` 入参可显式调低 `required`（无配置路径，默认常量冻结，唯一调用点是把门槛**调高**）②`smoke_u02` 自计数瑕疵（10 行 FAIL vs 汇总 8），两态一致、既有 ③信息：`window_cost_finalization` 等 U01 契约函数在 `src/` **无生产调用方** —— 正是 U09-OUTCOME-VS-LIFECYCLE-COST 分歧的土壤 ④信息：`current_closed` 不带窗口过滤，易被误读成本发布样本。"
+      },
+      {
+        "id": "U13FU1-BARE-BEFORE_ENTRY-FAILOPEN",
+        "title": "裸 `before_entry()` 在缺账本时 fail-open；且 service.py 启动/set_control 未注入事实（N1+N2，P2）",
+        "status": "OPEN",
+        "owner": "U12（须裁决：RC 前修 或 明确接受并登记）",
+        "blocks": "不阻断集成（Q 判 P2 有界、未构造出生产链利用），但属安全控制的 fail-open 面",
+        "note": "N1：`before_entry()` 的**未注入 facts 形态**在『门禁状态根没有账本文件 / 账本无 order_outbox 表』时，自洽摘要即放行 —— 与它自己的文档契约相悖。N2：补丁 01 的接线**只覆盖就绪链**，`src/core/service.py:314`（启动）与 `:1416`（set_control）仍是**裸 `before_entry()`**，作者自带验证器**完全不触及 service.py**。两者叠加的触发条件是『状态根缺账本』——真实部署里账本存在，故 Q 未能构造生产链利用；但 N2 说明**生产代码里仍有两处未接线的调用点**，U12 必须决定补齐还是登记接受。"
+      },
+      {
+        "id": "U13FU1-README-VS-CODE-N3",
+        "title": "U13-FU1 README 称 demo 不阻止启动，但 assert_environment_bound('demo') 实测会抛（N3，P3）",
+        "status": "OPEN",
+        "owner": "U12",
+        "blocks": "无（该 API 生产零调用点，默认部署仍可启动）",
+        "note": "文档与代码行为不一致，属交付物卫生问题。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -4284,7 +4300,7 @@
       "U13-FU1": {
         "title": "恢复门禁 4 条 P1 修复（来自 F14/F18 隔离演练）",
         "owner_role": "E线",
-        "status": "READY_FOR_REVIEW",
+        "status": "INTEGRATED",
         "head_commit": "af76443",
         "base": "943d839",
         "branch": "task/U13-FU1（worktree mat-wt/W3-fix）",
@@ -4321,27 +4337,50 @@
         "verification": {
           "session": "Q (reviews/U13-FU1/R1/q)",
           "candidate": "af76443",
-          "verdict": "PENDING",
-          "reports_dir": "docs/dispatch/reviews/U13-FU1/af76443/"
-        }
+          "verdict": "Q r1 PASS-with-notes（无阻塞项）",
+          "reports_dir": "docs/dispatch/reviews/U13-FU1/af76443/",
+          "report": "docs/dispatch/reviews/U13-FU1/af76443/Q_r1.md",
+          "evidence": {
+            "four_p1_before_after": "原始探针两棵对照树（943d839 vs 943d839+6文件+补丁01-04）逐条比对：drill_f14 19/0 exit 0（缺陷全在）-> 16/3 exit 1（3 条失败恰为缺陷断言：未装门禁 / 两条路径行为一致阻断 / C1 手写 CLEARED）；drill_f18 31/0 exit 0 -> 29/2 exit 1（validate('demo') 由 () 变 ('STATE_ROOT_MISSING',)）；probe_live_restore_layout live 档由『状态 JSON 平铺 data/、门禁在 data/live/ops/』变为**全部落 data/live/**（4 JSON+库+门禁+安装戳），空档全落 data/。",
+            "p1_details": "P1-1 门禁真落盘（文件+安装戳），verify_recovery_plan.py 循环证据消除（实测 gate after unlink = GATE_MISSING，非循环证明）；P1-2 restored_state_root/restored_gate_path **确实被演练与生产恢复共用**（grep 调用点 recovery.py:706/723、restore_recovery_bundle.py:230/232/251/263），两档 before_entry() 均 allowed=False 且与 RuntimePaths.state_root 同口径；P1-3 三档 EVIDENCE_UNVERIFIED/EVIDENCE_MISMATCH/RECONCILE_REQUIRED 全生效；P1-4 resolve_state_base 返回值未改、无新造码，补丁 04 实测输出 state_root_drift code=STATE_ROOT_MISSING，默认部署仍能启动。",
+            "bypass_attempts": "Q 自建 12 项绕过，全部挡住：空证据、自算摘要+脏账本、摘要不符、**先 CLEARED 再塞未收口单（会重新阻断，非一次性）**、只删门禁文件、只删安装戳。作者自认的两条边界**确认存在**：文件+安装戳**同时**删 -> GATE_NOT_INSTALLED 放行；篡改账本 order_outbox 行不可挡。",
+            "e2e_4_failures_adjudication": "**判为收紧（非修坏）**。Q 自建裁决探针（6/0）：先让对账**真的发生**再提交**同一份**证据 -> ok=True/state=CLEARED/GATE_CLEARED；随后再塞未收口单 -> 重新阻断，set_control('normal') 同步被拦。门禁**非死锁、非一次性**；探针 [3] 的预期是旧语义。",
+            "delta": "用正确方法重做（解包后 git init），84 脚本逐条 rc：pristine 0/84 非零、patched 0/84 非零 -> **NEW_FAIL=∅ / FIXED=∅**。作者『两边同为 2 个非零』是 git archive 无 .git 的伪影（正确树里 test_secret_scanner.py 与 smoke_u10a_release_package.py 都过）。真实工作树官方入口：OFFLINE REGRESSION OK scripts=84 exit 0。",
+            "patches": "01-05 在 3 种 git 配置下 15/15 rc=0、Checking=1、Skipped=0。**05 不必要，I 已弃用**。",
+            "lint_attribution": "**Q 独立确认 I 的诊断、并推翻作者的归因**：base 的 25 条 ruff **全部**来自 docs/dispatch/reviews/U12/.../raw/*.py（E702x9/E402x8/F401x5/E401x3）；docs/dispatch/patches/（U02 归档）**All checks passed**。沙箱（=集成树现状、未应用 05）实测 QUALITY CHECK OK files=291 untracked=0 exit 0。"
+          },
+          "new_findings": {
+            "N1": "P2（有界，非 P0）：`before_entry()` 的**未注入 facts 形态**在『门禁状态根没有账本文件 / 账本无 order_outbox 表』时 **fail-open** —— 自洽摘要即放行，与它自己的文档契约相悖。生产就绪链不受影响（总是注入账本事实），Q **未能构造生产链利用**。",
+            "N2": "补丁 01 的接线**只覆盖就绪链**；`service.py:314`（启动）与 `:1416`（set_control）仍是**裸 `before_entry()`**，作者自带验证器**完全不触及 `service.py`**。",
+            "N3": "README 称『demo 只是被检出并报告、不阻止启动』，但 `assert_environment_bound('demo')` 实测**会抛**（该 API 生产零调用点，默认部署仍可启动，故不阻塞）。"
+          },
+          "not_verified": [
+            "run_web.py 横幅未实际起服务打印（仅代码核对+实测其调用的 state_root_drift()）",
+            "N1 的生产链可利用性（未证不可利用 != 已证安全）",
+            "live 档端到端",
+            "真实交易所/断电/多账户/告警",
+            "create_recovery_bundle.py --profile 的真实 CLI",
+            "U13-FU1 范围外的 P2/P3 残留项"
+          ]
+        },
+        "integration_commit": "acf9ced"
       }
     },
     "w3_status": {
       "state": "IN_PROGRESS",
       "integrated_in_w3": [
-        "U09"
+        "U09",
+        "U13-FU1"
       ],
-      "in_flight": {
-        "U13-FU1": "READY_FOR_REVIEW（Q 复验中）"
-      },
       "remaining_first_release": [
         "U12"
       ],
       "gates": {
         "offline_regression": "OFFLINE REGRESSION OK scripts=85",
-        "quality": "QUALITY CHECK OK files=294 untracked=0",
+        "quality": "QUALITY CHECK OK files=295 untracked=0",
         "contracts": "PASS 173 / FAIL 0 (golden 160)"
-      }
+      },
+      "note": "U13-FU1 的 4 条 P1 全部 FIXED 并集成；W3 剩余仅 U12（RC 集成 + F01–F25 矩阵 + 7 天观察窗启动）。"
     }
   },
   "dispatch_version": "v1.1",

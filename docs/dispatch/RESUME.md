@@ -16,8 +16,8 @@
 - 已验收候选：`71f8109`（Q r5 复验 PASS-with-notes；与 tag 的差异仅为 dispatch 文档，`src/core/contracts` 与 `docs/contracts` 逐字节相同）
 - 集成区分支：`integration/unattended-v3` @ `ffdab44`（契约冻结后又有 1 个台账提交 `4fdc6bf`）
 - 四个实现线 worktree **已创建**（均从 `ffdab44`）：`mat-wt/A`(task/U01)、`mat-wt/B`(task/U04)、`mat-wt/CD`(task/U03)、`mat-wt/EF`(task/U15)
-- 当前步骤：**W3 进行中** —— **U09 已 INTEGRATED**；**U13-FU1 待复验**；**U12（RC 集成）** 为剩余最后一项。
-- 最新门禁：**`OFFLINE REGRESSION OK scripts=85`**、**`QUALITY CHECK OK files=294 untracked=0`**、契约 `PASS 173 / FAIL 0`。
+- 当前步骤：**W3 进行中** —— **U09 与 U13-FU1 均已 INTEGRATED**；**仅剩 U12（RC 集成 + F01–F25 矩阵 + 7 天观察窗启动）**。**首批 14 项已集成 13 项。**
+- 最新门禁：**`OFFLINE REGRESSION OK scripts=85`**、**`QUALITY CHECK OK files=295 untracked=0`**、契约 `PASS 173 / FAIL 0`。
 
 ### W1 进度（每轮更新）
 
@@ -172,7 +172,16 @@
   - **判定：F14 = PASS-with-notes（有条件的）；F18 = PASS-with-notes**。F14 在**生产恢复脚本**路径上必达成立（先对账再开仓、不重复下单，`broker.posts` 全程未增加）；F18 在**显式状态根**下必达成立（换代码根不换锁/不换身份、PID 复用拒启动、迁移回滚不损坏）。
   - **4 条 P1（I 已独立核对源码证实）**：`F14-DRILL-GATE-NOT-INSTALLED`、`F14-LIVE-GATE-LAYOUT`、`F14-GATE-EVIDENCE-SELFASSERTED`、`F18-STATE-ROOT-MISSING-UNREACHABLE`；另有 5 条 P2（`RECOVERY-BUNDLE-P2-CLUSTER`，含**既有**缺陷"截断锁文件单方接管 → 双持锁"）与 4 条 P3。全部已登记进台账 `dispatch.known_issues`。
   - KI02 天然检验通过：该树**无 `.venv`**，`smoke_windows_service_plan.py` 仍 24/0 无 `ValueError`；官方入口 `OFFLINE REGRESSION OK scripts=84` exit 0。
-- **E 线修复 `U13-FU1`**：**作者已交付 → 独立复验进行中**。工作树 `mat-wt/W3-fix`（`task/U13-FU1`，base `943d839`），**head `af76443`**，工作树干净。
+- **E 线修复 `U13-FU1`**：**✅ 已 INTEGRATED**（`acf9ced`）。工作树 `mat-wt/W3-fix`（`task/U13-FU1`，base `943d839`），head `af76443`。
+  - **Q r1 = PASS-with-notes（无阻塞项）**，报告 `docs/dispatch/reviews/U13-FU1/af76443/Q_r1.md`。
+  - **4 条 P1 全部 FIXED**（台账已置 FIXED）：原始探针在 pristine 上确证缺陷、在 patched 上**同一条断言翻转**（`drill_f14` 19/0 exit0 → 16/3 exit1；`drill_f18` 31/0 exit0 → 29/2 exit1；live 档状态 JSON 从平铺 `data/` 变为全落 `data/live/`）。
+  - **12 项绕过尝试全部挡住**，含"先 CLEARED 再塞未收口单会**重新阻断**（非一次性门禁）"。仅两条**作者已声明的边界**确认存在：门禁文件+安装戳**同时**删、篡改账本 `order_outbox` 行。
+  - **`drill_f14_e2e` 那 4 条失败：Q 独立裁决为"收紧"而非"修坏"**（自建探针 6/0：真对账后提交同一份证据 → `CLEARED`；再塞未收口单 → 重新阻断）。
+  - **修正了作者的错误归因**：25 条 ruff **全部**来自 I 归档的演练探针（`docs/dispatch/patches/` 的 U02 归档 **All checks passed**）→ **补丁 05 已弃用**，未新增任何 exclude。
+  - **新登记两条（U12 须裁决，不阻断集成）**：`U13FU1-BARE-BEFORE_ENTRY-FAILOPEN`（**N1+N2**：裸 `before_entry()` 在缺账本时 fail-open；且 `service.py:314` 启动 / `:1416` `set_control` **仍是未注入事实的裸调用**，作者验证器完全不触及 `service.py`）、`U13FU1-README-VS-CODE-N3`（README 称 demo 不阻止启动，实测 `assert_environment_bound('demo')` 会抛）。
+  - 集成实测：verifier 39/0、U13 冒烟 `OK steps=4`、契约 173/0、`QUALITY CHECK OK files=295`、**`OFFLINE REGRESSION OK scripts=85`**。
+
+- **E 线修复 `U13-FU1`（首次派发记录，保留备查）**：工作树 `mat-wt/W3-fix`（`task/U13-FU1`，base `943d839`），head `af76443`，工作树干净。
   - 分支内 6 文件：`src/core/ops/recovery.py`(+275)、`src/core/runtime_paths.py`(+56)、`scripts/ops/verify_recovery_plan.py`(+50)、`scripts/restore_recovery_bundle.py`(+40)、**新增** `scripts/ops/verify_u13f1_recovery_gate.py`(+400)、`scripts/smoke_u13_supervision.py`(+7)。
   - 补丁包 `docs/dispatch/patches/U13-FU1/bc112fe/`：`01`（必选·P1-3 生产接线）、`02`（必选·P1-2 建包 profile）、`03`/`04`（建议·P1-4 可观测）、`05`（**I 判定不采用**，见下）+ README + `evidence/`（before/after 日志）。
   - **`05_optional_docs_probe_lint.diff` 不采用**：作者把 `check_quality` 变红归因给"U02/base 的归档脚本"，**该归因经 I 按文件分组实测不成立** —— 25 条 ruff **全部来自 I 自己归档的演练探针**；已改名 `.py.txt` 修复，`check_quality` 现为 `OK files=290 untracked=0`。应用 `05` 会新增 exclude = 收窄门禁范围，故弃用。
