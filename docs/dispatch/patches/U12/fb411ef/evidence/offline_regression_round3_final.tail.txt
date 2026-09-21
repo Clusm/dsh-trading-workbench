@@ -1,0 +1,6 @@
+  PASS  报告前后数据库文件字节一致
+
+U09 冒烟: 60 通过 / 0 失败  (PATCHED=True, SHARED=True)
+
+OFFLINE REGRESSION OK scripts=85
+OFFLINE_EXIT=0

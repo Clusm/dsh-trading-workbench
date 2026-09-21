@@ -123,7 +123,7 @@ cd C:\Users\Tao\Desktop\币安\mat-wt\W3-rc
 | `U08-R5-FU2` | 执行器内 `db.*` 调用无护栏；审计库 `OperationalError` 穿出整轮、`decision=None` | U12/I | **未修**（属 `src/`）。既有形态，与 F05 的"DB 锁/满"直接相关 |
 | `U02-LEDGER-PARTITION` | 声明 `MTA_ACCOUNT_REF` 会使历史账本行不可幂等（同 `trade_id` 两域各一行）；先迁移后声明 | U02/U13/I | **本 RC 不得在生产启用 `MTA_ACCOUNT_REF`**（迁移脚本未落地）。影响 F18 |
 | `U02` `_consumed_ids` 纯内存 | 重启后同一 `exit_key` 会再次 `SUBMIT_REDUCE` | U02/U13 | **未修**。登记为 F04/F03 的重启面已知缺口 |
-| `AlertQueue` 无生产消费者 | U14：监控 `errors`，且 `PERSIST_FAILED` 不在其中 | U14 | **未修**。告警积压/弃投的监控口径缺口，影响 F12/F22 |
+| `AlertQueue` 无生产消费者 | U14：监控 `errors`，且 `PERSIST_FAILED` 不在其中 | U14 | **未修**（**台账登记项**，本 RC 未复跑其反例）。代码侧已确认：`src/core/ops/alert_delivery.py` 存在 `AlertQueue` 与 `errors` 计数器，`PERSIST_FAILED` 只进 `reason_codes`（`:201`/`:1727`）而非 `errors`（`:1681`）⇒ 与台账描述一致。告警积压/弃投的**监控口径缺口**，影响 F12/F22 |
 | `U09-OUTCOME-VS-LIFECYCLE-COST` | 「30 完整闭合」读 outcome 成本快照而非 lifecycle 权威态（fail-open，继承自基线） | **U12 须裁决是否 RC 前修** | **待裁决**（见矩阵 F23 + 第 8 节）。发布门禁权威性缺口 |
 | `U09-NET-UNKNOWN-PADDING` | 净收益未知的样本仍计入 30 闭合且**零门槛**；最少 1 个未知样本即可把 29 条真凭证凑成 30 | U12/U09 后续 | **待裁决**（见矩阵 F23）。发布门禁口径缺口 |
 | `U13FU1-BARE-BEFORE_ENTRY-FAILOPEN` | 裸 `before_entry()` 在缺账本时 fail-open；`service.py:314/:1416` 未注入事实（N1+N2） | U12 须裁决；**正在由 `U13-FU2` 修** | **在修（IN FLIGHT）**。本 RC **不声称已修**；注册为 F14 待裁决项 |

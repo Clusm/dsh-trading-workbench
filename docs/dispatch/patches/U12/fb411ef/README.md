@@ -4,7 +4,8 @@
 - 角色：I / 主会话（U12 BUILD 会话）
 - 分支：`task/U12`（worktree `mat-wt/W3-rc`）
 - **base：`7885e6a`**（= U13-FU1 集成后的集成树 HEAD）
-- **candidate head：`fb411ef`**（本目录名即该短 hash）
+- **candidate head：`fb411ef`**（本目录名即该短 hash）；其后仅追加本补丁包目录本身
+  （`524815c`，**不含产品逻辑、不含 RC 正文变更**），故交付物正文与 `fb411ef` 逐字节一致。
 - 契约：`contract-v3.0`
 - 性质：**不含任何 `src/**` / `scripts/**` 产品逻辑改动**；只含 RC 交付物文档、独立验收套件、CI 接线。
 - 状态：**DRAFT**（未冻结、未部署、未开始观察）
