@@ -4587,18 +4587,20 @@
       {
         "id": "U09-OUTCOME-VS-LIFECYCLE-COST",
         "title": "发布门禁读 outcome 成本快照，而非 lifecycle 权威态（P2·fail-open·继承自基线）",
-        "status": "OPEN",
+        "status": "FIX_PENDING_VERIFICATION",
         "owner": "U12（须裁决是否在 RC 前修）",
         "blocks": "『30 完整闭合』的权威性；不影响 U09 集成（既有口径，非 U09 回归）",
-        "note": "A r1 实测：`release_evidence.py:1097-1106` 的查询**根本没 SELECT lifecycle 的 cost_status**，`_eligible_lifecycle` 判的是 outcome 行。双向对照：l.INCOMPLETE/o.COMPLETE -> PASS 30；l.COMPLETE/o.INCOMPLETE -> FAIL 29，即门禁完全由 outcome 行决定。权威性依据：`trade_reconciliation.py:625` 是唯一成本重算写方且 UPDATE position_lifecycles；`binance_futures.py:2652/3120` 两处只降级 lifecycle、不碰 outcome；而 `log_trade_outcome` 是 INSERT OR IGNORE（同键复写被静默丢弃，行数 1->1）。=> lifecycle 是可变的当前权威，outcome 是首写即冻结的快照。**基线 base_release_evidence.py:357,373 同样读 o.cost_status => 既有口径，U09 未修**（其 must-haves 未含此项）。离线无法端到端复现真写路径分歧，待真机复核。"
+        "note": "A r1 实测：`release_evidence.py:1097-1106` 的查询**根本没 SELECT lifecycle 的 cost_status**，`_eligible_lifecycle` 判的是 outcome 行。双向对照：l.INCOMPLETE/o.COMPLETE -> PASS 30；l.COMPLETE/o.INCOMPLETE -> FAIL 29，即门禁完全由 outcome 行决定。权威性依据：`trade_reconciliation.py:625` 是唯一成本重算写方且 UPDATE position_lifecycles；`binance_futures.py:2652/3120` 两处只降级 lifecycle、不碰 outcome；而 `log_trade_outcome` 是 INSERT OR IGNORE（同键复写被静默丢弃，行数 1->1）。=> lifecycle 是可变的当前权威，outcome 是首写即冻结的快照。**基线 base_release_evidence.py:357,373 同样读 o.cost_status => 既有口径，U09 未修**（其 must-haves 未含此项）。离线无法端到端复现真写路径分歧，待真机复核。",
+        "fix": "U09-FU1 @ b03bee4（补丁包 docs/dispatch/patches/U09-FU1/b03bee4/）；待 Q 复验通过后置 FIXED 并集成。"
       },
       {
         "id": "U09-NET-UNKNOWN-PADDING",
         "title": "净收益未知的样本仍计入 30 完整闭合，且无门槛（P2·残余 fail-open）",
-        "status": "OPEN",
+        "status": "FIX_PENDING_VERIFICATION",
         "owner": "U12 / U09 后续",
         "blocks": "无（数据违反 U01 不变量，非现实攻击面），但属发布门禁口径缺口",
-        "note": "A r1 最小构造：30 条 `cost_status=COMPLETE` + `funding=NULL` -> 门禁 PASS/actual=30，`net_unknown=30`、`net_total=0.0`、**净收益可算样本 0 个**；**最少 1 个未知样本即可把 29 条真凭证凑成 30 放行**。判 P2 而非 P0：U01 的 `cost_complete`（trade_reconciliation.py:610）与 `finalize_costs` 都要求成本三项齐备才给 COMPLETE，故这种数据违反 U01 不变量。问题是 U09 既不校验该不变量，也对 `net_realized_unknown` **零门槛**，且作者 README §8 的九条未尽事项**未登记此条**。"
+        "note": "A r1 最小构造：30 条 `cost_status=COMPLETE` + `funding=NULL` -> 门禁 PASS/actual=30，`net_unknown=30`、`net_total=0.0`、**净收益可算样本 0 个**；**最少 1 个未知样本即可把 29 条真凭证凑成 30 放行**。判 P2 而非 P0：U01 的 `cost_complete`（trade_reconciliation.py:610）与 `finalize_costs` 都要求成本三项齐备才给 COMPLETE，故这种数据违反 U01 不变量。问题是 U09 既不校验该不变量，也对 `net_realized_unknown` **零门槛**，且作者 README §8 的九条未尽事项**未登记此条**。",
+        "fix": "U09-FU1 @ b03bee4（补丁包 docs/dispatch/patches/U09-FU1/b03bee4/）；待 Q 复验通过后置 FIXED 并集成。"
       },
       {
         "id": "U09-K06-GREEN-BUT-NO_GO",
@@ -4995,7 +4997,7 @@
       },
       "post_tasklist_fixes": {
         "U09-FU1": {
-          "status": "IN_PROGRESS",
+          "status": "READY_FOR_REVIEW",
           "branch": "task/U09-FU1",
           "worktree": "mat-wt/U09F1",
           "base": "4de8666",
@@ -5014,7 +5016,45 @@
             "RECOVERY-BUNDLE-P2-CLUSTER",
             "W1-JOINT-WIRING",
             "U08-U12-WIRING"
-          ]
+          ],
+          "head_commit": "0f7acd7",
+          "code_head": "b03bee4",
+          "changed_in_branch": [
+            "src/core/release_evidence.py(+114/-19)",
+            "scripts/smoke_u09_release_evidence.py(+123/-2)",
+            "tests/acceptance/test_release_evidence_v2.py(+135/-2)"
+          ],
+          "shared_patch": "scripts/smoke_release_acceptance.py(+5/-1) 只出补丁 02_*.diff（未提交进分支）",
+          "patch_package": "docs/dispatch/patches/U09-FU1/b03bee4/（01 release_evidence、02 smoke_release_acceptance 夹具 + README + evidence/；包内 .py 数 = 0，探针以 .py.txt 归档）",
+          "before_after": {
+            "两表都 COMPLETE": "PASS 30 -> PASS 30",
+            "l.INCOMPLETE / o.COMPLETE": "**PASS 30（错）-> FAIL 0**",
+            "l.COMPLETE / o.INCOMPLETE": "FAIL 0 -> FAIL 0（未放宽）",
+            "30 条净收益全未知": "**PASS 30（可算样本 0）-> FAIL 0**",
+            "29 真凭证 + 1 未知": "**PASS 30（错）-> FAIL 29**",
+            "合法零收益 net==0.0": "PASS 30 -> PASS 30"
+          },
+          "caliber": {
+            "缺陷1": "改成**两表都必须 COMPLETE**（新增 lifecycle_authority_reason()）。**为什么取与而不是只认 lifecycle**：只认 lifecycle 会让 `l.COMPLETE/o.INCOMPLETE` 从 FAIL 变 PASS = **放宽**；两表取与则**新合格集合 ⊆ 旧合格集合**（严格单调控紧）。快照未删：新增 `cost_status_snapshot_mismatches`（带 `snapshot_more_optimistic`）作交叉校验。",
+            "缺陷2": "选**『未知不计入 eligible』**（不选『设上限』：上限需要凭空发明一个可调门禁参数，排除是**零参数**）。`net_realized is None` ⇒ 不计入 30，原因码 `NET_REALIZED_UNKNOWN`；**只看 `is None` 不看真值**，故 `0.0`（合法零收益）照常计入。`required=30` 一字未动。"
+          },
+          "test_change_self_justification": "**未删除/未放宽任何既有断言**：两个套件在『只换实现不换测试』下就已全绿（旧代码下 60/0、78/0）；改动 = 夹具加**可选**参数 `lifecycle_cost_status`（默认 None ⇒ 与旧行为逐字相同）+ 新增 `[4b]`7 条 / `§4b`8 条断言（含 3+3 条反向证据：正常样本、快照悲观、合法零收益）+ 一处 FAIL 详情改为计数（无断言语义）。反向：把**新**测试扣在**旧** release_evidence 上 -> smoke exit 1（4 FAIL）、acceptance exit 1（4 FAIL）；新代码下 67/0、86/0。把新测试扣在 **U09 之前**的 release_evidence 上 -> **31/0 exit=0** 且**主动断言缺陷存在**（eligible==30）非 SKIP。",
+          "shared_fixture_justification": "`smoke_release_acceptance.py` 自称 `cost_status=COMPLETE` 却把 `funding_cashflow` 留 NULL —— 与 V1 同型、违反 U01 不变量，**任何** fail-closed 口径下都会红（旧断言『30 笔』+ `release_readiness==\"GO\"`）。加 `funding_cashflow=0.0`（零资金费 != 缺证据）是**把夹具拉回它自己声称的状态**；未动门槛、未改断言。**待 Q 裁决**。",
+          "evidence": "3 种 git 配置 x 2 补丁 0 Skipped/0 error；全量回归 **94** 脚本 pristine `OK scripts=94` rc=0 / patched `OK scripts=94` rc=0 -> **NEW_FAIL=∅、FIXED=∅**；U09 冒烟 60->**67/0**、验收 78->**86/0**、contracts 173/0、db_migrations 13/0、release_acceptance **17/0**、u06a rc=0、test_shadow_labels OK；CLI 探针 directional_candidates=200 未变；check_quality exit 0（files=303）未新增 exclude；『谁能声明 PASS』未放宽、200 口径一字未动。",
+          "unfinished": [
+            "smoke_u09_release_evidence.py 在 U09 之前的基线上本来就跑不起来（`declaration=` 关键字不存在）—— 原版在 448a4e9 上同样抛 TypeError，属既有状态，未顺手修",
+            "真写路径造出两表分歧仍未能离线端到端复现（需联网/下单），只做静态构造 + 行级实测",
+            "**net 数值仍取自 outcome 最新修订行**（保 F23 迟到修订语义），本次只把 lifecycle 当**成本完整性的否决位**，不改 net 取数口 —— 有意保留的边界",
+            "funding=NULL 但 cost_status=COMPLETE 的**历史旧行**会被排除（fail-closed，符合预期），真实发布前建议做一次离线影响面统计（本次未读真实 data/，无数字）",
+            "`_eligible_lifecycle` 的 `.upper()` 宽容比较（P3·N2）保留未动；U13FU3-INJECTION-TRUST / U08-R5-* / U09-K06-* / REVISION_CONFLICT 死分支一概未动"
+          ],
+          "verification": {
+            "session": "Q (reviews/U09-FU1/R1/q)",
+            "candidate": "0f7acd7",
+            "verdict": "PENDING",
+            "reports_dir": "docs/dispatch/reviews/U09-FU1/0f7acd7/",
+            "focus": "重点：①自建探针复现 6 场景前后对照；②**枚举集合差证明严格收紧**（0 个『旧不合格新合格』）；③**零 vs 未知必须分得清**（0.0/0/Decimal(0)/-0.0 计入；None/\"\"/缺键/nan 不计入）；④逐 hunk 裁决测试改动 + 两个反向测试；⑤裁决 smoke_release_acceptance 夹具改动是『拉回自洽』还是『救活即将变红的断言』；⑥7/200/30 四个数一个不许动。"
+          }
         }
       }
     },
