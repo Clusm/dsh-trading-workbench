@@ -192,7 +192,7 @@ cd C:\Users\Tao\Desktop\币安\mat-wt\W3-rc
 | 命令 | exit | 摘要 |
 |---|---|---|
 | `scripts/check_quality.py` | 0 | `All checks passed!` / `QUALITY CHECK OK files=295 untracked=0` |
-| `scripts/run_offline_regression.py` | 0 | `OFFLINE REGRESSION OK scripts=84` |
+| `scripts/run_offline_regression.py` | 0 | `OFFLINE REGRESSION OK scripts=85`（含 81 个 `smoke_*` + 4 个非 smoke 入口） |
 | `tests/acceptance/test_unattended_release.py` | 0 | 见 `evidence/` 日志 |
 
 > 余下 13 个 `tests/acceptance/*.py` 与各 `scripts/smoke_*.py` 由入口 [2] 覆盖；本 RC
@@ -255,5 +255,5 @@ cd C:\Users\Tao\Desktop\币安\mat-wt\W3-rc
 | 轮次 | 结果 | 根因 |
 |---|---|---|
 | 第 1 轮（矩阵/README 已提交、`observed_status.*` **未**提交时） | `run_offline_regression.py` **FAIL**（`smoke_u10a_release_package.py` 5 项失败） | `docs/releases/unattended_rc/README.md` 的 3 个相对链接指向**尚未落盘**的文件 → `doc_links_resolve` 报 3 条 `BROKEN_LINK`，并连带 `run_web.py --verify-package rc=2`。**门禁真实生效**（U10a 的"不漏包/链接可达"闸门抓到了本 RC 的在制品）。 |
-| 第 2 轮（全部交付物落盘后） | 见 §6 表：`OFFLINE REGRESSION OK scripts=84`，**exit 0** | 修复方式为**补齐文件**（非豁免/非跳过），门禁范围未收窄 |
+| 第 2 轮（全部交付物落盘后） | `OFFLINE REGRESSION OK scripts=85`，**exit 0** | 修复方式为**补齐文件**（非豁免/非跳过），门禁范围未收窄；第 1 轮的 5 项失败**全部消失** |
 

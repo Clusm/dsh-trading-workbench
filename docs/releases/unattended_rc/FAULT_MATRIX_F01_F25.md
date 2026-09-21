@@ -21,7 +21,7 @@
 
 | 代号 | 证据 | 来源 |
 |---|---|---|
-| `E1` | `scripts/run_offline_regression.py` → **exit 0**，`OFFLINE REGRESSION OK scripts=84` | **自跑**（本树） |
+| `E1` | `scripts/run_offline_regression.py` → **exit 0**，`OFFLINE REGRESSION OK scripts=85`（本树实测；Q 在 U13-FU1 候选树上曾记 84，**以本树实测为准**） | **自跑**（本树） |
 | `E2` | `scripts/check_quality.py` → **exit 0**，`QUALITY CHECK OK files=295 untracked=0` | **自跑**（本树） |
 | `E3` | `tests/acceptance/test_execution_faults.py` → **exit 0**，`168 通过 / 0 失败` | **自跑**（本树） |
 | `E4` | `tests/acceptance/test_release_evidence_v2.py` → **exit 0**，`78 通过 / 0 失败` | **自跑**（本树） |
@@ -135,7 +135,7 @@ Q r1 判 **PASS-with-notes，无阻塞项**）：
 | P1-4 | 未声明状态根时 `STATE_ROOT_MISSING` 不可达 → 静默新建错误基线 | `validate('demo')` 现返回 `('STATE_ROOT_MISSING',)`；`state_base_explicit` 有真实消费者（`state_root_drift`） |
 
 Q 另用**正确方法重做** delta（解包后 `git init`，84 脚本逐条 rc）：`NEW_FAIL=∅ / FIXED=∅`；
-真实工作树官方入口 `OFFLINE REGRESSION OK scripts=84 exit 0`。I 已弃用作者的补丁 05
+真实工作树官方入口 `OFFLINE REGRESSION OK scripts=84 exit 0`（**引用**该报告的数字；本树实测为 **85**，见 E1）。I 已弃用作者的补丁 05
 （作者对 `check_quality` 变红的归因经 I/Q 实测**不成立**：25 条 ruff 全部来自 I 自己归档的
 演练探针 `docs/dispatch/reviews/U12/.../raw/*.py`，已改名 `.py.txt` 修复）。
 
