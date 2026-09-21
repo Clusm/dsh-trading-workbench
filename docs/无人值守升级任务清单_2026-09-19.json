@@ -2044,6 +2044,22 @@
             "_load_state() 损坏静默清去重记忆（未改，已登记）"
           ],
           "unfinished": "无（1-5 全部已修或已如实登记）；真实宿主多实例并发、DB 侧勾稽、浏览器渲染未验证（同 r2）"
+        },
+        {
+          "type": "review_r4_verification",
+          "candidate": "fbef4e0",
+          "verdict": "CHANGES_REQUESTED（单点阻塞 N6）",
+          "archived_path": "docs/dispatch/reviews/U08/fbef4e0/Q_r4.md",
+          "n3_declared_scope_closed": "**声明范围真闭合**：cc9287a 两场景均'异常穿出+intents 全废' -> 0c131f2 均不穿出并记 LEDGER_SAVE_DEFERRED；真实外部持锁/连续两轮失败/失败与成功交替都不穿出；**孤儿确实落盘可审计**（新账本 orphan_consumed=['t1']）",
+          "n6_blocker": "**N6（P2 未登记，同 N3 形态）**：save()/consume()/release() 只吞 LockTimeout（save 另加 Corrupt），**OSError/PermissionError 仍穿出整个执行器**，后果与 N3 同形，而交付物**一字未登记** -> 按标尺不算闭合。复验者建议：三处 except Exception 即可（note 已自带异常名，不丢诊断）",
+          "n1_verified": "**真修**：主路径+卡册损坏 -> CARDS_INVALID+NO_TICKETS_AVAILABLE、blocked；真漂移仍 STRATEGY_LAB_DRIFT，两类不混。**有意行为变化判安全**：verdict=blocked 非 no_edge、空卡册产不出新信号、唯一放行的是历史票据（与既有'卡册缺失'路径逐字同形）",
+          "n2_verified": "如实（graph.py funnel/ledger 0 命中；r3 表已改'生产不可达'；过乐观旧文只剩在已标 SUPERSEDED 的归档里）",
+          "old_pkgs": "c147895/ 与 ec8fd1c/ **都已标 SUPERSEDED**（前者另有 SUPERSEDED.md）；命名口径写清",
+          "patch_applicability": "**0c131f2/ 可干净应用到当前集成 HEAD**（实测 HEAD=509246f；5/5 x 3 配置，-v 确认无 Skipped；diffstat 653/36 与 README 一致）-> **非集成阻塞项**",
+          "delta": "base=83 / head=84、NEW_FAIL=[]、非零 rc=[]、harness 入口 rc=0（83/84）；167 次执行全 rc=0；FAIL 行只在 rc=0 的 smoke_u02（负向对照）",
+          "gates": "files=290 / secret 525，全绿；抽样 7 项全过（接线 7、8x5 跨进程全 1、31 个 FAULT 码无一 no_edge、预算、同源）",
+          "new": "N6(P2 阻塞)、N7(P3 README 写 exec:<iso> 实为 exec-<iso>)、N8/N9 观察",
+          "unfinished": "OSError 真实触发频率、生产端到端（归 U12）无法离线验证"
         }
       ],
       "blockers": [],
@@ -2099,7 +2115,7 @@
           "sessions": [
             "U08 author (r3)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED（单点阻塞 N6）",
           "reports_dir": "docs/dispatch/reviews/U08/<r3head>/"
         },
         {
@@ -2109,8 +2125,18 @@
           "sessions": [
             "Q (reviews/U08/R4/r1)"
           ],
-          "verdict": "PENDING",
+          "verdict": "CHANGES_REQUESTED（单点阻塞 N6）",
           "reports_dir": "docs/dispatch/reviews/U08/fbef4e0/"
+        },
+        {
+          "round": "r5",
+          "stage": "修复复验",
+          "candidate": null,
+          "sessions": [
+            "U08 author (r4)"
+          ],
+          "verdict": "PENDING",
+          "reports_dir": "docs/dispatch/reviews/U08/<r4head>/"
         }
       ],
       "qa_runs": []
