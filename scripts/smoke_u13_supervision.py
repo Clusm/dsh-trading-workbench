@@ -1,11 +1,13 @@
 """U13 冒烟：托管 / 单实例 / RuntimePaths / 同 epoch 恢复包（全程离线）。
 
-三个子步骤，全部只写临时目录、不读真实 ``.env``/``data``/密钥、不联网、
+四个子步骤，全部只写临时目录、不读真实 ``.env``/``data``/密钥、不联网、
 不启动服务、不下单：
 
 1. ``tests/acceptance/test_supervision.py``（U13 验收套件，166 项断言）；
 2. ``scripts/ops/verify_runtime_paths.py``（消费者清单 / 共享出口根唯一 / 锁不随代码根漂移）；
-3. ``scripts/ops/verify_recovery_plan.py``（建包 → 校验 → 隔离演练 → 先对账再开仓）。
+3. ``scripts/ops/verify_recovery_plan.py``（建包 → 校验 → 隔离演练 → 先对账再开仓）；
+4. ``scripts/ops/verify_u13f1_recovery_gate.py``（U13-FU1：演练路径真的装门禁 /
+   demo·live 两态布局 / 门禁证据读取时复验 / 未声明状态根可检出）。
 
 任一子步骤非零退出即整体失败。
 """
@@ -22,6 +24,7 @@ STEPS = (
     ("acceptance", "tests/acceptance/test_supervision.py"),
     ("runtime_paths", "scripts/ops/verify_runtime_paths.py"),
     ("recovery_plan", "scripts/ops/verify_recovery_plan.py"),
+    ("recovery_gate_u13f1", "scripts/ops/verify_u13f1_recovery_gate.py"),
 )
 
 

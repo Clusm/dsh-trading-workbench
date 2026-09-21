@@ -138,6 +138,14 @@ def resolve_state_base(
 
     第三个元素 ``source`` 取值 ``declared``（显式声明，锁与状态不随代码根漂移）
     或 ``fallback``（未声明，退回旧布局，锁随代码根——升级前的行为）。
+
+    **P1-4**：``fallback`` 分支返回的第二个元素是**旧布局的相对路径** ``"data"``
+    （不是"调用方声明的值"）。它对既有消费者必须逐字节保持不变（例如
+    ``RuntimePaths.state_base_declared`` 在旧布局下就是 ``"data"``）。因此
+    "是否已声明状态根"这一判断**只能**用 ``source``（:attr:`RuntimePaths.
+    state_base_explicit` / :meth:`RuntimePaths.state_root_drift_reasons`），
+    **不得**用"声明值是否为非空字符串"——后者在旧布局下恒为真，
+    ``STATE_ROOT_MISSING`` 会永不可达。
     """
     root = Path(code_root).resolve()
     # 显式形参接受 str 或 Path（``_text`` 只处理 str，Path 必须先归一化）。
@@ -254,8 +262,46 @@ class RuntimePaths:
 
     @property
     def state_base_explicit(self) -> bool:
-        """状态根是否被 **显式声明**（决定"换代码根是否换锁"）。"""
+        """状态根是否被 **显式声明**（决定"换代码根是否换锁"）。
+
+        ``False`` = 旧布局（``<code_root>/data``）：同一账户换一个代码目录启动会得到
+        **另一把锁与另一套运行代**，这正是 F18 的漂移面。该性质必须**可被检出**
+        （见 :meth:`state_root_drift` / :meth:`validate`），不能只在脚本里可读。
+        """
         return self.state_base_source == "declared"
+
+    def state_root_drift(self) -> dict[str, Any]:
+        """未声明状态根时的漂移报告（**只读、不落盘**）。
+
+        默认部署（未设置 ``MTA_STATE_ROOT`` / ``paths.state_root``）是真实存在的，
+        本方法不把它变成不可用，而是把"锁与运行代随代码根漂移"这一事实**检出并
+        报告**出来，供启动期检查与看板消费（fail-closed 的**可观测**）：
+
+        - ``declared``：是否显式声明了状态根；
+        - ``code``：告警码（``STATE_ROOT_MISSING``）或空串；
+        - ``lock_follows_code_root``：旧布局下恒为 ``True``（锁随代码根）；
+        - ``remediation``：可选修复动作（声明 ``MTA_STATE_ROOT``）。
+        """
+        explicit = self.state_base_explicit
+        return {
+            "declared": explicit,
+            "state_base": str(self.state_base),
+            "state_base_declared": self.state_base_declared,
+            "state_base_source": self.state_base_source,
+            "profile": self.profile,
+            "lock_file": str(self.lock_file),
+            "run_registry_file": str(self.run_registry_file),
+            "lock_follows_code_root": not explicit,
+            "code": "" if explicit else STATE_ROOT_MISSING,
+            "remediation": (
+                "" if explicit else
+                f"声明 {STATE_ROOT_ENV_VAR}=<账户状态基座>（或 paths.state_root），"
+                "使锁/账本/运行代不随代码根漂移（R12/F18）"),
+        }
+
+    def state_root_drift_reasons(self) -> tuple[str, ...]:
+        """漂移告警码元组（未声明 → ``(STATE_ROOT_MISSING,)``，否则空）。"""
+        return () if self.state_base_explicit else (STATE_ROOT_MISSING,)
 
     @property
     def state_root(self) -> Path:
@@ -425,8 +471,12 @@ class RuntimePaths:
         本方法只做本地输入归一化 + 补一条"状态基座必须可解析"的前置检查。
         """
         reasons: list[str] = []
-        if not _text(self.state_base_declared):
-            reasons.append(STATE_ROOT_MISSING)
+        # P1-4：这里必须判"是否**显式声明**"，而不是"声明的字面量是否非空"。
+        # ``resolve_state_base`` 的 fallback 分支会把旧布局的相对路径 ``"data"``
+        # 当作声明值返回（对既有消费者保持逐字节兼容），于是按"非空即已声明"
+        # 判定会让 ``STATE_ROOT_MISSING`` **永不可达**——未声明状态根时换代码根
+        # 得到不同锁与不同运行代（静默新建错误基线）却没有任何原因码。
+        reasons.extend(self.state_root_drift_reasons())
         declared_value: str | Path
         if self.state_base_declared:
             raw = _text(self.state_base_declared)

@@ -1,0 +1,80 @@
+U13-FU1 verify tmp = C:\Users\Tao\AppData\Local\Temp\u13f1-gate-dmcmfvb3
+  NOTE  缺失符号（视作补丁未应用）: facts_digest, ledger_reconcile_facts, restored_gate_path, restored_state_root
+
+[P1-1/P1-2] 还原装门禁 + profile 感知布局（demo / live 两态）
+  PASS  profile=(demo) 恢复包携带 epoch.profile
+  [profile=(demo)] state_root=data gate=data/ops/recovery_gate.json
+  PASS  profile=(demo) 状态根与 RuntimePaths.state_root 同口径
+  PASS  profile=(demo) 四个必需状态 JSON 都落在状态根内
+  PASS  profile=(demo) 数据库落在状态根内
+  FAIL  profile=(demo) 还原后 ops/recovery_gate.json 真的存在  C:\Users\Tao\AppData\Local\Temp\u13f1-gate-dmcmfvb3\restore_demo\restored\data\ops\recovery_gate.json
+  FAIL  profile=(demo) 门禁安装戳存在  
+  FAIL  profile=(demo) 回执指向的门禁 = 还原根里真实那个门禁  None
+  FAIL  profile=(demo) 还原后 before_entry() 阻断（不是 GATE_NOT_INSTALLED 放行）  state=GATE_NOT_INSTALLED allowed=True codes=('GATE_NOT_INSTALLED',)
+  FAIL  profile=(demo) 结果对象带出同一个门禁路径  None
+  FAIL  profile=(demo) 删掉真实门禁文件 → GATE_MISSING 阻断（证明用的就是它）  allowed=True codes=('GATE_NOT_INSTALLED',)
+  PASS  profile=live 恢复包携带 epoch.profile
+  [profile=live] state_root=data gate=data/ops/recovery_gate.json
+  FAIL  profile=live 状态根与 RuntimePaths.state_root 同口径  data
+  PASS  profile=live 四个必需状态 JSON 都落在状态根内
+  PASS  profile=live 数据库落在状态根内
+  FAIL  profile=live 还原后 ops/recovery_gate.json 真的存在  C:\Users\Tao\AppData\Local\Temp\u13f1-gate-dmcmfvb3\restore_live\restored\data\ops\recovery_gate.json
+  FAIL  profile=live 门禁安装戳存在  
+  FAIL  profile=live 回执指向的门禁 = 还原根里真实那个门禁  None
+  FAIL  profile=live 还原后 before_entry() 阻断（不是 GATE_NOT_INSTALLED 放行）  state=GATE_NOT_INSTALLED allowed=True codes=('GATE_NOT_INSTALLED',)
+  FAIL  profile=live 结果对象带出同一个门禁路径  None
+  FAIL  profile=live 删掉真实门禁文件 → GATE_MISSING 阻断（证明用的就是它）  allowed=True codes=('GATE_NOT_INSTALLED',)
+
+[P1-3] 门禁证据读取时用账本真实事实复验
+  FAIL  账本真实事实可读，且能看到未收口的 ENTRY 单  None
+  forged(empty evidence) -> allowed=True codes=('GATE_CLEARED',)
+  FAIL  手写 CLEARED（evidence 空）不再放行  allowed=True
+  forged(self-consistent digest, ledger dirty) -> allowed=True codes=('GATE_CLEARED',)
+  FAIL  手写 CLEARED + 自洽摘要，但账本仍有未收口 ENTRY → 仍阻断  allowed=True codes=('GATE_CLEARED',)
+  FAIL  证据摘要对不上 → 阻断  allowed=True codes=('GATE_CLEARED',)
+  reconciled stale submitting rows = 1
+  FAIL  收口后账本事实归零  None
+  PASS  require_reconcile 后立即开仓被拒
+  PASS  账本无未收口单 + 结构化证据 → 放行
+  FAIL  落盘证据携带可核事实与摘要  {'account_ref': 'demo:u13f1', 'observed_at_ms': 1789969646201, 'open_orders_verified': True, 'positions_verified': True, 'runtime_instance_id': 'rt-u13f1'}
+  PASS  放行后 before_entry() 仍放行
+  after new unresolved ENTRY -> allowed=True codes=('GATE_CLEARED',)
+  FAIL  放行后账本又出现未收口 ENTRY → before_entry() 重新阻断  allowed=True codes=('GATE_CLEARED',)
+  PASS  门禁文件被删除（安装戳在）仍 GATE_MISSING 阻断
+
+[P1-4] 未声明状态根可检出（STATE_ROOT_MISSING 可达）
+  legacy state_base_declared='data' source=fallback explicit=False
+  legacy.validate('demo') = ()
+  FAIL  未声明状态根时 validate() 产出 STATE_ROOT_MISSING  ()
+  FAIL  state_base_explicit 有真实消费者（state_root_drift）  RuntimePaths.state_root_drift 不存在
+  PASS  旧布局的 state_base_declared 保持 'data'（既有消费者零漂移）
+  PASS  旧布局解析出的状态基座仍是 <code_root>/data（默认部署不受影响）
+  PASS  显式声明状态根时不产出 STATE_ROOT_MISSING
+  PASS  显式声明下两个代码根仍解析到同一状态基座/同一把锁
+  PASS  未声明下两个代码根解析到不同的锁（这正是要**报告**的漂移）
+  PASS  live + 无 profile 仍报原有 STATE_ROOT_PROFILE_UNLOCKED
+
+U13-FU1 RECOVERY GATE: 17 通过 / 22 失败
+  FAILED: profile=(demo) 还原后 ops/recovery_gate.json 真的存在
+  FAILED: profile=(demo) 门禁安装戳存在
+  FAILED: profile=(demo) 回执指向的门禁 = 还原根里真实那个门禁
+  FAILED: profile=(demo) 还原后 before_entry() 阻断（不是 GATE_NOT_INSTALLED 放行）
+  FAILED: profile=(demo) 结果对象带出同一个门禁路径
+  FAILED: profile=(demo) 删掉真实门禁文件 → GATE_MISSING 阻断（证明用的就是它）
+  FAILED: profile=live 状态根与 RuntimePaths.state_root 同口径
+  FAILED: profile=live 还原后 ops/recovery_gate.json 真的存在
+  FAILED: profile=live 门禁安装戳存在
+  FAILED: profile=live 回执指向的门禁 = 还原根里真实那个门禁
+  FAILED: profile=live 还原后 before_entry() 阻断（不是 GATE_NOT_INSTALLED 放行）
+  FAILED: profile=live 结果对象带出同一个门禁路径
+  FAILED: profile=live 删掉真实门禁文件 → GATE_MISSING 阻断（证明用的就是它）
+  FAILED: 账本真实事实可读，且能看到未收口的 ENTRY 单
+  FAILED: 手写 CLEARED（evidence 空）不再放行
+  FAILED: 手写 CLEARED + 自洽摘要，但账本仍有未收口 ENTRY → 仍阻断
+  FAILED: 证据摘要对不上 → 阻断
+  FAILED: 收口后账本事实归零
+  FAILED: 落盘证据携带可核事实与摘要
+  FAILED: 放行后账本又出现未收口 ENTRY → before_entry() 重新阻断
+  FAILED: 未声明状态根时 validate() 产出 STATE_ROOT_MISSING
+  FAILED: state_base_explicit 有真实消费者（state_root_drift）
+  NOTE: missing symbols: facts_digest, ledger_reconcile_facts, restored_gate_path, restored_state_root

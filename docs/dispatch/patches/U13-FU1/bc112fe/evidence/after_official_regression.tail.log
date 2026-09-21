@@ -1,0 +1,13 @@
+... (4574 lines total, tail 12)
+[5] 共享适配（运行时行为探测；不以补丁是否已应用为前提）
+  PASS  已接线：run_web.py --verify-package 对解压包自检并退出 0
+  PASS  发布包目录缺解释器时 fail-closed（不再回退到包外解释器）
+  PASS  开发检出行为不变（无清单时照旧回退）
+  PASS  显式 require_package_interpreter=False 可覆盖为外置解释器
+  PASS  包内存在配置声明的解释器时按 config 解析
+
+结果: 37 通过 / 0 失败
+备注: 沙箱已跟踪文件 631 个，release_id=rel-3a721dac95fb28cc7db2；按 KI04 范围豁免未扫描（仓库扫描器登记一致）：['docs/无人值守升级任务清单_2026-09-19.json']
+
+OFFLINE REGRESSION OK scripts=84
+OFFICIAL rc=0

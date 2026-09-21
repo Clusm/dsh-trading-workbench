@@ -1,0 +1,64 @@
+drill tmp = C:\Users\Tao\AppData\Local\Temp\w3-f18-drill-t5cwk_rm
+
+[A] 新代码目录 + 旧状态根（换代码根不得换状态根/身份）
+  code_A lock=C:\Users\Tao\AppData\Local\Temp\w3-f18-drill-t5cwk_rm\state_base\trading_service.lock
+  code_B lock=C:\Users\Tao\AppData\Local\Temp\w3-f18-drill-t5cwk_rm\state_base\trading_service.lock
+  PASS  两个代码根 + 同一显式状态根 → 同一把锁（单账户互斥不被换目录绕过）
+  PASS  两个代码根 → 同一 lock_scope（作用域证据一致）
+  PASS  两个代码根 → 同一状态基座
+  A: iid=c642ba74d45c gen=gen-c8e7eb63 new=True
+  B: iid=c642ba74d45c gen=gen-c8e7eb63 new=False
+  PASS  换代码根后沿用同一 runtime_instance_id（未新建错误基线）
+  PASS  换代码根后沿用同一 generation_id（运行代连续）
+  PASS  未声明状态根时两个代码根得到不同锁（这正是 F18 的漂移面）
+  legacy_a.state_base_declared='data' source=fallback explicit=False
+  legacy_a.validate('demo') = ('STATE_ROOT_MISSING',)
+  FAIL  [缺陷] 未声明状态根时 validate() 为空（STATE_ROOT_MISSING 不可达）  ('STATE_ROOT_MISSING',)
+  FAIL  [缺陷] 未声明状态根时 assert_environment_bound 不抛错（demo 无拦截）  
+  legacy A iid=e3b5c8756a72 / B iid=d033e25de1f4
+  PASS  [缺陷] 未声明状态根时两个代码根各自新建基线（不同运行代）
+  live+profile=None reasons = ('STATE_ROOT_PROFILE_UNLOCKED',)
+  PASS  EXECUTION_MODE=live 但无 profile → 被拦（STATE_ROOT_PROFILE_UNLOCKED）
+  PASS  environment=demo 与 profile=live 冲突 → ENVIRONMENT_STATE_ROOT_MISMATCH
+
+[B] PID 复用与单实例互斥
+  B1 acquire -> RuntimeError: 交易服务已在运行（PID=28428，锁文件=trading_service.lock），持有者={'runtime_instance_id': 'old'}
+  PASS  B1 锁文件 PID = 当前进程 PID 时仍拒绝启动（不把新进程误认成自己）
+  PASS  B1 被拒后锁文件未被删除（没有踩掉别人的锁）
+  PASS  B2 确认死亡的陈旧 PID 锁可安全接管
+  B3 empty-lock(size=0) acquire -> SUCCEEDED
+  PASS  B3 空锁文件（O_EXCL 建好未写入的窗口）被当成陈旧锁 → 第二个实例接管 —— 绕过成功
+  PASS  B4 check_writer_stopped 对损坏锁不抛错（静默认为无写者）
+  B4 check_writer_stopped(corrupt lock) -> returned None (treated as stopped)
+  PASS  B5 损坏锁下仍能建恢复包（写者是否真停无法证明）
+  B5 create_epoch_bundle(corrupt lock) -> CREATED
+
+[C] 两账户同 profile / 同账户不同 profile
+  acct-A iid=c642ba74d45c
+  acct-B iid=c4ff43dfda59 new=True
+  PASS  两账户同一 profile 共用同一把锁（进程级互斥成立）
+  PASS  两账户在同一状态根上身份不同（account_ref 参与身份派生）
+  registry after B: account_ref=demo:acct-B
+  PASS  后启动的账户**覆盖**了前一个账户的运行代基线（同一状态根无账户分区）
+  PASS  前一个账户再启动会拿到**新的** runtime_instance_id（基线被改写）
+  demo lock = C:\Users\Tao\AppData\Local\Temp\w3-f18-drill-t5cwk_rm\state_base\trading_service.lock
+  live lock = C:\Users\Tao\AppData\Local\Temp\w3-f18-drill-t5cwk_rm\state_base\live\trading_service.lock
+  PASS  同账户不同 profile → 不同锁文件（两个 profile 可并行，不是同账户互斥）
+  PASS  demo/live 共享出口根唯一（限流冷却与 LLM 准入共用）
+
+[D] 迁移推进后可回退、回退后不损坏
+  current versions: 1..17 (17)
+  PASS  全新库迁移到唯一版本序列
+  after re-migrate: versions=1..17 quick_check=ok probe=1
+  PASS  回退到 v9 后重新推进：版本序列仍唯一且到顶
+  PASS  回退再推进后 quick_check=ok（不损坏）
+  PASS  回退再推进不丢数据（业务行仍在）
+  PASS  迁移动作失败向上抛出
+  PASS  失败迁移整笔回滚（probe 无残留）
+  PASS  失败版本未登记
+  backup=agent_trader_20260921_055217.sqlite quick_check=ok schema=17
+  PASS  在线备份可作为迁移回滚点（独立可打开 + quick_check=ok）
+
+F18 DRILL 结果: 29 通过 / 2 失败
+  FAILED: [缺陷] 未声明状态根时 validate() 为空（STATE_ROOT_MISSING 不可达）
+  FAILED: [缺陷] 未声明状态根时 assert_environment_bound 不抛错（demo 无拦截）

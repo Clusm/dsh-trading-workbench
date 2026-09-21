@@ -28,7 +28,10 @@ from core.ops.recovery import (  # noqa: E402
     RecoveryGate,
     create_epoch_bundle,
     drill_epoch_bundle,
+    gate_install_marker,
     recovery_plan,
+    restored_gate_path,
+    restored_state_root,
     verify_epoch_bundle,
 )
 from core.runtime_paths import REQUIRED_STATE_FILES, RuntimePaths  # noqa: E402
@@ -86,29 +89,56 @@ def run_drill(*, require_independent_volume: bool) -> dict:
         receipt = json.loads((base / "drill" / "restore_receipt.json")
                              .read_text(encoding="utf-8"))
         steps["receipt_entry_gate"] = receipt["entry_gate"]
-        # 恢复后先对账再开仓：未提交证据前必须阻断。
-        gate = RecoveryGate.load(base / "drill" / "gate.json")
-        gate.require_reconcile(epoch_id=verified["epoch"]["epoch_id"],
-                               account_ref="demo:ops-drill",
-                               runtime_instance_id="drill-runtime")
-        blocked = gate.before_entry(now_ms=1_000_000)
+        # P1-1：**不得**自己另建一个门禁再来断言它阻断（那是循环证据）。
+        # 这里只认"还原路径真的落盘了门禁" + "回执指向的那个文件"。
+        restored_root = base / "drill"
+        profile = str(restored["profile"] or "")
+        gate_file = restored_gate_path(restored_root, profile)
+        state_root = restored_state_root(restored_root, profile)
+        steps["layout"] = {
+            "profile": profile,
+            "state_root": state_root.relative_to(restored_root).as_posix(),
+            "gate_file": gate_file.relative_to(restored_root).as_posix(),
+            "receipt_gate": str(receipt.get("recovery_gate_file") or ""),
+            "gate_installed_on_disk": gate_file.is_file(),
+            "install_marker_on_disk": gate_install_marker(gate_file).is_file(),
+            "state_files_in_state_root": sorted(
+                name for name in REQUIRED_STATE_FILES if (state_root / name).is_file()),
+        }
+        # 恢复后先对账再开仓：还原完（未提交任何证据）必须阻断。
+        blocked = RecoveryGate.load(gate_file).before_entry()
         steps["gate_blocked"] = {"allowed": blocked.allowed,
                                  "reason_codes": list(blocked.reason_codes),
                                  "state": blocked.state}
-        cleared = gate.complete_reconcile(
+        cleared = RecoveryGate.load(gate_file).complete_reconcile(
             {"observed_at_ms": 1_000_000, "positions_verified": True,
-             "open_orders_verified": True}, now_ms=1_000_000,
-            account_ref="demo:ops-drill", runtime_instance_id="drill-runtime")
+             "open_orders_verified": True}, now_ms=1_000_000)
         steps["gate_cleared"] = {"allowed": cleared.allowed,
                                  "reason_codes": list(cleared.reason_codes)}
         steps["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
         failures: list[str] = []
         if steps["receipt_entry_gate"] != RECONCILE_REQUIRED_BEFORE_ENTRY:
             failures.append("RECEIPT_GATE_WRONG")
+        if steps["layout"]["receipt_gate"] != steps["layout"]["gate_file"]:
+            failures.append("RECEIPT_POINTS_AT_WRONG_GATE")
+        if not (steps["layout"]["gate_installed_on_disk"]
+                and steps["layout"]["install_marker_on_disk"]):
+            failures.append("GATE_NOT_INSTALLED_BY_RESTORE")
+        if len(steps["layout"]["state_files_in_state_root"]) != len(REQUIRED_STATE_FILES):
+            failures.append("STATE_FILES_NOT_IN_STATE_ROOT")
         if blocked.allowed or RECONCILE_REQUIRED_BEFORE_ENTRY not in blocked.reason_codes:
             failures.append("GATE_NOT_BLOCKING_BEFORE_RECONCILE")
         if not cleared.allowed or GATE_CLEARED not in cleared.reason_codes:
             failures.append("GATE_NOT_CLEARED_AFTER_RECONCILE")
+        # 非循环性证明：删掉**还原根里那个真实的**门禁文件（安装戳仍在）后判定
+        # 必须翻转为阻断。旧实现在 <base>/drill/gate.json 另建门禁，删真实文件
+        # 根本不影响它的断言。
+        gate_file.unlink()
+        missing = RecoveryGate.load(gate_file).before_entry()
+        steps["gate_missing_after_unlink"] = {
+            "allowed": missing.allowed, "reason_codes": list(missing.reason_codes)}
+        if missing.allowed:
+            failures.append("REAL_GATE_UNLINK_NOT_DETECTED")
         if verified["files"] != 1 + len(REQUIRED_STATE_FILES):
             failures.append("BUNDLE_MEMBER_COUNT_WRONG")
         steps["failures"] = failures
@@ -145,8 +175,10 @@ def main() -> int:
     print(f"  dry_run           = {drill['dry_run']}")
     print(f"  restore           = {drill['restore']}")
     print(f"  receipt gate      = {drill['receipt_entry_gate']}")
+    print(f"  restored layout   = {drill['layout']}")
     print(f"  gate before recon = {drill['gate_blocked']}")
     print(f"  gate after recon  = {drill['gate_cleared']}")
+    print(f"  gate after unlink = {drill['gate_missing_after_unlink']}")
     if "plan" in report:
         plan = report["plan"]
         print("\n  metadata-only recovery plan (no state content read):")
