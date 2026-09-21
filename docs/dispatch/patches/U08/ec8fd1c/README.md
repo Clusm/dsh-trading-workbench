@@ -82,7 +82,17 @@ git -C "C:/Users/Tao/Desktop/币安/mat-wt/I" -c core.autocrlf=true apply --chec
     `base_fail=0 / head_fail=0 / NEW_FAIL=[] / FIXED=[] / BOTH_FAIL=[]`；
     `ABSENT_IN_BASE=['scripts/smoke_u08_strategy_funnel.py']`（U08 新增脚本）。
 
-## 五、已知边界
+## 五、已知边界（含 U05 接线声明的**如实重列**，B-r1 §8）
+
+本包落地后的**生产可达性**对照（`grep` 证据见 §四）：
+
+| U05/U03 入口 | r1 声明 | r2 事实 |
+|---|---|---|
+| 漏斗逐项 + 轮级故障记录（`ScanFunnel.record` / `record_round_fault`） | 不可达 | **可达**：`scanner.scan()` 与 `strategy_trader.run_strategy_trader()` 生产调用 |
+| `ticket_skip_detail()`（U08 与 `valid_signal_ticket` 同一真值表） | 无生产者 | **可达**：执行器逐票判定 + 扫描侧 `TICKET_EXPIRING_BEFORE_USE` |
+| `TicketLedger.consume/recover/release/orphan_consumed` | 无消费者 | **可达**：执行器在下单前消费、建意图失败按同轮释放 |
+| `classify_cycle` / `reason_from_source_errors` / `round_explanation` | r1 记为"已接" | **生产可达性仍为 0**：只被本任务测试调用；本包让它们**在模块内有入口**，真正的调用点是整轮聚合器（`src/core/graph.py` 的 cycle），**归 U12** |
+| `run_protection_first` / `graph.model_deadline()` / `AgentRecorder` / `ModelRouteGuard` / `LeaseRegistry` / `background_refresh` / `macro·onchain.reason_from_errors` | 仍留 U12 | 仍留 U12（不变） |
 
 - `01` 的轮级故障依靠**注入漏斗**才会写进内存对象；未注入时（如 `graph.py` 的
   调用点）仍会落**状态文件**的 `last_scan.funnel`，但调用方拿不到同一个实例。
@@ -90,4 +100,7 @@ git -C "C:/Users/Tao/Desktop/币安/mat-wt/I" -c core.autocrlf=true apply --chec
 - `PROVIDER_RATE_LIMITED` 细分码仍**无生产者**（等待 U05 `classify_exception` 的
   调用点接入执行侧异常路径）。
 - `_load_state()` 损坏时静默清零去重记忆（`except: pass`）是既有行为，本包未改；
-  已作为已知窗口登记给 U12。
+  已作为已知窗口登记（**直接冲击必达②"跨轮不重复发射"**，漏斗侧账本只管"消费"）。
+- `record_round_fault(CHANNEL_BUDGET_ZERO)` 的性质是 `scope`：通道被配置成只扫描
+  不下单时 verdict 是 `no_candidates` + 主因 `READINESS_BLOCKED`（**不是**
+  `blocked`），这是"配置态"而非"故障"的有意选择。
