@@ -144,7 +144,11 @@
 > **当前在做的是「后置线」（非首批必需，P2）**：U06b 与 U10b 已派发（U12 集成后二者依赖就绪）。
 
 ### 后置线进行中（勿重复派发）
-- **`U06b` 影子 v2 固定时点标签**：工作树 `mat-wt/D2`（`task/U06b` @ `0706db1`）。**已内联两条关键约束**：①`src/intel/shadow_status.py` 现在是**发布门禁的单一口径来源**（`release_evidence.py` 经 `release_gate_role` 决定 200 方向候选分母），**不得改动 `COHORTS`/`SOURCE_A|B|C`/`GATE_ROLE_*` 语义**，若必须动则要证明门禁结果**逐字不变**；②首批**不得伪称 F11 已通过**（`F11:v2_labels=DEFERRED` 记录不变）。
+- **`U06b` 影子 v2 固定时点标签**：**作者已交付 → Q 复验中**。工作树 `mat-wt/D2`，head `8ae0f65`（base `0706db1`），**共享文件已从分支还原**、只在补丁包 `docs/dispatch/patches/U06b/0f1f21c/`（2 diff）内。
+  - 作者称门禁**不受影响**：写 50 条 v2 标签后 `directional_candidates` 3→3、`release_readiness` NO_G0→NO_GO、**门禁报告除 `generated_at` 外逐字相同**；`shadow_status.py` **一个字符未改**；`current_schema_version()` 仍 17；无新增 ruff exclude。两态 PASS=89/0（未打补丁）、100/0（打完）；delta **NEW_FAIL=∅**；补丁 6/6 干净。
+  - **集成顺序（作者注明）**：**先合 `src/intel/shadow_v2/`，再应用两个补丁**，否则 `service.py` 的 `from intel import shadow_status, shadow_v2` 会 ImportError。
+  - **未做（如实登记）**：v2 **未接入采集循环**（默认开关 `False`）、未做采集调度编排、未做 U07 的配对统计。
+  - **复验已派发**：Q（`reviews/U06b/R1/q`，detached @ `8ae0f65`），重点用**自建夹具**独立复现门禁不倒性（不采信作者 evidence 脚本）。**仍在运行，勿重复派发。**
 - **`U10b` 旧脚本与历史文档整理**：工作树 `mat-wt/F2`（`task/U10b` @ `0706db1`）。**已内联最大坑**：`_validate_smoke_manifest()` 强制 `scripts/` 下每个 `smoke_*.py` 恰好登记一次 → 移动/改名必须**同时**交 `run_offline_regression.py` 登记补丁；且移出 `scripts/` 顶层 = **削减回归覆盖，不得静默做**；改完必须复跑 `smoke_u10a_release_package.py` 证明打包仍绿。
 - **两者均在运行，勿重复派发。**
 - 依赖它们的：`U07`（等 U06b）、`U11`（等 U10b）。
