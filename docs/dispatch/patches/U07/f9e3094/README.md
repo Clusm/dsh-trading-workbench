@@ -76,8 +76,27 @@ U07 的独占路径就在同一个包里（`statistics.py`），因此**任何**
 
 ### 4. 隔离沙箱（`git archive <base> | tar -x` + 立刻 `git init`）
 
-见下节 delta 表（pristine `c2f1bab` vs patched head+2 补丁，
-全量 `scripts/run_offline_regression.py` 逐脚本失败集合对比）。
+沙箱：`sandbox_pristine`（`c2f1bab`）/ `sandbox_patched`（作者 head + 本包 2 补丁）/
+`sandbox_branch`（作者 head，不打补丁，用于两态自证）。
+
+| 项 | pristine | patched |
+|---|---|---|
+| `scripts/run_offline_regression.py`（全量 85 脚本，各约 13 分钟） | `SMOKE MANIFEST OK included=81 excluded=1` + **`OFFLINE REGRESSION OK scripts=85`**，exit=0 | 同左，**`OFFLINE REGRESSION OK scripts=85`**，exit=0 |
+| **失败脚本集合** | **∅** | **∅** |
+| **NEW_FAIL = patched ∖ pristine** | — | **∅** |
+| 本任务新增失败 | — | **0**（本包未新增任何 `scripts/smoke_*.py`，故 `_validate_smoke_manifest()` 不触发登记要求） |
+| `tests/integration/test_shadow_statistics.py` | 该文件不存在（U07 独占路径） | `PASS=127 FAIL=0` exit=0 |
+| `tests/integration/test_shadow_labels.py` | `PASS=100 FAIL=0` exit=0 | `PASS=100 FAIL=0` exit=0 |
+| `scripts/smoke_contracts_v3.py` | `PASS 173 / FAIL 0` exit=0 | `PASS 173 / FAIL 0` exit=0 |
+| `scripts/smoke_u06a_shadow_isolation.py` | `PASS 52 / FAIL 0` exit=0 | `PASS 52 / FAIL 0` exit=0 |
+| `scripts/smoke_u09_release_evidence.py` | `60 通过 / 0 失败` exit=0 | `60 通过 / 0 失败` exit=0 |
+| `tests/acceptance/test_release_evidence_v2.py` | `78 通过 / 0 失败` exit=0 | `78 通过 / 0 失败` exit=0 |
+| `scripts/check_quality.py`（含 ruff） | — | `QUALITY CHECK OK files=303 untracked=0`，**未新增任何 ruff exclude** |
+
+> **补丁 02 未应用时的对照**：在 `sandbox_branch`（作者 head，不打补丁）里，
+> `tests/integration/test_shadow_labels.py` 为 `PASS=99 FAIL=1`
+> （唯一失败即「独占路径四个模块齐备」）；加上补丁 02 后回到 `PASS=100 FAIL=0`。
+> 这就是补丁 02 存在的**唯一理由**，也是本任务唯一的跨任务耦合点。
 
 ## 应用方式
 
@@ -95,9 +114,9 @@ git apply 02_test_shadow_labels_module_boundary.diff
   `tests/integration/test_shadow_statistics.py`、`tests/fixtures/shadow/statistics/`
   （作者分支已提交），否则补丁 01 的落库方法没有消费者、补丁 02 也没有必要。
 * 两态探测标记：`audit.database.U07_INTEGRATION == "u07.shadow_v2.statistics.v1"`。
-* `tests/integration/test_shadow_statistics.py` **两态均可跑**：未打补丁
-  **120 PASS / 0 FAIL**，打完 **127 PASS / 0 FAIL**（差值即落库/幂等/摘要断言），
-  不假定补丁是否已应用。
+* `tests/integration/test_shadow_statistics.py` **两态均可跑**（已在沙箱实测）：
+  `sandbox_branch`（不打补丁）**120 PASS / 0 FAIL**，`sandbox_patched`
+  **127 PASS / 0 FAIL**（差值即 7 条落库/幂等/摘要断言），不假定补丁是否已应用。
 * 补丁 01 的插入点紧邻 U06b 的 `shadow_v2_labels`（SCHEMA 段）与
   `shadow_v2_coverage`（方法段）：若其他任务也在这两处附近落改动，请按
   「集成版本 → 目标内容」重出 diff，不要手工猜冲突解法（RESUME lesson 8）。
