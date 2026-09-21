@@ -11,7 +11,7 @@ P1 先做安全的最小闭环：
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from audit.database import AuditDatabase
 from core.signal_ticket import (
@@ -22,6 +22,7 @@ from core.signal_ticket import (
 from core.strategy_funnel import (
     ALREADY_CONSUMED,
     CONSUMED,
+    DETAIL_AUDIT_UNAVAILABLE,
     DETAIL_CHANNEL_BUDGET_ZERO,
     DETAIL_LEDGER_SAVE_DEFERRED,
     DETAIL_NO_LATEST_PRICE,
@@ -118,6 +119,20 @@ def _note(notes: list[str], text: str, detail: str = "") -> None:
     notes.append(f"{text}{suffix}")
 
 
+def _audit_write(notes: list[str], what: str, call: Callable[[], Any]) -> None:
+    """执行一次**纯审计写入**：失败不得中断本轮，但必须留痕（U08-R5-FU2）。
+
+    审计写入不参与交易决策（它只记录"为什么跳过"），因此异常一律局部化——
+    与 N6 对 ``ledger.*`` 的做法同形：``except Exception``，``KeyboardInterrupt`` /
+    ``SystemExit``（``BaseException``）必须继续穿出。**不静默**：把操作名与底层
+    异常名写进 note，运维能看见"本轮的审计链缺了一段"，而不是只看到一次安静的成功。
+    """
+    try:
+        call()
+    except Exception as exc:  # noqa: BLE001 - 审计写入异常不得穿出执行器
+        notes.append(f"审计写入失败（{what}，{type(exc).__name__}: {exc}），本轮继续")
+
+
 def run_strategy_trader(*, tickets: list[dict[str, Any]],
                         portfolio: dict[str, Any] | None = None,
                         prices: dict[str, float] | None = None,
@@ -181,8 +196,25 @@ def run_strategy_trader(*, tickets: list[dict[str, Any]],
                   detail)
             continue
         ticket_id = str(ticket.get("ticket_id") or "")
-        if (db is not None and db.signal_ticket_has_order(ticket_id)) or (
-                ledger is not None and ledger.is_consumed(ticket_id)):
+        # 去重读取是**跨进程权威**（"这张票已经下过单吗"）。这里必须 fail-closed
+        # （U08-R5-FU2）：审计库**读不出答案**时绝不得当成"没下过"放行——那会重复下单。
+        # 与 N6 同形的是"异常不得穿出执行器"；方向相反的是**失败语义**：N6 局部化后
+        # 照常开仓，这里局部化后**不**开仓（状态不可验证 -> 不交易）。
+        already_ordered = False
+        if db is not None:
+            try:
+                already_ordered = bool(db.signal_ticket_has_order(ticket_id))
+            except Exception as exc:  # noqa: BLE001 - 审计库异常不得穿出，且必须 fail-closed
+                # 本票本轮跳过并**如实披露**（细分码区分于"已消费"：这不是"已下过单"，
+                # 而是"无法断定"）。同轮其余票据的去重读取各自独立，不受牵连。
+                # 跳过**不**烧票：账本未被消费，审计库恢复后下一轮仍可正常评估。
+                _skip(funnel, Stage.TICKET_FRESH.value, DETAIL_AUDIT_UNAVAILABLE, ticket)
+                _note(notes,
+                      f"{ticket_id} 审计库不可用"
+                      f"（{type(exc).__name__}: {exc}），状态不可验证，跳过",
+                      DETAIL_AUDIT_UNAVAILABLE)
+                continue
+        if already_ordered or (ledger is not None and ledger.is_consumed(ticket_id)):
             _skip(funnel, Stage.TICKET_FRESH.value, DETAIL_TICKET_ALREADY_CONSUMED, ticket)
             _note(notes, f"{ticket_id} 已消费过，跳过", DETAIL_TICKET_ALREADY_CONSUMED)
             continue
@@ -224,17 +256,27 @@ def run_strategy_trader(*, tickets: list[dict[str, Any]],
                   f"{ticket.get('ticket_id', symbol)} 不在当前业务开仓白名单内，跳过",
                   DETAIL_SYMBOL_NOT_ALLOWED)
             if db:
-                db.log_risk_event(
-                    event_type="strategy_scope_skip", severity="info",
-                    details=f"{symbol} 不在当前业务开仓白名单内", action_taken="skip open")
+                # 纯审计写入：失败不得中断本轮（U08-R5-FU2），但必须留痕。
+                _audit_write(notes, f"log_risk_event(strategy_scope_skip,{symbol})",
+                             lambda: db.log_risk_event(
+                                 event_type="strategy_scope_skip", severity="info",
+                                 details=f"{symbol} 不在当前业务开仓白名单内",
+                                 action_taken="skip open"))
             continue
         if not _not_expired(ticket, now):
             _skip(funnel, Stage.TICKET_FRESH.value, TICKET_DETAIL_EXPIRED, ticket)
             _note(notes, f"{ticket['ticket_id']} 已过期，跳过", TICKET_DETAIL_EXPIRED)
             if db:
-                db.log_risk_event(event_type="strategy_ticket_expired", severity="info",
-                                  details=f"{ticket['ticket_id']} 过期跳过", action_taken="skip")
-                db.update_signal_ticket(ticket_id=str(ticket["ticket_id"]), status="expired")
+                # 两笔都是纯审计写入，逐笔独立局部化（一笔失败不影响另一笔）。
+                _audit_write(notes,
+                             f"log_risk_event(strategy_ticket_expired,{ticket['ticket_id']})",
+                             lambda: db.log_risk_event(
+                                 event_type="strategy_ticket_expired", severity="info",
+                                 details=f"{ticket['ticket_id']} 过期跳过", action_taken="skip"))
+                _audit_write(notes,
+                             f"update_signal_ticket(expired,{ticket['ticket_id']})",
+                             lambda: db.update_signal_ticket(
+                                 ticket_id=str(ticket["ticket_id"]), status="expired"))
             continue
         if symbol in held_symbols:
             _skip(funnel, Stage.NO_POSITION_CONFLICT.value, DETAIL_SYMBOL_ALREADY_HELD,
@@ -242,9 +284,12 @@ def run_strategy_trader(*, tickets: list[dict[str, Any]],
             _note(notes, f"{ticket['ticket_id']} 同 symbol 已有仓位，跳过",
                   DETAIL_SYMBOL_ALREADY_HELD)
             if db:
-                db.log_risk_event(event_type="strategy_conflict_skip", severity="warn",
-                                  details=f"{ticket['ticket_id']} 与现有 {symbol} 仓位冲突",
-                                  action_taken="skip")
+                _audit_write(notes,
+                             f"log_risk_event(strategy_conflict_skip,{ticket['ticket_id']})",
+                             lambda: db.log_risk_event(
+                                 event_type="strategy_conflict_skip", severity="warn",
+                                 details=f"{ticket['ticket_id']} 与现有 {symbol} 仓位冲突",
+                                 action_taken="skip"))
             continue
         if strategy_id in held_strategy:
             _skip(funnel, Stage.NO_POSITION_CONFLICT.value, DETAIL_STRATEGY_ALREADY_HELD,
