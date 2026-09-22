@@ -11,7 +11,15 @@ import time
 import uuid
 from typing import Any, Mapping
 
+from core.runtime_identity import (
+    RUNTIME_INSTANCE_UNBOUND,
+    is_placeholder_runtime_instance_id,
+)
 from core.trading_scope import TradingScope
+
+#: 两态探测标记（U15-FU3 交付物存在性）：哨兵运行代在**消费入口**不再被当作
+#: 合法身份。验收套件据此对"修前/修后"分别断言，不猜共享文件是否已应用补丁。
+U15_FU3_ENTRY_READINESS_SENTINEL_GUARD = "U15-FU3"
 
 
 @dataclass(frozen=True)
@@ -107,6 +115,11 @@ def evaluate_entry_readiness(
     - ``recovery_gate_allowed``：恢复门禁（``core.ops.recovery.RecoveryGate``）
       的开仓判定。非 ``True`` 时把 ``recovery_gate_reason_codes`` 并入阻断原因，
       因此"恢复完直接开仓"在执行层被拒，而不是只靠控制面状态间接兜底。
+
+    U15-FU3 补一条**默认生效**的 fail-closed：运行代是占位哨兵（``"unknown"``
+    等）与"没有运行代"同样是**未证明**，产出 ``RUNTIME_INSTANCE_UNBOUND``（复用
+    既有码）。空/缺失仍走原有的 ``RUNTIME_INSTANCE_UNPROVEN``；真实例号不受
+    影响。
     """
     facts = facts or {}
     observed_at = float(time.time() if now is None else now)
@@ -163,6 +176,13 @@ def evaluate_entry_readiness(
     effective_environment = str(environment or facts.get("environment") or "")
     if not effective_runtime_id:
         reasons.append("RUNTIME_INSTANCE_UNPROVEN")
+    elif is_placeholder_runtime_instance_id(effective_runtime_id):
+        # U15-FU3：占位哨兵（``"unknown"`` 等，见
+        # ``core.runtime_identity.RUNTIME_INSTANCE_PLACEHOLDERS``）非空，因此
+        # 旧逻辑把它当成"身份已证明"。它与缺失同样**不能证明**运行代，按既有
+        # 原因码 ``RUNTIME_INSTANCE_UNBOUND`` 阻断（复用 FU1/FU2 的唯一名单与
+        # 唯一判定函数，未新造码、未另立第二套归一化）。真实例号不受影响。
+        reasons.append(RUNTIME_INSTANCE_UNBOUND)
     if not effective_environment:
         reasons.append("ENVIRONMENT_UNPROVEN")
     if _fact_bool(facts, "persistence_available") is not True:
@@ -234,6 +254,13 @@ def authorization_matches_context(decision: Any, context: Mapping[str, Any] | No
     for expected_key, decision_attr in checks.items():
         expected = context.get(expected_key)
         actual = getattr(decision, decision_attr, None)
+        if expected_key == "runtime_instance_id" and (
+                is_placeholder_runtime_instance_id(expected)
+                or is_placeholder_runtime_instance_id(actual)):
+            # U15-FU3：占位哨兵不是实例号，"两侧逐字相等"因此**不构成**进程
+            # 绑定（否则 ``"unknown" == "unknown"`` 会被读成"同一个运行代"）。
+            # 复用 FU1/FU2 的唯一名单与唯一判定函数；比对项本身未改。
+            return False
         if not expected or actual != expected:
             return False
     return True
