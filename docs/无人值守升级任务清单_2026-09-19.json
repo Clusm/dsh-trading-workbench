@@ -4774,6 +4774,14 @@
         "owner": "U15 后续 / U12",
         "blocks": "无（U15-FU1 未扩面；同族缺口）",
         "note": "U15-FU1 在 `release_manifest`/`runtime_identity` 侧把哨兵识别为『运行代缺失』，但 **`management_authorization.py:177` 与 `verify_account_binding` 仍是『非空即通过』** —— 经**被污染的 registry** 把 `runtime_instance_id` 写成 `\"unknown\"` 时，哨兵仍可能经 K04 授权路径被接受。作者在 README §7.2 已自认；Q r1 记录但**未做端到端可利用性验证**。建议：把同一哨兵判定下沉到 K04 的绑定校验，或让 `RunRegistry.load()` 把占位实例号视为『无记录』（重铸）——后者可一并覆盖 `mint_runtime_generation` 的残留。"
+      },
+      {
+        "id": "U15FU2-UNCOVERED-CONSUMERS",
+        "title": "两条消费入口仍接受运行代哨兵（`evaluate_entry_readiness` / `authorization_matches_context`）—— 当前不可达，同族收口中",
+        "status": "FIX_PENDING_VERIFICATION",
+        "owner": "U15 线（修复会话 U15-FU3）",
+        "blocks": "无（当前不可达：源头已治愈 + 真正开仓门禁 `authorize_new_entry` 已堵）",
+        "note": "Q r1 遍历消费入口时测出，**推翻了作者『不再有任何出口把哨兵当合法身份』的绝对表述**。两处均在 `src/core/entry_readiness.py`：`:85 evaluate_entry_readiness`（`runtime_instance_id='unknown'` -> `allowed=True`、`reasons=()`）与 `:216 authorization_matches_context`（两侧 `'unknown'` -> `True`）。**当前不可达**（registry 已治愈、`authorize_new_entry` 已被 FU2 堵），但 `mint_runtime_generation` **仍能构造**哨兵对象（FU2 边界①），故任何直接把构造对象喂进来的调用方都会放行 —— **同族潜在洞**。**I 已派 U15-FU3** 收口（复用同一哨兵口径，不新建第二份名单）。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -5365,7 +5373,7 @@
           "integration_commit": "merge task/U15-FU1 @ bf9b304（owned 路径逐字节一致）；集成 ce0eafe"
         },
         "U15-FU2": {
-          "status": "READY_FOR_REVIEW",
+          "status": "INTEGRATED",
           "branch": "task/U15-FU2",
           "worktree": "mat-wt/U15F2",
           "base": "85722e2",
@@ -5390,10 +5398,28 @@
           "verification": {
             "session": "Q (reviews/U15-FU2/R1/q)",
             "candidate": "8c67af8",
-            "verdict": "PENDING",
+            "verdict": "Q r1 **PASS-with-notes**（无阻塞项）",
             "reports_dir": "docs/dispatch/reviews/U15-FU2/8c67af8/",
-            "focus": "重点：①A 自建 fixture 前后对照（重铸是恢复正确行为、不是洗白）；②**B 必须端到端**（污染 registry -> 授权结论 `submit_allowed` 由 True 变 False）；③**反向证据逐条**（真值不新增阻断、像哨兵的真值不误杀、真值 registry 不重铸、binding 既有语义未变）——任何一条被修坏判阻塞；④**口径单一性**（全仓不得有第二份哨兵名单/第二套归一化）；⑤**独立判定两条未尽事项**，尤其遍历消费入口找漏网；⑥门禁数字未动。"
-          }
+            "focus": "重点：①A 自建 fixture 前后对照（重铸是恢复正确行为、不是洗白）；②**B 必须端到端**（污染 registry -> 授权结论 `submit_allowed` 由 True 变 False）；③**反向证据逐条**（真值不新增阻断、像哨兵的真值不误杀、真值 registry 不重铸、binding 既有语义未变）——任何一条被修坏判阻塞；④**口径单一性**（全仓不得有第二份哨兵名单/第二套归一化）；⑤**独立判定两条未尽事项**，尤其遍历消费入口找漏网；⑥门禁数字未动。",
+            "report": "docs/dispatch/reviews/U15-FU2/8c67af8/Q_r1.md",
+            "reproduced": "Q 自建 fixture：**A** base `load()=RunRecord('unknown',3)`、`load_or_mint created=False instance='unknown' restarts=3` -> patched `load()=None`、`created=True`、实例号 32 位 uuid hex、`restarts=0`（方向确认为**恢复真值**，非洗白）；**B 端到端**（污染 registry -> 授权结论）base `submit_allowed=True binding=()` -> patched **`submit_allowed=False binding=('RUNTIME_INSTANCE_UNBOUND',)`**，`reconcile_allowed` 两态 True。",
+            "reverse_12": "**反向 12 条全过**：真值绑定/端到端 True 且**不新增阻断码**；`unknownverse`/`known`/`n-a-x`/`UNKNOWN-X` 不误杀；真值 registry 不重铸（`created=False, restarts=4`）；`actual is None`->`RUNTIME_GENERATION_UNPROVEN`、未声明 scope_hash 不比较、轮换 epoch 不影响，逐条未变。",
+            "caliber_single": "**全仓仅一份** `RUNTIME_INSTANCE_PLACEHOLDERS` + 唯一 `is_placeholder_runtime_instance_id`/`resolve_runtime_instance_id`，5 个门禁调用点全部走同一函数，**无第二份名单**。",
+            "delta": "L19 沙箱：**NEW_FAIL=∅ FIXED=∅ CHANGED=1**（仅 u10a `release_id` 哈希，rc 均 0），与作者逐字吻合；94 脚本两态 rc 全 0，官方入口 `OFFLINE REGRESSION OK scripts=94`；**u10a 真跑到**；`check_quality files=304` 无新 exclude；U15 `PASS 298`、混合 `291`、U12 `50/0`、契约 173/0。补丁 4 diff x 3 配置全 `Checking patch`、0 Skipped；应用到 base 后与 head blob **SAME×4**。阈值所在 `release_evidence.py` 两态 sha256 **逐字节相同**。",
+            "q_corrections": {
+              "N1_absolute_claim_false": "**作者的『不再有任何被当成合法身份的出口』严格不成立**：Q 遍历消费入口，发现**两条本轮未触碰**的入口仍接受非空哨兵 —— `evaluate_entry_readiness`（`inst='unknown'` -> `allowed=True, reasons=()`）与 `authorization_matches_context`（两侧 `'unknown'` -> `True`）（**均在 `src/core/entry_readiness.py`**）。**可达性**：由已治愈的 registry 挡住，真正的开仓门禁 `authorize_new_entry` 已堵（+`RUNTIME_INSTANCE_UNBOUND`）=> 当前不可达，但**声称过宽**。**处置：I 已派 `U15-FU3` 收口这两处**（同族不留口子），并新增登记 `U15FU2-UNCOVERED-CONSUMERS`。",
+              "N2_except_claim": "§9『新增行不含 `except`/`try:`』**不准确**：`tests/acceptance/test_runtime_identity.py` 新增 1 处 `try`/`except ManagementAuthorizationError`（**仅测试、只捕具体异常**，本质结论仍成立）。",
+              "N3_ls_files": "`8c67af8` 的 `git ls-files`=**917**（多 25 个补丁包文档）；**代码 head `6a24fb5` 两态同 892**；回归在 `6a24fb5` 上跑（src/tests 与 `8c67af8` 逐字节相同）。",
+              "N4_empty_string": "`RunRegistry.load()` 会读入**空串**实例号记录（`instance=''`），但唯一消费口 `load_or_mint` 重铸 -> FU2 未尽事项②『可达性极低』**成立**。"
+            },
+            "not_verified": [
+              "未运行真实/demo 服务与任何网络/下单路径",
+              "未读 .env/data/",
+              "未穷举 tests/ 内的哨兵用法",
+              "未做并发重铸时序验证"
+            ]
+          },
+          "integration_commit": "merge task/U15-FU2 @ 8c67af8（owned 路径逐字节一致）；集成 048033b"
         }
       }
     },
