@@ -1,0 +1,191 @@
+diff --git a/tests/acceptance/test_runtime_identity.py b/tests/acceptance/test_runtime_identity.py
+index 7374455..1534c8c 100644
+--- a/tests/acceptance/test_runtime_identity.py
++++ b/tests/acceptance/test_runtime_identity.py
+@@ -2048,6 +2048,178 @@ def check_contaminated_registry_to_authorization_conclusion() -> None:
+                   allowed.as_dict())
+ 
+ 
++# --------------------------------------------------------------------------
++# U15-FU3：哨兵（"unknown"）不得从**最后两个消费入口**读成合法身份
++#   `entry_readiness.evaluate_entry_readiness`（开仓就绪）
++#   `entry_readiness.authorization_matches_context`（签名外的进程绑定复核）
++# 哨兵名单与判定**复用** U15-FU1/FU2 的单一来源
++# （`RUNTIME_INSTANCE_PLACEHOLDERS` / `is_placeholder_runtime_instance_id`），
++# 本文件不另立第二份名单。
++# --------------------------------------------------------------------------
++def _u15_fu3_guard() -> str:
++    """两态探测：消费入口（entry_readiness）侧的 U15-FU3 交付物是否在位。"""
++    from core import entry_readiness as entry_readiness_module  # noqa: PLC0415
++
++    return str(getattr(
++        entry_readiness_module, "U15_FU3_ENTRY_READINESS_SENTINEL_GUARD", ""))
++
++
++def _readiness_facts(scope: object) -> dict[str, object]:
++    """一份"除运行代外全部满足"的事实集：使哨兵成为唯一变量。"""
++    return {
++        "service_accepting": True,
++        "control_state": "normal",
++        "equity_available": True,
++        "account_risk_allow_new": True,
++        "startup_safety_ready": True,
++        "order_submission_ready": True,
++        "market_cooldown_active": False,
++        "data_budget_available": True,
++        "rate_coordination_available": True,
++        "order_mirror_ok": True,
++        "protection_mirror_ok": True,
++        "unknown_orders": 0,
++        "submitting_orders": 0,
++        "scope_hash": scope.scope_hash,
++        "persistence_available": True,
++    }
++
++
++class _PipelineDecision:
++    """`authorization_matches_context` 只读 ``pipeline_*`` 属性。"""
++
++    def __init__(self, *, expires_at: object, environment: object,
++                 scope_hash: object, runtime_instance_id: object) -> None:
++        self.pipeline_authorization_expires_at = expires_at
++        self.pipeline_environment = environment
++        self.pipeline_scope_hash = scope_hash
++        self.pipeline_runtime_instance_id = runtime_instance_id
++
++
++def check_sentinel_never_passes_entry_readiness_entries() -> None:
++    """U15-FU3：哨兵运行代在两个消费入口都必须 fail-closed。"""
++    import time  # noqa: PLC0415
++
++    from core.entry_readiness import (  # noqa: PLC0415
++        authorization_matches_context,
++        evaluate_entry_readiness,
++    )
++    from core.trading_scope import TradingScope  # noqa: PLC0415
++
++    scope = TradingScope.from_symbols(["BTCUSDT", "ETHUSDT"])
++    now = time.time()
++    guard = _u15_fu3_guard()
++
++    def readiness(instance: object) -> object:
++        return evaluate_entry_readiness(
++            _readiness_facts(scope), now=now, scope=scope,
++            runtime_instance_id=instance, environment="demo")
++
++    def matches(value: object) -> bool:
++        return authorization_matches_context(
++            _PipelineDecision(expires_at=now + 60.0, environment="demo",
++                              scope_hash=scope.scope_hash,
++                              runtime_instance_id=value),
++            {"environment": "demo", "scope_hash": scope.scope_hash,
++             "runtime_instance_id": value}, now=now)
++
++    # ── 正向：哨兵被拒 ────────────────────────────────────────────────
++    if guard:
++        snap = readiness("unknown")
++        check("哨兵实例号不再被读成合法身份（allowed=False）",
++              not snap.new_entry_allowed, snap.as_dict())
++        check("哨兵实例号产出可区分的既有原因码 RUNTIME_INSTANCE_UNBOUND",
++              snap.blocking_reasons and
++              _RUNTIME_INSTANCE_UNBOUND in snap.blocking_reasons
++              and snap.blocking_reasons.count(_RUNTIME_INSTANCE_UNBOUND) == 1,
++              snap.as_dict())
++        check("哨兵经 facts 通道（未传显式参数）同样被拒",
++              not evaluate_entry_readiness(
++                  _readiness_facts(scope) | {"runtime_instance_id": "unknown"},
++                  now=now, scope=scope, environment="demo").new_entry_allowed)
++        check("授权上下文两侧都是哨兵 -> 不构成进程绑定（False）",
++              matches("unknown") is False, "True")
++    else:
++        snap = readiness("unknown")
++        check("基线态：哨兵实例号被判「就绪」且无原因码（复现缺陷）",
++              snap.new_entry_allowed and not snap.blocking_reasons,
++              snap.as_dict())
++        check("基线态：两侧哨兵被读成「同一个运行代」（复现缺陷）",
++              matches("unknown") is True, "False")
++
++    # ── 反向证据（两态逐字相同）：真值与「只是长得像」的值不被误杀 ──
++    real = readiness("rt-2026-09-22-a1b2c3")
++    check("反向证据：真实运行代照常就绪，且不新增任何阻断码（两态都成立）",
++          real.new_entry_allowed and not real.blocking_reasons, real.as_dict())
++    lookalikes = ("unknownverse", "known", "n/a-x", "UNKNOWN-X", "unknown-ish")
++    killed = [name for name in lookalikes
++              if not readiness(name).new_entry_allowed]
++    check("反向证据：只是长得像哨兵的真实例号不被误杀（两态都成立）",
++          not killed, f"被误杀={killed}")
++    not_bound = [name for name in lookalikes if not matches(name)]
++    check("反向证据：像哨兵的真实例号仍可构成进程绑定（两态都成立）",
++          not not_bound, f"被误判未绑定={not_bound}")
++
++    # ── 反向证据：既有语义（三态事实 / 比对项）逐条未变 ──────────────
++    tri = {}
++    for key, value in (("order_mirror_ok", None), ("order_mirror_ok", False),
++                       ("protection_mirror_ok", None),
++                       ("protection_mirror_ok", False)):
++        facts = _readiness_facts(scope) | {key: value}
++        tri[f"{key}={value}"] = evaluate_entry_readiness(
++            facts, now=now, scope=scope,
++            runtime_instance_id="rt-real-1", environment="demo"
++        ).blocking_reasons
++    check("反向证据：三态事实语义逐条未变（True/False/None 各自的码）",
++          tri["order_mirror_ok=None"] == ("ORDER_MIRROR_UNPROVEN",)
++          and tri["order_mirror_ok=False"] == ("ORDER_MIRROR_MISMATCH",)
++          and tri["protection_mirror_ok=None"] == ("PROTECTION_MIRROR_UNPROVEN",)
++          and tri["protection_mirror_ok=False"] == ("PROTECTION_MIRROR_MISMATCH",),
++          str(tri))
++    unproven = evaluate_entry_readiness(
++        _readiness_facts(scope) | {"order_mirror_ok": None}, now=now,
++        scope=scope, runtime_instance_id="rt-real-1",
++        environment="demo").blocking_reasons
++    check("反向证据：缺证据的既有码未被替换、也未叠加哨兵码",
++          unproven == ("ORDER_MIRROR_UNPROVEN",), str(unproven))
++
++    empty_reasons = evaluate_entry_readiness(
++        _readiness_facts(scope), now=now, scope=scope,
++        runtime_instance_id="", environment="demo").blocking_reasons
++    check("反向证据：空实例号仍产出原有 RUNTIME_INSTANCE_UNPROVEN（未换码）",
++          "RUNTIME_INSTANCE_UNPROVEN" in empty_reasons
++          and _RUNTIME_INSTANCE_UNBOUND not in empty_reasons, str(empty_reasons))
++
++    real_decision = _PipelineDecision(expires_at=now + 60.0, environment="demo",
++                                      scope_hash=scope.scope_hash,
++                                      runtime_instance_id="rt-real-1")
++    real_context = {"environment": "demo", "scope_hash": scope.scope_hash,
++                    "runtime_instance_id": "rt-real-1"}
++    check("反向证据：TTL/环境/scope/运行代逐条比较项未变（两态都成立）",
++          authorization_matches_context(real_decision, real_context, now=now)
++          and not authorization_matches_context(
++              _PipelineDecision(expires_at=now - 1.0, environment="demo",
++                                scope_hash=scope.scope_hash,
++                                runtime_instance_id="rt-real-1"),
++              real_context, now=now)
++          and not authorization_matches_context(
++              _PipelineDecision(expires_at=now + 60.0, environment="live",
++                                scope_hash=scope.scope_hash,
++                                runtime_instance_id="rt-real-1"),
++              real_context, now=now)
++          and not authorization_matches_context(
++              _PipelineDecision(expires_at=now + 60.0, environment="demo",
++                                scope_hash="deadbeef",
++                                runtime_instance_id="rt-real-1"),
++              real_context, now=now)
++          and not authorization_matches_context(
++              _PipelineDecision(expires_at=None, environment="demo",
++                                scope_hash=scope.scope_hash,
++                                runtime_instance_id="rt-real-1"),
++              real_context, now=now),
++          "既有比对项被改动")
++
++
+ def main() -> int:
+     check_identity_inputs_change_hash()
+     check_config_sources_enter_identity()
+@@ -2082,6 +2254,7 @@ def main() -> int:
+     check_sentinel_runtime_instance_never_binds()
+     check_contaminated_registry_reheals_runtime_instance_id()
+     check_contaminated_registry_to_authorization_conclusion()
++    check_sentinel_never_passes_entry_readiness_entries()
+     if FAILURES:
+         print(f"\nU15 RUNTIME IDENTITY ACCEPTANCE FAILED: {len(FAILURES)} -> "
+               + ", ".join(FAILURES))

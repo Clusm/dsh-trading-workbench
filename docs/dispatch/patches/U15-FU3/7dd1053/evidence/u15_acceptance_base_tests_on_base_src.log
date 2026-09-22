@@ -1,0 +1,313 @@
+PASS identity-deterministic
+PASS dependency-lock-affects-identity
+PASS strategy-card-affects-identity
+PASS model-override-affects-identity
+PASS env-model-override-affects-identity
+PASS allowlisted-env-override-affects-identity
+PASS profile-override-affects-identity
+PASS effective-config-affects-identity
+PASS runtime-instance-ignored-in-deployment-hash
+PASS settings-risk-drift-changes-identity
+PASS decision-policy-drift-changes-identity
+PASS agents-file-drift-changes-identity
+PASS risk-learning-drift-changes-identity
+PASS risk-profile-lock-drift-changes-identity
+PASS windows-service-drift-changes-identity
+PASS identity-restored-after-source-restore
+PASS missing-source-changes-identity
+PASS missing-source-is-visible-as-advisory
+PASS missing-source-rejected-when-required (MissingRuntimeInputError)
+PASS source-file-credentials-not-hashed
+PASS source-file-credentials-counted
+PASS source-file-sensitive-drop-changes-hash
+PASS source-config-hash-reflects-effective-config
+PASS artifact-absolute-path-rejected (MalformedInputError)
+PASS artifact-escaping-path-rejected (MalformedInputError)
+PASS artifact-env-file-name-rejected (CredentialLeakError)
+PASS artifact-credential-name-rejected (CredentialLeakError)
+PASS artifact-relative-path-accepted
+PASS artifact-path-bounds-in-identity (MalformedInputError)
+PASS artifact-outside-content-not-in-identity
+PASS malformed-raw_settings-rejected (MalformedInputError)
+PASS malformed-raw_agents-rejected (MalformedInputError)
+PASS malformed-env-rejected (MalformedInputError)
+PASS malformed-profile-overrides-rejected (MalformedInputError)
+PASS malformed-credentials-rejected (MalformedInputError)
+PASS empty-runtime-instance-rejected (MissingRuntimeInputError)
+PASS zero-card-strategy-rejected (MissingRuntimeInputError)
+PASS zero-card-strategy-rejected-in-identity (MissingRuntimeInputError)
+PASS cardless-strategy-file-rejected (MissingRuntimeInputError)
+PASS valid-cards-still-accepted
+PASS missing-lock-file-rejected (MissingRuntimeInputError)
+PASS missing-lock-file-rejected-direct (MissingRuntimeInputError)
+PASS lock-collector-optional-mode
+PASS strategy-source-declared
+PASS strategy-source-verifies
+PASS strategy-source-mismatch-rejected (StrategySourceMismatchError)
+PASS strategy-cards-missing-rejected (MissingRuntimeInputError)
+PASS strategy-cards-missing-in-identity (MissingRuntimeInputError)
+PASS no-secret-value-in-identity
+PASS no-sensitive-key-path-in-effective-config
+PASS no-sensitive-key-path-in-model-route
+PASS env-allowlist-has-no-sensitive-name
+PASS settings-whitelist-has-no-sensitive-leaf
+PASS credential-env-not-in-overrides
+PASS env-snapshot-allowlisted
+PASS guard-rejects-raw-env-text (CredentialLeakError)
+PASS guard-rejects-env-file-key (CredentialLeakError)
+PASS guard-rejects-nested-credential-key (CredentialLeakError)
+PASS k01-guard-rejects-raw-text (SensitiveInputError)
+PASS k01-guard-rejects-secret-key (SensitiveInputError)
+PASS no-env-file-path-hashed
+PASS empty-env-yields-empty-overrides
+PASS absent-settings-keys-not-filled
+PASS settings-carries-all-six-config-sources
+PASS no-profile-means-no-overrides
+PASS profile-overrides-from-config-only
+PASS blank-env-value-ignored
+PASS agent-model-beats-env
+PASS env-model-beats-default
+PASS default-model-used-last
+PASS effort-from-agents-yaml
+PASS workbuddy-switches-provider
+PASS workbuddy-only-ai-trader
+PASS empty-model-is-structured-rejection (ModelRouteConfigError)
+PASS route-hashable
+PASS route-hash-changes-with-model
+PASS missing-key-is-mock
+PASS mock-blocks-demo
+PASS mock-blocks-live
+PASS mock-does-not-block-paper
+PASS mock-blocker-visible-in-overrides
+PASS explicit-mock-setting-effective
+PASS undeclared-credential-is-mock
+PASS fallback-with-mock-primary-flagged
+PASS workbuddy-blocked-outside-live
+PASS workbuddy-allowed-in-live
+PASS nested-secret-not-in-model-route
+PASS nested-secret-drop-is-counted
+PASS workbuddy-capability-unproven-blocks
+PASS workbuddy-no-fake-credential-evidence
+PASS workbuddy-declared-unavailable-blocks
+PASS workbuddy-declared-available-allows
+PASS workbuddy-live-blocks-entry-without-evidence
+PASS workbuddy-live-allows-entry-with-evidence
+PASS unrecognised-fallback-provider-is-not-silent
+PASS no-fallback-for-non-ai-trader
+PASS fallback-declared-unavailable-rejected (FallbackRouteError)
+PASS fallback-opencode-explicitly-declared-path
+PASS mock-blocks-authorize-new-entry
+PASS healthy-route-allows-entry
+PASS readiness-false-still-blocks
+PASS account-mismatch-blocks-entry
+PASS git-mismatch-blocks-entry
+PASS gate-omitted-expected-is-fail-closed
+PASS gate-omitted-readiness-is-fail-closed
+PASS gate-foreign-generation-rejected
+PASS scope-hash-unbound-rejected
+PASS scope-hash-compared-both-ways
+PASS scope-hash-absent-on-both-sides-is-not-a-mismatch
+PASS gate-malformed-generation-rejected
+PASS gate-malformed-bundle-rejected
+PASS gate-malformed-expected-rejected
+PASS new-a-demo-bundle-live-generation-rejected
+PASS new-a-explicit-bindings-cannot-bypass
+PASS new-a-live-bundle-demo-generation-rejected
+PASS new-a-consistent-identity-and-generation-allowed
+PASS new-a-instance-difference-is-not-a-cross-mismatch
+PASS new-a-same-environment-other-account-rejected
+PASS mint-rejects-epoch-string (MalformedInputError)
+PASS mint-rejects-epoch-none (MalformedInputError)
+PASS mint-rejects-epoch-bool (MalformedInputError)
+PASS mint-rejects-epoch-float (MalformedInputError)
+PASS mint-rejects-epoch-list (MalformedInputError)
+PASS mint-rejects-started-at-string (MalformedInputError)
+PASS mint-rejects-started-at-object (MalformedInputError)
+PASS mint-rejects-scope-string-int (MalformedInputError)
+PASS mint-rejects-fingerprint-int (MalformedInputError)
+PASS mint-rejects-environment-int (MalformedInputError)
+PASS mint-rejects-account-ref-dict (MalformedInputError)
+PASS mint-rejects-account-ref-none (MalformedInputError)
+PASS mint-rejects-instance-int (MalformedInputError)
+PASS mint-still-rejects-empty-environment (MissingRuntimeInputError)
+PASS mint-still-rejects-unknown-environment (ExecutionModeError)
+PASS mint-still-rejects-empty-instance (MissingRuntimeInputError)
+PASS mint-still-rejects-negative-epoch (RuntimeIdentityError)
+PASS mint-accepts-well-formed-inputs
+PASS fallback-provider-env-declared-name-is-read
+PASS fallback-provider-env-default-name-still-works
+PASS fallback-provider-env-absent-is-reported
+PASS fallback-provider-env-name-is-exported-as-evidence
+PASS dependency-comparison-match-when-all-declared
+PASS dependency-comparison-match-with-explicit-declaration
+PASS dependency-comparison-mismatch-on-drifted-declaration
+PASS dependency-comparison-unavailable-on-bad-shape
+PASS dependency-comparison-unavailable-when-declared-file-missing
+PASS dependency-comparison-unavailable-without-deployed-lock
+PASS bundle-produces-dependency-comparison-status
+PASS bundle-reports-unavailable-when-lock-missing
+PASS workbuddy-blocked-when-mode-unknown(None)
+PASS workbuddy-blocked-when-mode-unknown('')
+PASS workbuddy-blocked-when-mode-unknown('   ')
+PASS workbuddy-allowed-when-mode-live
+PASS workbuddy-allowed-in-paper
+PASS unlocked-scope-has-warning
+PASS locked-scope-has-no-warning
+PASS live-without-profile-blocked
+PASS live-without-profile-advisory-visible
+PASS demo-without-profile-not-blocked
+PASS local-fallback-labelled-in-bundle
+PASS local-fallback-not-blocking-in-demo
+PASS local-fallback-blocked-in-live
+PASS declared-account-ref-is-stable
+PASS live-fallback-explicitly-allowed
+PASS fallback-local-false-rejects-missing-account (MissingRuntimeInputError)
+PASS mint-rejects-conflicting-environment (ExecutionModeError)
+PASS mint-rejects-unknown-environment (ExecutionModeError)
+PASS mint-rejects-empty-environment (MissingRuntimeInputError)
+PASS bare-string-account-ref-is-normalised
+PASS mint-rejects-empty-string-account-ref (MissingRuntimeInputError)
+PASS account-ref-is-declared-stable
+PASS account-ref-local-fallback-labeled
+PASS account-ref-not-key-derived
+PASS rotation-keeps-account-ref
+PASS rotation-keeps-generation-id
+PASS rotation-keeps-scope-and-instance
+PASS rotation-bumps-epoch-and-fingerprintC:\Users\Tao\Desktop\币安\multi-agent-trader\.venv\Lib\site-packages\langgraph\cache\base\__init__.py:8: LangChainPendingDeprecationWarning: The default value of `allowed_objects` will change in a future version. Pass an explicit value (e.g., allowed_objects='messages' or allowed_objects='core') to suppress this warning.
+  from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+PASS fingerprint-irreversible
+PASS fingerprint-none-on-empty
+PASS rotation-does-not-break-binding
+PASS generation-id-deterministic
+PASS generation-id-per-instance
+PASS generation-requires-instance (MissingRuntimeInputError)
+PASS rotation-needs-fingerprint-or-none (RuntimeIdentityError)
+PASS binding-self-ok
+PASS binding-unproven-without-actual
+PASS binding-detects-environment
+PASS binding-detects-account
+PASS binding-detects-instance
+PASS binding-detects-scope
+PASS binding-detects-generation
+PASS generation-serialisable
+PASS profile-wins-over-execution-mode
+PASS execution-mode-when-no-profile
+PASS default-when-nothing-given
+PASS mode-normalised-case
+PASS unknown-profile-rejected (ExecutionModeError)
+PASS unknown-mode-rejected (ExecutionModeError)
+PASS empty-profile-is-not-unset (ExecutionModeError)
+PASS empty-mode-is-not-unset (ExecutionModeError)
+PASS unknown-default-mode-rejected (ExecutionModeError)
+PASS non-string-profile-rejected (ExecutionModeError)
+PASS paper-is-not-a-valid-profile (ExecutionModeError)
+PASS profile-ignores-conflicting-execution-mode
+PASS testnet-mode-supported
+PASS valid-fallback-accepted
+PASS fallback-missing-credential (FallbackRouteError)
+PASS fallback-credential-undeclared (FallbackRouteError)
+PASS fallback-model-none (FallbackRouteError)
+PASS fallback-empty-model (FallbackRouteError)
+PASS fallback-empty-provider (FallbackRouteError)
+PASS fallback-bad-url-scheme (FallbackRouteError)
+PASS fallback-url-without-host (FallbackRouteError)
+PASS fallback-url-with-credentials (FallbackRouteError)
+PASS fallback-unknown-field (FallbackRouteError)
+PASS fallback-non-mapping (FallbackRouteError)
+PASS illegal-fallback-config-rejected (FallbackRouteError)
+PASS no-fallback-explicit-empty
+PASS declared-fallback-in-route
+PASS coverage-complete-when-lock-present
+PASS coverage-gap-reported-as-identity-coverage-error (IdentityCoverageError)
+PASS coverage-gap-name-is-dependency-lock
+PASS state-root-consistent-combination
+PASS state-root-live-without-profile-flagged
+PASS state-root-shared-live-root-flagged
+PASS state-root-profile-environment-mismatch
+PASS state-root-unbound-inputs
+PASS state-root-demo-shared-root-is-fine
+PASS disposition-covers-report-items
+PASS disposition-status-valid
+PASS disposition-has-note-and-owner
+PASS disposition-covers-all-decl-and-diff-items
+PASS diff-7-registration-is-honest
+PASS decl-7-registration-is-honest
+INFO fingerprint disposition: fixed=12 registered=12 ['decl-11', 'decl-13', 'decl-15', 'decl-4', 'decl-6', 'diff-6', 'diff-7', 'fu-1', 'fu-2', 'fu-3', 'fu-4', 'fu-paths']
+PASS 合成根默认扫描接受命中键名标记的代码模块
+PASS 合成根 .env 仍被拒 (CredentialLeakError)
+PASS 合成根 credentials.json 仍被拒 (CredentialLeakError)
+PASS 真实根默认工件扫描不抛错
+PASS 真实根工件集合包含 src/core/management_authorization.py
+PASS 真实根工件集合非空且全部在 src/ 下
+PASS 凭据文件名仍被拒 .env (CredentialLeakError)
+PASS 凭据文件名仍被拒 .env.local (CredentialLeakError)
+PASS 凭据文件名仍被拒 config/.env.production (CredentialLeakError)
+PASS 凭据文件名仍被拒 credentials.json (CredentialLeakError)
+PASS 凭据文件名仍被拒 id_rsa (CredentialLeakError)
+PASS 凭据文件名仍被拒 id_rsa.pub (CredentialLeakError)
+PASS 凭据文件名仍被拒 api_secret.pem (CredentialLeakError)
+PASS 凭据文件名仍被拒 secrets.yaml (CredentialLeakError)
+PASS 凭据文件名仍被拒 server.key (CredentialLeakError)
+PASS 凭据文件名仍被拒 cert.p12 (CredentialLeakError)
+PASS 凭据文件名仍被拒 app.keystore (CredentialLeakError)
+PASS 凭据文件名仍被拒 db_password.txt (CredentialLeakError)
+PASS 凭据文件名仍被拒 tls/private_key.pem (CredentialLeakError)
+PASS 凭据文件名仍被拒 auth/passwd (CredentialLeakError)
+PASS 凭据文件名仍被拒 src/api_key_store.py (CredentialLeakError)
+PASS 普通代码模块未被误杀 src/core/management_authorization.py
+PASS 普通代码模块未被误杀 src/core/token_bucket.py
+PASS 普通代码模块未被误杀 src/core/authorization_gate.py
+PASS 普通代码模块未被误杀 src/core/keyboard_shortcuts.py
+PASS 普通代码模块未被误杀 src/core/monkey_patch.py
+PASS K01 键名守卫未削弱（authorization/api_key/key 仍是敏感键名）
+PASS SENSITIVE_KEY_MARKERS 仍含 authorization（冻结契约未改）
+PASS 保守残差：含 secret 子串的文件名被拒（fail-closed） (CredentialLeakError)
+  ----  [U12-BF1 hop2 / I] hash_artifact(真实工件) -> 已消解（契约层已适配）
+PASS 占位符识别：大小写与空白无关，真值/空值/None/非字符串不被判为哨兵
+PASS 归一化绝不返回哨兵：缺失/空/None/非字符串 → None，真值原样（去空白）
+PASS 占位符 → blockers 带 RUNTIME_GENERATION_UNPROVEN（不静默）
+PASS 占位符 → 身份里的运行代字段留空（绝不用哨兵回填）
+PASS 占位符不牺牲其余身份证据（照常采集，不是整份降级成采集失败）
+PASS 显式 None（降级路径：手上确实没有运行代）与占位符同口径
+PASS 空运行代仍 MissingRuntimeInputError（两态都成立，未放宽） (MissingRuntimeInputError)
+PASS 反向证据：真实运行代不带 RUNTIME_GENERATION_UNPROVEN（两态都成立）
+PASS 服务在正常态能启动且清单可读（两态都成立）
+PASS 正常态：清单运行代 == 服务手上的真实运行代（透传，不是占位符）
+PASS 正常态：不因本次改动新增阻断（反向证据）
+PASS 降级态（运行代不可持久化）服务仍能启动，不变成启动失败
+PASS 降级态：清单留空（不用临时实例值/哨兵冒充运行代）
+PASS 降级态：清单显式登记 RUNTIME_GENERATION_UNPROVEN（看得出「运行代缺失」）
+PASS 前提：两个哨兵运行代的 generation_id 逐字相等（否则本轮无的放矢）
+PASS 哨兵×哨兵不通过绑定，原因码 RUNTIME_INSTANCE_UNBOUND（复用既有码）
+PASS 任一侧带哨兵即不通过（expected 带哨兵）
+PASS 任一侧带哨兵即不通过（actual 带哨兵）
+PASS 反向证据：真实运行代照常通过（两态都成立）
+PASS 反向证据：只是长得像哨兵的真实例号不被误杀（两态都成立）
+PASS 既有语义未变：缺 actual 仍是 RUNTIME_GENERATION_UNPROVEN（逐字不变）
+PASS 既有语义未变：两边都未声明 scope 时不比较（两态都成立）
+PASS 既有语义未变：轮换凭据后绑定照常通过（两态都成立）
+PASS 既有语义未变：畸形入参仍是 RUNTIME_GENERATION_MALFORMED
+PASS 哨兵 registry 视为无记录：load() -> None（修前读出 'unknown'）
+PASS 重铸出**真实**实例号（32 位 uuid4 hex，不再是哨兵）
+PASS 旧运行代未被继承（restarts 归零，不把哨兵当成「同一代」）
+PASS 重铸已落盘（再次 load 得到的就是真实实例号）
+PASS 反向证据：真实实例号照常读入（两态都成立）
+PASS 反向证据：同一环境/账户沿用同一运行代，不重铸、不新铸（两态都成立）
+PASS 反向证据：只是长得像哨兵的真实例号不被误杀、不被重铸（两态都成立）
+PASS 端到端①：污染 registry 已自愈 → 授权绑定到**真实**实例号且不新增阻断
+PASS 端到端②：签发侧不再把哨兵盖成一份「已绑定」的授权
+PASS 端到端②：哨兵运行代的账户域显式未绑定
+PASS 端到端②：污染 registry 铸出的哨兵运行代 → 授权结论为「不通过」且带可区分原因码 RUNTIME_INSTANCE_UNBOUND
+PASS 端到端②：按原 id 的收口/查单不被身份绑定阻断（既有边界未变）
+PASS 基线态：哨兵实例号被判「就绪」且无原因码（复现缺陷）
+PASS 基线态：两侧哨兵被读成「同一个运行代」（复现缺陷）
+PASS 反向证据：真实运行代照常就绪，且不新增任何阻断码（两态都成立）
+PASS 反向证据：只是长得像哨兵的真实例号不被误杀（两态都成立）
+PASS 反向证据：像哨兵的真实例号仍可构成进程绑定（两态都成立）
+PASS 反向证据：三态事实语义逐条未变（True/False/None 各自的码）
+PASS 反向证据：缺证据的既有码未被替换、也未叠加哨兵码
+PASS 反向证据：空实例号仍产出原有 RUNTIME_INSTANCE_UNPROVEN（未换码）
+PASS 反向证据：TTL/环境/scope/运行代逐条比较项未变（两态都成立）
+
+U15 RUNTIME IDENTITY ACCEPTANCE PASS
