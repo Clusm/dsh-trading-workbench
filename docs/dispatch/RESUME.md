@@ -27,7 +27,7 @@
 - **18/18 任务全部 INTEGRATED**（首批 14 项 + 后置 P2 四项 U06b/U07/U10b/U11），另有 **5 轮缺陷修复**（U13-FU1/FU2/FU3、U12-BF1、U09-FU1）与 **1 次契约勘误**（`CONTRACT-ERRATUM-1`）。
 - **稳定性证据**：`git rev-list --count <branch> ^integration/unattended-v3` 对 **全部 22 条 `task/*` 分支均为 0** —— 无任何已交付提交游离在集成分支之外。
 - **常设门禁**：`OFFLINE REGRESSION OK scripts=94`（U11 修复轮把 9 个 `tests/` 套件补进回归，85→94）、`QUALITY CHECK OK files=303 untracked=0`、契约 `PASS 173 / FAIL 0`（golden 160）、打包器 `37/0`（0 断链）。
-- **台账**：`known_issues` 共 40 条 —— **13 FIXED / 24 OPEN**（其余为已修或已决）。
+- **台账**：known_issues 共 41 条 —— **18 FIXED / 20 OPEN**（2026-09-22 逐条复核后更正：4 条已解的记录曾滞后记 OPEN，见 L20-LEDGER-STATUS-DRIFT）。
 
 ### 运行目录合规性（已核查）
 - `multi-agent-trader` 的 **HEAD 仍为 `05d28e0`**，`src/`、`config/`、`knowledge/`、`scripts/`、`tests/` **改动为空** —— 本会话**未**在其上做任何 checkout/合并/改配置/执行开发代码；demo 服务跑的是未变代码。
