@@ -1,0 +1,28 @@
+== U08-R5-FU2 前后对照探针 ==
+-- A. 去重读取（:184 db.signal_ticket_has_order）抛 OperationalError --
+  票据 t-a（审计库读取不可用）
+    escaped  = sqlite3.OperationalError: database is locked
+    decision = <未返回>（整轮作废）
+    intents  = <丢失>
+    funnel   = {}
+    ledger.is_consumed('t-a') = False   （True = 票据被永久烧掉；False = 仅本轮观望）
+-- A2. 只有 t-bad 的读取不可用：坏票跳过、同轮 t-good 照常开仓 --
+  票据 [t-bad, t-good(ETH)]
+    escaped  = sqlite3.OperationalError: database is locked
+    decision = <未返回>（整轮作废）
+    intents  = <丢失>
+    funnel   = {}
+-- B. 纯审计写入（:227/:237 log_risk_event / update_signal_ticket）抛 OperationalError --
+  票据 [t-good(ETH), t-hold(BTC 已持仓)]
+    escaped  = sqlite3.OperationalError: database is locked
+    decision = <未返回>（整轮作废）
+    intents  = <丢失>
+    funnel   = {'SYMBOL_ALREADY_HELD': 1}
+-- C. KeyboardInterrupt 必须继续穿出（不得被 except Exception 吞掉） --
+  票据 t-ki
+    escaped  = builtins.KeyboardInterrupt: SIGINT
+    decision = <未返回>（整轮作废）
+    intents  = <丢失>
+    funnel   = {}
+-- 注册表 --
+    AUDIT_UNAVAILABLE registered = <missing>
