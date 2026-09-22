@@ -5298,14 +5298,41 @@
           "integration_commit": "merge task/U13-FU5 @ 1fe6037（owned 路径逐字节一致）；补丁包由 I 从作者 worktree 补入并提交（N2）"
         },
         "U15-FU1": {
-          "status": "IN_PROGRESS",
+          "status": "READY_FOR_REVIEW",
           "branch": "task/U15-FU1",
           "worktree": "mat-wt/U15F1",
           "base": "02b93da",
           "targets_issue": "U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER（原登记把它低估为『影响判据精度』）",
           "defect": "发布清单的 `runtime_instance_id` 在生产**默认是占位符 `\"unknown\"` 且无阻断码**。链路（I 已逐步核对）：①service.py:165-171 用 RunRegistry 拿到真实运行代并 self.runtime_instance_id=...（:174 已用它做 metadata）②service.py:188-195 调 build_release_manifest **未传 runtime_instance_id** ③release_manifest.py:297 回退 os.getenv('MTA_RUNTIME_INSTANCE_ID')，未设则 None ④release_manifest.py:232 静默用 `str(runtime_instance_id or \"unknown\")` ⑤runtime_identity.py:1684-1686 只拒绝**空**值，`\"unknown\"` 是非空串被当合法运行代 -> blockers 里无该条 ⑥消费方（含 U12 验收 `complete=bool(artifact_hash) and bool(runtime_instance_id)`）读成『身份完整』。",
           "impact": "**服务手里有真实值却没用**；发布清单的**身份证据**默认携带占位符并被如实消费 —— 与已修 `U09-FU1` 同族（读起来『存在』、实际不存在的值）。降级路径（运行代未持久化，service.py:182-186 置 run_generation=None 并记 run_generation_error）下尤其明显。",
-          "direction_requirement": "两处都要：**A（生产链路）** service.py 把已拿到的真实运行代传下去（run_generation 为 None 时**不得**传字面 'unknown' 冒充）；**B（口径）** 占位符不得被静默当合法身份值 —— 显式识别为『运行代缺失』并记阻断码（优先复用既有码，不新造语义重叠码）或拒绝。硬要求：不得放宽既有阻断语义；7/200/30 一个数字不动；**不得把『没有运行代』变成『启动失败』**（服务在降级路径下仍须能起）；U12 验收套件会因此需更新，**必须逐条自证是跟随新口径而非为变绿而放宽**；不得吞 KI/SystemExit。"
+          "direction_requirement": "两处都要：**A（生产链路）** service.py 把已拿到的真实运行代传下去（run_generation 为 None 时**不得**传字面 'unknown' 冒充）；**B（口径）** 占位符不得被静默当合法身份值 —— 显式识别为『运行代缺失』并记阻断码（优先复用既有码，不新造语义重叠码）或拒绝。硬要求：不得放宽既有阻断语义；7/200/30 一个数字不动；**不得把『没有运行代』变成『启动失败』**（服务在降级路径下仍须能起）；U12 验收套件会因此需更新，**必须逐条自证是跟随新口径而非为变绿而放宽**；不得吞 KI/SystemExit。",
+          "code_head": "ad0d2ea",
+          "tip": "bf9b304",
+          "changed_files": "5 文件 +342/-17：src/core/service.py(+10)、src/core/release_manifest.py(+38/-5)、src/core/runtime_identity.py(+85/-4)、tests/acceptance/test_runtime_identity.py(+171)、tests/acceptance/test_unattended_release.py(+38/-8)",
+          "patch_package": "docs/dispatch/patches/U15-FU1/ad0d2ea/（5 diff + README + 34 evidence）；**补丁包已被 bf9b304 跟踪**（未重演 N2）",
+          "before_after": {
+            "正常态（真实 TradingService，paper，隔离 MTA_STATE_ROOT）": "pristine `service.runtime_instance_id='4fa9f71e…'` 但 `manifest='unknown'`、blockers=[] -> patched `manifest` **等于** `service.runtime_instance_id`（真实值透传）、blockers 不新增",
+            "降级态（run_generation=None）": "pristine `manifest='unknown'`、blockers=[] -> patched **服务仍能起来**、`manifest=''`、blockers=**['RUNTIME_GENERATION_UNPROVEN']**",
+            "build_release_manifest": "arg=None：'unknown' -> ''+阻断码；arg='rt-probe-1'：两态都透传且不加阻断",
+            "**U09 发布门禁读数（最有后果的一环）**": "占位符清单：修前 **PASS/[]** -> 修后 **NO_DATA/['IDENTITY_REF_MISSING']**；真实值两态 PASS"
+          },
+          "caliber_B": "选**『显式识别为运行代缺失 + 记入既有阻断码』**（复用 U15 r2 既有码 `RUNTIME_GENERATION_UNPROVEN`，与 K04 绑定门禁同码，**未新造码**），**不抛错**。不抛错的理由：抛错会走 `_identity_evidence` 的兜底分支 -> 把**整份证据**（artifact/effective_config/model_route/dependency/git_dirty）清空并改报 `IDENTITY_COLLECT_FAILED`，即把『缺一项』**谎报成『采集失败』**、削弱可审性。空串/纯空白/非字符串**仍抛 `MissingRuntimeInputError`（未放宽）**。清单字段留空（采集侧 + builder 侧**两道闸**），哨兵永不落进值。哨兵名单 16 项（unknown/none/null/nil/n-a/na/undefined/unset/missing/not-set/notset/-/--/?/placeholder/tbd，大小写与空白无关）。",
+          "u12_test_self_justification": "`complete -> collected`：把『证据已采集』与『运行代已证明』拆开 —— 修前的第二个合取项在无运行代时取的是**哨兵（恒真）**，正是本缺陷；运行代改由新增两条**单加强制**断言覆盖。**3 条断言 -> 6 条，无一条旧断言删除**（1 条重命名 + 条件等价改写）。新增：`instance == \"\"`、`RUNTIME_GENERATION_UNPROVEN in blockers`（guard 态，**旧实现必失败**）；基线态分支断言缺陷形态（两态可跑所需，非放宽）；反向证据断言两态都成立。U15 套件**未改任何既有断言**；两态探测用 `getattr(module, \"U15_FU1_RUNTIME_INSTANCE_GUARD\", \"\")`（**未硬编码迁移版本集合**）。计数：U12 47/0 -> 50/0；U15 276 PASS/0。",
+          "reverse_evidence": "真实运行代：服务链路 `manifest == service.runtime_instance_id` 且 **blockers 不新增**；`build_release_manifest(arg='rt-probe-1')` 两态都透传且不带 `RUNTIME_GENERATION_UNPROVEN`。",
+          "delta": "**NEW_FAIL=∅ / FIXED=∅ / SAME_FAIL=∅ / CHANGED=∅**（94 脚本两态 rc 全 0）；**`git ls-files` 857/857**（L19 已应用，只暂存不 commit）；官方入口两态 `OFFLINE REGRESSION OK scripts=94` exit 0。`check_quality OK files=304 untracked=0`（未新增 exclude）。补丁 5 x 3 配置全 `Checking patch`、**0 Skipped**。真实树 `smoke_u10a` 37/0。`KeyboardInterrupt`/`SystemExit` 两路均穿出。",
+          "unfinished": [
+            "`mint_runtime_generation` **未动** -> 损坏/遗留 `runtime_generation.json`（值 `\"unknown\"`）仍能铸出实例号为 `\"unknown\"` 的运行代；**但它必然被清单标成 `RUNTIME_GENERATION_UNPROVEN`（不再静默）**。建议另立：`RunRegistry.load()` 把占位实例号视为**无记录**（重铸）。",
+            "`management_authorization.py:177` 仍是『非空即通过』—— 同样哨兵从别的路径进 K04 授权不会被拦（**同族，未扩面**）。",
+            "`release_manifest` 的 `egress_id` 仍可写 `\"unknown\"`（live 启动门禁已把它当缺失，字段本身未动；相邻项已登记，未顺手修）。",
+            "本阻断码是**记录**不是启动门禁：服务在降级路径仍能起来（**符合要求**）；闭环位置 = 清单字段 / `identity_blockers` / 看板拒切 live / U09 `IDENTITY_REF_MISSING`。"
+          ],
+          "verification": {
+            "session": "Q (reviews/U15-FU1/R1/q)",
+            "candidate": "bf9b304",
+            "verdict": "PENDING",
+            "reports_dir": "docs/dispatch/reviews/U15-FU1/bf9b304/",
+            "focus": "重点：①服务链路前后对照（**降级态服务仍须能起来**，若起不来判阻塞 —— 过度修正）；②**U09 门禁读数独立复现**（占位符 -> NO_DATA/IDENTITY_REF_MISSING，最有后果的一环）；③哨兵 16 项正/反面（`unknownverse`/`known`/`n/a-x` 等**长得像的真值不得误杀**）+ 空值仍抛；④U12/U15 测试改动逐 hunk 裁决 + **新断言扣旧实现必失败**；⑤门禁数字与既有码语义未动。"
+          }
         }
       }
     },
