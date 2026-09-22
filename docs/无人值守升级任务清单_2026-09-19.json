@@ -4535,11 +4535,11 @@
       {
         "id": "U08-R5-FU2",
         "title": "执行器内审计库调用无护栏（db.* 抛 OperationalError 会穿出整轮）",
-        "status": "FIX_PENDING_VERIFICATION",
+        "status": "FIXED",
         "owner": "U12/I",
         "blocks": "无（既有形态，U08 未引入未扩大）",
         "note": "Q r5 N12 实测：strategy_trader.py 的 db.signal_ticket_has_order()/db.log_risk_event()/db.update_signal_ticket() 未包 except；审计库抛 sqlite3.OperationalError: database is locked 时异常穿出整个执行器、decision=None，与 N6 同形。pristine 树逐字相同 -> 属既有形态。建议 U12 与 U08-R5-FU1 合并处置（同一处收口）。",
-        "fix": "U08-FU2 @ 7746605（补丁包 docs/dispatch/patches/U08-FU2/7746605/）；去重读 fail-closed（AUDIT_UNAVAILABLE 跳过、不烧票）+ 纯审计写局部化；待 Q 复验通过后置 FIXED 并集成。"
+        "fix": "U08-FU2 @ 7746605，集成见 docs/dispatch/reviews/U08-FU2/dcb87bc/。去重读 fail-closed（AUDIT_UNAVAILABLE 跳过、不烧票）+ 纯审计写局部化 + 异常名进 note；Q 复验含『票据确已下单但审计读失败仍跳过』的关键对抗，无重复下单风险。"
       },
       {
         "id": "F14-DRILL-GATE-NOT-INSTALLED",
@@ -4719,6 +4719,14 @@
         "owner": "U09 后续 / U12",
         "blocks": "无（全仓无写方产出带空白枚举值；且只接受带空白的**肯定值**，不会放行 INCOMPLETE，方向仍 fail-closed）",
         "note": "Q r1 在枚举集合差时发现：`\" COMPLETE \"` / `\" ATTRIBUTED \"` 这类**带空白**的枚举值会『旧不合格 -> 新合格』（3 例），因此作者『严格单调收紧（0 放宽）』的绝对表述**不完全成立**。方向安全（不会把 INCOMPLETE 读成合格），且生产上不可达，故判 P3 而非阻塞。若后续要绝对保证单调性，可把 `.strip()` 改为精确匹配或对带空白值显式拒绝。"
+      },
+      {
+        "id": "U08FU2-DISCLOSURE-MASKS-CONSUMED",
+        "title": "账本已消费 + 审计读失败时披露为 AUDIT_UNAVAILABLE，掩盖『其实已消费』（P3·偏保守）",
+        "status": "OPEN",
+        "owner": "U08 后续 / U12",
+        "blocks": "无（偏保守：不撒谎、不重复下单）",
+        "note": "Q r1 的非阻塞观察：当账本**已**消费且审计读失败时，披露码是 `AUDIT_UNAVAILABLE`/`blocked`，而非 `TICKET_ALREADY_CONSUMED`/`handled`。方向安全（不会重复下单），但**丢失了『该票其实已被消费』这一事实**，排查时可能误判为审计库故障而非重复票。若要保留信息，可在 AUDIT_UNAVAILABLE 的 note 里附上账本侧 `is_consumed` 的读数。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -5083,7 +5091,7 @@
           "integration_tests": "集成态实测：U09 冒烟 **67/0**、U09 验收 **86/0**、`smoke_release_acceptance` **17/0**、契约 **173/0**、`check_quality OK files=303 untracked=0`、`SMOKE MANIFEST OK included=81 excluded=1`、**`OFFLINE REGRESSION OK scripts=94`**"
         },
         "U08-FU2": {
-          "status": "READY_FOR_REVIEW",
+          "status": "INTEGRATED",
           "branch": "task/U08-FU2",
           "worktree": "mat-wt/U08F2",
           "base": "b0c61ba",
@@ -5121,10 +5129,23 @@
           "verification": {
             "session": "Q (reviews/U08-FU2/R1/q)",
             "candidate": "dcb87bc",
-            "verdict": "PENDING",
+            "verdict": "Q r1 **PASS-with-notes**（无阻塞项）",
             "reports_dir": "docs/dispatch/reviews/U08-FU2/dcb87bc/",
-            "focus": "重点：①四场景自建探针复现；②**方向确为 fail-closed**（构造『票据其实已下过单、但审计库读不出』-> 必须仍**跳过**，若放行则判阻塞，因涉重复下单；并确认**不烧票**、verdict 为 blocked、披露码不是 TICKET_ALREADY_CONSUMED）；③正常路径逐字不变 + 新增 10 条断言**扣旧实现应变红**且 7 条失败全来自第 [10] 节；④KeyboardInterrupt 仍穿出；⑤既有原因码表一字未动。"
-          }
+            "focus": "重点：①四场景自建探针复现；②**方向确为 fail-closed**（构造『票据其实已下过单、但审计库读不出』-> 必须仍**跳过**，若放行则判阻塞，因涉重复下单；并确认**不烧票**、verdict 为 blocked、披露码不是 TICKET_ALREADY_CONSUMED）；③正常路径逐字不变 + 新增 10 条断言**扣旧实现应变红**且 7 条失败全来自第 [10] 节；④KeyboardInterrupt 仍穿出；⑤既有原因码表一字未动。",
+            "report": "docs/dispatch/reviews/U08-FU2/dcb87bc/Q_r1.md",
+            "four_scenarios": "Q 自建探针复现：A 去重读抛错 pristine escaped/decision 未返回/funnel 空 -> patched escaped=None/no_trade/0 intent/AUDIT_UNAVAILABLE=1/**verdict=blocked/READINESS_BLOCKED**；A2 只坏一票 整轮穿出 -> open/1 intent；B 纯审计写抛错 整轮穿出+intent 丢失 -> open/1 intent 保住；C KeyboardInterrupt 两态均穿出。",
+            "direction_verified": "**真 fail-closed**：①故障票不进 intents（A=0/D=0）②**不烧票** —— SpyLedger 实测 `consume_calls=0`、`is_consumed=False`、账本文件未被创建 ③披露码不是 TICKET_ALREADY_CONSUMED，`verdict=blocked`（对照场景 E『权威说已下单』才是 handled）。**关键对抗**：真实 AuditDatabase 先证明 `signal_ticket_has_order('t-ordered')==True`，再用 UnreadableProxy 让读侧抛错 -> **实测仍跳过（0 intent、不烧票）**；恢复后再跑一轮得 TICKET_ALREADY_CONSUMED、仍 0 intent -> **无重复下单风险**。",
+            "reverse_verified": "integration **208/0 两态**；旧冒烟脚本 91/0 两态；新冒烟 patched **101/0**、**旧实现 94 PASS/7 FAIL，7 条失败逐条比对全部以 `FU2 ` 开头且全部位于第 [10] 节**，无别处被改坏；第 [10] 节另 3 条两态都过 = 不变量。KI/SystemExit 在读、写两条路径均**仍穿出**（4 例实测）。",
+            "no_overreach": "signal_ticket.py / release_evidence.py / ops/recovery.py / pyproject.toml / run_offline_regression.py / check_quality.py 均 0 改动；FU1/INJECTION-TRUST/K06 0 提及。strategy_funnel.py **+7/-0 纯新增**、既有行一字未改；文档 +1/-0 唯一一行；`validate_detail_table` OK。",
+            "delta": "两态均 `OK scripts=94` rc=0 -> **NEW_FAIL=∅ / FIXED=∅ / CHANGED={smoke_u08 91->101（FAIL 计数均 0）}**；check_quality OK files=303；契约 173/0 golden=160。补丁矩阵 3x3 全 `Checking patch`、0 Skipped/0 Error；`7746605` 归档 vs pristine+3 补丁内容逐字节相同（忽略 EOL）。",
+            "not_verified": [
+              "未独立复核作者 README §8.5 的『过期分支不可达』死代码判定",
+              "未覆盖跨进程/并发、真实服务压测、`orphan_consumed()` 补单、看板渲染（dashboard/app.py 0 改动）"
+            ],
+            "q_note_nonblocking": "账本**已**消费 + 审计读失败时，披露为 `AUDIT_UNAVAILABLE/blocked` 而非 `TICKET_ALREADY_CONSUMED/handled` —— 偏保守、不撒谎、不重复下单，但**掩盖了『其实已消费』这一事实**。已登记 P3。"
+          },
+          "integration_commit": "merge @ dcb87bc（owned 路径逐字节一致：git diff dcb87bc HEAD = 0 行）",
+          "methodology_finding": "**Q 发现的沙箱方法学缺陷（影响此前所有 delta 的覆盖度声明）**：只 `git init` 而无 index 时，`smoke_u10a_release_package.py` 靠 `git ls-files` 建沙箱会得到**空文件列表** -> **两态都在第 85 个脚本同样崩**。Q 在两棵树各做一次 `git add -A`（**只暂存、不 commit**、`autocrlf=false`）后取到完整 94 脚本；补丁矩阵另在**全新未暂存树**复测通过。=> 此前各轮『只 git init』算出的 NEW_FAIL=∅ **结论仍成立**（两态同败不构成*新增*失败），但**该脚本当时并未真正被执行**，覆盖度比声称的略低。**修正做法**：解包后 `git init && git add -A`（不 commit）。"
         }
       }
     },
@@ -5177,7 +5198,14 @@
         "MODEL_ROUTE_MOCK",
         "U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER"
       ]
-    }
+    },
+    "lessons": [
+      {
+        "id": "L19-SANDBOX-GIT-INIT-INDEX",
+        "lesson": "沙箱 delta 的『只 git init』有缺陷：`smoke_u10a_release_package.py` 靠 `git ls-files` 建包沙箱，无 index 时得空列表 -> 两态同崩、该脚本实际未被执行。修正：`git init && git add -A`（**不 commit**）。此前各轮 NEW_FAIL=∅ 的结论仍成立（两态同败 != 新增失败），但覆盖度声明偏高。",
+        "source": "U08-FU2 Q r1"
+      }
+    ]
   },
   "dispatch_version": "v1.1",
   "increment_scope": [
