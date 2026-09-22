@@ -251,6 +251,10 @@ L19 生效。`smoke_u10a_release_package.py` **确实被执行到**（其尾部�
 
 三配置均逐份 `Checking patch`、**0 `Skipped`**，无 `error:`。
 
+**补丁自足性**：把 4 份 `.diff` 依次应用到 `85722e2` 的全新解包树（`git apply`，无 rejected），
+再与 `6a24fb5` 的四个 blob 逐文件比对 —— 归一化行尾后 sha256 **完全一致**（`SAME`×4），
+即补丁包**足以**从 base 重建本 head 的改动面（工作树上的 CRLF 是 git checkout 行为，非 diff 内容）。
+
 ## 8. 质量门禁
 
 `PYTHONUTF8=1 <venv>/python.exe scripts/check_quality.py` → `QUALITY CHECK OK files=304 untracked=0`
