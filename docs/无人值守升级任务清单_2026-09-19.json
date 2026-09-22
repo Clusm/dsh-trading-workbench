@@ -4743,18 +4743,28 @@
       {
         "id": "U13-FU5-FALSE-QUIESCENCE",
         "title": "**（P0）锁文件损坏 -> `check_writer_stopped` 静默返回 -> 恢复包被声明为『写者已停』并据此验证通过（写者其实仍在运行）**",
-        "status": "OPEN",
+        "status": "FIXED",
         "owner": "U13 线（修复会话 U13-FU5）",
         "blocks": "灾难恢复路径的正确性：会造出并接受一份『同一时刻静止』的**撕裂恢复点**",
-        "note": "**与 U13-FU4 完全同源（锁文件损坏）**，Q r1 独立复现并**推翻了作者『无害』的论证**。机理（I 已独立核对代码）：`recovery.py:349-353` 的 `except (FileNotFoundError, OSError, json.JSONDecodeError): return` —— 把『读不出』当成『写者已停』；随后 `create_epoch_bundle`（:477 调 check_writer_stopped）在 :545 **无条件写 `writer_stopped: True`**；`verify_epoch_bundle`（:589-591）**强制要求该标志为 True** 才接受；`restore_recovery_bundle.py:132` 亦信任之。**最小复现（Q，patched 树）**：真实存活 writer + 锁损坏 -> `check_writer_stopped` 不抛 -> `bundle_created=true`、`manifest_writer_stopped=true`、`verify_epoch_bundle_accepted=true`，全程 writer 仍活。即**在写者运行时造出一份被声明为『同一时刻静止』的撕裂恢复点**。触发输入与 FU4 同源；`O_EXCL`->`os.write` 之间的『空文件』窗口是**真实竞态**。**Q 建议按 P0 登记，且不得在合入 FU4 后宣布『锁损坏 fail-open 类』已闭合** —— 同意。"
+        "note": "**与 U13-FU4 完全同源（锁文件损坏）**，Q r1 独立复现并**推翻了作者『无害』的论证**。机理（I 已独立核对代码）：`recovery.py:349-353` 的 `except (FileNotFoundError, OSError, json.JSONDecodeError): return` —— 把『读不出』当成『写者已停』；随后 `create_epoch_bundle`（:477 调 check_writer_stopped）在 :545 **无条件写 `writer_stopped: True`**；`verify_epoch_bundle`（:589-591）**强制要求该标志为 True** 才接受；`restore_recovery_bundle.py:132` 亦信任之。**最小复现（Q，patched 树）**：真实存活 writer + 锁损坏 -> `check_writer_stopped` 不抛 -> `bundle_created=true`、`manifest_writer_stopped=true`、`verify_epoch_bundle_accepted=true`，全程 writer 仍活。即**在写者运行时造出一份被声明为『同一时刻静止』的撕裂恢复点**。触发输入与 FU4 同源；`O_EXCL`->`os.write` 之间的『空文件』窗口是**真实竞态**。**Q 建议按 P0 登记，且不得在合入 FU4 后宣布『锁损坏 fail-open 类』已闭合** —— 同意。",
+        "fix": "U13-FU5 @ 1fe6037（集成 7d57b86）：`check_writer_stopped` 四情形区分、不可解析 -> `RECOVERY_LOCK_UNREADABLE` fail-closed；复用 FU4 的 `read_lock_holder` 单一口径。Q 复验：修前造包+`writer_stopped=True`+verify 接受（写者仍活）-> 修后拒绝且未产出包；①锁不存在与③pid 已死**仍允许**（未修坏合法路径）；7/7 不可解析形态被拒。"
       },
       {
         "id": "RECOVERY-WRITER-STOPPED-CLASS-NOT-CLOSED",
         "title": "『锁文件损坏 -> fail-open』这一类**尚未闭合**（FU4 只修了 InstanceLock.acquire 一处）",
-        "status": "OPEN",
+        "status": "FIXED",
         "owner": "U13 线 / U12",
         "blocks": "无（追踪项）",
-        "note": "U13-FU4 修好了 `InstanceLock.acquire()` 的接管路径，但**同一根因**在 `recovery.py:check_writer_stopped` 上仍然存在（见 U13-FU5-FALSE-QUIESCENCE）。**在 U13-FU5 修好之前，不得宣称『锁损坏 fail-open 类』已闭合。** 另需注意 `scripts/create_recovery_bundle.py:179` 也自行写 `writer_stopped: True`，修复时须一并核对。"
+        "note": "U13-FU4 修好了 `InstanceLock.acquire()` 的接管路径，但**同一根因**在 `recovery.py:check_writer_stopped` 上仍然存在（见 U13-FU5-FALSE-QUIESCENCE）。**在 U13-FU5 修好之前，不得宣称『锁损坏 fail-open 类』已闭合。** 另需注意 `scripts/create_recovery_bundle.py:179` 也自行写 `writer_stopped: True`，修复时须一并核对。",
+        "fix": "**该类已闭合**：两处同源点（`InstanceLock.acquire()` 由 U13-FU4 修、`check_writer_stopped` 由 U13-FU5 修）现均 fail-closed，且共享同一 `read_lock_holder` 口径。残余的**只读判定窗口（TOCTOU）**已另立为 `RECOVERY-TOCTOU-RESIDUAL`（P3），且 Q 实测生产入口 `create_recovery_bundle.py` 全程持锁、残余只在直接调库 API 时存在。"
+      },
+      {
+        "id": "RECOVERY-TOCTOU-RESIDUAL",
+        "title": "`create_epoch_bundle` 的 `check_writer_stopped` 仍是只读判定：锁不存在时放行后，写者可在快照取完前启动（P3·残余）",
+        "status": "OPEN",
+        "owner": "U13 后续 / U12",
+        "blocks": "无（生产入口不受影响）",
+        "note": "U13-FU5 只封死了『读不出当已停』这条 fail-open，**没有**把 `core.ops.recovery.create_epoch_bundle` 改成持锁建包。残余：库 API 直接调用时存在窗口（只读检查通过后写者启动 -> 仍产出 `writer_stopped: True` 且 verify 接受）。**Q 实测判定为非阻塞**：生产入口 `scripts/create_recovery_bundle.py` 在复制**全程真持锁**（4 次回调中锁存在且 pid=自身），残余只影响直接调库 API 的调用方；后果是撕裂包（非双持有/重复下单），且恢复端有对账门。若要彻底消除，应让 `create_epoch_bundle` 也走持锁路径。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -5234,7 +5244,7 @@
           "integration_commit": "merge task/U13-FU4 @ 109d97f（owned 路径逐字节一致：git diff 109d97f HEAD = 0 行）"
         },
         "U13-FU5": {
-          "status": "READY_FOR_REVIEW",
+          "status": "INTEGRATED",
           "branch": "task/U13-FU5",
           "worktree": "mat-wt/U13F5",
           "base": "1d737b5",
@@ -5264,10 +5274,28 @@
           "verification": {
             "session": "Q (reviews/U13-FU5/R1/q)",
             "candidate": "1fe6037",
-            "verdict": "PENDING",
+            "verdict": "Q r1 **PASS-with-notes**（无阻塞项；Q 未能推翻）",
             "reports_dir": "docs/dispatch/reviews/U13-FU5/1fe6037/",
-            "focus": "重点：①用 Q **自己上轮的最小复现**在修复树上重跑，确认真的被拒；②**四情形逐条实测**，尤其①锁不存在 与③pid 已死 **必须仍允许**（修坏灾难恢复正常入口比原缺陷更糟）；③**独立判定 TOCTOU 残余的级别**（是否仍属『谎报同一时刻静止』）；④`read_lock_holder` 抽取逐 hunk 审、FU4 语义与验收 [1]-[4] 仍绿；⑤`create_recovery_bundle` 的改动是纯文案还是也改了控制流。"
-          }
+            "focus": "重点：①用 Q **自己上轮的最小复现**在修复树上重跑，确认真的被拒；②**四情形逐条实测**，尤其①锁不存在 与③pid 已死 **必须仍允许**（修坏灾难恢复正常入口比原缺陷更糟）；③**独立判定 TOCTOU 残余的级别**（是否仍属『谎报同一时刻静止』）；④`read_lock_holder` 抽取逐 hunk 审、FU4 语义与验收 [1]-[4] 仍绿；⑤`create_recovery_bundle` 的改动是纯文案还是也改了控制流。",
+            "report": "docs/dispatch/reviews/U13-FU5/1fe6037/Q_r1.md",
+            "before_after_verified": "Q 自写探针（真实存活 writer 子进程 + 锁截断 0 字节）：pristine 不抛/`bundle_created=True`/`manifest_writer_stopped=True`/`verify_accepted=True`（写者全程存活）-> patched `RECOVERY_LOCK_UNREADABLE`/`bundle_created=False`/`published_bundles=[]`/写者未被侵扰。**与作者表格逐格一致。**",
+            "four_cases_verified": "①锁不存在 -> 不抛、**建包 True + verify 接受** ✓ 未修坏；②可解析+pid 存活 -> `RECOVERY_WRITER_RUNNING`、**文案与 base 逐字相同**；③可解析+pid 已死 -> 不抛、**建包 True + verify 接受** ✓ 未修坏；④存在但不可解析 -> **7/7 全 False**。pristine 侧 5/7 形态 fail-open（另 2 形态抛裸 AttributeError/UnicodeDecodeError，是碰巧拒而非设计）。",
+            "toctou_ruling": "**Q 判定：不构成未闭合的谎报，非阻塞。** Q 确定性复现了窗口（只读检查通过后立刻起 writer -> 修后**仍**产出 `writer_stopped: True` 且 verify 接受），**但决定性证据是**：生产入口 `scripts/create_recovery_bundle.py` 在复制**全程真持锁**（实测 4 次复制回调中锁存在且 pid=自身），残余只在**直接调库 API** 时存在；后果是撕裂包（非双持有/重复下单），且恢复端有对账门。**原 P0 的机制（静态输入 => 确定性误判）已闭合。**",
+            "extraction_verified": "`read_lock_holder` 抽取归一化后 **0 行 diff**（仅 `self.path`<->`path`）；`except Exception` 不吞 KeyboardInterrupt；**最强证据：原版未改一字的 FU4 测试注入新代码仍 42 PASS exit 0**；patched 测试 89 PASS。脚本走 `guard.acquire()` 真持锁；`except LockUnreadableError: raise` **是控制流改动但两分支都 raise**，两态实测均 REJECTED => **未放宽**。",
+            "delta": "`BOTH_OK=94/94`、**`NEW_FAIL=[]`、`FIXED=[]`**；**`git ls-files=834/834`**；u10a 真跑到（打印『沙箱已跟踪文件 834 个』rc 0）；`check_quality files=304` 两态相同且脚本逐字节相同（无新增 exclude）；contracts 173/0、u13_supervision OK、recovery_bundle 11/0。补丁矩阵 **12/12 `Checking patch`、0 Skipped**；真实 apply 后与 patched 树 **0 个跟踪文件不同**。",
+            "notes": {
+              "N1": "作者 `CHANGED=[]` 按严格输出比对**不可复现** —— Q 实测 `CHANGED=[u10a(仅 release_id), u13_supervision(新增 [5]/[5b] 段)]`，rc 均 0、差异均为预期内。属作者声明不精确，不影响结论。",
+              "N2": "**补丁包 `docs/dispatch/patches/U13-FU5/1fe6037/` 未被 `1fe6037` 跟踪**（`git ls-tree` 无任何 FU5 路径），仅存在于作者 worktree 的**未跟踪**文件。内容已被 Q 验证（4 diff + 16 evidence），但**无法证明与最终交付件逐字节同一**。**I 已从作者 worktree 复制进集成树并提交**（7d57b86）；教训同 L12：未跟踪的评审/交付证据等于没有证据。"
+            },
+            "not_verified": [
+              "TOCTOU 注入非 vivo 计时",
+              "patch 包交付归属（Q 无法证明字节同一）",
+              "无 pytest 全量套件",
+              "POSIX 分支未跑",
+              "等共 9 条见报告 §8"
+            ]
+          },
+          "integration_commit": "merge task/U13-FU5 @ 1fe6037（owned 路径逐字节一致）；补丁包由 I 从作者 worktree 补入并提交（N2）"
         }
       }
     },
