@@ -80,11 +80,13 @@ from core.runtime_identity import (  # noqa: E402
     resolve_model_route,
     rotate_credential,
     collect_artifact_files,
+    RUNTIME_GENERATION_UNPROVEN,
     validate_fallback_route,
     verify_account_binding,
     verify_environment_state_root,
     verify_strategy_cards_source,
 )
+from core import runtime_identity as runtime_identity_module  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -1598,6 +1600,173 @@ def check_artifact_filename_guard_is_separate() -> None:
         print(f"  ----  [U12-BF1 hop2 / I] hash_artifact(真实工件) -> {_hop2}")
 
 
+# --------------------------------------------------------------------------
+# U15-FU1：运行代**占位符**不得被当成身份值（发布清单链路：读起来像值 ≠ 有值）
+# --------------------------------------------------------------------------
+def _u15_fu1_guard() -> str:
+    """两态探测：U15-FU1 交付物是否在位（不猜共享文件是否已打补丁）。"""
+    return str(getattr(runtime_identity_module, "U15_FU1_RUNTIME_INSTANCE_GUARD", ""))
+
+
+def check_placeholder_runtime_instance_is_not_an_identity() -> None:
+    """U15-FU1 ①：哨兵识别 + 采集口径（占位符 == "运行代未证明"，而不是"有值"）。"""
+    guard = _u15_fu1_guard()
+    is_placeholder = getattr(runtime_identity_module, "is_placeholder_runtime_instance_id", None)
+    resolve = getattr(runtime_identity_module, "resolve_runtime_instance_id", None)
+    if not guard:
+        check("基线态：占位符识别器缺席（本轮交付物未应用，如实记录）",
+              is_placeholder is None and resolve is None, f"guard={guard!r}")
+    else:
+        # 识别器：大小写/空白无关；**真值与空值不被误判**（空/形状错误走各自既有语义）
+        check("占位符识别：大小写与空白无关，真值/空值/None/非字符串不被判为哨兵",
+              bool(is_placeholder) and is_placeholder("unknown") and is_placeholder(" UNKNOWN ")
+              and is_placeholder("n/a") and not is_placeholder("rt-real")
+              and not is_placeholder("") and not is_placeholder(None)
+              and not is_placeholder(7),
+              f"placeholders={getattr(runtime_identity_module, 'RUNTIME_INSTANCE_PLACEHOLDERS', None)}")
+        check("归一化绝不返回哨兵：缺失/空/None/非字符串 → None，真值原样（去空白）",
+              bool(resolve) and resolve("unknown") is None and resolve("") is None
+              and resolve(None) is None and resolve(7) is None
+              and resolve(" rt-real ") == "rt-real", f"resolve={resolve}")
+
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = make_root(Path(raw))
+        base = dict(environment="demo", execution_mode="demo", env={},
+                    credentials_present={"SENSENOVA_API_KEY": True},
+                    raw_settings=SETTINGS, raw_agents=AGENTS)
+        if guard:
+            placeholder = collect_runtime_identity(
+                tmp, runtime_instance_id="unknown", **base)
+            check("占位符 → blockers 带 RUNTIME_GENERATION_UNPROVEN（不静默）",
+                  RUNTIME_GENERATION_UNPROVEN in placeholder.blockers,
+                  str(placeholder.blockers))
+            check("占位符 → 身份里的运行代字段留空（绝不用哨兵回填）",
+                  placeholder.identity.runtime_instance_id == "",
+                  repr(placeholder.identity.runtime_instance_id))
+            check("占位符不牺牲其余身份证据（照常采集，不是整份降级成采集失败）",
+                  len(placeholder.identity.artifact_hash) == 64
+                  and len(placeholder.identity.dependency_hash) == 64,
+                  f"artifact={placeholder.identity.artifact_hash!r}")
+            missing = collect_runtime_identity(tmp, runtime_instance_id=None, **base)
+            check("显式 None（降级路径：手上确实没有运行代）与占位符同口径",
+                  RUNTIME_GENERATION_UNPROVEN in missing.blockers
+                  and missing.identity.runtime_instance_id == "",
+                  f"{missing.blockers} {missing.identity.runtime_instance_id!r}")
+        else:
+            legacy = collect_runtime_identity(tmp, runtime_instance_id="unknown", **base)
+            check("基线态：'unknown' 被当成合法运行代且不产生阻断码（复现缺陷）",
+                  legacy.identity.runtime_instance_id == "unknown"
+                  and RUNTIME_GENERATION_UNPROVEN not in legacy.blockers,
+                  f"{legacy.identity.runtime_instance_id!r} {legacy.blockers}")
+
+        # 既有阻断语义**未放宽**（两态都成立）：空串仍是结构化拒绝，不是"记个码放行"。
+        expect_raises("空运行代仍 MissingRuntimeInputError（两态都成立，未放宽）",
+                      (MissingRuntimeInputError,), collect_runtime_identity, tmp,
+                      runtime_instance_id="", **base)
+
+        # 反向证据（两态都成立）：真实运行代不该被本次改动标成阻断。
+        real = build(tmp)
+        check("反向证据：真实运行代不带 RUNTIME_GENERATION_UNPROVEN（两态都成立）",
+              real.identity.runtime_instance_id == "rt-test"
+              and RUNTIME_GENERATION_UNPROVEN not in real.blockers,
+              f"{real.identity.runtime_instance_id!r} {real.blockers}")
+
+
+def _service_with_isolated_state(state_root: Path, *, break_registry: bool):
+    """在隔离状态根上启动**真实** ``TradingService``（paper，不联网、不下单）。"""
+    import os  # noqa: PLC0415
+
+    import yaml  # noqa: PLC0415
+
+    from core import service as service_module  # noqa: PLC0415
+    from core.config_loader import Settings  # noqa: PLC0415
+    from core.service import TradingService  # noqa: PLC0415
+
+    def _load(name: str) -> dict:
+        return yaml.safe_load((ROOT / "config" / name).read_text(encoding="utf-8"))
+
+    state_root.mkdir(parents=True, exist_ok=True)
+    saved = {name: os.environ.get(name) for name in
+             ("EXECUTION_MODE", "MTA_STATE_ROOT", "MTA_PROFILE", "MTA_RUNTIME_INSTANCE_ID")}
+    os.environ["EXECUTION_MODE"] = "paper"
+    os.environ["MTA_STATE_ROOT"] = str(state_root)
+    for name in ("MTA_PROFILE", "MTA_RUNTIME_INSTANCE_ID"):
+        os.environ.pop(name, None)
+    original = service_module.RunRegistry
+    if break_registry:
+        class _BrokenRegistry:
+            """运行代持久化不可用（真实故障：状态根不可写/文件损坏）。"""
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                raise RuntimeError("simulated run-registry failure (U15-FU1)")
+
+        service_module.RunRegistry = _BrokenRegistry
+    try:
+        settings = Settings(ROOT, _load("settings.yaml"), _load("agents.yaml"),
+                            _load("risk_learning.yaml"))
+        service = TradingService(settings)
+    finally:
+        service_module.RunRegistry = original
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    return service
+
+
+def check_service_manifest_registers_missing_run_generation() -> None:
+    """U15-FU1 ②：**服务链路**前后对照（正常态 / 降级态），两态各自断言应有语义。
+
+    修前：服务手上已有真实运行代，清单却写 ``"unknown"`` 且**无任何阻断码**；
+    修后：正常态透传真实值、降级态留空 + ``RUNTIME_GENERATION_UNPROVEN``。
+    两态**都**必须能启动服务（"没有运行代"不得变成"启动失败"）。
+    """
+    guard = _u15_fu1_guard()
+    with tempfile.TemporaryDirectory(prefix="u15fu1_svc_ok_",
+                                     ignore_cleanup_errors=True) as raw:
+        service = _service_with_isolated_state(Path(raw) / "state", break_registry=False)
+        manifest = dict(getattr(service, "release_manifest", {}) or {})
+        blockers = tuple(manifest.get("identity_blockers") or ())
+        instance = str(manifest.get("runtime_instance_id") or "")
+        own = str(getattr(service, "runtime_instance_id", "") or "")
+        check("服务在正常态能启动且清单可读（两态都成立）", bool(manifest) and bool(own))
+        if guard:
+            check("正常态：清单运行代 == 服务手上的真实运行代（透传，不是占位符）",
+                  instance == own and len(instance) == 32 and instance != "unknown",
+                  f"manifest={instance!r} service={own!r}")
+            check("正常态：不因本次改动新增阻断（反向证据）",
+                  RUNTIME_GENERATION_UNPROVEN not in blockers, str(blockers))
+        else:
+            check("基线态：清单运行代是 'unknown'（服务手上的真值被丢掉，复现缺陷）",
+                  instance == "unknown" and own not in ("", "unknown") and instance != own,
+                  f"manifest={instance!r} service={own!r}")
+            check("基线态：占位符不产生任何阻断码（故消费方读成「身份完整」）",
+                  RUNTIME_GENERATION_UNPROVEN not in blockers, str(blockers))
+        service.close()
+
+    with tempfile.TemporaryDirectory(prefix="u15fu1_svc_deg_",
+                                     ignore_cleanup_errors=True) as raw:
+        degraded = _service_with_isolated_state(Path(raw) / "state", break_registry=True)
+        manifest = dict(getattr(degraded, "release_manifest", {}) or {})
+        blockers = tuple(manifest.get("identity_blockers") or ())
+        instance = str(manifest.get("runtime_instance_id") or "")
+        check("降级态（运行代不可持久化）服务仍能启动，不变成启动失败",
+              bool(manifest) and getattr(degraded, "run_generation", None) is None)
+        if guard:
+            check("降级态：清单留空（不用临时实例值/哨兵冒充运行代）",
+                  instance == "" and instance != str(
+                      getattr(degraded, "runtime_instance_id", "") or ""),
+                  f"manifest={instance!r} service={getattr(degraded, 'runtime_instance_id', None)!r}")
+            check("降级态：清单显式登记 RUNTIME_GENERATION_UNPROVEN（看得出「运行代缺失」）",
+                  RUNTIME_GENERATION_UNPROVEN in blockers, str(blockers))
+        else:
+            check("基线态：降级路径同样静默写 'unknown' 且无阻断码（复现缺陷）",
+                  instance == "unknown"
+                  and RUNTIME_GENERATION_UNPROVEN not in blockers, f"{instance!r} {blockers}")
+        degraded.close()
+
+
 def main() -> int:
     check_identity_inputs_change_hash()
     check_config_sources_enter_identity()
@@ -1627,6 +1796,8 @@ def main() -> int:
     check_environment_state_root_interface()
     check_fingerprint_disposition_registered()
     check_artifact_filename_guard_is_separate()
+    check_placeholder_runtime_instance_is_not_an_identity()
+    check_service_manifest_registers_missing_run_generation()
     if FAILURES:
         print(f"\nU15 RUNTIME IDENTITY ACCEPTANCE FAILED: {len(FAILURES)} -> "
               + ", ".join(FAILURES))
