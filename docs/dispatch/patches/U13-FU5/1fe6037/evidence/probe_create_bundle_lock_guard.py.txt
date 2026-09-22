@@ -1,0 +1,109 @@
+"""U13-FU5 交付物 #4 的核对探针：``scripts/create_recovery_bundle.py`` 是否
+**绕过**了 ``create_epoch_bundle`` 的写者停写检查？
+
+结论口径：该脚本不调 ``check_writer_stopped``，它走的是 ``InstanceLock.acquire()``
+（U13-FU4 已 fail-closed）——即在**真的把锁握在手里**的前提下才写
+``writer_stopped: True``。本探针用真实存活 writer 子进程 + 损坏锁实测这一点。
+
+    PYTHONUTF8=1 <venv>/python.exe probe_create_bundle_lock_guard.py.txt <repo_root>
+"""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from core.instance_lock import InstanceLock  # noqa: E402
+from core.runtime_paths import REQUIRED_STATE_FILES, RuntimePaths  # noqa: E402
+from create_recovery_bundle import create_recovery_bundle  # noqa: E402
+
+_HOLDER = """
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+from core.instance_lock import InstanceLock
+lock = InstanceLock(sys.argv[2])
+lock.acquire()
+print("HELD %d" % os.getpid(), flush=True)
+time.sleep(300)
+"""
+
+
+def fixture(base: Path) -> Path:
+    root = base / "proj"
+    paths = RuntimePaths.resolve(root, profile=None)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(paths.db_file)
+    conn.execute("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY)")
+    conn.execute("INSERT INTO schema_migrations VALUES(1)")
+    conn.commit()
+    conn.close()
+    for name in REQUIRED_STATE_FILES:
+        (paths.data_dir / name).write_text(json.dumps({"fixture": name}), encoding="utf-8")
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def main() -> int:
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    print(f"REPO={ROOT}")
+    with tempfile.TemporaryDirectory(prefix="fu5-crb-") as tmp:
+        base = Path(tmp)
+        root = fixture(base)
+        out = base / "bundles"
+        lock_file = RuntimePaths.resolve(root, profile=None).lock_file
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _HOLDER, str(ROOT / "src"), str(lock_file)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding="utf-8", errors="replace", env=env)
+        line = (proc.stdout.readline() if proc.stdout else "") or ""
+        if "HELD" not in line:
+            print("HOLDER_FAILED", line)
+            proc.kill()
+            return 0
+        holder_pid = int(line.split()[1])
+        try:
+            try:
+                create_recovery_bundle(root, out)
+                print("intact_lock_bundle=CREATED  <-- 不应发生")
+            except BaseException as exc:  # noqa: BLE001
+                print(f"intact_lock_bundle=REJECTED {type(exc).__name__}")
+
+            lock_file.write_bytes(b"")           # 真实竞态窗口：O_EXCL 后、write 前
+            try:
+                b = create_recovery_bundle(root, out)
+                print(f"corrupt_lock_bundle=CREATED {b.name}  <-- 不应发生")
+            except BaseException as exc:  # noqa: BLE001
+                print(f"corrupt_lock_bundle=REJECTED {type(exc).__name__}")
+                print(f"  chained_cause={type(exc.__cause__).__name__}: "
+                      f"{str(exc.__cause__).splitlines()[0] if exc.__cause__ else ''}")
+                print(f"  actionable={'手工删除' in str(exc) or '手工删除' in str(exc.__cause__ or '')}")
+            published = sorted(out.iterdir()) if out.is_dir() else []
+            print(f"published_bundles={[p.name for p in published]}")
+            print(f"writer_still_alive={InstanceLock._pid_alive(holder_pid)}")
+        finally:
+            import signal
+            for target in (holder_pid, proc.pid):
+                try:
+                    os.kill(target, signal.SIGTERM)
+                except OSError:
+                    pass
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

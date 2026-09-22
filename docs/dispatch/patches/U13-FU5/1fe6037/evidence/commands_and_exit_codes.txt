@@ -1,0 +1,50 @@
+U13-FU5 复现命令与退出码（全部离线，无网、无真实状态根、不下单）
+head = 1fe6037   base = 1d737b5
+解释器 = C:/Users/Tao/Desktop/币安/multi-agent-trader/.venv/Scripts/python.exe（无 pytest）
+所有 python 调用前置 PYTHONUTF8=1
+pristine 树 = git archive 1d737b5 -> /tmp/pristine
+patched  树 = 本仓工作树（= base + 01..04.diff）
+
+[1] 主探针：真实存活 writer + 锁文件损坏（同一脚本，两态都跑）
+    PYTHONUTF8=1 <PY> docs/dispatch/patches/U13-FU5/probe_recovery_lock_corruption.py.txt <tree>
+      pristine 1d737b5 : corrupt_lock_check=NO_RAISE / bundle_created=True /
+                         manifest_writer_stopped=True / verify_epoch_bundle_accepted=True /
+                         writer_still_alive_at_end=True          exit=0
+                                                       -> evidence/probe_pristine.log
+      patched  1fe6037 : corrupt_lock_check=RECOVERY_LOCK_UNREADABLE / bundle_created=False
+                                                       -> evidence/probe_patched.log
+
+[2] 落地验收（U13-FU4 验收文件被扩展 [5]/[5b] 两节，两态可跑）
+    PYTHONUTF8=1 <PY> tests/acceptance/test_instance_lock_failclosed.py
+      pristine 1d737b5 : U13-FU4/FU5 FAILED: 23 项          exit=1
+                                                       -> evidence/acceptance_pristine.log
+      patched  1fe6037 : U13-FU4/FU5 LOCK + RECOVERY FAIL-CLOSED OK  exit=0
+                                                       -> evidence/acceptance_patched.log
+
+[3] 交付物 #4 核对：create_recovery_bundle.py 是否绕过检查
+    PYTHONUTF8=1 <PY> evidence/probe_create_bundle_lock_guard.py.txt <tree>
+      pristine 1d737b5 : intact=REJECTED RuntimeError / corrupt=REJECTED RuntimeError
+                         (chained LockUnreadableError) / published=[]   exit=0
+                                                       -> evidence/probe_crb_pristine.log
+      patched  1fe6037 : intact=REJECTED RuntimeError / corrupt=REJECTED LockUnreadableError
+                         / published=[] / actionable=True              exit=0
+                                                       -> evidence/probe_crb_patched.log
+    结论：不绕过。它走 InstanceLock.acquire()（FU4 已 fail-closed），比
+    check_writer_stopped 的只读判定**更强**（真的持锁建包）。
+
+[4] 补丁 3 配置 apply --check（pristine 导出树内，4 份 diff 一起）
+    git apply --check --verbose 01..04.diff                                        -> exit=0, Checking patch=4, Skipped=0
+    git -c core.autocrlf=false -c core.eol=lf apply --check --verbose 01..04.diff  -> exit=0, Checking patch=4, Skipped=0
+    git -c core.autocrlf=true apply --check --verbose 01..04.diff                  -> exit=0, Checking patch=4, Skipped=0
+    -> evidence/apply_check_3configs.log
+
+[5] 沙箱 full delta（pristine vs patched，各 94 脚本）
+    PYTHONUTF8=1 <PY> evidence/run_delta.py.txt   （脚本原件在 /tmp/fu5_delta/run_delta.py）
+      git_ls_files=834 / 834 ；pristine_nonzero=0 ；patched_nonzero=0 ；
+      NEW_FAIL=[] FIXED=[] CHANGED=[] BOTH_NONZERO=[]
+      -> evidence/reg_pristine.tsv / evidence/reg_patched.tsv /
+         evidence/full_delta_summary.txt / evidence/regression_driver.log
+
+[6] 质量门禁
+    PYTHONUTF8=1 <PY> scripts/check_quality.py   -> QUALITY CHECK OK files=304 untracked=0, exit=0
+    -> evidence/check_quality_patched.log（与 base 逐字相同，未新增 exclude）

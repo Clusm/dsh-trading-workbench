@@ -1,0 +1,186 @@
+diff --git a/src/core/ops/recovery.py b/src/core/ops/recovery.py
+index 9bc56e2..c7c8266 100644
+--- a/src/core/ops/recovery.py
++++ b/src/core/ops/recovery.py
+@@ -32,6 +32,14 @@ F05 相关：写盘采用"暂存目录 + 原子发布"，中断的恢复包**不
+ 存在时**拒绝覆盖**（坏包不得覆盖好包）；状态 JSON 损坏时 ``STATE_CORRUPT``
+ fail-closed。
+ 
++- **停写证明 fail-closed（U13-FU5）**：``check_writer_stopped`` 严格区分四种
++  情形（见其 docstring）。**"锁文件读不出"绝不等于"写者已停"**：锁被截断
++  （含 ``O_EXCL`` 创建与 ``os.write`` 之间的真实竞态窗口）、坏 JSON、非 UTF-8、
++  无可用 pid 时一律抛 :class:`RecoveryLockUnreadableError`（``code`` =
++  ``RECOVERY_LOCK_UNREADABLE``）**拒绝建包**，绝不让一份"写者仍活着"的状态根
++  被打上 ``writer_stopped: True`` 并被 :func:`verify_epoch_bundle` 接受。
++  "锁文件不存在"与"遗留锁（持有者确认已死）"两条合法运维路径**保持不变**。
++
+ 只在本机文件系统上工作：不联网、不读 ``.env``/密钥、不启动服务、不下单。
+ """
+ from __future__ import annotations
+@@ -49,7 +57,11 @@ from datetime import datetime, timezone
+ from pathlib import Path
+ from typing import Any
+ 
+-from core.instance_lock import InstanceLock
++from core.instance_lock import (
++    InstanceLock,
++    LockUnreadableError,
++    read_lock_holder,
++)
+ from core.runtime_paths import REQUIRED_STATE_FILES, RuntimePaths
+ 
+ __all__ = [
+@@ -73,6 +85,7 @@ __all__ = [
+     "OPTIONAL_STATE_FILES",
+     "RECONCILE_REQUIRED_BEFORE_ENTRY",
+     "RECOVERY_INCOMPLETE",
++    "RECOVERY_LOCK_UNREADABLE",
+     "RECOVERY_WRITER_RUNNING",
+     "SAME_VOLUME_NOT_DISASTER_RECOVERY",
+     "STATE_CORRUPT",
+@@ -80,6 +93,7 @@ __all__ = [
+     "RecoveryEpoch",
+     "RecoveryGate",
+     "RecoveryGateDecision",
++    "RecoveryLockUnreadableError",
+     "check_writer_stopped",
+     "create_epoch_bundle",
+     "drill_epoch_bundle",
+@@ -109,6 +123,11 @@ OPTIONAL_STATE_FILES = (
+ EPOCH_MISMATCH = "EPOCH_MISMATCH"
+ RECOVERY_INCOMPLETE = "RECOVERY_INCOMPLETE"
+ RECOVERY_WRITER_RUNNING = "RECOVERY_WRITER_RUNNING"
++#: 单实例锁文件**存在但读不出持有者**（空/截断/坏 JSON/非对象/非 UTF-8/pid<=0）
++#: → 无法确认写者是否已停 ⇒ fail-closed，**拒绝创建恢复包**（U13-FU5）。
++#: 与 ``RECOVERY_WRITER_RUNNING`` 必须可区分：那条是"确认写者还活着"，
++#: 这条是"不知道写者在不在"——把后者当成"写者已停"正是本缺陷的根因。
++RECOVERY_LOCK_UNREADABLE = "RECOVERY_LOCK_UNREADABLE"
+ STATE_CORRUPT = "STATE_CORRUPT"
+ SAME_VOLUME_NOT_DISASTER_RECOVERY = "SAME_VOLUME_NOT_DISASTER_RECOVERY"
+ RECONCILE_REQUIRED_BEFORE_ENTRY = "RECONCILE_REQUIRED_BEFORE_ENTRY"
+@@ -307,6 +326,23 @@ class RecoveryError(RuntimeError):
+         super().__init__(f"{code}: {message}" if message else code)
+ 
+ 
++class RecoveryLockUnreadableError(RecoveryError):
++    """单实例锁**存在但读不出**持有者 ⇒ 拒绝创建恢复包（U13-FU5）。
++
++    与 ``core.instance_lock.LockUnreadableError``（U13-FU4）同口径、同根因，只是
++    发生在**恢复包创建**这条消费链上。单独成类（而不只是换个 ``code`` 字符串）是
++    为了和 FU4 一致地"可区分"：调用方既能按 ``code`` 也能按类型把"锁读不出"与
++    "写者确认还在跑"（:data:`RECOVERY_WRITER_RUNNING`）分开处理。
++
++    继承 ``RecoveryError``，因此既有 ``except RecoveryError`` 消费者语义不变——
++    它们本来就必须 fail-closed，这里只是**把 fail-open 翻成 fail-closed**。
++    ``__cause__`` 指向底层 ``LockUnreadableError``（含其可行动文案）。
++    """
++
++    def __init__(self, message: str) -> None:
++        super().__init__(RECOVERY_LOCK_UNREADABLE, message)
++
++
+ def _sha256_bytes(data: bytes) -> str:
+     return hashlib.sha256(data).hexdigest()
+ 
+@@ -342,27 +378,67 @@ def _open_immutable_readonly(path: Path) -> sqlite3.Connection:
+     return sqlite3.connect(uri, uri=True)
+ 
+ 
++def _lock_unreadable_message(lock_file: Path, reason: str) -> str:
++    """锁读不出时的**可行动**报错正文（U13-FU5）。
++
++    这条消息必须能独立完成三件事：说清"为什么不能自动放行"、告诉操作者**先确认
++    服务是否在运行**、再给出确认未运行后的手工删锁命令（Windows/POSIX 都给）。
++    """
++    return (
++        f"单实例锁文件存在但读不出持有者 PID，无法确认交易服务是否已停机："
++        f"{lock_file}\n"
++        f"原因：{reason}\n"
++        "为什么不能自动放行：读不出锁内容 ≠ 写者已停。此时创建恢复包会把一个"
++        "**可能正在被写入**的状态根伪称为'同一时刻静止'的一致快照，"
++        "灾难恢复时按它还原等于用撕裂状态覆盖线上账本。\n"
++        "操作者请这样做：\n"
++        "  1) 先确认交易服务是否正在运行（进程列表 / 控制台 / 健康巡检的核心环）；\n"
++        "  2) 确认**未**运行后，手工删除该锁文件再重试建包：\n"
++        f'     Windows: del "{lock_file}"\n'
++        f'     POSIX:   rm "{lock_file}"\n'
++        "  3) 若服务确实在运行，不要删除该文件——先正常停机再创建恢复包。"
++    )
++
++
+ def check_writer_stopped(paths: RuntimePaths) -> None:
+     """确认交易服务**没有**在写这个状态根（单实例锁语义）。
+ 
+-    复用 ``core.instance_lock.InstanceLock`` 的只读存活判定（唯一事实源，不在
+-    这里重写 Windows 句柄逻辑）。锁文件里的 PID 仍存活 → 拒绝创建恢复包。
++    复用 ``core.instance_lock.read_lock_holder``（U13-FU4 落地的唯一口径：读不出
++    = fail-closed，不在这里重写 Windows 句柄逻辑，也不重写"什么叫可解析"）。
++
++    **四种情形严格区分**（U13-FU5，修前第 3 种被当成第 1/4 种）：
++
++    ====================================  ======================  ==========
++    锁文件事实                             判定                    处置
++    ====================================  ======================  ==========
++    不存在（``FileNotFoundError``）        写者已停                允许
++    可解析 + pid 有效且**存活**            写者在写                拒绝 ``RECOVERY_WRITER_RUNNING``
++    可解析 + pid 有效且**已死**            遗留锁，写者已停        允许
++    **存在但不可解析 / 无可用 pid**        **无法确认**            **拒绝** ``RECOVERY_LOCK_UNREADABLE``
++    ====================================  ======================  ==========
++
++    "存在但不可解析" 覆盖：空文件（含 ``O_EXCL`` 创建与 ``os.write`` 之间的真实
++    竞态窗口）/ 截断 / 坏 JSON / 顶层非对象 / 非 UTF-8 / 缺 pid / pid<=0。
+     """
+     lock_file = paths.lock_file
+     try:
+-        payload = json.loads(lock_file.read_text(encoding="utf-8"))
+-    except (FileNotFoundError, OSError, json.JSONDecodeError):
++        holder = read_lock_holder(lock_file)
++    except LockUnreadableError as exc:
++        # 修前这里是 ``except (...): return`` —— "读不出"被当成了"写者已停"。
++        raise RecoveryLockUnreadableError(
++            _lock_unreadable_message(lock_file, exc.reason)) from exc
++    if holder is None:
++        # 锁文件不存在 ⇒ 没有写者持有它，合法路径（不要修坏）。
+         return
+-    try:
+-        pid = int(payload.get("pid") or 0)
+-    except (TypeError, ValueError):
+-        pid = 0
+-    if pid > 0 and InstanceLock._pid_alive(pid):
++    pid, _data = holder
++    if InstanceLock._pid_alive(pid):
+         raise RecoveryError(
+             RECOVERY_WRITER_RUNNING,
+             f"交易服务仍在运行（PID={pid}，锁文件={lock_file.name}）；"
+             "请先正常停机，再创建同 epoch 恢复包",
+         )
++    # 可解析 **且** pid 确认不存活 ⇒ 遗留锁（进程被 kill -9 / 断电留下），
++    # 写者确实已停，合法运维路径（不要修坏）。
+ 
+ 
+ def state_json_health(data_dir: Path, *, names: tuple[str, ...] | None = None) -> dict[str, Any]:
+@@ -467,8 +543,12 @@ def create_epoch_bundle(
+     """创建同 epoch 恢复包（DB + JSON），中断不发布、已存在不覆盖。
+ 
+     调用方必须保证交易服务已停机；本函数会在建包前复核单实例锁
+-    （:func:`check_writer_stopped`），并在复制前巡检状态 JSON
+-    （:func:`state_json_health`）。
++    （:func:`check_writer_stopped`：锁**读不出**即 fail-closed 拒绝，
++    U13-FU5），并在复制前巡检状态 JSON（:func:`state_json_health`）。
++
++    因此第 :data:`RECOVERY_LOCK_UNREADABLE` 条拒绝路径成立时，本函数**不会**
++    写出 ``writer_stopped: True`` —— 这个声明只有在"锁不存在"或"锁可解析且持有者
++    确认已死"两种情况后才可能落盘，不会是"读不出"被伪装的静止声明。
+     """
+     data_dir = paths.data_dir
+     db_source = paths.db_file
+@@ -808,7 +888,8 @@ def recovery_plan(paths: RuntimePaths, *, metadata_only: bool = False) -> dict[s
+         "required_state_files": list(REQUIRED_STATE_FILES),
+         "optional_state_files": list(OPTIONAL_STATE_FILES),
+         "steps": [
+-            "1. 正常停机并确认单实例锁无存活 PID（check_writer_stopped）",
++            "1. 正常停机并确认单实例锁无存活 PID（check_writer_stopped；"
++            "锁文件存在但不可解析 → 拒绝建包，U13-FU5）",
+             "2. state_json_health：任一关键 JSON 损坏即停新仓，不得用坏状态建包",
+             "3. create_epoch_bundle：DB+JSON 同一 epoch 窗口，暂存后原子发布",
+             "4. 把恢复包复制到**独立卷**（同卷演练只证明流程，不证明灾难恢复，R21）",

@@ -1,0 +1,27 @@
+diff --git a/scripts/create_recovery_bundle.py b/scripts/create_recovery_bundle.py
+index 1e723e5..463f4c5 100644
+--- a/scripts/create_recovery_bundle.py
++++ b/scripts/create_recovery_bundle.py
+@@ -19,7 +19,7 @@ from typing import Any
+ PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ sys.path.insert(0, str(PROJECT_ROOT / "src"))
+ 
+-from core.instance_lock import InstanceLock  # noqa: E402
++from core.instance_lock import InstanceLock, LockUnreadableError  # noqa: E402
+ from core.ops.recovery import state_json_health  # noqa: E402
+ from core.runtime_paths import PROFILE_ALLOWED, RuntimePaths  # noqa: E402
+ 
+@@ -89,6 +89,13 @@ def create_recovery_bundle(project_root: Path, output_dir: Path, *,
+     guard = InstanceLock(instance_lock)
+     try:
+         guard.acquire()
++    except LockUnreadableError:
++        # U13-FU5：锁文件**存在但读不出**时 ``acquire()`` 已 fail-closed（U13-FU4），
++        # 本脚本**没有**绕过该检查——它走的正是 ``guard.acquire()``，比
++        # ``check_writer_stopped`` 的只读判定更强（真的把锁握在手里）。
++        # 这里只是不要把"不知道写者在不在"误报成"服务仍在运行"：原样上抛，
++        # 保留底层可行动文案（先确认服务、再手工删锁）。
++        raise
+     except RuntimeError as exc:
+         raise RuntimeError("交易服务仍在运行；请先正常停机，再创建一致恢复包") from exc
+     try:

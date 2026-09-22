@@ -1,0 +1,105 @@
+U13-FU4 单实例锁 fail-closed 验收
+
+[1] 可解析 + 持有者存活 → 拒绝（行为不变）
+  PASS  第二实例被拒绝 — RuntimeError
+  PASS  拒绝文案保持原样（写明持有者 PID 与锁文件）
+  PASS  拒绝时未删除持有者的锁文件
+  PASS  持有者进程真实存活（跨进程）
+
+[3] 存在但不可解析 → fail-closed（不删除、不接管）
+  PASS  空文件（被截断为 0 字节）：拒绝且不接管
+  PASS  空文件（被截断为 0 字节）：抛可区分的 LockUnreadableError — LockUnreadableError
+  PASS  空文件（被截断为 0 字节）：报错可行动（先确认、再手工删除）
+  PASS  空文件（被截断为 0 字节）：锁文件被原样保留
+  PASS  空文件（被截断为 0 字节）：持有者未被误判为已死亡
+  PASS  坏 JSON（写入中途被截断）：拒绝且不接管
+  PASS  坏 JSON（写入中途被截断）：抛可区分的 LockUnreadableError — LockUnreadableError
+  PASS  坏 JSON（写入中途被截断）：报错可行动（先确认、再手工删除）
+  PASS  坏 JSON（写入中途被截断）：锁文件被原样保留
+  PASS  坏 JSON（写入中途被截断）：持有者未被误判为已死亡
+  PASS  JSON 顶层非对象：拒绝且不接管
+  PASS  JSON 顶层非对象：抛可区分的 LockUnreadableError — LockUnreadableError
+  PASS  JSON 顶层非对象：报错可行动（先确认、再手工删除）
+  PASS  JSON 顶层非对象：锁文件被原样保留
+  PASS  JSON 顶层非对象：持有者未被误判为已死亡
+  PASS  非 UTF-8 字节：拒绝且不接管
+  PASS  非 UTF-8 字节：抛可区分的 LockUnreadableError — LockUnreadableError
+  PASS  非 UTF-8 字节：报错可行动（先确认、再手工删除）
+  PASS  非 UTF-8 字节：锁文件被原样保留
+  PASS  非 UTF-8 字节：持有者未被误判为已死亡
+  PASS  无 pid 字段：拒绝且不接管
+  PASS  无 pid 字段：抛可区分的 LockUnreadableError — LockUnreadableError
+  PASS  无 pid 字段：报错可行动（先确认、再手工删除）
+  PASS  无 pid 字段：锁文件被原样保留
+  PASS  无 pid 字段：持有者未被误判为已死亡
+  PASS  pid 为 0（不可用）：拒绝且不接管
+  PASS  pid 为 0（不可用）：抛可区分的 LockUnreadableError — LockUnreadableError
+  PASS  pid 为 0（不可用）：报错可行动（先确认、再手工删除）
+  PASS  pid 为 0（不可用）：锁文件被原样保留
+  PASS  pid 为 0（不可用）：持有者未被误判为已死亡
+
+[2] 可解析 + 持有者确定已死 → 回收（合法路径不能被修坏）
+  PASS  前提：构造出的 PID 确定已死
+  PASS  遗留锁被回收（第二个进程可接管）
+  PASS  接管后锁文件记录本进程 PID
+  PASS  释放后锁文件被删除
+
+[4] 正常路径：首拿 / 次拒 / 释放后可再拿
+  PASS  第一个实例拿到锁
+  PASS  第二个实例被拒绝
+  PASS  持有者释放后锁文件被删除
+  PASS  释放后可再拿
+
+[5] 写者存活 + 锁文件损坏 → 恢复包必须拒绝（U13-FU5）
+  PASS  前提：锁文件记录的是真实存活的写者 PID
+  PASS  前提：锁完好且写者存活 → RECOVERY_WRITER_RUNNING（行为不变）
+  FAIL  空文件（被截断为 0 字节）：check_writer_stopped 拒绝且原因码可区分 — code=（未拒绝）
+  FAIL  空文件（被截断为 0 字节）：create_epoch_bundle 拒绝建包 — 未拒绝：造出了伪称静止的恢复包
+  FAIL  空文件（被截断为 0 字节）：拒绝原因码可区分（非 WRITER_RUNNING）
+  PASS  空文件（被截断为 0 字节）：写者仍真实存活（读不出 ≠ 已停）
+  PASS  空文件（被截断为 0 字节）：锁文件被原样保留
+  FAIL  空文件（被截断为 0 字节）：报错可行动（先确认服务、再手工删锁）
+  FAIL  坏 JSON（写入中途被截断）：check_writer_stopped 拒绝且原因码可区分 — code=（未拒绝）
+  FAIL  坏 JSON（写入中途被截断）：create_epoch_bundle 拒绝建包 — 未拒绝：造出了伪称静止的恢复包
+  FAIL  坏 JSON（写入中途被截断）：拒绝原因码可区分（非 WRITER_RUNNING）
+  PASS  坏 JSON（写入中途被截断）：写者仍真实存活（读不出 ≠ 已停）
+  PASS  坏 JSON（写入中途被截断）：锁文件被原样保留
+  FAIL  坏 JSON（写入中途被截断）：报错可行动（先确认服务、再手工删锁）
+  FAIL  JSON 顶层非对象：check_writer_stopped 拒绝且原因码可区分 — code=AttributeError
+  PASS  JSON 顶层非对象：create_epoch_bundle 拒绝建包 — AttributeError
+  FAIL  JSON 顶层非对象：拒绝原因码可区分（非 WRITER_RUNNING）
+  PASS  JSON 顶层非对象：写者仍真实存活（读不出 ≠ 已停）
+  PASS  JSON 顶层非对象：锁文件被原样保留
+  FAIL  JSON 顶层非对象：报错可行动（先确认服务、再手工删锁）
+  FAIL  非 UTF-8 字节：check_writer_stopped 拒绝且原因码可区分 — code=UnicodeDecodeError
+  PASS  非 UTF-8 字节：create_epoch_bundle 拒绝建包 — UnicodeDecodeError
+  FAIL  非 UTF-8 字节：拒绝原因码可区分（非 WRITER_RUNNING）
+  PASS  非 UTF-8 字节：写者仍真实存活（读不出 ≠ 已停）
+  PASS  非 UTF-8 字节：锁文件被原样保留
+  FAIL  非 UTF-8 字节：报错可行动（先确认服务、再手工删锁）
+  FAIL  无 pid 字段：check_writer_stopped 拒绝且原因码可区分 — code=（未拒绝）
+  FAIL  无 pid 字段：create_epoch_bundle 拒绝建包 — 未拒绝：造出了伪称静止的恢复包
+  FAIL  无 pid 字段：拒绝原因码可区分（非 WRITER_RUNNING）
+  PASS  无 pid 字段：写者仍真实存活（读不出 ≠ 已停）
+  PASS  无 pid 字段：锁文件被原样保留
+  FAIL  无 pid 字段：报错可行动（先确认服务、再手工删锁）
+  FAIL  pid 为 0（不可用）：check_writer_stopped 拒绝且原因码可区分 — code=（未拒绝）
+  FAIL  pid 为 0（不可用）：create_epoch_bundle 拒绝建包 — 未拒绝：造出了伪称静止的恢复包
+  FAIL  pid 为 0（不可用）：拒绝原因码可区分（非 WRITER_RUNNING）
+  PASS  pid 为 0（不可用）：写者仍真实存活（读不出 ≠ 已停）
+  PASS  pid 为 0（不可用）：锁文件被原样保留
+  FAIL  pid 为 0（不可用）：报错可行动（先确认服务、再手工删锁）
+  FAIL  全程未发布任何恢复包 — recovery_20260922_015104_996820, recovery_20260922_015105_031975, recovery_20260922_015105_074439, recovery_20260922_015105_112206
+
+[5b] 反向证据：合法运维路径必须仍然允许建包
+  PASS  (a) 前提：锁文件不存在
+  PASS  (a) 锁文件不存在 → check_writer_stopped 不拒绝
+  PASS  (a) 锁文件不存在 → 允许建包（合法路径未被修坏） — NoneType: None
+  PASS  (a) 包声明停写且 verify_epoch_bundle 接受
+  PASS  (b) 前提：构造出的 PID 确定已死
+  PASS  (b) 遗留锁（持有者已死）→ check_writer_stopped 不拒绝
+  PASS  (b) 遗留锁（持有者已死）→ 允许建包（真实运维路径未被修坏） — NoneType: None
+  PASS  (b) 包声明停写且 verify_epoch_bundle 接受
+
+U13-FU4/FU5 FAILED: 23 项 —— 空文件（被截断为 0 字节）：check_writer_stopped 拒绝且原因码可区分, 空文件（被截断为 0 字节）：create_epoch_bundle 拒绝建包, 空文件（被截断为 0 字节）：拒绝原因码可区分（非 WRITER_RUNNING）, 空文件（被截断为 0 字节）：报错可行动（先确认服务、再手工删锁）, 坏 JSON（写入中途被截断）：check_writer_stopped 拒绝且原因码可区分
+exit=1
