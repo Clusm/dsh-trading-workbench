@@ -10,9 +10,14 @@
 
 **18/18 任务已全部集成**（见下方终态记录）。**此前一度记为"停止点"，现已修正**：那一步是基于"剩余项多为 P3"的归纳，**没有逐条查看**。逐条核对后确认其中**至少一条是活路径上的真缺陷**（非 P3 卫生），故恢复有限度的修复工作：
 
-- **`U08-FU2`（进行中）**：工作树 `mat-wt/U08F2`（`task/U08-FU2` @ `b0c61ba`）—— 修 `U08-R5-FU2`：`src/agents/strategy_trader.py` 对审计库 `db.*` 的调用**无护栏**（`:184` 的 `db.signal_ticket_has_order` 位于顶部**普通 for 循环**内、无 try/except；`:227/:235/:237/:245` 同类）。审计库抛 `sqlite3.OperationalError` 时**异常穿出整个执行器**、本轮 intents 全部作废 —— 与已修的 **N6 同形**（当时只修了 `ledger.*`）。
-  - **已内联最关键的方向要求**：去重读取**必须 fail-closed** —— 读不出"是否已下单"时**不得**当成"没下过"（那会**重复下单**），必须**跳过该票并如实披露**；纯审计写入失败则局部化 + 留痕；不得吞 `KeyboardInterrupt`；异常名进 note；正常路径行为逐字不变。
-- 其余 23 条 OPEN 逐条归类见下方"为什么不再自行开工"（该节保留，但已按其自身结论收窄：**P3 卫生/显式延期的功能接线/需外部条件** 三类不动，**活路径上的真缺陷**继续修）。
+- **`U08-FU2`（✅ 已 INTEGRATED）**：`U08-R5-FU2` 已 FIXED。工作树 `mat-wt/U08F2`（`task/U08-FU2`），代码 head `7746605`（tip `dcb87bc`），集成见 `docs/dispatch/reviews/U08-FU2/dcb87bc/Q_r1.md`。
+  - 修的是 `src/agents/strategy_trader.py` 对审计库 `db.*` 的**无护栏调用**（`:184` 去重读位于顶部普通 for 循环内；`:227/:235/:237/:245` 同类）。审计库抛 `sqlite3.OperationalError` 时异常**穿出整个执行器**、本轮 intents 全废 —— 与已修的 N6 同形（当时只覆盖 `ledger.*`）。
+  - **方向 fail-closed 且经对抗验证**：Q 先让真实 `AuditDatabase` 证明某票**确已下单**，再让读侧抛错 → **仍跳过、0 intent、不烧票**（`consume_calls=0`、账本文件未创建）；恢复后下一轮报 `TICKET_ALREADY_CONSUMED`、仍 0 intent → **无重复下单路径**。披露码为 `AUDIT_UNAVAILABLE`/`verdict=blocked`，**刻意不复用** `TICKET_ALREADY_CONSUMED`（那会把"无法断定"谎报成"已下过单"）。
+  - 反向证据：integration `208/0` 两态、旧冒烟 91/0 两态；新断言在**旧实现**上恰好 **7 条失败、全部以 `FU2 ` 开头且全在第 [10] 节**（无别处被改坏）。`KeyboardInterrupt`/`SystemExit` 读/写两路均仍穿出。越权 0 改动。
+  - 集成实测：smoke_u08 **101/0**、test_strategy_funnel 208/0、`check_quality OK files=303`、契约 173/0、**`OFFLINE REGRESSION OK scripts=94`**。
+  - 新登记 P3：`U08FU2-DISCLOSURE-MASKS-CONSUMED`（账本已消费 + 审计读失败时披露为 AUDIT_UNAVAILABLE，方向安全但掩盖"其实已消费"）。
+- **⚠ 新教训 `L19`（影响此前所有 delta 的覆盖度声明）**：沙箱**只 `git init` 而无 index** 时，`smoke_u10a_release_package.py` 靠 `git ls-files` 建包沙箱会得到**空列表** → **两态同崩**、该脚本实际未被执行。Q 改用 `git add -A`（**只暂存不 commit**）才取到完整 94 脚本。此前各轮 `NEW_FAIL=∅` **结论仍成立**（同败 ≠ 新增失败），但**覆盖度声明偏高**。**修正做法：解包后 `git init && git add -A`（不 commit）。**
+- 其余 23 条 OPEN 仍按三类不动：**P3 卫生**、**显式延期的功能接线**（`W1-JOINT-WIRING`/`U08-U12-WIRING`）、**需外部条件**（`MODEL_ROUTE_MOCK`/`D05`/观察窗/`runtime_instance_id`）。**活路径上的真缺陷**继续修。
 
 **计划内的任务清单仍为 100% 完成；以下终态记录不变。**
 
