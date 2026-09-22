@@ -5363,6 +5363,15 @@
             ]
           },
           "integration_commit": "merge task/U15-FU1 @ bf9b304（owned 路径逐字节一致）；集成 ce0eafe"
+        },
+        "U15-FU2": {
+          "status": "IN_PROGRESS",
+          "branch": "task/U15-FU2",
+          "worktree": "mat-wt/U15F2",
+          "base": "85722e2",
+          "targets_issue": "U15FU1-K04-SENTINEL-RESIDUAL（+ U15-FU1 自认的 mint_runtime_generation 残留）",
+          "defect": "**运行代哨兵值 `\"unknown\"` 仍能从另外两条路径被当成合法身份**：**A（源头）** `mint_runtime_generation`/`RunRegistry.load()` 未动 —— 损坏/遗留的 runtime_generation.json（实例号写成 \"unknown\"）**仍能被读进来并铸出哨兵运行代**，U15-FU1 只保证它被标 UNPROVEN、没阻止它产生。**B（授权路径，I 已逐行核对确认可达）**：`management_authorization.py:177` 的门禁是 `if not str(generation.runtime_instance_id or \"\").strip()` -> **\"unknown\" 非空直接过**；`runtime_identity.py:1801 verify_account_binding` 的关键比较是 `actual.generation_id != expected.generation_id`，而 `generation_id` **由含实例号的成分派生** -> **两边都带同一哨兵时逐字相等、绑定通过**。结论：被污染的 registry 可让『绑定到某个运行代』的授权**实际绑在占位符上**。",
+          "direction_requirement": "**A（源头）** 读取侧把哨兵实例号视为**无记录 -> 重新铸造**（方向是恢复正确行为，不是放宽）。**B（授权路径）** 把哨兵识别**下沉到 K04 绑定校验**，使哨兵从任何路径进来绑定都**不通过**并产出**可区分的既有原因码**（优先复用 `RUNTIME_INSTANCE_UNBOUND` 或 FU1 既有码，**不新造语义重叠码**）。硬要求：**复用 U15-FU1 的哨兵名单/判定**（不得第二份 —— 那正是本族成因），必要时抽成单一函数；不得放宽既有判定；7/200/30/0.999/120 不动；**不得误杀** unknownverse/known/n/a-x 这类像哨兵的真值；不得把『缺运行代』变成『服务起不来』；不得吞 KI/SystemExit。**补丁包必须提交进分支**（上轮出现过未被 head 跟踪的问题）。"
         }
       }
     },
