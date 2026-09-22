@@ -176,3 +176,16 @@ U12 套件总数：`PASS=47 FAIL=0`（修前，pristine）→ `PASS=50 FAIL=0`�
 4. 本轮的阻断码是**记录**不是**门禁**：服务不会因为 `RUNTIME_GENERATION_UNPROVEN`
    拒绝启动（符合要求）。它在闭环中出现的位置是：清单字段、`identity_blockers`、
    看板 `/api/mode` 拒绝切 live、U09 证据 `IDENTITY_REF_MISSING`。
+
+---
+
+## 附录（I 在集成时追加，不改原文）
+
+**更正 §4 的一处不实陈述（Q r1 复验 Note ① 实测）**：§4 称本补丁已更新
+`tests/acceptance/test_runtime_identity.py` 的模块 docstring，**实际未更新**——
+原文仍写"不启动服务"，而新增的 `RUNTIME_GENERATION_UNPROVEN` 两态断言确实会构造真实的
+`TradingService`。Q 已实测该构造是安全的（**paper 模式 + 隔离的临时状态根**，不触真实
+`data/`、不联网、不下单、不启停既有服务），故无行为风险，但**文档与代码不符属实**。
+
+**处置**：集成时已由 I 更正该 docstring（如实写明"例外"及其隔离条件），未改动任何断言。
+此处保留原文并追加说明，以便回溯作者当时的声称。

@@ -5,7 +5,12 @@
     PYTHONUTF8=1 <venv>/python.exe tests/acceptance/test_runtime_identity.py
 
 全程离线：只在临时目录里造 fixture 仓库，不读真实 ``.env``/``data``/密钥，
-不联网、不启动服务、不下单。逐项打印 PASS/FAIL，任一失败以退出码 1 结束。
+不联网、不下单。逐项打印 PASS/FAIL，任一失败以退出码 1 结束。
+
+**例外（U15-FU1）**：`RUNTIME_GENERATION_UNPROVEN` 的两态断言会构造一个真实的
+``TradingService``——运行在 **paper** 模式、``MTA_STATE_ROOT`` 指向**隔离的临时
+状态根**，不触真实 ``data/``、不联网、不下单、不启停任何既有服务。（原文写
+“不启动服务”已与实际不符，此处如实更正。）
 """
 from __future__ import annotations
 
