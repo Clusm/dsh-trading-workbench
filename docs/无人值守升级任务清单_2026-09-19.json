@@ -4781,7 +4781,8 @@
         "status": "FIX_PENDING_VERIFICATION",
         "owner": "U15 线（修复会话 U15-FU3）",
         "blocks": "无（当前不可达：源头已治愈 + 真正开仓门禁 `authorize_new_entry` 已堵）",
-        "note": "Q r1 遍历消费入口时测出，**推翻了作者『不再有任何出口把哨兵当合法身份』的绝对表述**。两处均在 `src/core/entry_readiness.py`：`:85 evaluate_entry_readiness`（`runtime_instance_id='unknown'` -> `allowed=True`、`reasons=()`）与 `:216 authorization_matches_context`（两侧 `'unknown'` -> `True`）。**当前不可达**（registry 已治愈、`authorize_new_entry` 已被 FU2 堵），但 `mint_runtime_generation` **仍能构造**哨兵对象（FU2 边界①），故任何直接把构造对象喂进来的调用方都会放行 —— **同族潜在洞**。**I 已派 U15-FU3** 收口（复用同一哨兵口径，不新建第二份名单）。"
+        "note": "Q r1 遍历消费入口时测出，**推翻了作者『不再有任何出口把哨兵当合法身份』的绝对表述**。两处均在 `src/core/entry_readiness.py`：`:85 evaluate_entry_readiness`（`runtime_instance_id='unknown'` -> `allowed=True`、`reasons=()`）与 `:216 authorization_matches_context`（两侧 `'unknown'` -> `True`）。**当前不可达**（registry 已治愈、`authorize_new_entry` 已被 FU2 堵），但 `mint_runtime_generation` **仍能构造**哨兵对象（FU2 边界①），故任何直接把构造对象喂进来的调用方都会放行 —— **同族潜在洞**。**I 已派 U15-FU3** 收口（复用同一哨兵口径，不新建第二份名单）。",
+        "fix": "U15-FU3 @ 7dd1053：两处均改调**同一** `is_placeholder_runtime_instance_id`；哨兵 -> `allowed=false` + 既有码 `RUNTIME_INSTANCE_UNBOUND`；`authorization_matches_context` 两侧哨兵 -> `false`。待 Q 复验通过后置 FIXED。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -5420,6 +5421,36 @@
             ]
           },
           "integration_commit": "merge task/U15-FU2 @ 8c67af8（owned 路径逐字节一致）；集成 048033b"
+        },
+        "U15-FU3": {
+          "status": "READY_FOR_REVIEW",
+          "code_head": "7dd1053",
+          "tip": "31c003b",
+          "base": "048033b",
+          "branch": "task/U15-FU3（worktree mat-wt/U15F3）",
+          "changed_files": "src/core/entry_readiness.py **+27**；tests/acceptance/test_runtime_identity.py **+173（0 删除）**",
+          "patch_package": "docs/dispatch/patches/U15-FU3/7dd1053/（20 文件，**已被 head 跟踪**，包内无 .py）",
+          "before_after": {
+            "evaluate_entry_readiness(runtime_instance_id='unknown')": "base `{\"allowed\": true, \"reasons\": []}` -> patched `{\"allowed\": false, \"reasons\": [\"RUNTIME_INSTANCE_UNBOUND\"]}`",
+            "同上，哨兵经 facts['runtime_instance_id']": "base `allowed=true reasons=[]` -> patched `allowed=false (\"RUNTIME_INSTANCE_UNBOUND\",)`",
+            "authorization_matches_context（两侧哨兵）": "base `true` -> patched `false`",
+            "说明": "两棵树上跑同一探针，`diff` 的**全部**差异只有这 3 行，其余逐字相同"
+          },
+          "caliber_reuse": "实测：名单**只有一处定义**（`runtime_identity.py:1621`）、成员判定**只有一处**（`:1636 casefold() in RUNTIME_INSTANCE_PLACEHOLDERS`）；本轮两个新判定点（`entry_readiness.py:179`、`:258/:259`）**只调** `is_placeholder_runtime_instance_id`；该文件内**零哨兵字面量、零第二份名单、零第二套归一化**；原因码是 **import 的常量**（本地无字面量副本，与 FU2 的 management_authorization 一致）。谓词调用点全集 = FU1/FU2/FU3 共 **6 处**，同一谓词。",
+          "reverse_evidence": "两态逐字相同：真值 `rt-2026-09-22-a1b2c3` 两处照常通过且**不新增阻断码**；`unknownverse`/`known`/`n-a-x`/`UNKNOWN-X` **不被误杀**；三态事实语义逐条未变（`True/False/None` -> `[]`/`MISMATCH`/`UNPROVEN`）；TTL/环境/scope/运行代比较项逐条未变（`expired`/`missing_expiry`/`env_mismatch`/`scope_mismatch`/`runtime_mismatch`/`empty_context`/`none_context` 全 false，`real_both=true`）；**空实例号仍走原有 `RUNTIME_INSTANCE_UNPROVEN`**（UNBOUND 未出现）；`7天/200/30/0.999/120` 未动；`pyproject.toml` 未动；无 try/except 新增。",
+          "delta": "94 脚本两态 `nonzero=0`：**NEW_FAIL ∅ / FIXED ∅ / CHANGED 1**（唯一 = `smoke_u10a_release_package.py` 的 `release_id` 内容指纹，rc 同为 0、已跟踪文件 918 两态一致，与 FU2 同族）。L19 已应用：**代码 head `7dd1053` 的 `git ls-files` = 918**（base 亦 918）；docs 提交后分支 head=938。`check_quality exit=0`、`QUALITY CHECK OK files=304 untracked=0`、**未新增 exclude**。补丁 3 配置全 `Checking patch`、0 Skipped；应用到 base 后与 patched **SAME × 2 文件**。验收套件**两态可跑**（base 树 src、patched 均 exit=0）；未硬编码迁移版本集合；**未改任何既有断言**。",
+          "unfinished": [
+            "①`ReadinessSnapshot.runtime_instance_id` **仍原样回显入参**（哨兵时仍写 `\"unknown\"`）—— 本轮只加 fail-closed 判定、未改回显字段（以免越过『只针对哨兵加 fail-closed』的边界）；作者称该字段不构成授权凭据（消费方需看 `allowed`）。**待 Q 核查是否真有消费方直接读该字段做放行决定。**",
+            "②`mint_runtime_generation` **仍能构造**哨兵运行代对象（FU2 边界①，本轮未动）；本轮效果 = 该对象喂进任何已收口入口（6 处谓词调用点）都拿不到通过。",
+            "③本轮未触碰其它任何已登记项。"
+          ],
+          "verification": {
+            "session": "Q (reviews/U15-FU3/R1/q)",
+            "candidate": "31c003b",
+            "verdict": "PENDING",
+            "reports_dir": "docs/dispatch/reviews/U15-FU3/31c003b/",
+            "focus": "**这两个入口是『能不能开新仓』的门禁，故重点是合法路径没被堵死。** ①两处前后对照；②**合法完整入参仍 `allowed=True` 且不新增阻断码**，并尽量端到端到实际门禁（`authorize_new_entry` 或 pipeline 消费点）——**若合法路径被堵死判阻塞**；③口径单一（全仓不得有第二份名单/第二套归一化，自己数 6 处调用点）；④`unknownverse` 等不误杀；⑤三态语义/比较项/空实例号原码逐条未变；⑥**独立判定 `ReadinessSnapshot.runtime_instance_id` 回显是否被消费方直接用于放行**。"
+          }
         }
       }
     },
