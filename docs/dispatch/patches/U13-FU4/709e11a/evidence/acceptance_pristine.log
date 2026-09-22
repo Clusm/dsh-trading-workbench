@@ -1,0 +1,53 @@
+U13-FU4 单实例锁 fail-closed 验收
+
+[1] 可解析 + 持有者存活 → 拒绝（行为不变）
+  PASS  第二实例被拒绝 — RuntimeError
+  PASS  拒绝文案保持原样（写明持有者 PID 与锁文件）
+  PASS  拒绝时未删除持有者的锁文件
+  PASS  持有者进程真实存活（跨进程）
+
+[3] 存在但不可解析 → fail-closed（不删除、不接管）
+  FAIL  空文件（被截断为 0 字节）：拒绝且不接管
+  FAIL  空文件（被截断为 0 字节）：抛可区分的 LockUnreadableError — 无异常
+  FAIL  空文件（被截断为 0 字节）：报错可行动（先确认、再手工删除）
+  FAIL  空文件（被截断为 0 字节）：锁文件被原样保留 — 锁文件已被删除（fail-open）
+  PASS  空文件（被截断为 0 字节）：持有者未被误判为已死亡
+  FAIL  坏 JSON（写入中途被截断）：拒绝且不接管
+  FAIL  坏 JSON（写入中途被截断）：抛可区分的 LockUnreadableError — 无异常
+  FAIL  坏 JSON（写入中途被截断）：报错可行动（先确认、再手工删除）
+  FAIL  坏 JSON（写入中途被截断）：锁文件被原样保留 — 锁文件已被删除（fail-open）
+  PASS  坏 JSON（写入中途被截断）：持有者未被误判为已死亡
+  FAIL  JSON 顶层非对象：拒绝且不接管
+  FAIL  JSON 顶层非对象：抛可区分的 LockUnreadableError — 无异常
+  FAIL  JSON 顶层非对象：报错可行动（先确认、再手工删除）
+  FAIL  JSON 顶层非对象：锁文件被原样保留 — 锁文件已被删除（fail-open）
+  PASS  JSON 顶层非对象：持有者未被误判为已死亡
+  FAIL  非 UTF-8 字节：拒绝且不接管
+  FAIL  非 UTF-8 字节：抛可区分的 LockUnreadableError — 无异常
+  FAIL  非 UTF-8 字节：报错可行动（先确认、再手工删除）
+  FAIL  非 UTF-8 字节：锁文件被原样保留 — 锁文件已被删除（fail-open）
+  PASS  非 UTF-8 字节：持有者未被误判为已死亡
+  FAIL  无 pid 字段：拒绝且不接管
+  FAIL  无 pid 字段：抛可区分的 LockUnreadableError — 无异常
+  FAIL  无 pid 字段：报错可行动（先确认、再手工删除）
+  FAIL  无 pid 字段：锁文件被原样保留 — 锁文件已被删除（fail-open）
+  PASS  无 pid 字段：持有者未被误判为已死亡
+  FAIL  pid 为 0（不可用）：拒绝且不接管
+  FAIL  pid 为 0（不可用）：抛可区分的 LockUnreadableError — 无异常
+  FAIL  pid 为 0（不可用）：报错可行动（先确认、再手工删除）
+  FAIL  pid 为 0（不可用）：锁文件被原样保留 — 锁文件已被删除（fail-open）
+  PASS  pid 为 0（不可用）：持有者未被误判为已死亡
+
+[2] 可解析 + 持有者确定已死 → 回收（合法路径不能被修坏）
+  PASS  前提：构造出的 PID 确定已死
+  PASS  遗留锁被回收（第二个进程可接管）
+  PASS  接管后锁文件记录本进程 PID
+  PASS  释放后锁文件被删除
+
+[4] 正常路径：首拿 / 次拒 / 释放后可再拿
+  PASS  第一个实例拿到锁
+  PASS  第二个实例被拒绝
+  PASS  持有者释放后锁文件被删除
+  PASS  释放后可再拿
+
+U13-FU4 FAILED: 24 项 —— 空文件（被截断为 0 字节）：拒绝且不接管, 空文件（被截断为 0 字节）：抛可区分的 LockUnreadableError, 空文件（被截断为 0 字节）：报错可行动（先确认、再手工删除）, 空文件（被截断为 0 字节）：锁文件被原样保留, 坏 JSON（写入中途被截断）：拒绝且不接管
