@@ -4595,7 +4595,7 @@
         "status": "OPEN",
         "owner": "E线/U12",
         "blocks": "无（不阻断，但需在 RC 运维风险清单中列明）",
-        "note": "①两套恢复包单向不互通（生产脚本读不了 core 的 schema-3 包，ValueError: 不支持的恢复包版本）；②check_writer_stopped 对损坏锁静默 return -> 仍建包（停写前提不可证）；③InstanceLock 对截断为 0 字节的锁文件单方接管 -> 实测双持锁（**既有缺陷**，0cbdb20 起，U13 仅加 metadata）；④同一状态根两账户 -> RunRegistry.load_or_mint 直接 persist，先启动账户 runtime_instance_id 被覆盖；⑤恢复包不含 runtime_generation.json 且校验器拒白名单外文件 -> DR 后 runtime_instance_id/generation_id 必变（运行代跨重启稳定在“恢复”场景断裂）。"
+        "note": "①两套恢复包单向不互通（生产脚本读不了 core 的 schema-3 包，ValueError: 不支持的恢复包版本）；②check_writer_stopped 对损坏锁静默 return -> 仍建包（停写前提不可证）；③InstanceLock 对截断为 0 字节的锁文件单方接管 -> 实测双持锁（**既有缺陷**，0cbdb20 起，U13 仅加 metadata）；④同一状态根两账户 -> RunRegistry.load_or_mint 直接 persist，先启动账户 runtime_instance_id 被覆盖；⑤恢复包不含 runtime_generation.json 且校验器拒白名单外文件 -> DR 后 runtime_instance_id/generation_id 必变（运行代跨重启稳定在“恢复”场景断裂）。  **【2026-09-22 更新】** 其中『InstanceLock 对截断为 0 字节的锁文件单方接管 -> 实测双持锁』一条经 I 逐条复核确认为**活路径安全缺陷**（单实例互斥失效 -> 重复下单），**已派 `U13-FU4` 修复**（fail-closed 三情形区分），其余四条仍 OPEN。"
       },
       {
         "id": "U09-OUTCOME-VS-LIFECYCLE-COST",
@@ -5158,6 +5158,17 @@
           },
           "integration_commit": "merge @ dcb87bc（owned 路径逐字节一致：git diff dcb87bc HEAD = 0 行）",
           "methodology_finding": "**Q 发现的沙箱方法学缺陷（影响此前所有 delta 的覆盖度声明）**：只 `git init` 而无 index 时，`smoke_u10a_release_package.py` 靠 `git ls-files` 建沙箱会得到**空文件列表** -> **两态都在第 85 个脚本同样崩**。Q 在两棵树各做一次 `git add -A`（**只暂存、不 commit**、`autocrlf=false`）后取到完整 94 脚本；补丁矩阵另在**全新未暂存树**复测通过。=> 此前各轮『只 git init』算出的 NEW_FAIL=∅ **结论仍成立**（两态同败不构成*新增*失败），但**该脚本当时并未真正被执行**，覆盖度比声称的略低。**修正做法**：解包后 `git init && git add -A`（不 commit）。"
+        },
+        "U13-FU4": {
+          "status": "IN_PROGRESS",
+          "branch": "task/U13-FU4",
+          "worktree": "mat-wt/U13F4",
+          "base": "d52bd68",
+          "targets_issue": "RECOVERY-BUNDLE-P2-CLUSTER（其中 InstanceLock 截断锁单方接管一条，即 U13 r2 的 P2-3）",
+          "defect": "src/core/instance_lock.py 的 InstanceLock.acquire()（:136-166）在锁文件**不可解析**时把 pid 置 0（`except Exception: pid = 0`），而 `_pid_alive(pid)` 对 pid<=0 直接返回 False（:61-63）-> 走到 `self.path.unlink()` **单方删除仍存活持有者的锁文件** -> 循环内 O_EXCL 重建成功 -> **第二个活进程拿到锁**。注释自称『仅清理确认已死亡的遗留锁』，但代码把**读不出**当成了**确认已死亡**。",
+          "impact": "**单实例互斥失效**：锁文件被截断/损坏时两个活实例同时对同一状态根运行交易服务 -> 重复下单、控制面重复动作、同一状态根双写。隔离演练已实测（持有者 PID 30004 存活，第二进程 PID 34808 接管成功）。属**既有缺陷**（可追溯到 0cbdb20），非本批次引入。",
+          "i_verified_exists": "I 复核（d52bd68）：`except Exception: pid = 0`（:149-150）+ `if pid <= 0: return False`（:62-63）+ `self.path.unlink()`（:160-163）三处连起来即可复现。",
+          "direction_requirement": "必须区分三种情形，只有一种允许回收：①可解析 + 持有者存活 -> 拒绝（保持现状）②可解析 + 持有者确定已死（读出 pid 且不存活）-> **允许回收**（合法路径，不得修坏）③**存在但不可解析**（空/截断/坏 JSON/非 UTF-8/无 pid）-> **fail-closed：不删不接管**，抛可区分错误且报错**可行动**（告诉操作者确认未运行后手工删锁）。硬要求：『读不出』绝不等于『已死亡』；不得改成永不回收；正常单实例行为逐字不变；不得吞 KeyboardInterrupt/SystemExit。"
         }
       }
     },
