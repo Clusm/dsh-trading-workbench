@@ -4595,7 +4595,7 @@
         "status": "OPEN",
         "owner": "E线/U12",
         "blocks": "无（不阻断，但需在 RC 运维风险清单中列明）",
-        "note": "①两套恢复包单向不互通（生产脚本读不了 core 的 schema-3 包，ValueError: 不支持的恢复包版本）；②check_writer_stopped 对损坏锁静默 return -> 仍建包（停写前提不可证）；③InstanceLock 对截断为 0 字节的锁文件单方接管 -> 实测双持锁（**既有缺陷**，0cbdb20 起，U13 仅加 metadata）；④同一状态根两账户 -> RunRegistry.load_or_mint 直接 persist，先启动账户 runtime_instance_id 被覆盖；⑤恢复包不含 runtime_generation.json 且校验器拒白名单外文件 -> DR 后 runtime_instance_id/generation_id 必变（运行代跨重启稳定在“恢复”场景断裂）。  **【2026-09-22 更新】** 其中『InstanceLock 对截断为 0 字节的锁文件单方接管 -> 实测双持锁』一条经 I 逐条复核确认为**活路径安全缺陷**（单实例互斥失效 -> 重复下单），**已派 `U13-FU4` 修复**（fail-closed 三情形区分），其余四条仍 OPEN。"
+        "note": "①两套恢复包单向不互通（生产脚本读不了 core 的 schema-3 包，ValueError: 不支持的恢复包版本）；②check_writer_stopped 对损坏锁静默 return -> 仍建包（停写前提不可证）；③InstanceLock 对截断为 0 字节的锁文件单方接管 -> 实测双持锁（**既有缺陷**，0cbdb20 起，U13 仅加 metadata）；④同一状态根两账户 -> RunRegistry.load_or_mint 直接 persist，先启动账户 runtime_instance_id 被覆盖；⑤恢复包不含 runtime_generation.json 且校验器拒白名单外文件 -> DR 后 runtime_instance_id/generation_id 必变（运行代跨重启稳定在“恢复”场景断裂）。  **【2026-09-22 更新】** 本簇 5 条中 **2 条已 FIXED**：③「`InstanceLock` 对截断为 0 字节的锁文件单方接管 -> 实测双持锁」由 **U13-FU4** 修复（不可解析 -> fail-closed，锁文件逐字节不动；Q 用**真实两进程 × 8 种损坏形态**复验：pristine 8/8 接管且持有者仍活 -> patched 8/8 拒绝）；②「`check_writer_stopped` 对损坏锁静默判『写者已停』-> 仍建包」由 **U13-FU5** 修复（不可解析 -> `RECOVERY_LOCK_UNREADABLE`；Q 复验：写者存活时修前造包 + `writer_stopped=True` + verify 接受 -> 修后拒绝且未产出包）。**注意**：这两条**同源**（锁文件损坏），即 `RECOVERY-WRITER-STOPPED-CLASS-NOT-CLOSED` 所指的一族，现已两处均收口。其余 3 条仍 OPEN：①两套恢复包单向不互通（生产脚本读不了 core 的 schema-3 包，报 `ValueError`，属**失败即报错**非静默）；④同一状态根两账户静默覆盖运行代基线；⑤恢复包不含 `runtime_generation.json`（DR 后运行代必变）。"
       },
       {
         "id": "U09-OUTCOME-VS-LIFECYCLE-COST",
@@ -4770,10 +4770,13 @@
       {
         "id": "U15FU1-K04-SENTINEL-RESIDUAL",
         "title": "（同族·未扩面）K04 授权路径未识别运行代哨兵：经污染 registry 混入的 `\"unknown\"` 仍可能被接受（P2）",
-        "status": "OPEN",
+        "status": "FIXED",
         "owner": "U15 后续 / U12",
         "blocks": "无（U15-FU1 未扩面；同族缺口）",
-        "note": "U15-FU1 在 `release_manifest`/`runtime_identity` 侧把哨兵识别为『运行代缺失』，但 **`management_authorization.py:177` 与 `verify_account_binding` 仍是『非空即通过』** —— 经**被污染的 registry** 把 `runtime_instance_id` 写成 `\"unknown\"` 时，哨兵仍可能经 K04 授权路径被接受。作者在 README §7.2 已自认；Q r1 记录但**未做端到端可利用性验证**。建议：把同一哨兵判定下沉到 K04 的绑定校验，或让 `RunRegistry.load()` 把占位实例号视为『无记录』（重铸）——后者可一并覆盖 `mint_runtime_generation` 的残留。"
+        "note": "U15-FU1 在 `release_manifest`/`runtime_identity` 侧把哨兵识别为『运行代缺失』，但 **`management_authorization.py:177` 与 `verify_account_binding` 仍是『非空即通过』** —— 经**被污染的 registry** 把 `runtime_instance_id` 写成 `\"unknown\"` 时，哨兵仍可能经 K04 授权路径被接受。作者在 README §7.2 已自认；Q r1 记录但**未做端到端可利用性验证**。建议：把同一哨兵判定下沉到 K04 的绑定校验，或让 `RunRegistry.load()` 把占位实例号视为『无记录』（重铸）——后者可一并覆盖 `mint_runtime_generation` 的残留。",
+        "status_prev": "OPEN",
+        "fix": "**已由 U15-FU2 修复（记录滞后）**。I 逐行核实：`src/core/management_authorization.py:180-183` 已改为 `if resolve_runtime_instance_id(generation.runtime_instance_id) is None: reasons.append(RUNTIME_INSTANCE_UNBOUND)`（注释明写「不再用『非空即绑定』——哨兵非空，会误通过」），`:247-249` 同样；`runtime_identity.py:1646` 在 `resolve_runtime_instance_id` 内调 `is_placeholder_runtime_instance_id`；`RUNTIME_INSTANCE_UNBOUND` 为**复用**的既有码（`:209`），未新造。Q r1 复验的**端到端**证据：污染 registry -> 授权结论 `submit_allowed` 由 `True` 变 `False`、`binding_reason_codes=('RUNTIME_INSTANCE_UNBOUND',)`，而 `reconcile_allowed` 两态均 `True`（既有边界未变）。",
+        "stale_status_corrected_at": "2026-09-22（I 逐条复核后更正，第 8 次同类）"
       },
       {
         "id": "U15FU2-UNCOVERED-CONSUMERS",
