@@ -1,4 +1,4 @@
-"""U13-FU4 验收：锁文件**存在但不可解析**时单实例锁必须 fail-closed。
+"""U13-FU4 + U13-FU5 验收：锁文件**存在但不可解析**时全仓必须 fail-closed。
 
 独立可运行（本仓库无 pytest）：
 
@@ -9,18 +9,28 @@
 本进程扮演"第二个服务"，因此"两个活持有者"是真实的两进程共存，而不是同进程
 多对象的近似。逐项打印 PASS/FAIL，任一失败以退出码 1 结束。
 
-三种情形（U13-FU4 的根因是"读不出"被当成了"已死亡"）：
+U13-FU4 —— 单实例锁 ``InstanceLock.acquire()`` 侧，三种情形：
 
   [1] 可解析 + 持有者存活      → 拒绝（行为必须逐字不变）
   [2] 可解析 + 持有者确定已死  → 回收遗留锁（真实运维需要，必须没被修坏）
   [3] 存在但不可解析（空 / 截断 / JSON 坏 / 非 UTF-8 / 无 pid / pid<=0）
       → fail-closed：抛可区分的 ``LockUnreadableError``、**不删除**锁文件、不接管
   [4] 正常路径：首拿 / 次拒 / 释放后可再拿
+
+U13-FU5 —— **恢复包创建**侧的同一根因（第二种口径），在本文件被扩展为：
+
+  [5] **真实存活写者 + 锁文件损坏** → ``check_writer_stopped`` / ``create_epoch_bundle``
+      必须**拒绝**（原因码 ``RECOVERY_LOCK_UNREADABLE``），写者仍活、锁原样保留、
+      全程**不发布任何恢复包**。修复前这里会成功造出 ``writer_stopped: True`` 的包
+      并被 ``verify_epoch_bundle`` 接受（撕裂恢复点被伪称"同一时刻静止"）。
+  [5b] 反向证据：**锁文件不存在** 与 **遗留锁（持有者确认已死）** 两条合法运维
+      路径必须**仍然允许**建包并通过 ``verify_epoch_bundle``（证明没修坏）。
 """
 from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -30,6 +40,13 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from core.instance_lock import InstanceLock  # noqa: E402
+from core.ops.recovery import (  # noqa: E402
+    RECOVERY_WRITER_RUNNING,
+    check_writer_stopped,
+    create_epoch_bundle,
+    verify_epoch_bundle,
+)
+from core.runtime_paths import REQUIRED_STATE_FILES, RuntimePaths  # noqa: E402
 
 try:
     # 修复后引入的可区分错误类型；修复前不存在（那时"读不出"被降级成 pid=0）。
@@ -39,6 +56,12 @@ try:
 except ImportError:
     LockUnreadableError = None  # type: ignore[assignment]
     _HAS_TYPED_ERROR = False
+
+try:
+    # U13-FU5 新增：恢复包侧的"锁读不出"原因码；修复前不存在。
+    from core.ops.recovery import RECOVERY_LOCK_UNREADABLE as _FU5_CODE  # noqa: E402
+except ImportError:  # 修复前的树上没有这个原因码：按字面量比对，照样能判 FAIL。
+    _FU5_CODE = "RECOVERY_LOCK_UNREADABLE"  # type: ignore[assignment]
 
 _FAILURES: list[str] = []
 
@@ -135,6 +158,119 @@ def _corrupt_payloads() -> dict[str, bytes]:
     }
 
 
+# --------------------------------------------------------------------------
+# U13-FU5：恢复包创建侧的同一根因
+# --------------------------------------------------------------------------
+
+
+def _attempt_code(fn, *args, **kwargs) -> str:
+    """调用 ``fn``；返回异常的 ``code`` 属性（未抛异常则返回空串）。"""
+    try:
+        fn(*args, **kwargs)
+    except BaseException as exc:  # noqa: BLE001 —— 只取原因码，不吞给调用方
+        return str(getattr(exc, "code", "") or type(exc).__name__)
+    return ""
+
+
+def _try_bundle(paths, bundles) -> tuple[Path | None, BaseException | None]:
+    """尝试建包；返回 (包目录, None) 或 (None, 异常)。"""
+    try:
+        return create_epoch_bundle(paths, bundles, environment="demo"), None
+    except BaseException as exc:  # noqa: BLE001
+        return None, exc
+
+
+def _make_state_fixture(base: Path) -> RuntimePaths:
+    """最小可用状态根：SQLite（含 ``schema_migrations``）+ 全部关键 JSON。
+
+    JSON 名单取自 ``REQUIRED_STATE_FILES``（**不**硬编码名单/迁移版本集合）。
+    """
+    paths = RuntimePaths.resolve(base, profile=None)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(paths.db_file)
+    connection.execute("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY)")
+    connection.execute("INSERT INTO schema_migrations VALUES(1)")
+    connection.commit()
+    connection.close()
+    for name in REQUIRED_STATE_FILES:
+        (paths.data_dir / name).write_text(json.dumps({"fixture": name}), encoding="utf-8")
+    return paths
+
+
+def _manifest_of(bundle: Path) -> dict:
+    return json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+
+
+def check_recovery_writer_stopped_fail_closed() -> None:
+    """[5] 写者真实存活 + 锁文件损坏 → 恢复包必须拒绝；[5b] 合法路径仍允许。"""
+    print("\n[5] 写者存活 + 锁文件损坏 → 恢复包必须拒绝（U13-FU5）")
+    with tempfile.TemporaryDirectory(prefix="fu5-accept-") as tmp:
+        base = Path(tmp)
+        paths = _make_state_fixture(base / "host")
+        bundles = base / "bundles"
+        payloads = _corrupt_payloads()
+        holder, holder_pid = _spawn_holder([paths.lock_file])
+        try:
+            lock = paths.lock_file
+            check("前提：锁文件记录的是真实存活的写者 PID",
+                  lock.is_file() and holder_pid > 0
+                  and InstanceLock._pid_alive(holder_pid))
+            check("前提：锁完好且写者存活 → RECOVERY_WRITER_RUNNING（行为不变）",
+                  _attempt_code(check_writer_stopped, paths) == RECOVERY_WRITER_RUNNING)
+
+            for label, payload in payloads.items():
+                lock.write_bytes(payload)
+                code = _attempt_code(check_writer_stopped, paths)
+                check(f"{label}：check_writer_stopped 拒绝且原因码可区分",
+                      code == _FU5_CODE, f"code={code or '（未拒绝）'}")
+                bundle, exc = _try_bundle(paths, bundles)
+                check(f"{label}：create_epoch_bundle 拒绝建包", bundle is None,
+                      "未拒绝：造出了伪称静止的恢复包" if bundle is not None
+                      else f"{type(exc).__name__}")
+                check(f"{label}：拒绝原因码可区分（非 WRITER_RUNNING）",
+                      _attempt_code(check_writer_stopped, paths) == _FU5_CODE)
+                check(f"{label}：写者仍真实存活（读不出 ≠ 已停）",
+                      InstanceLock._pid_alive(holder_pid))
+                check(f"{label}：锁文件被原样保留",
+                      lock.exists() and lock.read_bytes() == payload)
+                check(f"{label}：报错可行动（先确认服务、再手工删锁）",
+                      exc is not None and "确认" in str(exc) and "手工删除" in str(exc))
+            published = sorted(bundles.iterdir()) if bundles.is_dir() else []
+            check("全程未发布任何恢复包", not published,
+                  ", ".join(p.name for p in published))
+        finally:
+            _kill_holder(holder, holder_pid)
+
+        print("\n[5b] 反向证据：合法运维路径必须仍然允许建包")
+        legal = _make_state_fixture(base / "host2")
+
+        check("(a) 前提：锁文件不存在", not legal.lock_file.exists())
+        check("(a) 锁文件不存在 → check_writer_stopped 不拒绝",
+              _attempt_code(check_writer_stopped, legal) == "")
+        bundle, exc = _try_bundle(legal, base / "bundles-a")
+        check("(a) 锁文件不存在 → 允许建包（合法路径未被修坏）",
+              bundle is not None, f"{type(exc).__name__}: {exc}")
+        if bundle is not None:
+            check("(a) 包声明停写且 verify_epoch_bundle 接受",
+                  _manifest_of(bundle)["writer_stopped"] is True
+                  and verify_epoch_bundle(bundle, expected_environment="demo")["schema"] == 3)
+
+        dead = _dead_pid()
+        check("(b) 前提：构造出的 PID 确定已死", not InstanceLock._pid_alive(dead))
+        legal.lock_file.write_text(
+            json.dumps({"pid": dead, "thread": 3}), encoding="utf-8")
+        check("(b) 遗留锁（持有者已死）→ check_writer_stopped 不拒绝",
+              _attempt_code(check_writer_stopped, legal) == "")
+        stale_bundle, stale_exc = _try_bundle(legal, base / "bundles-b")
+        check("(b) 遗留锁（持有者已死）→ 允许建包（真实运维路径未被修坏）",
+              stale_bundle is not None, f"{type(stale_exc).__name__}: {stale_exc}")
+        if stale_bundle is not None:
+            check("(b) 包声明停写且 verify_epoch_bundle 接受",
+                  _manifest_of(stale_bundle)["writer_stopped"] is True
+                  and verify_epoch_bundle(
+                      stale_bundle, expected_environment="demo")["schema"] == 3)
+
+
 def main() -> int:
     print("U13-FU4 单实例锁 fail-closed 验收")
     with tempfile.TemporaryDirectory(prefix="fu4-accept-") as tmp:
@@ -212,10 +348,12 @@ def main() -> int:
         check("释放后可再拿", third._owned)
         third.release()
 
+    check_recovery_writer_stopped_fail_closed()
+
     if _FAILURES:
-        print(f"\nU13-FU4 FAILED: {len(_FAILURES)} 项 —— {', '.join(_FAILURES[:5])}")
+        print(f"\nU13-FU4/FU5 FAILED: {len(_FAILURES)} 项 —— {', '.join(_FAILURES[:5])}")
         return 1
-    print("\nU13-FU4 INSTANCE LOCK FAIL-CLOSED OK")
+    print("\nU13-FU4/FU5 LOCK + RECOVERY FAIL-CLOSED OK")
     return 0
 
 
