@@ -6,7 +6,7 @@
 
 ---
 
-## 0. 当前步骤（2026-09-22 09:3x）—— 计划已完成，转入逐条关闭"真缺陷"
+## 0. 当前步骤（2026-09-22 10:2x）—— 计划已完成，转入逐条关闭"真缺陷"
 
 **⚠ 判据：不要按"类别标签"判断剩余项 —— 必须逐条读。** 本会话已因此栽过两次：①曾据"剩余多为 P3"宣布停止点，实际 `U08-R5-FU2` 是活路径真缺陷；②逐条复核后又发现 `RECOVERY-BUNDLE-P2-CLUSTER` 里的"锁接管"实为**单实例互斥失效**。**做法：读每一条的 `blocks` 与后果，而不是读它的标题。**
 
@@ -15,9 +15,9 @@
 | `U09-FU1` | 发布门禁两条 fail-open（读 outcome 快照而非 lifecycle 权威态；净收益未知仍计入 30） | ✅ INTEGRATED |
 | `U08-FU2` | 执行器对审计库 `db.*` 无护栏 -> 异常穿出整轮、intents 全废 | ✅ INTEGRATED |
 | `U13-FU4` | **单实例锁在锁文件损坏时 fail-OPEN** -> 两个活实例同管一个状态根 | ✅ INTEGRATED |
-| `U13-FU5` | **（P0）** 锁损坏 -> `check_writer_stopped` 静默返回 -> 恢复包被声明"写者已停"并验证通过（写者其实仍在运行） | **进行中** |
+| `U13-FU5` | **（P0）** 锁损坏 -> `check_writer_stopped` 静默返回 -> 恢复包被声明"写者已停"并验证通过（写者其实仍在运行） | ✅ INTEGRATED |
 
-- **`RECOVERY-WRITER-STOPPED-CLASS-NOT-CLOSED`**：FU4 只修了两处同源点中的一处。**在 FU5 落地前，不得宣称"锁文件损坏 -> fail-open"这一类已闭合。**（另注意 `scripts/create_recovery_bundle.py:179` 自行写 `writer_stopped: True`，FU5 须一并核对。）
+- **`RECOVERY-WRITER-STOPPED-CLASS-NOT-CLOSED`：该类现已闭合**（两处同源点均已 fail-closed：`InstanceLock.acquire()` 由 FU4、`check_writer_stopped` 由 FU5，且共享同一 `read_lock_holder` 口径）。残余的**只读判定窗口（TOCTOU）**另立为 `RECOVERY-TOCTOU-RESIDUAL`（P3）：生产入口 `create_recovery_bundle.py` 实测**全程持锁**，残余只影响直接调库 API 的调用方。
 
 **18/18 任务已全部集成**（见下方终态记录）。**此前一度记为"停止点"，现已修正**：那一步是基于"剩余项多为 P3"的归纳，**没有逐条查看**。逐条核对后确认其中**至少一条是活路径上的真缺陷**（非 P3 卫生），故恢复有限度的修复工作：
 
@@ -38,7 +38,7 @@
 - **18/18 任务全部 INTEGRATED**（首批 14 项 + 后置 P2 四项 U06b/U07/U10b/U11），另有 **5 轮缺陷修复**（U13-FU1/FU2/FU3、U12-BF1、U09-FU1）与 **1 次契约勘误**（`CONTRACT-ERRATUM-1`）。
 - **稳定性证据**：`git rev-list --count <branch> ^integration/unattended-v3` 对 **全部 22 条 `task/*` 分支均为 0** —— 无任何已交付提交游离在集成分支之外。
 - **常设门禁**：`OFFLINE REGRESSION OK scripts=94`（U11 修复轮把 9 个 `tests/` 套件补进回归，85→94）、`QUALITY CHECK OK files=303 untracked=0`、契约 `PASS 173 / FAIL 0`（golden 160）、打包器 `37/0`（0 断链）。
-- **台账**：known_issues 共 41 条 —— **18 FIXED / 20 OPEN**（2026-09-22 逐条复核后更正：4 条已解的记录曾滞后记 OPEN，见 L20-LEDGER-STATUS-DRIFT）。
+- **台账**：known_issues 共 43 条 —— **20 FIXED / 21 OPEN**（2026-09-22 逐条复核后更正）。
 
 ### 运行目录合规性（已核查）
 - `multi-agent-trader` 的 **HEAD 仍为 `05d28e0`**，`src/`、`config/`、`knowledge/`、`scripts/`、`tests/` **改动为空** —— 本会话**未**在其上做任何 checkout/合并/改配置/执行开发代码；demo 服务跑的是未变代码。
