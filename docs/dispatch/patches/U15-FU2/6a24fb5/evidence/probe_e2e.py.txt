@@ -1,0 +1,133 @@
+"""U15-FU2 残留 A/B 两态探针（argv[1] = 被测树根）。
+
+用法：PYTHONUTF8=1 <venv>/python.exe probe_e2e.py <tree_root>
+"""
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(ROOT / "src"))
+
+from core.management_authorization import (  # noqa: E402
+    ManagementAuthorizationError,
+    evaluate_management_request,
+    issue_management_authorization,
+    resolve_account_domain,
+)
+from core.ops.supervision import RunRegistry  # noqa: E402
+from core.runtime_identity import (  # noqa: E402
+    derive_account_ref,
+    mint_runtime_generation,
+    verify_account_binding,
+)
+
+ACCT = "demo:acct-a"
+
+
+def _gen(instance: str, started_at: float = 1000.0):
+    return mint_runtime_generation(
+        environment="demo", account_ref=derive_account_ref("demo", declared_account_ref="acct-a"),
+        runtime_instance_id=instance, started_at=started_at)
+
+
+def _write_registry(path: Path, instance: str = "unknown", restarts: int = 3) -> dict:
+    seed = _gen(instance)
+    payload = {
+        "environment": seed.environment, "account_ref": seed.account_ref,
+        "runtime_instance_id": seed.runtime_instance_id, "generation_id": seed.generation_id,
+        "credential_epoch": 0, "key_fingerprint": None, "scope_hash": None,
+        "started_at": 1000.0, "restarts": restarts,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return payload
+
+
+def _request(**overrides) -> dict:
+    base = {"action": "REDUCE", "account_ref": ACCT, "lifecycle_id": "lc-e2e",
+            "position_side": "LONG", "reduce_qty": "0.001", "current_position_qty": "0.01",
+            "requested_net_delta": "0", "environment": "demo", "remove_protection": False}
+    base.update(overrides)
+    return base
+
+
+def main() -> int:
+    print(f"### tree={ROOT}")
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw) / "runtime_generation.json"
+        payload = _write_registry(path)
+        print(f"[A:fixture] runtime_generation.json runtime_instance_id={payload['runtime_instance_id']!r} "
+              f"restarts={payload['restarts']}")
+
+        # ---------- 残留 A ----------
+        registry = RunRegistry(path)
+        loaded = registry.load()
+        print(f"[A:before/after] load() -> "
+              + ("None（视为无记录）" if loaded is None
+                 else f"RunRecord(instance={loaded.runtime_instance_id!r}, restarts={loaded.restarts})"))
+        record, created = registry.load_or_mint(environment="demo", account_ref=ACCT, now=2000.0)
+        healed = record.runtime_instance_id != "unknown"
+        print(f"[A:before/after] load_or_mint() -> instance={record.runtime_instance_id!r} "
+              f"created={created} restarts={record.restarts} | 哨兵是否已消除={healed}")
+
+        # ---------- 残留 B ----------
+        sentinel = _gen("unknown")
+        twin = _gen("unknown")
+        both = verify_account_binding(sentinel, twin)
+        print(f"[B:before/after] verify_account_binding(哨兵, 哨兵) -> allowed={both.allowed} "
+              f"reasons={both.reason_codes}")
+        domain = resolve_account_domain(sentinel)
+        print(f"[B:before/after] resolve_account_domain(哨兵) -> bound={domain.bound} "
+              f"reasons={domain.reason_codes}")
+
+        # ---------- 端到端：被污染的 registry → 授权结论 ----------
+        polluted_generation = _gen(payload["runtime_instance_id"], started_at=payload["started_at"])
+        try:
+            auth = issue_management_authorization(
+                authorization_id="auth-e2e", generation=polluted_generation,
+                lifecycle_id="lc-e2e", position_side="LONG", max_reduce_qty="0.005",
+                position_revision=0, nonce="ne", issued_at_ms=1000, ttl_ms=1000)
+            print(f"[E2E] issue_management_authorization(哨兵运行代) -> 成功，"
+                  f"runtime_instance_id={auth.runtime_instance_id!r}")
+        except ManagementAuthorizationError as exc:
+            auth = issue_management_authorization(
+                authorization_id="auth-e2e", generation=_gen("rt-real-1"),
+                lifecycle_id="lc-e2e", position_side="LONG", max_reduce_qty="0.005",
+                position_revision=0, nonce="ne", issued_at_ms=1000, ttl_ms=1000,
+            ).model_copy(update={"runtime_instance_id": "unknown"})
+            print(f"[E2E] issue_management_authorization(哨兵运行代) -> 拒绝 {exc.reason_codes}"
+                  f"（改以「修前已签发」的形态重放：runtime_instance_id={auth.runtime_instance_id!r}）")
+        decision = evaluate_management_request(
+            auth, request=_request(runtime_instance_id="unknown"),
+            now_ms=1010, current_revision=0, generation=polluted_generation)
+        print(f"[E2E] evaluate_management_request -> submit_allowed={decision.submit_allowed} "
+              f"reconcile_allowed={decision.reconcile_allowed} "
+              f"binding_reason_codes={decision.binding_reason_codes} reasons={decision.reason_codes}")
+
+        # ---------- 反向证据 ----------
+        real = _gen("rt-real-1")
+        rb = verify_account_binding(real, real)
+        real_decision = evaluate_management_request(
+            issue_management_authorization(
+                authorization_id="auth-real", generation=real, lifecycle_id="lc-e2e",
+                position_side="LONG", max_reduce_qty="0.005", position_revision=0,
+                nonce="nr", issued_at_ms=1000, ttl_ms=1000),
+            request=_request(runtime_instance_id="rt-real-1"),
+            now_ms=1010, current_revision=0, generation=real)
+        print(f"[REV] 真值 verify_account_binding -> allowed={rb.allowed} reasons={rb.reason_codes} | "
+              f"端到端 submit_allowed={real_decision.submit_allowed} "
+              f"reasons={real_decision.reason_codes}")
+        for name in ("unknownverse", "known", "n/a-x", "UNKNOWN-X"):
+            g = _gen(name, started_at=3000.0)
+            b = verify_account_binding(g, g)
+            print(f"[REV] 像哨兵的真值 {name!r} -> allowed={b.allowed} reasons={b.reason_codes}")
+        empty = verify_account_binding(real, None)
+        print(f"[REV] 缺 actual -> {empty.reason_codes}（既有语义）")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

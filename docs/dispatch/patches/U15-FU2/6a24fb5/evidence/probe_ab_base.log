@@ -1,0 +1,12 @@
+[A] load() -> record instance='unknown' restarts=3
+[A] load_or_mint -> instance='unknown' created=True restarts=3
+[B] sentinel generation_id=gen-9c9b1951a2e504c41b8e instance='unknown'
+[B] verify_account_binding(both sentinel) -> allowed=True reasons=()
+[B] resolve_account_domain -> bound=True reasons=()
+[B] issued authorization runtime_instance_id='unknown'
+[B] evaluate_management_request -> submit_allowed=True binding=() reasons=()
+[B-rev] real verify -> allowed=True reasons=()
+[B-rev] lookalike 'unknownverse' -> allowed=True reasons=()
+[B-rev] lookalike 'known' -> allowed=True reasons=()
+[B-rev] lookalike 'n/a-x' -> allowed=True reasons=()
+[B-rev] lookalike 'UNKNOWN-X' -> allowed=True reasons=()
