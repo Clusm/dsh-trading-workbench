@@ -1,0 +1,12 @@
+[A:sentinel] {"allowed": true, "reasons": [], "runtime_instance_id": "unknown"}
+[A:real] {"allowed": true, "reasons": [], "runtime_instance_id": "rt-2026-09-22-a1b2c3"}
+[A:lookalike:unknownverse] {"allowed": true, "reasons": [], "runtime_instance_id": "unknownverse"}
+[A:lookalike:known] {"allowed": true, "reasons": [], "runtime_instance_id": "known"}
+[A:lookalike:n/a-x] {"allowed": true, "reasons": [], "runtime_instance_id": "n/a-x"}
+[A:lookalike:UNKNOWN-X] {"allowed": true, "reasons": [], "runtime_instance_id": "UNKNOWN-X"}
+[A:facts_channel] {"allowed": true, "reasons": [], "runtime_instance_id": "unknown"}
+[A:tri_state] {"order_mirror_ok=False": [false, ["ORDER_MIRROR_MISMATCH"]], "order_mirror_ok=None": [false, ["ORDER_MIRROR_UNPROVEN"]], "order_mirror_ok=True": [true, []], "protection_mirror_ok=False": [false, ["PROTECTION_MIRROR_MISMATCH"]], "protection_mirror_ok=None": [false, ["PROTECTION_MIRROR_UNPROVEN"]], "protection_mirror_ok=True": [true, []], "service_accepting=False": [false, ["SERVICE_NOT_ACCEPTING"]], "service_accepting=None": [false, ["SERVICE_NOT_ACCEPTING"]], "service_accepting=True": [true, []]}
+[B:sentinel_both] true
+[B:sentinel_context_real_decision] false
+[B:real_both] true
+[B:comparisons] {"empty_context": false, "env_mismatch": false, "expired": false, "lookalike:UNKNOWN-X": true, "lookalike:known": true, "lookalike:n/a-x": true, "lookalike:unknownverse": true, "missing_expiry": false, "none_context": false, "runtime_mismatch": false, "scope_mismatch": false}
