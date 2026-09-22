@@ -4695,10 +4695,11 @@
       {
         "id": "U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER",
         "title": "`runtime_instance_id` 为字面量占位符 'unknown'，但 U12 验收的 `complete` 判据把它当『非空=完整』",
-        "status": "OPEN",
+        "status": "FIXED",
         "owner": "U12/U15",
         "blocks": "无（不阻断集成）；影响『身份完整』的判据精度",
-        "note": "实测：`build_release_manifest(...).to_dict()['runtime_instance_id'] == 'unknown'`（字面量，非空）。U12 验收的 `complete = bool(artifact_hash) and bool(runtime_instance_id)` 因此判为『完整』。真值语义：`runtime_instance_id` 是运行代标识，服务启动若未能持久化运行代会降级为占位值（service.py 记 `run_generation_error` / 'identity evidence incomplete'）。**静默把占位符当完整身份**是口径缺口（方向 fail-open）。建议 U12/U15 在 RC 收口时明确：`'unknown'` 应视为『运行代缺失』而非完整身份（例如纳入 blockers 或改用显式 `runtime_instance_id_known` 标志）。"
+        "note": "实测：`build_release_manifest(...).to_dict()['runtime_instance_id'] == 'unknown'`（字面量，非空）。U12 验收的 `complete = bool(artifact_hash) and bool(runtime_instance_id)` 因此判为『完整』。真值语义：`runtime_instance_id` 是运行代标识，服务启动若未能持久化运行代会降级为占位值（service.py 记 `run_generation_error` / 'identity evidence incomplete'）。**静默把占位符当完整身份**是口径缺口（方向 fail-open）。建议 U12/U15 在 RC 收口时明确：`'unknown'` 应视为『运行代缺失』而非完整身份（例如纳入 blockers 或改用显式 `runtime_instance_id_known` 标志）。",
+        "fix": "U15-FU1 @ ad0d2ea（集成 ce0eafe）：service.py 透传真实运行代；release_manifest/runtime_identity 把 16 项哨兵识别为『运行代缺失』并记**既有**码 `RUNTIME_GENERATION_UNPROVEN`（不抛错以免清空整份证据）。Q 复验：正常态 manifest==service.instance 且不新增阻断；降级态**服务仍能起**、字段为空+阻断码；**U09 门禁由 PASS/[] 变 NO_DATA/['IDENTITY_REF_MISSING']**；25/25 哨兵命中、14 项像哨兵的真值零误杀。"
       },
       {
         "id": "U06B-P3-CLUSTER",
@@ -4765,6 +4766,14 @@
         "owner": "U13 后续 / U12",
         "blocks": "无（生产入口不受影响）",
         "note": "U13-FU5 只封死了『读不出当已停』这条 fail-open，**没有**把 `core.ops.recovery.create_epoch_bundle` 改成持锁建包。残余：库 API 直接调用时存在窗口（只读检查通过后写者启动 -> 仍产出 `writer_stopped: True` 且 verify 接受）。**Q 实测判定为非阻塞**：生产入口 `scripts/create_recovery_bundle.py` 在复制**全程真持锁**（4 次回调中锁存在且 pid=自身），残余只影响直接调库 API 的调用方；后果是撕裂包（非双持有/重复下单），且恢复端有对账门。若要彻底消除，应让 `create_epoch_bundle` 也走持锁路径。"
+      },
+      {
+        "id": "U15FU1-K04-SENTINEL-RESIDUAL",
+        "title": "（同族·未扩面）K04 授权路径未识别运行代哨兵：经污染 registry 混入的 `\"unknown\"` 仍可能被接受（P2）",
+        "status": "OPEN",
+        "owner": "U15 后续 / U12",
+        "blocks": "无（U15-FU1 未扩面；同族缺口）",
+        "note": "U15-FU1 在 `release_manifest`/`runtime_identity` 侧把哨兵识别为『运行代缺失』，但 **`management_authorization.py:177` 与 `verify_account_binding` 仍是『非空即通过』** —— 经**被污染的 registry** 把 `runtime_instance_id` 写成 `\"unknown\"` 时，哨兵仍可能经 K04 授权路径被接受。作者在 README §7.2 已自认；Q r1 记录但**未做端到端可利用性验证**。建议：把同一哨兵判定下沉到 K04 的绑定校验，或让 `RunRegistry.load()` 把占位实例号视为『无记录』（重铸）——后者可一并覆盖 `mint_runtime_generation` 的残留。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -5298,7 +5307,7 @@
           "integration_commit": "merge task/U13-FU5 @ 1fe6037（owned 路径逐字节一致）；补丁包由 I 从作者 worktree 补入并提交（N2）"
         },
         "U15-FU1": {
-          "status": "READY_FOR_REVIEW",
+          "status": "INTEGRATED",
           "branch": "task/U15-FU1",
           "worktree": "mat-wt/U15F1",
           "base": "02b93da",
@@ -5329,10 +5338,31 @@
           "verification": {
             "session": "Q (reviews/U15-FU1/R1/q)",
             "candidate": "bf9b304",
-            "verdict": "PENDING",
+            "verdict": "Q r1 **PASS-with-notes**（无阻塞项；未能推翻任何一条声称）",
             "reports_dir": "docs/dispatch/reviews/U15-FU1/bf9b304/",
-            "focus": "重点：①服务链路前后对照（**降级态服务仍须能起来**，若起不来判阻塞 —— 过度修正）；②**U09 门禁读数独立复现**（占位符 -> NO_DATA/IDENTITY_REF_MISSING，最有后果的一环）；③哨兵 16 项正/反面（`unknownverse`/`known`/`n/a-x` 等**长得像的真值不得误杀**）+ 空值仍抛；④U12/U15 测试改动逐 hunk 裁决 + **新断言扣旧实现必失败**；⑤门禁数字与既有码语义未动。"
-          }
+            "focus": "重点：①服务链路前后对照（**降级态服务仍须能起来**，若起不来判阻塞 —— 过度修正）；②**U09 门禁读数独立复现**（占位符 -> NO_DATA/IDENTITY_REF_MISSING，最有后果的一环）；③哨兵 16 项正/反面（`unknownverse`/`known`/`n/a-x` 等**长得像的真值不得误杀**）+ 空值仍抛；④U12/U15 测试改动逐 hunk 裁决 + **新断言扣旧实现必失败**；⑤门禁数字与既有码语义未动。",
+            "report": "docs/dispatch/reviews/U15-FU1/bf9b304/Q_r1.md",
+            "service_chain": "Q 自建隔离夹具（未采信作者 evidence）：pristine normal `manifest='unknown'`+`[]`；pristine degraded 同；patched normal **`manifest == service.instance`** 且 blockers 不新增；patched degraded **服务照常启动**、`manifest=''`、`['RUNTIME_GENERATION_UNPROVEN']` => **无过度修正**。",
+            "u09_gate_reproduced": "Q 自建合成 AuditDatabase 复现：占位符/无参/env 哨兵 `PASS/[]` -> **`NO_DATA/['IDENTITY_REF_MISSING']`**；真实值两态 PASS。机制确认：`_identity_block`->`_first_present` 跳过 `\"\"`，且清单**无** `identity_ref`/`instance_id` 别名键可绕过。",
+            "sentinels": "**25/25 命中**（16 项 + 9 种大小写/空白变形）；**14 项像哨兵的真值零误杀**；空串/纯空白/非字符串**仍抛 `MissingRuntimeInputError`**；占位符时其余证据照常采集（artifactId 64 位，**未整份降级**）。",
+            "tests_ruled": "`test_runtime_identity.py` **171/0（未改任何既有断言）**；U12 删的 8 行全在单一函数内 = 1 重命名 + 1 条件改写 + **0 删除**，check 计数 **3->6**；两态探测用 `getattr(module, \"U15_FU1_RUNTIME_INSTANCE_GUARD\",\"\")`（无硬编码版本集合）。**反向测试：新断言强制求值在旧实现上 7/7 FAIL、新实现 7/7 PASS** -> 非空转。",
+            "no_overreach_on_gate": "`release_evidence.py` **不在补丁集** -> `7/200/30/0.999/120`、`gates` 10 键、顶层键集合**物理未改**；`RUNTIME_GENERATION_UNPROVEN` pristine 已存在（**复用未新造**）；补丁 `+` 行无任何新原因码。",
+            "delta": "**`git ls-files=857/857`**；94 脚本两态 **NEW_FAIL=[] FIXED=[] BOTH_FAIL=[]**，`patched fails=[]`；输出尾差恰是 3 个被本补丁触及的文件（u10a 仅 release_id、U15 262->276、U12 47->50）。官方两态 `OFFLINE REGRESSION OK scripts=94` exit 0；`smoke_u10a_release_package.py` **确认真跑到**（89s，37/0，自报 857 跟踪文件）；`check_quality OK files=304` 两态且文件本身未改；contracts 两态 173/0。补丁 **15x `Checking patch`、0 Skipped**。",
+            "q_extra_adversarial": "**Q 自加的对抗测试**：把 registry 文件里的 `runtime_instance_id` 直改为 `\"unknown\"` —— pristine 仍静默 `'unknown'`+`[]`，patched 归一化为 `''`+阻断码，证实 README §7.1『端到端可见』属实。",
+            "notes": {
+              "N1_docstring": "`test_runtime_identity.py:8` 的 docstring 仍写『不启动服务』，而新测试确实构造真实 `TradingService`；补丁包 README §4 声称已更新该 docstring —— **与实际不符**。实测安全（paper + 隔离状态根）。**I 已更正 docstring，并在 README 追加附录说明（不改原文）**。",
+              "N2_k04_residual": "**K04 残留**（作者 README §7.2 自认）：`management_authorization.py`/`verify_account_binding` **未识别本轮哨兵** —— 经污染 registry 混入的哨兵在 K04 路径**仍可能被接受**。Q 未做端到端可利用性验证。已登记为 `U15FU1-K04-SENTINEL-RESIDUAL`。"
+            },
+            "not_verified": [
+              "未跑作者自带探针脚本",
+              "未在正在运行的 demo 进程上观测（硬约束不停服务）",
+              "K04 残留未做端到端可利用性验证",
+              "`report_release_readiness.py` 等 U09 CLI 入口未端到端跑",
+              "无 pytest",
+              "单平台，`autocrlf=true` 只做 --check 未真 apply"
+            ]
+          },
+          "integration_commit": "merge task/U15-FU1 @ bf9b304（owned 路径逐字节一致）；集成 ce0eafe"
         }
       }
     },
