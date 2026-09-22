@@ -6,7 +6,7 @@
 
 ---
 
-## 0. 当前步骤（2026-09-22 10:2x）—— 计划已完成，转入逐条关闭"真缺陷"
+## 0. 当前步骤（2026-09-22 12:5x）—— 计划已完成，转入逐条关闭"真缺陷"
 
 **⚠ 判据：不要按"类别标签"判断剩余项 —— 必须逐条读。** 本会话已因此栽过两次：①曾据"剩余多为 P3"宣布停止点，实际 `U08-R5-FU2` 是活路径真缺陷；②逐条复核后又发现 `RECOVERY-BUNDLE-P2-CLUSTER` 里的"锁接管"实为**单实例互斥失效**。**做法：读每一条的 `blocks` 与后果，而不是读它的标题。**
 
@@ -16,6 +16,9 @@
 | `U08-FU2` | 执行器对审计库 `db.*` 无护栏 -> 异常穿出整轮、intents 全废 | ✅ INTEGRATED |
 | `U13-FU4` | **单实例锁在锁文件损坏时 fail-OPEN** -> 两个活实例同管一个状态根 | ✅ INTEGRATED |
 | `U13-FU5` | **（P0）** 锁损坏 -> `check_writer_stopped` 静默返回 -> 恢复包被声明"写者已停"并验证通过（写者其实仍在运行） | ✅ INTEGRATED |
+| `U15-FU1` | 发布清单的身份证据**默认携带占位符 `"unknown"`**且无阻断码（服务手里有真实值却没传） | ✅ INTEGRATED |
+| `U15-FU2` | 哨兵 `"unknown"` 仍能从**源头读取**与 **K04 授权绑定**两条路径被当合法身份（授权会绑在占位符上） | ✅ INTEGRATED |
+| `U15-FU3` | 复验遍历消费入口发现的**另外两条**仍接受哨兵（`evaluate_entry_readiness`/`authorization_matches_context`）—— 当前不可达，同族收口中 | **进行中** |
 
 - **`RECOVERY-WRITER-STOPPED-CLASS-NOT-CLOSED`：该类现已闭合**（两处同源点均已 fail-closed：`InstanceLock.acquire()` 由 FU4、`check_writer_stopped` 由 FU5，且共享同一 `read_lock_holder` 口径）。残余的**只读判定窗口（TOCTOU）**另立为 `RECOVERY-TOCTOU-RESIDUAL`（P3）：生产入口 `create_recovery_bundle.py` 实测**全程持锁**，残余只影响直接调库 API 的调用方。
 
@@ -38,7 +41,7 @@
 - **18/18 任务全部 INTEGRATED**（首批 14 项 + 后置 P2 四项 U06b/U07/U10b/U11），另有 **5 轮缺陷修复**（U13-FU1/FU2/FU3、U12-BF1、U09-FU1）与 **1 次契约勘误**（`CONTRACT-ERRATUM-1`）。
 - **稳定性证据**：`git rev-list --count <branch> ^integration/unattended-v3` 对 **全部 22 条 `task/*` 分支均为 0** —— 无任何已交付提交游离在集成分支之外。
 - **常设门禁**：`OFFLINE REGRESSION OK scripts=94`（U11 修复轮把 9 个 `tests/` 套件补进回归，85→94）、`QUALITY CHECK OK files=303 untracked=0`、契约 `PASS 173 / FAIL 0`（golden 160）、打包器 `37/0`（0 断链）。
-- **台账**：known_issues 共 43 条 —— **20 FIXED / 21 OPEN**（2026-09-22 逐条复核后更正）。
+- **台账**：known_issues 共 46 条（含本轮新增的复验发现项）。
 
 ### 运行目录合规性（已核查）
 - `multi-agent-trader` 的 **HEAD 仍为 `05d28e0`**，`src/`、`config/`、`knowledge/`、`scripts/`、`tests/` **改动为空** —— 本会话**未**在其上做任何 checkout/合并/改配置/执行开发代码；demo 服务跑的是未变代码。
