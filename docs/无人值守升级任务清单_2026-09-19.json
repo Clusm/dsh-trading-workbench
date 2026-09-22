@@ -5160,7 +5160,7 @@
           "methodology_finding": "**Q 发现的沙箱方法学缺陷（影响此前所有 delta 的覆盖度声明）**：只 `git init` 而无 index 时，`smoke_u10a_release_package.py` 靠 `git ls-files` 建沙箱会得到**空文件列表** -> **两态都在第 85 个脚本同样崩**。Q 在两棵树各做一次 `git add -A`（**只暂存、不 commit**、`autocrlf=false`）后取到完整 94 脚本；补丁矩阵另在**全新未暂存树**复测通过。=> 此前各轮『只 git init』算出的 NEW_FAIL=∅ **结论仍成立**（两态同败不构成*新增*失败），但**该脚本当时并未真正被执行**，覆盖度比声称的略低。**修正做法**：解包后 `git init && git add -A`（不 commit）。"
         },
         "U13-FU4": {
-          "status": "IN_PROGRESS",
+          "status": "READY_FOR_REVIEW",
           "branch": "task/U13-FU4",
           "worktree": "mat-wt/U13F4",
           "base": "d52bd68",
@@ -5168,7 +5168,38 @@
           "defect": "src/core/instance_lock.py 的 InstanceLock.acquire()（:136-166）在锁文件**不可解析**时把 pid 置 0（`except Exception: pid = 0`），而 `_pid_alive(pid)` 对 pid<=0 直接返回 False（:61-63）-> 走到 `self.path.unlink()` **单方删除仍存活持有者的锁文件** -> 循环内 O_EXCL 重建成功 -> **第二个活进程拿到锁**。注释自称『仅清理确认已死亡的遗留锁』，但代码把**读不出**当成了**确认已死亡**。",
           "impact": "**单实例互斥失效**：锁文件被截断/损坏时两个活实例同时对同一状态根运行交易服务 -> 重复下单、控制面重复动作、同一状态根双写。隔离演练已实测（持有者 PID 30004 存活，第二进程 PID 34808 接管成功）。属**既有缺陷**（可追溯到 0cbdb20），非本批次引入。",
           "i_verified_exists": "I 复核（d52bd68）：`except Exception: pid = 0`（:149-150）+ `if pid <= 0: return False`（:62-63）+ `self.path.unlink()`（:160-163）三处连起来即可复现。",
-          "direction_requirement": "必须区分三种情形，只有一种允许回收：①可解析 + 持有者存活 -> 拒绝（保持现状）②可解析 + 持有者确定已死（读出 pid 且不存活）-> **允许回收**（合法路径，不得修坏）③**存在但不可解析**（空/截断/坏 JSON/非 UTF-8/无 pid）-> **fail-closed：不删不接管**，抛可区分错误且报错**可行动**（告诉操作者确认未运行后手工删锁）。硬要求：『读不出』绝不等于『已死亡』；不得改成永不回收；正常单实例行为逐字不变；不得吞 KeyboardInterrupt/SystemExit。"
+          "direction_requirement": "必须区分三种情形，只有一种允许回收：①可解析 + 持有者存活 -> 拒绝（保持现状）②可解析 + 持有者确定已死（读出 pid 且不存活）-> **允许回收**（合法路径，不得修坏）③**存在但不可解析**（空/截断/坏 JSON/非 UTF-8/无 pid）-> **fail-closed：不删不接管**，抛可区分错误且报错**可行动**（告诉操作者确认未运行后手工删锁）。硬要求：『读不出』绝不等于『已死亡』；不得改成永不回收；正常单实例行为逐字不变；不得吞 KeyboardInterrupt/SystemExit。",
+          "code_head": "709e11a",
+          "tip": "109d97f",
+          "changed_in_branch": [
+            "src/core/instance_lock.py(+84/-8：新增 LockUnreadableError + _read_holder()，改写 acquire() 的 except FileExistsError 分支)",
+            "tests/acceptance/test_instance_lock_failclosed.py(新增 223 行，真实跨进程)",
+            "scripts/smoke_u13_supervision.py(+7/-4：接线为第 5 步，脚本数不变)"
+          ],
+          "patch_package": "docs/dispatch/patches/U13-FU4/709e11a/（3 diff + README + evidence 19 项；探针归档为 .py.txt）",
+          "before_after": "跨进程实测（持有者是真实子进程，探针扮演第二个服务）：pristine d52bd68 `C3a 接管成功（探针PID=18628，持有者PID=27796 仍存活=True）-> 两个活持有者`（C3a-C3e 五行同形）`PROBE: 3 通过/5 失败` exit 1；修复 709e11a `C3a 拒绝 LockUnreadableError…` `PROBE: 8 通过/0 失败` exit 0。修后 PASS 判据 = 拒绝 **∧** 异常类型正是 LockUnreadableError **∧** 锁文件字节逐字节原样未动。落地验收两态：pristine 18通过/24失败 exit1 -> 修复 42/0 exit 0。",
+          "three_cases": {
+            "可解析+pid有效+存活": "两态均拒 RuntimeError（**文案逐字不变**）",
+            "可解析+pid=已退出的真实子进程（确定已死）": "两态**均回收成功**（新锁 pid = 本进程）<- 反向证据：**没修坏**合法运维路径",
+            "空/截断 0 字节": "修前接管 -> 两个活持有者；修后**拒绝 + 未删锁**",
+            "坏 JSON / 顶层非对象 / 非 UTF-8 / 无 pid / pid=0": "修前接管 -> 两个活持有者；修后**拒绝 + 未删锁**"
+          },
+          "error_message": "可行动文案（实际抛出）：『单实例锁文件存在但无法解析，拒绝启动（读不出持有者 PID，不能确认它是否已死亡）：<绝对路径>』+ 原因行 + 『为什么不能自动清理：读不出内容 != 持有者已死亡；自动删除锁文件会让两个实例同时管理同一状态根（重复下单 / 控制面双写）』+ 操作者三步（先确认服务是否在运行 -> 确认未运行后手工删除并给 Windows/POSIX 各自命令 -> 若确实在运行则不要删）。异常另带 `lock_path`/`reason` 属性；`LockUnreadableError` **继承 RuntimeError**，既有 `except RuntimeError` 调用方语义不变。",
+          "normal_path_unchanged": "smoke_p0_account_safety **17/0 两态一致**（含 [6] 首拿/次拒/释放后可再启动）；smoke_profile_isolation `PROFILE ISOLATION OK` 两态一致；smoke_u13_supervision pristine `steps=4` / 修复 `steps=5`，均 exit 0。`_pid_alive`/`release`/`describe`/`update_metadata` **未动**。",
+          "delta": "94/94 同一集合；pristine 非零 0、patched 非零 0；**NEW_FAIL=∅**（FIXED、BOTH_NONZERO 亦 ∅）。**L19 校验已落实**：沙箱 `git ls-files = 809`，`smoke_u10a_release_package.py` 两态**真跑到（6/0）**，patched 沙箱 u13 冒烟确证输出 `U13-FU4 INSTANCE LOCK FAIL-CLOSED OK / steps=5`。`check_quality OK files=304 untracked=0`（未改 check_quality、未新增 exclude）。3 配置 `git apply --check` 全 `Checking patch`、exit 0、**0 Skipped**。",
+          "unfinished": [
+            "**`src/core/ops/recovery.py:check_writer_stopped` 未改**：它在 `json.JSONDecodeError` 时 `return`（把『锁读不出』当『写者已停』），是**同源 fail-open 的另一种表现**（不删锁、不接管，故不造成双持有）。按任务边界只改 instance_lock.py，**登记待 triage**；`health_watch.probe_instance_lock` 损坏时给 `process_unverified`，已是可区分口径、无需改。**已要求 Q 独立判定其严重度**：该『写者已停』结论被谁消费、消费方会不会据此在写者其实仍在运行时做出危险动作。",
+            "`O_EXCL` 创建->写入之间的极短窗口内并发启动，第二进程会按『情形 3』拒绝（文案指向手工删除），而当时正确动作是『别启动』。行为安全，但未加退避（避免在互斥路径引入时间依赖）。",
+            "新验收文件**未登记进 `run_offline_regression.py` 的 SCRIPTS**（保持 94 便于逐脚本对比），经 `smoke_u13_supervision.py` 第 5 步进入离线回归、仍被每轮执行。",
+            "过程中发现并已修：非 UTF-8 锁文件首版会以裸 `UnicodeDecodeError` 逃出（无操作指引），已并入 `LockUnreadableError` 统一口径。"
+          ],
+          "verification": {
+            "session": "Q (reviews/U13-FU4/R1/q)",
+            "candidate": "109d97f",
+            "verdict": "PENDING",
+            "reports_dir": "docs/dispatch/reviews/U13-FU4/109d97f/",
+            "focus": "重点：①**真实两进程**跨进程前后对照（自建探针）；②拒绝时锁文件**逐字节未动**；③**情形 2 仍能回收（没修坏）** + pid 指向无关存活进程时应拒；④报错可行动性 + LockUnreadableError 继承 RuntimeError + 非 UTF-8 路径；⑤**独立判定 `check_writer_stopped` 同源 fail-open 的严重度**（本轮最可能发现漏修的点）；⑥L19：报告 git ls-files 条数并确认 u10a 真跑到。"
+          }
         }
       }
     },
