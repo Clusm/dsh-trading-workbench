@@ -5234,13 +5234,40 @@
           "integration_commit": "merge task/U13-FU4 @ 109d97f（owned 路径逐字节一致：git diff 109d97f HEAD = 0 行）"
         },
         "U13-FU5": {
-          "status": "IN_PROGRESS",
+          "status": "READY_FOR_REVIEW",
           "branch": "task/U13-FU5",
           "worktree": "mat-wt/U13F5",
           "base": "1d737b5",
           "targets_issue": "U13-FU5-FALSE-QUIESCENCE（P0）",
           "defect": "recovery.py:check_writer_stopped 在 (FileNotFoundError, OSError, JSONDecodeError) 时 return，把『读不出』当『写者已停』；create_epoch_bundle 随后无条件写 writer_stopped: True（:545），verify_epoch_bundle（:589-591）强制要求该标志、restore_recovery_bundle.py:132 亦信任 -> **写者仍在运行时造出并被接受一份被声明为『同一时刻静止』的撕裂恢复点**。",
-          "direction_requirement": "四情形区分，与刚落地 U13-FU4 同口径：①锁不存在 -> 允许（合法）②可解析+pid 存活 -> 拒绝（现状）③可解析+pid 已死 -> 允许（遗留锁，合法）④存在但不可解析/无可用 pid -> **fail-closed 拒绝**，抛可区分可行动错误。硬要求：读不出 != 写者已停；**优先复用 U13-FU4 的 LockUnreadableError/_read_holder，避免第二套口径**；不得用『存在即拒绝』的粗糙写法修坏合法遗留锁路径；不得吞 KI/SystemExit；**须核对 scripts/create_recovery_bundle.py:179 是否绕过 create_epoch_bundle 的检查**。"
+          "direction_requirement": "四情形区分，与刚落地 U13-FU4 同口径：①锁不存在 -> 允许（合法）②可解析+pid 存活 -> 拒绝（现状）③可解析+pid 已死 -> 允许（遗留锁，合法）④存在但不可解析/无可用 pid -> **fail-closed 拒绝**，抛可区分可行动错误。硬要求：读不出 != 写者已停；**优先复用 U13-FU4 的 LockUnreadableError/_read_holder，避免第二套口径**；不得用『存在即拒绝』的粗糙写法修坏合法遗留锁路径；不得吞 KI/SystemExit；**须核对 scripts/create_recovery_bundle.py:179 是否绕过 create_epoch_bundle 的检查**。",
+          "head_commit": "1fe6037",
+          "changed_files": "4 文件 +297/-45：scripts/create_recovery_bundle.py、src/core/instance_lock.py(+80)、src/core/ops/recovery.py(+107)、tests/acceptance/test_instance_lock_failclosed.py(+146)",
+          "patch_package": "docs/dispatch/patches/U13-FU5/1fe6037/（4 diff + README + 16 evidence；探针归档为 .py.txt）",
+          "before_after": "真实存活 writer 子进程 + 锁截断为 0 字节：修前 `corrupt_lock_check=NO_RAISE`、**`bundle_created=True`**、**`manifest_writer_stopped=True`**、**`verify_epoch_bundle_accepted=True`**（全程 writer 仍活）-> 修后 `corrupt_lock_check=RECOVERY_LOCK_UNREADABLE`、**`bundle_created=False`**（未产出包）。落地验收：修前 exit=1（23 项 FAILED）-> 修后 exit=0。",
+          "four_cases": {
+            "①锁文件不存在": "两态均**允许**（实测仍允许：建包成功、writer_stopped=True、verify 接受）<- 最关键的反向证据",
+            "②可解析+pid 存活": "两态均拒 RECOVERY_WRITER_RUNNING（**文案逐字不变**）",
+            "③可解析+pid 已死": "两态均**允许**（实测，遗留锁回收路径**没修坏**）",
+            "④存在但不可解析/无可用 pid": "**由允许（P0）翻转为拒绝 RECOVERY_LOCK_UNREADABLE**，覆盖 6 形态（空/截断、坏 JSON、顶层非对象、非 UTF-8、无 pid、pid=0）"
+          },
+          "create_recovery_bundle_check": "**核对结论：不需要新护栏 —— 它没有绕过检查。** 该脚本调 `InstanceLock.acquire()`（比只读判定更强：真把锁握在手里直到建包完成），FU4 已封死；两态实测均 REJECTED、published_bundles=[]、writer_still_alive=True。本轮唯一改动 `except LockUnreadableError: raise`（原先被 `except RuntimeError` 包装成『交易服务仍在运行』—— fail-closed 没错，但把『不知道写者在不在』断言成了『服务仍在运行』，与同源）。**仅文案，控制流不变**（待 Q 核实）。",
+          "reuse_decision": "**复用 FU4 的判定，不引入第二套口径**：把 FU4 的 `_read_holder()` 实现本体抽成模块级 `read_lock_holder()`，`_read_holder()` 改为一行转发（同样条件、同样报错文本、同样不吞 KeyboardInterrupt/SystemExit）。理由：`InstanceLock.__init__` 有 `mkdir(parents=True)` 副作用，只读消费者不该构造锁对象；不抽就得重写 `read_text + json.loads + pid 校验` —— **那正是本缺陷的形态（第二套口径）**。现在全仓只有一处『锁文件可读性』判定。",
+          "delta": "`sets_equal=True`、**`git ls-files=834/834`**、94/94 脚本、`nonzero=0/0`、**`NEW_FAIL=[] FIXED=[] CHANGED=[] BOTH_NONZERO=[]`**（L19 已应用：两树均 `git init && git add -A` 只暂存不 commit）。`check_quality OK files=304 untracked=0` 与 base 逐字相同、未新增 exclude。3 配置 × 4 diff 全 `Checking patch`、0 Skipped。",
+          "unfinished": [
+            "**TOCTOU 未消除（修前修后同存）**：`create_epoch_bundle` 的 `check_writer_stopped` 仍是**只读判定** —— 锁不存在时放行后，服务仍可能在快照取完前启动，故仍可能产出少量不一致的包；本轮只封死『读不出当已停』这条 fail-open，**没有**把它改成持锁建包（`scripts/create_recovery_bundle.py` 本来就是持锁的）。**已要求 Q 独立判定其级别**：是否仍构成『被声明为同一时刻静止』的谎报。",
+            "**`verify_epoch_bundle` 仍只信 manifest 的 `writer_stopped` 布尔**：校验时无法回溯证明『当时写者确实停了』。本轮保证的是『造包时不会把读不出的锁当成已停』，**不是**『事后可证明』。",
+            "`scripts/restore_recovery_bundle.py:132` 未改（读老字段 `service_was_stopped`，语义无关，未变得更不可信）。",
+            "`InstanceLock.release()`/`describe()` 未处理『读不出』：前者静默不删（fail-safe），后者返回 `{}`（只读诊断），均非 fail-open 安全路径，未动。",
+            "修前树上『非 UTF-8』『顶层非对象』两种形态会漏出无关的 `UnicodeDecodeError`/`AttributeError` —— 既非允许也非拒绝的**未设计第三态**；同组其它断言在这两形态上仍 FAIL，不会洗绿。"
+          ],
+          "verification": {
+            "session": "Q (reviews/U13-FU5/R1/q)",
+            "candidate": "1fe6037",
+            "verdict": "PENDING",
+            "reports_dir": "docs/dispatch/reviews/U13-FU5/1fe6037/",
+            "focus": "重点：①用 Q **自己上轮的最小复现**在修复树上重跑，确认真的被拒；②**四情形逐条实测**，尤其①锁不存在 与③pid 已死 **必须仍允许**（修坏灾难恢复正常入口比原缺陷更糟）；③**独立判定 TOCTOU 残余的级别**（是否仍属『谎报同一时刻静止』）；④`read_lock_holder` 抽取逐 hunk 审、FU4 语义与验收 [1]-[4] 仍绿；⑤`create_recovery_bundle` 的改动是纯文案还是也改了控制流。"
+          }
         }
       }
     },
