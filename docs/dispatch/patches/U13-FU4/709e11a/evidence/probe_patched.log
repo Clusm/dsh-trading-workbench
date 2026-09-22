@@ -1,0 +1,14 @@
+
+=== U13-FU4 锁损坏 fail-closed 探针 ===
+tree = C:\Users\Tao\Desktop\币安\mat-wt\U13F4
+用例   期望                                观察                                                                      结论
+C3a  c3a_empty.lock 不可解析 → fail-closed 拒绝 LockUnreadableError: 单实例锁文件存在但无法解析，拒绝启动（读不出持有者 PID，不能确认它是否已死亡）：C:\Users\Tao\AppData\Local\Temp\fu4-probe-zrj3xgnn\c3a_empty.lockPASS
+C3b  c3b_badjson.lock 不可解析 → fail-closed拒绝 LockUnreadableError: 单实例锁文件存在但无法解析，拒绝启动（读不出持有者 PID，不能确认它是否已死亡）：C:\Users\Tao\AppData\Local\Temp\fu4-probe-zrj3xgnn\c3b_badjson.lockPASS
+C3c  c3c_nonutf8.lock 不可解析 → fail-closed拒绝 LockUnreadableError: 单实例锁文件存在但无法解析，拒绝启动（读不出持有者 PID，不能确认它是否已死亡）：C:\Users\Tao\AppData\Local\Temp\fu4-probe-zrj3xgnn\c3c_nonutf8.lockPASS
+C3d  c3d_nopid.lock 不可解析 → fail-closed 拒绝 LockUnreadableError: 单实例锁文件存在但无法解析，拒绝启动（读不出持有者 PID，不能确认它是否已死亡）：C:\Users\Tao\AppData\Local\Temp\fu4-probe-zrj3xgnn\c3d_nopid.lockPASS
+C3e  c3e_pidzero.lock 不可解析 → fail-closed拒绝 LockUnreadableError: 单实例锁文件存在但无法解析，拒绝启动（读不出持有者 PID，不能确认它是否已死亡）：C:\Users\Tao\AppData\Local\Temp\fu4-probe-zrj3xgnn\c3e_pidzero.lockPASS
+C1   可解析+持有者存活 → 拒绝                    拒绝 RuntimeError: 交易服务已在运行（PID=9732，锁文件=c1_intact.lock）                  PASS
+C2   可解析+持有者已死 → 回收                    回收成功（旧PID=27632 已死；新PID=27548）                                          PASS
+N    正常路径：首拿/次拒/释放后再拿                  PASS                                                                    PASS
+
+PROBE: 8 通过 / 0 失败

@@ -1,0 +1,129 @@
+diff --git a/src/core/instance_lock.py b/src/core/instance_lock.py
+index 5b460e6..b0ea03a 100644
+--- a/src/core/instance_lock.py
++++ b/src/core/instance_lock.py
+@@ -40,12 +40,48 @@ def _sanitise_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+     return cleaned
+ 
+ 
++class LockUnreadableError(RuntimeError):
++    """锁文件存在但**读不出持有者**（空 / 截断 / JSON 坏 / 非 UTF-8 / 无可用 pid）。
++
++    这是"读不出 ≠ 已死亡"的载体：``InstanceLock.acquire()`` 在无法确认持有者状态时
++    抛本异常并**拒绝启动**——不删除锁文件、不接管。继承 ``RuntimeError``，因此既有
++    ``except RuntimeError`` 调用方语义不变，上层仍可单独识别"锁文件损坏"与"服务已在
++    运行"两种拒绝。
++
++    U13-FU4：修前 ``acquire()`` 把读不出降级成 ``pid = 0``，而 ``_pid_alive(0)`` 直接
++    返回 False，于是走"清理遗留锁"分支——**单方删除仍存活持有者的锁文件**，第二个
++    活进程随后 O_EXCL 成功，两个实例同时对同一状态根跑交易服务（重复下单 / 控制面
++    双写）。锁文件被截断为 0 字节或内容损坏即可触发。
++    """
++
++    def __init__(self, lock_path: Path, reason: str):
++        self.lock_path = Path(lock_path)
++        self.reason = reason
++        super().__init__(
++            "单实例锁文件存在但无法解析，拒绝启动（读不出持有者 PID，"
++            f"不能确认它是否已死亡）：{self.lock_path}\n"
++            f"原因：{reason}\n"
++            "为什么不能自动清理：读不出内容 ≠ 持有者已死亡；自动删除锁文件会让两个"
++            "实例同时管理同一状态根（重复下单 / 控制面双写）。\n"
++            "操作者请这样做：\n"
++            "  1) 先确认交易服务是否正在运行（进程列表 / 控制台 / 健康巡检的核心环）；\n"
++            "  2) 确认**未**运行后，手工删除该锁文件再启动：\n"
++            f'     Windows: del "{self.lock_path}"\n'
++            f'     POSIX:   rm "{self.lock_path}"\n'
++            "  3) 若服务确实在运行，不要删除该文件——继续使用已在运行的服务即可。"
++        )
++
++
+ class InstanceLock:
+     """用 PID 状态文件阻止同一状态根启动两个交易服务实例。
+ 
+     获取锁时会校验旧 PID 是否仍存活；只有确认进程不存在才接管陈旧锁。实例拥有者退出
+     时才可释放文件，避免另一个进程误删正在使用的安全锁。
+ 
++    三种情形严格区分（U13-FU4）：可解析 + 持有者存活 → 拒绝；可解析 + 持有者**确认**
++    已死 → 回收遗留锁（真运维需要，保留）；存在但**读不出** → fail-closed，抛
++    ``LockUnreadableError``，不删除、不接管。
++
+     U13（diff-6）：锁路径必须由 **状态根 + profile** 决定（``RuntimePaths.lock_file``），
+     这样换代码目录不会换锁——两套代码根无法各持一把锁管理同一账户（F06/F18/R12）。
+     可选 ``metadata`` 把运行代/账户作用域写进锁文件，事故复盘时可回答"当时是谁在
+@@ -125,6 +161,44 @@ class InstanceLock:
+         os.replace(temp, self.path)
+         return True
+ 
++    def _read_holder(self) -> tuple[int, dict[str, Any]] | None:
++        """读出锁文件里的持有者 PID 与元数据；**读不出一律 fail-closed**。
++
++        返回 ``(pid, data)``：可解析且 pid 可用（``pid > 0``），由调用方判定存活/已死。
++        返回 ``None``：锁文件在竞争窗口内已被删除——那是"没有持有者"，不是"损坏"，
++        调用方重新竞争 O_EXCL 即可。
++
++        抛 ``LockUnreadableError``：文件存在但读不出（空 / 截断 / JSON 坏 / 非 UTF-8 /
++        无可用 pid）。这里**绝不**返回 ``0`` 或 ``None`` 来降级成"已死亡"——那正是
++        U13-FU4 的根因。``except Exception`` 口径沿用既有实现，不吞 ``KeyboardInterrupt``
++        / ``SystemExit``。
++        """
++        try:
++            raw = self.path.read_text(encoding="utf-8")
++        except FileNotFoundError:
++            return None
++        except (OSError, UnicodeDecodeError) as exc:
++            # 权限/IO 失败与非 UTF-8 字节都读不出持有者 ⇒ 同一 fail-closed 口径。
++            raise LockUnreadableError(
++                self.path, f"锁文件无法读取：{type(exc).__name__}: {exc}") from exc
++        try:
++            data = json.loads(raw)
++            if not isinstance(data, dict):
++                raise ValueError(f"JSON 顶层不是对象（{type(data).__name__}）")
++            raw_pid = data.get("pid")
++            if isinstance(raw_pid, bool) or not isinstance(raw_pid, (int, str)):
++                raise ValueError(f"pid 字段缺失或类型非法（{type(raw_pid).__name__}）")
++            pid = int(raw_pid)
++        except Exception as exc:
++            raise LockUnreadableError(
++                self.path,
++                f"锁文件内容不可解析（{len(raw)} 字节，UTF-8）："
++                f"{type(exc).__name__}: {exc}") from exc
++        if pid <= 0:
++            raise LockUnreadableError(
++                self.path, f"锁文件里的 pid 不是有效进程号（{pid}）")
++        return pid, data
++
+     def acquire(self) -> None:
+         payload = json.dumps({
+             "pid": os.getpid(),
+@@ -143,20 +217,22 @@ class InstanceLock:
+                 self._owned = True
+                 return
+             except FileExistsError:
+-                try:
+-                    data = json.loads(self.path.read_text(encoding="utf-8"))
+-                    pid = int(data.get("pid") or 0)
+-                except Exception:
+-                    pid = 0
++                holder = self._read_holder()
++                if holder is None:
++                    # 锁已被并发回收：没有持有者，下一轮 O_EXCL 重新竞争（不是损坏）。
++                    continue
++                pid, data = holder
+                 if self._pid_alive(pid):
+-                    holder = {key: data.get(key) for key in (
++                    details = {key: data.get(key) for key in (
+                         "runtime_instance_id", "generation_id", "lock_scope",
+                         "profile", "environment", "account_ref",
+                     ) if data.get(key) is not None}
+-                    detail = f"，持有者={holder}" if holder else ""
++                    detail = f"，持有者={details}" if details else ""
+                     raise RuntimeError(
+                         f"交易服务已在运行（PID={pid}，锁文件={self.path.name}）{detail}")
+-                # 仅清理确认已死亡的遗留锁；下一轮 O_EXCL 仍会重新竞争，避免并发覆盖。
++                # 可解析 **且** pid 确认不存活 ⇒ 遗留锁，允许回收；下一轮 O_EXCL 仍会
++                # 重新竞争，避免并发覆盖。（读不出的情形已在 _read_holder fail-closed，
++                # 绝不会走到这里——读不出 ≠ 已死亡。）
+                 try:
+                     self.path.unlink()
+                 except FileNotFoundError:

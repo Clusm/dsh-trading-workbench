@@ -1,0 +1,81 @@
+  PASS  旧包装入口按 profile 分离日志
+
+[1] demo 默认：端口 8000、日志 data/web_console.log
+  PASS  demo 启动返回 0
+  PASS  命令行显式携带 --profile demo
+  PASS  demo 默认端口 8000 显式传给子进程
+  PASS  profile/端口参数各出现一次
+  PASS  host 透传回环地址
+  PASS  解释器与包装入口正确
+  PASS  探活与启动确认都使用 8000
+  PASS  demo 日志写入 data/web_console.log
+  PASS  demo 不产生 data/live/web_console.log
+  PASS  日志头标注 profile 与端口
+  PASS  输出 demo 日志绝对路径
+  PASS  输出 demo 访问地址
+  PASS  子进程工作目录为项目根
+  PASS  stderr 合并进日志、stdin 断开
+  PASS  close_fds 打开
+  PASS  创建标志匹配平台
+  PASS  非 Windows 使用独立会话
+  PASS  代理模式显式关闭直连开关
+  PASS  四种代理变量均指向默认出口
+  PASS  回环地址排除代理
+  PASS  子进程无缓冲输出
+  PASS  端口确认采用 0.5 秒轮询
+
+[2] live 默认：端口 8001、日志 data/live/web_console.log
+  PASS  live 启动返回 0
+  PASS  命令行显式携带 --profile live
+  PASS  live 默认端口 8001 显式传给子进程
+  PASS  探活与启动确认都使用 8001
+  PASS  live 日志写入 data/live/web_console.log
+  PASS  live 不写 demo 日志
+  PASS  live 日志头标注 profile 与端口
+  PASS  输出 live 日志绝对路径
+  PASS  输出 live 访问地址
+  PASS  live 出口标识注入子进程环境
+  PASS  live 日志标注出口身份
+
+[3] 显式 --port 覆盖 profile 默认端口
+  PASS  显式端口透传给子进程
+  PASS  端口参数唯一且未被追加默认值
+  PASS  探活使用显式端口 9123
+  PASS  日志归属仍由 profile 决定
+
+[4] demo 显式端口不改变日志归属
+  PASS  缺省 profile 为 demo
+  PASS  端口 9200 生效
+  PASS  日志仍在 data/web_console.log
+
+[5] 已在监听：按解析后的实际端口跳过启动
+  PASS  已监听时返回 0
+  PASS  只探活一次且端口为 8001
+  PASS  不创建子进程
+  PASS  跳过信息标注 profile 与端口
+  PASS  跳过时不产生日志文件
+
+[6] 非法 profile 在启动前被 argparse 拒绝
+  PASS  非法档位以退出码 2 拒绝
+  PASS  不创建子进程
+  PASS  不做端口探活
+  PASS  错误信息列出可选档位
+
+[7] 子进程提前退出：返回 1 并指向 live 日志
+  PASS  子进程退出时启动器返回 1
+  PASS  提示退出码与 live 日志路径
+  PASS  等待循环探测 live 端口
+  PASS  子进程退出后立即返回，不空等
+
+[8] --no-proxy：清除代理环境并显式直连
+  PASS  直连开关显式置 1
+  PASS  四种代理变量全部清除
+  PASS  回环地址仍排除代理
+  PASS  日志头记录 proxy=none
+
+[9] live 缺少出口身份在创建进程前 fail-closed
+  PASS  缺出口身份以参数错误拒绝
+  PASS  缺出口身份不探端口也不创建子进程
+  PASS  错误信息明确要求 MTA_EGRESS_ID
+
+结果: 61 通过 / 0 失败

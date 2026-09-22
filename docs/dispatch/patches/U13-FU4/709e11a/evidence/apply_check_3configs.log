@@ -1,0 +1,30 @@
+### config=default flags=''
+$ git  apply --check --verbose 01_core_instance_lock_failclosed.diff
+Checking patch src/core/instance_lock.py...
+exit=0
+$ git  apply --check --verbose 02_acceptance_instance_lock_failclosed.diff
+Checking patch tests/acceptance/test_instance_lock_failclosed.py...
+exit=0
+$ git  apply --check --verbose 03_smoke_u13_supervision_register.diff
+Checking patch scripts/smoke_u13_supervision.py...
+exit=0
+### config=noeol flags='-c core.autocrlf=false -c core.eol=lf'
+$ git -c core.autocrlf=false -c core.eol=lf apply --check --verbose 01_core_instance_lock_failclosed.diff
+Checking patch src/core/instance_lock.py...
+exit=0
+$ git -c core.autocrlf=false -c core.eol=lf apply --check --verbose 02_acceptance_instance_lock_failclosed.diff
+Checking patch tests/acceptance/test_instance_lock_failclosed.py...
+exit=0
+$ git -c core.autocrlf=false -c core.eol=lf apply --check --verbose 03_smoke_u13_supervision_register.diff
+Checking patch scripts/smoke_u13_supervision.py...
+exit=0
+### config=autocrlf flags='-c core.autocrlf=true'
+$ git -c core.autocrlf=true apply --check --verbose 01_core_instance_lock_failclosed.diff
+Checking patch src/core/instance_lock.py...
+exit=0
+$ git -c core.autocrlf=true apply --check --verbose 02_acceptance_instance_lock_failclosed.diff
+Checking patch tests/acceptance/test_instance_lock_failclosed.py...
+exit=0
+$ git -c core.autocrlf=true apply --check --verbose 03_smoke_u13_supervision_register.diff
+Checking patch scripts/smoke_u13_supervision.py...
+exit=0

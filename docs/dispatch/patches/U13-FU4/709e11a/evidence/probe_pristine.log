@@ -1,0 +1,14 @@
+
+=== U13-FU4 锁损坏 fail-closed 探针 ===
+tree = C:\Users\Tao\Desktop\币安\mat-wt\U13F4
+用例   期望                                观察                                                                      结论
+C3a  c3a_empty.lock 不可解析 → fail-closed 接管成功（探针PID=18628，持有者PID=27796 仍存活=True）→ 两个活持有者                         FAIL
+C3b  c3b_badjson.lock 不可解析 → fail-closed接管成功（探针PID=18628，持有者PID=27796 仍存活=True）→ 两个活持有者                         FAIL
+C3c  c3c_nonutf8.lock 不可解析 → fail-closed接管成功（探针PID=18628，持有者PID=27796 仍存活=True）→ 两个活持有者                         FAIL
+C3d  c3d_nopid.lock 不可解析 → fail-closed 接管成功（探针PID=18628，持有者PID=27796 仍存活=True）→ 两个活持有者                         FAIL
+C3e  c3e_pidzero.lock 不可解析 → fail-closed接管成功（探针PID=18628，持有者PID=27796 仍存活=True）→ 两个活持有者                         FAIL
+C1   可解析+持有者存活 → 拒绝                    拒绝 RuntimeError: 交易服务已在运行（PID=27796，锁文件=c1_intact.lock）                 PASS
+C2   可解析+持有者已死 → 回收                    回收成功（旧PID=23876 已死；新PID=18628）                                          PASS
+N    正常路径：首拿/次拒/释放后再拿                  PASS                                                                    PASS
+
+PROBE: 3 通过 / 5 失败
