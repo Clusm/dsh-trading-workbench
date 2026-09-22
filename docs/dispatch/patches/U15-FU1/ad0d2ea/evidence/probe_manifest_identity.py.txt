@@ -1,0 +1,106 @@
+"""U15-FU1 probe: 发布清单 runtime_instance_id 占位符链路（真实服务 + 降级路径）。"""
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
+sys.path.insert(0, str(ROOT / "src"))
+
+
+def _isolate_env(state_root: Path) -> None:
+    os.environ["EXECUTION_MODE"] = "paper"
+    os.environ["MTA_STATE_ROOT"] = str(state_root)
+    for name in ("MTA_PROFILE", "MTA_RUNTIME_INSTANCE_ID", "MTA_EGRESS_ID", "MTA_RELEASE_ID"):
+        os.environ.pop(name, None)
+
+
+def _settings():
+    import yaml
+
+    from core.config_loader import Settings
+
+    def _load(name: str) -> dict:
+        return yaml.safe_load((ROOT / "config" / name).read_text(encoding="utf-8"))
+
+    return Settings(ROOT, _load("settings.yaml"), _load("agents.yaml"),
+                    _load("risk_learning.yaml"))
+
+
+def case_service(state_root: Path, *, break_registry: bool):
+    from core import service as service_mod
+    from core.service import TradingService
+
+    _isolate_env(state_root)
+    original = service_mod.RunRegistry
+    if break_registry:
+        class _Boom:
+            def __init__(self, *_a, **_k):
+                raise RuntimeError("simulated run-registry failure (U15-FU1 probe)")
+
+        service_mod.RunRegistry = _Boom
+    try:
+        svc = TradingService(_settings())
+    finally:
+        service_mod.RunRegistry = original
+    manifest = getattr(svc, "release_manifest", {}) or {}
+    try:
+        svc.close()
+    except Exception as exc:  # noqa: BLE001
+        print(f"   <close failed: {type(exc).__name__}: {exc}>")
+    return {
+        "service.runtime_instance_id": getattr(svc, "runtime_instance_id", None),
+        "run_generation": None if getattr(svc, "run_generation", None) is None else "present",
+        "manifest.runtime_instance_id": manifest.get("runtime_instance_id"),
+        "manifest.identity_blockers": list(manifest.get("identity_blockers") or []),
+        "manifest.artifact_hash": str(manifest.get("artifact_hash") or "")[:12],
+    }
+
+
+def case_api(runtime_instance_id=None, environment="demo"):
+    from core.release_manifest import build_release_manifest
+
+    manifest = build_release_manifest(
+        ROOT, environment=environment, runtime_instance_id=runtime_instance_id,
+    ).to_dict()
+    return {
+        "call.runtime_instance_id_arg": runtime_instance_id,
+        "manifest.runtime_instance_id": manifest.get("runtime_instance_id"),
+        "manifest.identity_blockers": list(manifest.get("identity_blockers") or []),
+    }
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory(prefix="u15fu1_ok_", ignore_cleanup_errors=True) as tmp:
+        normal = case_service(Path(tmp) / "state", break_registry=False)
+    with tempfile.TemporaryDirectory(prefix="u15fu1_deg_", ignore_cleanup_errors=True) as tmp:
+        degraded = case_service(Path(tmp) / "state", break_registry=True)
+    print("== service: normal (RunRegistry 可用) ==")
+    for key, value in normal.items():
+        print(f"   {key} = {value!r}")
+    print("== service: degraded (RunRegistry 抛错) ==")
+    for key, value in degraded.items():
+        print(f"   {key} = {value!r}")
+    print("== build_release_manifest API（无运行代 vs 真实运行代）==")
+    for kwargs in ({}, {"runtime_instance_id": "rt-probe-1"}):
+        for key, value in case_api(**kwargs).items():
+            print(f"   {key} = {value!r}")
+    try:
+        from core import runtime_identity as ri
+
+        print("== runtime_identity 占位符识别 ==")
+        helper = getattr(ri, "is_placeholder_runtime_instance_id", None)
+        print(f"   guard_marker = {getattr(ri, 'U15_FU1_RUNTIME_INSTANCE_GUARD', None)!r}")
+        print(f"   helper = {helper!r}")
+        if helper is not None:
+            for sample in ("unknown", "UNKNOWN", " unknown ", "", None, "rt-real", 7):
+                print(f"   is_placeholder({sample!r}) = {helper(sample)}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"   <no helper: {type(exc).__name__}: {exc}>")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

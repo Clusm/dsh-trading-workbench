@@ -1,0 +1,24 @@
+from pathlib import Path
+
+def load(p):
+    rows = {}
+    for line in Path(p).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        idx, script, rc, tail = line.split("\t", 3)
+        rows[script] = (int(rc), tail)
+    return rows
+
+base = load("C:/Users/Tao/AppData/Local/Temp/u15fu1/reg_base.tsv")
+patch = load("C:/Users/Tao/AppData/Local/Temp/u15fu1/reg_patch.tsv")
+assert set(base) == set(patch)
+new_fail = sorted(s for s in base if base[s][0] == 0 and patch[s][0] != 0)
+fixed = sorted(s for s in base if base[s][0] != 0 and patch[s][0] == 0)
+same_fail = sorted(s for s in base if base[s][0] != 0 and patch[s][0] != 0)
+changed = sorted(s for s in same_fail if base[s][1] != patch[s][1])
+print(f"scripts={len(base)} base_fail={sum(1 for v in base.values() if v[0])} "
+      f"patch_fail={sum(1 for v in patch.values() if v[0])}")
+print("NEW_FAIL(pristine 0 -> patched !=0):", new_fail or "EMPTY")
+print("FIXED (pristine !=0 -> patched 0):", fixed or "EMPTY")
+print("SAME_FAIL:", same_fail or "EMPTY")
+print("CHANGED(tail differs among same_fail):", changed or "EMPTY")

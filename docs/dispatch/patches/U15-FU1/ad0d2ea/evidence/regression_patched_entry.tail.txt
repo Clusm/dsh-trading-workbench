@@ -1,0 +1,25 @@
+  PASS  本轮一张票都没有：轮级 NO_TICKETS_AVAILABLE（与'被过滤光'可区分）
+
+[10] 看板接线（两态各自断言）
+  当前态：dashboard 漏斗展示 已应用
+  PASS  看板读到漏斗段并标 available=True
+  PASS  看板展示主因/verdict/候选/开仓计数
+  PASS  看板展示停在闸门的直方图
+  PASS  漏斗页含闸门/细分码/仓位管理者/规则版本四块内容C:\Users\Tao\Desktop\币安\multi-agent-trader\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+  from starlette.testclient import TestClient as TestClient  # noqa
+
+  PASS  漏斗页对缺失的漏斗段给出显式说明而不是空白成功页
+  PASS  被篡改的漏斗段不会把展示层打成 500：标 available=False/verdict=unavailable
+  PASS  被篡改时漏斗页仍渲染出显式说明（不是空白成功页）
+  PASS  读侧不把被篡改的 no_open.verdict=no_edge 当结论
+  PASS  看板能定位每个仓位的管理者与规则版本
+  PASS  GET /funnel 返回 200（展示面真的可达，不只是助手函数）
+  PASS  GET /funnel 页面含闸门与仓位归属两块
+  PASS  GET /api/funnel 返回 JSON 且含漏斗与仓位两个键
+  PASS  没有漏斗状态文件时 JSON 明确标 available=False（不伪造成功）
+  PASS  GET /channels 仍 200（新增上下文键不破坏既有页面）
+
+============================================================
+U08 STRATEGY FUNNEL: PASS 208 / FAIL 0
+
+OFFLINE REGRESSION OK scripts=94

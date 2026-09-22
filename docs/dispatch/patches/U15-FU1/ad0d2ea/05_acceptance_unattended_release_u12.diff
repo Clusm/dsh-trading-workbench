@@ -1,0 +1,73 @@
+diff --git a/tests/acceptance/test_unattended_release.py b/tests/acceptance/test_unattended_release.py
+index fa8a829..784ff23 100644
+--- a/tests/acceptance/test_unattended_release.py
++++ b/tests/acceptance/test_unattended_release.py
+@@ -267,6 +267,7 @@ def test_report_fail_closed() -> None:
+ def test_identity_is_never_silently_empty() -> None:
+     section("[8] K01 身份：完整 或 显式阻断（两态都成立的 fail-closed 不变量）")
+     try:
++        from core import runtime_identity as identity_module  # noqa: PLC0415
+         from core.release_manifest import build_release_manifest  # noqa: PLC0415
+         from core.runtime_identity import collect_artifact_files  # noqa: PLC0415
+     except Exception as exc:  # noqa: BLE001
+@@ -285,23 +286,52 @@ def test_identity_is_never_silently_empty() -> None:
+ 
+     manifest = build_release_manifest(ROOT, environment="demo").to_dict()
+     blockers = tuple(manifest.get("identity_blockers") or ())
+-    complete = bool(manifest.get("artifact_hash")) and bool(
+-        manifest.get("runtime_instance_id"))
+-    if complete:
+-        check("身份完整（artifact_hash 与 runtime_instance_id 均非空）", True)
+-        # 身份完整 **不等于** 无阻断：`MODEL_ROUTE_MOCK`（配置的是 Mock 模型路由）
++    instance = str(manifest.get("runtime_instance_id") or "")
++    # U15-FU1 口径：**身份证据已采集** 与 **运行代已证明** 是两件事，判据分开。
++    # 修前这里是 ``artifact_hash and runtime_instance_id`` —— 而后者在无运行代时
++    # 是哨兵 ``"unknown"``（真值），于是"证据齐了"被读成"运行代也有了"。
++    collected = bool(manifest.get("artifact_hash")) and "IDENTITY_COLLECT_FAILED" not in blockers
++    if collected:
++        check("身份证据已采集（artifact_hash 非空且未报采集失败）", True)
++        # 身份证据齐 **不等于** 无阻断：`MODEL_ROUTE_MOCK`（配置的是 Mock 模型路由）
+         # 是**环境级**阻断，与"身份采集失败"是两回事。本行只拒绝把采集失败
+         # 伪装成完整身份（原断言要求 complete -> 无任何阻断码，在采集修复之后
+         # 会把合法的 Mock 路由阻断误报为失败）。
+-        check("身份完整时不得带 IDENTITY_COLLECT_FAILED（环境级阻断可存在）",
++        check("身份证据完整时不得带 IDENTITY_COLLECT_FAILED（环境级阻断可存在）",
+               "IDENTITY_COLLECT_FAILED" not in blockers, f"blockers={blockers}")
+     else:
+         # 采集失败时**必须**显式登记阻断原因，不得静默产出空身份。
+         check("身份不完整时显式带 IDENTITY_COLLECT_FAILED（不静默）",
+               "IDENTITY_COLLECT_FAILED" in blockers, f"blockers={blockers}")
+     check("身份采集结果与工件扫描状态一致（两态不矛盾）",
+-          scan_ok == complete or (not scan_ok and not complete),
+-          f"scan_ok={scan_ok} complete={complete}")
++          scan_ok == collected or (not scan_ok and not collected),
++          f"scan_ok={scan_ok} collected={collected}")
++
++    # U15-FU1：**没有**真实运行代时，清单必须留空并显式阻断；`"unknown"` 这类
++    # 哨兵不得被当成值（它对 `bool(...)` 判据恒为真，等于谎报"身份完整"）。
++    # 本函数不传 `runtime_instance_id`，故这里恒定处于"无运行代"一态。
++    if getattr(identity_module, "U15_FU1_RUNTIME_INSTANCE_GUARD", ""):
++        check("U15-FU1：无运行代 → 清单字段留空（不再写 'unknown'）",
++              instance == "", f"runtime_instance_id={instance!r}")
++        check("U15-FU1：无运行代 → 显式 RUNTIME_GENERATION_UNPROVEN",
++              "RUNTIME_GENERATION_UNPROVEN" in blockers, f"blockers={blockers}")
++    else:
++        # 基线态（共享文件未打补丁）：如实记录缺陷形态 —— 哨兵被当作值、且
++        # 不产生任何阻断码。**这是本套件的缺陷复现断言，不是放宽**：修后态
++        # 走上面的分支，此分支必须失败。
++        check("基线态：'unknown' 占位符被静默接受（复现缺陷，不误判为已修）",
++              instance == "unknown" and "RUNTIME_GENERATION_UNPROVEN" not in blockers,
++              f"runtime_instance_id={instance!r} blockers={blockers}")
++
++    # 反向证据：**真实**运行代既不得被留空，也不得被本次改动标成阻断
++    # （两态都成立：修前本就透传真值，修后仍须透传）。
++    real = build_release_manifest(
++        ROOT, environment="demo", runtime_instance_id="rt-u12-reverse").to_dict()
++    real_blockers = tuple(real.get("identity_blockers") or ())
++    check("真实运行代不被本次改动标成阻断（反向证据，两态都成立）",
++          str(real.get("runtime_instance_id") or "") == "rt-u12-reverse"
++          and "RUNTIME_GENERATION_UNPROVEN" not in real_blockers,
++          f"instance={real.get('runtime_instance_id')!r} blockers={real_blockers}")
+ 
+ 
+ # --------------------------------------------------------------------------- #
