@@ -202,8 +202,9 @@ CHANGED: 1
   "沙箱已跟踪文件 918 个" 两态一致，属**内容指纹**而非行为差异（与 U15-FU2 的 CHANGED 同族）。
 
 代码 head 的 `git ls-files` 条数（L19）：`7dd1053` → **918**（base `048033b` 亦为 918；
-本 head 只改 2 个已跟踪文件，未新增代码文件）。补丁包自身的 `docs/**` 文件在后续
-docs 提交后使 head 增至 928（见 `evidence/git_ls_files_head.log`）。
+本 head 只改 2 个已跟踪文件，未新增代码文件）。补丁包自身的 20 个 `docs/**` 文件在
+docs 提交 `b305345` 后使分支 head 增至 **938**（见 `evidence/git_ls_files_head.log`）——
+**补丁包已被 head 跟踪**（`git ls-files` 列出 20 个文件，非 FU5 那种"未跟踪"状态）。
 
 `scripts/check_quality.py`：**绿**（`exit=0`，`QUALITY CHECK OK files=304 untracked=0`，
 `evidence/check_quality_patched.log`）。**未新增任何 exclude**：`pyproject.toml` 的
