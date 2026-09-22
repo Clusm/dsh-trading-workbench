@@ -200,6 +200,22 @@ def _dependency_comparison_status(root: Path, identity_module: Any) -> str:
     return DEPENDENCY_STATUS_MATCH
 
 
+def _resolved_runtime_instance_id(value: str | None) -> str:
+    """归一化运行代：占位符 / 空白 / 非字符串 → ``""``（= 缺失）。
+
+    单一事实源在 ``runtime_identity``（:func:`resolve_runtime_instance_id`）。
+    该模块不可用时**保守返回空串** —— 宁可不证明，也不把哨兵写进清单
+    （U15-FU1：``"unknown"`` 这类值读起来像运行代，实际不是）。
+    """
+    try:
+        from core import runtime_identity as identity_module
+
+        resolved = identity_module.resolve_runtime_instance_id(value)
+    except Exception:  # noqa: BLE001 - 采集失败由 IDENTITY_COLLECT_FAILED 表达
+        return ""
+    return "" if resolved is None else resolved
+
+
 def _identity_evidence(
     root: Path, *,
     environment: str,
@@ -212,12 +228,17 @@ def _identity_evidence(
     请求。settings/agents 由本模块 **直读 YAML** 传入（``config_loader.load_settings``
     会 ``load_dotenv``，清单构建不得经过它），环境变量按 ``env={}`` 传入，因此
     ``environment_overrides`` 不会被 ``.env`` 内容污染。
+
+    U15-FU1：``runtime_instance_id`` 先经 :func:`_resolved_runtime_instance_id`
+    归一化 —— 占位符（``"unknown"`` 等）在这里就变成"**没有**运行代"，
+    于是既不会被当成合法身份写进清单，也不会被偷偷回填成别的字符串。
     """
+    resolved_instance = _resolved_runtime_instance_id(runtime_instance_id)
     fallback = {
         "artifact_hash": "",
         "effective_config_hash": "",
         "model_route_hash": "",
-        "runtime_instance_id": str(runtime_instance_id or ""),
+        "runtime_instance_id": resolved_instance,
         "strategy_cards_hash": "",
         "dependency_comparison_status": DEPENDENCY_STATUS_UNAVAILABLE,
         "git_dirty": False,
@@ -229,7 +250,9 @@ def _identity_evidence(
         bundle = identity_module.collect_runtime_identity(
             root,
             environment=environment,
-            runtime_instance_id=str(runtime_instance_id or "unknown"),
+            # 空串 → None（"明确没有运行代"）：采集方据此登记
+            # RUNTIME_GENERATION_UNPROVEN，而不是把空值当形状错误整份丢弃。
+            runtime_instance_id=resolved_instance or None,
             execution_mode=environment,
             declared_account_ref=account_ref,
             env={},
@@ -262,8 +285,15 @@ def build_release_manifest(
     """生成当前代码/配置/依赖的确定性指纹，不读 ``.env`` 内容。
 
     ``runtime_instance_id`` 为 U15 追加的可选入参（默认从
-    ``MTA_RUNTIME_INSTANCE_ID`` 取，仍为空则记为 ``unknown``）：调用方（服务）
-    可传入真实运行实例标识，使清单里的身份证据与进程一致。
+    ``MTA_RUNTIME_INSTANCE_ID`` 取）：调用方（服务）可传入真实运行实例标识，
+    使清单里的身份证据与进程一致。
+
+    U15-FU1：**读不出真实运行代时不再记 ``"unknown"``**。缺省、占位符
+    （``"unknown"``/``"n/a"``/…）与空白一律归一化为"缺失" —— 清单里的
+    ``runtime_instance_id`` 留空，且 ``identity_blockers`` 带
+    ``RUNTIME_GENERATION_UNPROVEN``。修复前这两处分别是 ``"unknown"`` 与空
+    阻断列表：消费方（``bool(runtime_instance_id)`` 之类的判据）会把它读成
+    "身份完整"。**绝不放宽**：这只是把"读起来像值的哨兵"降级为显式缺失。
     """
     root = Path(project_root).resolve()
     env = str(environment or "unknown").lower()[:32]
@@ -322,7 +352,10 @@ def build_release_manifest(
         artifact_hash=content_hash,
         effective_config_hash=str(evidence.get("effective_config_hash") or ""),
         model_route_hash=str(evidence.get("model_route_hash") or ""),
-        runtime_instance_id=str(evidence.get("runtime_instance_id") or ""),
+        # U15-FU1 第二道闸：采集结果再归一化一次，任何降级分支都不会把
+        # 哨兵漏进清单字段（缺失 = 空串，可被 `bool(...)` 类判据如实读成"无"）。
+        runtime_instance_id=_resolved_runtime_instance_id(
+            evidence.get("runtime_instance_id")),
         strategy_cards_hash=str(evidence.get("strategy_cards_hash") or strategy_cards_hash),
         dependency_comparison_status=str(
             evidence.get("dependency_comparison_status") or DEPENDENCY_STATUS_UNAVAILABLE),

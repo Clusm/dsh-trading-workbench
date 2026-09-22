@@ -1,0 +1,69 @@
+U12 RC 交付物验收（离线；两态可跑）
+
+=== [1] 发布门禁阈值逐字未降低（7 天 / 200 候选 / 30 闭合） ===
+  PASS  阈值 min_directional_candidates == 200（实测 200）
+  PASS  阈值 min_eligible_closed_trades == 30（实测 30）
+  PASS  阈值 min_observation_days == 7.0（实测 7.0）
+  PASS  阈值 min_observation_coverage == 0.999（实测 0.999）
+  PASS  阈值 max_observation_gap_seconds == 120.0（实测 120.0）
+  PASS  release_evidence.py 可读
+  PASS  thresholds 入参风险已登记（U09-P3/A5），本套件不合法化降级
+
+=== [2] observed_status：三项观察门禁必须为 NOT_STARTED ===
+  PASS  observed_status.json 存在且可读
+  PASS  observation_days: state=NOT_STARTED 且 actual 为空
+  PASS  directional_candidates: state=NOT_STARTED 且 actual 为空
+  PASS  eligible_closed_trades: state=NOT_STARTED 且 actual 为空
+  PASS  没有任何门禁被写成 PASS
+  PASS  thresholds_lowered 为 False
+  PASS  live_enabled 为 False
+  PASS  K06 全绿 != 发布通过 已声明
+  PASS  release_id 未被编造（绑定 release_manifest.json）
+  PASS  observed_status.md 含三项 NOT_STARTED 表述
+  PASS  observed_status.md 标记 DRAFT 且声明不得写成通过
+  PASS  observed_status.md 未把冻结/通过写成事实宣称
+
+=== [3] F11：v2_labels=DEFERRED（逐字） ===
+  PASS  矩阵逐字含 `F11:v2_labels=DEFERRED`
+  PASS  V2_LABELS_STATE == 'DEFERRED'（实测 'DEFERRED'）
+  PASS  EXECUTION_WEIGHT == 0.0（实测 0.0）
+  PASS  FIRST_RELEASE_FAULT_SCOPE 已声明首批范围
+  PASS  矩阵把 F11 标为 DEFERRED（不得写通过）
+
+=== [4] F01–F25 逐条覆盖与'不得写 N/A' ===
+  PASS  F01–F25 逐条出现（缺：[]）
+  PASS  矩阵含四类覆盖状态词表
+  PASS  矩阵含'缺什么能力'清单（§D）
+  PASS  矩阵明确禁止把缺失能力写成 N/A
+  PASS  矩阵表格中不存在 N/A 覆盖状态
+  PASS  F14/F18 引用两份报告（原始 + 复验）
+  PASS  F14/F18 保留'不得记作完全通过'
+
+=== [5] 不得宣称 RC 已冻结 / 已通过观察窗 ===
+  PASS  宣称检测器非空转（正例检出 / 否定例放过）
+  PASS  README 标记 DRAFT
+  PASS  README 明示未冻结
+  PASS  README 明示观察门禁未开始
+  PASS  README 未把冻结/通过/发布状态写成事实宣称
+  PASS  README 保留回滚段
+  PASS  README 登记待裁决项且不自行决定
+
+=== [6] build_release_readiness_report 在缺证据时 fail-closed ===
+  PASS  缺表的库 → 抛错而不是伪造通过
+  PASS  缺 release_id → 拒绝（ValueError）
+
+=== [8] K01 身份：完整 或 显式阻断（两态都成立的 fail-closed 不变量） ===
+  ----  src/ 默认工件扫描成功=True 
+  PASS  身份证据已采集（artifact_hash 非空且未报采集失败）
+  PASS  身份证据完整时不得带 IDENTITY_COLLECT_FAILED（环境级阻断可存在）
+  PASS  身份采集结果与工件扫描状态一致（两态不矛盾）
+  PASS  基线态：'unknown' 占位符被静默接受（复现缺陷，不误判为已修）
+  PASS  真实运行代不被本次改动标成阻断（反向证据，两态都成立）
+
+=== [7] CI 接入官方离线回归 ===
+  PASS  ci.yml 存在且可读
+  PASS  CI 运行 check_quality.py
+  PASS  CI 运行本 RC 验收脚本
+  PASS  CI 强制 UTF-8（避免仅因控制台编码误报）
+
+U12 UNATTENDED RELEASE ACCEPTANCE PASS=49 FAIL=0
