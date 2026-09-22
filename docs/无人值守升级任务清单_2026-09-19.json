@@ -4739,6 +4739,22 @@
         "owner": "U08 后续 / U12",
         "blocks": "无（偏保守：不撒谎、不重复下单）",
         "note": "Q r1 的非阻塞观察：当账本**已**消费且审计读失败时，披露码是 `AUDIT_UNAVAILABLE`/`blocked`，而非 `TICKET_ALREADY_CONSUMED`/`handled`。方向安全（不会重复下单），但**丢失了『该票其实已被消费』这一事实**，排查时可能误判为审计库故障而非重复票。若要保留信息，可在 AUDIT_UNAVAILABLE 的 note 里附上账本侧 `is_consumed` 的读数。"
+      },
+      {
+        "id": "U13-FU5-FALSE-QUIESCENCE",
+        "title": "**（P0）锁文件损坏 -> `check_writer_stopped` 静默返回 -> 恢复包被声明为『写者已停』并据此验证通过（写者其实仍在运行）**",
+        "status": "OPEN",
+        "owner": "U13 线（修复会话 U13-FU5）",
+        "blocks": "灾难恢复路径的正确性：会造出并接受一份『同一时刻静止』的**撕裂恢复点**",
+        "note": "**与 U13-FU4 完全同源（锁文件损坏）**，Q r1 独立复现并**推翻了作者『无害』的论证**。机理（I 已独立核对代码）：`recovery.py:349-353` 的 `except (FileNotFoundError, OSError, json.JSONDecodeError): return` —— 把『读不出』当成『写者已停』；随后 `create_epoch_bundle`（:477 调 check_writer_stopped）在 :545 **无条件写 `writer_stopped: True`**；`verify_epoch_bundle`（:589-591）**强制要求该标志为 True** 才接受；`restore_recovery_bundle.py:132` 亦信任之。**最小复现（Q，patched 树）**：真实存活 writer + 锁损坏 -> `check_writer_stopped` 不抛 -> `bundle_created=true`、`manifest_writer_stopped=true`、`verify_epoch_bundle_accepted=true`，全程 writer 仍活。即**在写者运行时造出一份被声明为『同一时刻静止』的撕裂恢复点**。触发输入与 FU4 同源；`O_EXCL`->`os.write` 之间的『空文件』窗口是**真实竞态**。**Q 建议按 P0 登记，且不得在合入 FU4 后宣布『锁损坏 fail-open 类』已闭合** —— 同意。"
+      },
+      {
+        "id": "RECOVERY-WRITER-STOPPED-CLASS-NOT-CLOSED",
+        "title": "『锁文件损坏 -> fail-open』这一类**尚未闭合**（FU4 只修了 InstanceLock.acquire 一处）",
+        "status": "OPEN",
+        "owner": "U13 线 / U12",
+        "blocks": "无（追踪项）",
+        "note": "U13-FU4 修好了 `InstanceLock.acquire()` 的接管路径，但**同一根因**在 `recovery.py:check_writer_stopped` 上仍然存在（见 U13-FU5-FALSE-QUIESCENCE）。**在 U13-FU5 修好之前，不得宣称『锁损坏 fail-open 类』已闭合。** 另需注意 `scripts/create_recovery_bundle.py:179` 也自行写 `writer_stopped: True`，修复时须一并核对。"
       }
     ],
     "contract_candidate": "71f8109",
@@ -5160,7 +5176,7 @@
           "methodology_finding": "**Q 发现的沙箱方法学缺陷（影响此前所有 delta 的覆盖度声明）**：只 `git init` 而无 index 时，`smoke_u10a_release_package.py` 靠 `git ls-files` 建沙箱会得到**空文件列表** -> **两态都在第 85 个脚本同样崩**。Q 在两棵树各做一次 `git add -A`（**只暂存、不 commit**、`autocrlf=false`）后取到完整 94 脚本；补丁矩阵另在**全新未暂存树**复测通过。=> 此前各轮『只 git init』算出的 NEW_FAIL=∅ **结论仍成立**（两态同败不构成*新增*失败），但**该脚本当时并未真正被执行**，覆盖度比声称的略低。**修正做法**：解包后 `git init && git add -A`（不 commit）。"
         },
         "U13-FU4": {
-          "status": "READY_FOR_REVIEW",
+          "status": "INTEGRATED",
           "branch": "task/U13-FU4",
           "worktree": "mat-wt/U13F4",
           "base": "d52bd68",
@@ -5196,10 +5212,26 @@
           "verification": {
             "session": "Q (reviews/U13-FU4/R1/q)",
             "candidate": "109d97f",
-            "verdict": "PENDING",
+            "verdict": "Q r1 **PASS-with-notes**（FU4 本体完全成立；但**同源缺陷未闭合**）",
             "reports_dir": "docs/dispatch/reviews/U13-FU4/109d97f/",
-            "focus": "重点：①**真实两进程**跨进程前后对照（自建探针）；②拒绝时锁文件**逐字节未动**；③**情形 2 仍能回收（没修坏）** + pid 指向无关存活进程时应拒；④报错可行动性 + LockUnreadableError 继承 RuntimeError + 非 UTF-8 路径；⑤**独立判定 `check_writer_stopped` 同源 fail-open 的严重度**（本轮最可能发现漏修的点）；⑥L19：报告 git ls-files 条数并确认 u10a 真跑到。"
-          }
+            "focus": "重点：①**真实两进程**跨进程前后对照（自建探针）；②拒绝时锁文件**逐字节未动**；③**情形 2 仍能回收（没修坏）** + pid 指向无关存活进程时应拒；④报错可行动性 + LockUnreadableError 继承 RuntimeError + 非 UTF-8 路径；⑤**独立判定 `check_writer_stopped` 同源 fail-open 的严重度**（本轮最可能发现漏修的点）；⑥L19：报告 git ls-files 条数并确认 u10a 真跑到。",
+            "report": "docs/dispatch/reviews/U13-FU4/109d97f/Q_r1.md",
+            "crossprocess": "Q 自建探针（真实两进程）+ **8 个损坏变体**（空/截断/坏 JSON/非对象/无 pid/pid=0/pid 负数/非 UTF-8）：**pristine 8/8 接管成功且持有者仍活 -> `two_live_holders=true`**；**patched 8/8 被拒（exit 3）**，持有者安然无恙。",
+            "lock_unchanged": "patched 8/8 **`lock_unchanged=true` 且 before/after sha256 完全相等**（如 empty `e3b0c44298fc1c14==e3b0c44298fc1c14`）；pristine 8/8 锁被删。",
+            "not_broken": "情形 2（pid 确实已退出）**两态都回收成功**（新锁 pid = 接管者自身 pid）；边界『无关存活 PID』两态都拒绝、锁未动；情形 1 两态均 RuntimeError 且**文案逐字不变**。",
+            "ast_check": "Q 用 AST 比对：**只有 `acquire` 被改**，`_pid_alive`/`release`/`describe`/`update_metadata`/`__init__`/`__del__` 源段**完全相等**。",
+            "delta": "L19 已应用：`git init && git add -A` 后 **`git ls-files` = 808/809**；94 脚本两态 **BOTH_OK=94、NEW_FAIL=∅、FIXED=∅**，CHANGED 仅 u13 supervision steps 4->5（预期）；**u10a 确认真跑到**（82.9s/82.0s，打印『沙箱已跟踪文件 809 个』）。check_quality 两树文件相同（无新增 exclude），contracts 两态 173/0。补丁矩阵 9/9 `Checking patch`、0 Skipped。",
+            "not_verified": [
+              "未起真实服务/未接触真实状态根（『两活持有者->重复下单』按代码路径推断）",
+              "竞态窗口未 vivo 计时",
+              "未穷举超长/符号链接/目录/磁盘满等形态",
+              "`check_writer_stopped` 修复未实现（见 U13-FU5）",
+              "未跑完整 pytest（环境无 pytest）",
+              "未全仓普查其他同类 fail-open",
+              "`_pid_alive` 的 POSIX 分支未执行"
+            ]
+          },
+          "integration_commit": "merge task/U13-FU4 @ 109d97f（owned 路径逐字节一致：git diff 109d97f HEAD = 0 行）"
         }
       }
     },
