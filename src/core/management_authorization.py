@@ -39,7 +39,9 @@ from core.contracts.k04_management import ProtectionTarget
 from core.runtime_identity import (
     RUNTIME_GENERATION_MALFORMED,
     RUNTIME_GENERATION_UNPROVEN,
+    RUNTIME_INSTANCE_UNBOUND,
     RuntimeGeneration,
+    resolve_runtime_instance_id,
     verify_account_binding,
 )
 
@@ -174,8 +176,11 @@ def resolve_account_domain(
         runtime_instance_id=runtime_instance_id, scope_hash=scope_hash,
     )
     reasons = list(binding.reason_codes)
-    if not str(generation.runtime_instance_id or "").strip():
-        reasons.append("RUNTIME_INSTANCE_UNBOUND")
+    # U15-FU2：哨兵实例号（``"unknown"`` 等）与"空"同判 —— 用**唯一**的归一化
+    # 口（``resolve_runtime_instance_id``）判定，不再用"非空即绑定"（哨兵非空，
+    # 因此旧判据直接放行）。方向 fail-closed，不误杀 ``unknownverse`` 这类真值。
+    if resolve_runtime_instance_id(generation.runtime_instance_id) is None:
+        reasons.append(RUNTIME_INSTANCE_UNBOUND)
     if not str(generation.environment or "").strip():
         reasons.append("ENVIRONMENT_UNBOUND")
     return ManagementAccountDomain(
@@ -237,9 +242,11 @@ def issue_management_authorization(
     else:
         account_ref = str(generation.account_ref or "")
         environment = str(generation.environment or "") or None
-        instance = str(generation.runtime_instance_id or "") or None
+        # U15-FU2：签发侧同口径 —— 不把哨兵写进授权（否则等于把"未绑定的运行代"
+        # 盖成一份"看起来绑定好了"的授权，留待运行期去发现）。
+        instance = resolve_runtime_instance_id(generation.runtime_instance_id)
         if instance is None:
-            reasons.append("RUNTIME_INSTANCE_UNBOUND")
+            reasons.append(RUNTIME_INSTANCE_UNBOUND)
         if environment is None:
             reasons.append("ENVIRONMENT_UNBOUND")
         if not account_ref:

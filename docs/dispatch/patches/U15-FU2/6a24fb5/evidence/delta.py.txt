@@ -1,0 +1,25 @@
+import sys
+from pathlib import Path
+def load(p):
+    rows=[]
+    for line in Path(p).read_text(encoding="utf-8").splitlines():
+        if not line.strip(): continue
+        i,script,rc,tail=line.split("\t",3)
+        rows.append((script,int(rc),tail))
+    return rows
+a=load(sys.argv[1]); b=load(sys.argv[2])
+assert [r[0] for r in a]==[r[0] for r in b], "script list differs"
+new_fail=[]; fixed=[]; changed=[]
+for (s1,r1,t1),(s2,r2,t2) in zip(a,b):
+    if (r1==0)!=(r2==0):
+        (new_fail if r2!=0 else fixed).append((s1,r1,r2,t2))
+    elif r1!=r2 or t1!=t2:
+        changed.append((s1,r1,r2,t1,t2))
+print(f"scripts={len(a)} pristine_nonzero={sum(1 for r in a if r[1]!=0)} patched_nonzero={sum(1 for r in b if r[1]!=0)}")
+print("NEW_FAIL:", new_fail or "∅")
+print("FIXED:", fixed or "∅")
+print("CHANGED:", len(changed))
+for c in changed[:40]: print("  ", c)
+print("TAIL_DIFF_ONLY (same rc, different last line):")
+for (s1,r1,t1),(s2,r2,t2) in zip(a,b):
+    if r1==r2 and t1!=t2: print(f"   {s1}: {t1!r} -> {t2!r}")

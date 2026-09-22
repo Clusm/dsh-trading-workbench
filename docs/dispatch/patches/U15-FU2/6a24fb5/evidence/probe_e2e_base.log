@@ -1,0 +1,14 @@
+### tree=C:\Users\Tao\AppData\Local\Temp\u15fu2\sandbox\pristine
+[A:fixture] runtime_generation.json runtime_instance_id='unknown' restarts=3
+[A:before/after] load() -> RunRecord(instance='unknown', restarts=3)
+[A:before/after] load_or_mint() -> instance='unknown' created=False restarts=3 | 哨兵是否已消除=False
+[B:before/after] verify_account_binding(哨兵, 哨兵) -> allowed=True reasons=()
+[B:before/after] resolve_account_domain(哨兵) -> bound=True reasons=()
+[E2E] issue_management_authorization(哨兵运行代) -> 成功，runtime_instance_id='unknown'
+[E2E] evaluate_management_request -> submit_allowed=True reconcile_allowed=True binding_reason_codes=() reasons=()
+[REV] 真值 verify_account_binding -> allowed=True reasons=() | 端到端 submit_allowed=True reasons=()
+[REV] 像哨兵的真值 'unknownverse' -> allowed=True reasons=()
+[REV] 像哨兵的真值 'known' -> allowed=True reasons=()
+[REV] 像哨兵的真值 'n/a-x' -> allowed=True reasons=()
+[REV] 像哨兵的真值 'UNKNOWN-X' -> allowed=True reasons=()
+[REV] 缺 actual -> ('RUNTIME_GENERATION_UNPROVEN',)（既有语义）
