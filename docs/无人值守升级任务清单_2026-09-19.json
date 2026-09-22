@@ -5296,6 +5296,16 @@
             ]
           },
           "integration_commit": "merge task/U13-FU5 @ 1fe6037（owned 路径逐字节一致）；补丁包由 I 从作者 worktree 补入并提交（N2）"
+        },
+        "U15-FU1": {
+          "status": "IN_PROGRESS",
+          "branch": "task/U15-FU1",
+          "worktree": "mat-wt/U15F1",
+          "base": "02b93da",
+          "targets_issue": "U12-INTEGRATION-RUNTIME-INSTANCE-PLACEHOLDER（原登记把它低估为『影响判据精度』）",
+          "defect": "发布清单的 `runtime_instance_id` 在生产**默认是占位符 `\"unknown\"` 且无阻断码**。链路（I 已逐步核对）：①service.py:165-171 用 RunRegistry 拿到真实运行代并 self.runtime_instance_id=...（:174 已用它做 metadata）②service.py:188-195 调 build_release_manifest **未传 runtime_instance_id** ③release_manifest.py:297 回退 os.getenv('MTA_RUNTIME_INSTANCE_ID')，未设则 None ④release_manifest.py:232 静默用 `str(runtime_instance_id or \"unknown\")` ⑤runtime_identity.py:1684-1686 只拒绝**空**值，`\"unknown\"` 是非空串被当合法运行代 -> blockers 里无该条 ⑥消费方（含 U12 验收 `complete=bool(artifact_hash) and bool(runtime_instance_id)`）读成『身份完整』。",
+          "impact": "**服务手里有真实值却没用**；发布清单的**身份证据**默认携带占位符并被如实消费 —— 与已修 `U09-FU1` 同族（读起来『存在』、实际不存在的值）。降级路径（运行代未持久化，service.py:182-186 置 run_generation=None 并记 run_generation_error）下尤其明显。",
+          "direction_requirement": "两处都要：**A（生产链路）** service.py 把已拿到的真实运行代传下去（run_generation 为 None 时**不得**传字面 'unknown' 冒充）；**B（口径）** 占位符不得被静默当合法身份值 —— 显式识别为『运行代缺失』并记阻断码（优先复用既有码，不新造语义重叠码）或拒绝。硬要求：不得放宽既有阻断语义；7/200/30 一个数字不动；**不得把『没有运行代』变成『启动失败』**（服务在降级路径下仍须能起）；U12 验收套件会因此需更新，**必须逐条自证是跟随新口径而非为变绿而放宽**；不得吞 KI/SystemExit。"
         }
       }
     },
