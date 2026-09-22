@@ -118,11 +118,13 @@ __all__ = [
     "mint_runtime_generation",
     "model_route_blockers",
     "RUNTIME_INSTANCE_PLACEHOLDERS",
+    "RUNTIME_INSTANCE_UNBOUND",
     "resolve_execution_scope",
     "resolve_git_state",
     "resolve_model_route",
     "resolve_runtime_instance_id",
     "U15_FU1_RUNTIME_INSTANCE_GUARD",
+    "U15_FU2_RUNTIME_INSTANCE_SENTINEL_GUARD",
     "rotate_credential",
     "verify_account_binding",
     "verify_control_write",
@@ -199,6 +201,12 @@ DEPENDENCY_COMPARISON_UNAVAILABLE = "UNAVAILABLE"
 #: 省略 `expected` 不再等价于“跳过绑定校验”，200 只可能来自真正校验过的路径。
 RUNTIME_GENERATION_UNPROVEN = "RUNTIME_GENERATION_UNPROVEN"
 IDENTITY_BINDING_UNPROVEN = "IDENTITY_BINDING_UNPROVEN"
+#: 运行代**实例号未绑定**：缺失、空白，或读起来像值、实际不是的**哨兵**
+#: （``"unknown"`` 等，见 :data:`RUNTIME_INSTANCE_PLACEHOLDERS`）。U15-FU2 起
+#: 本码由 :func:`verify_account_binding` 直接产出（此前只有
+#: ``management_authorization`` 在"串非空"这一层拦，哨兵因此漏过）。码值沿用
+#: 既有字面量，**未新造**。
+RUNTIME_INSTANCE_UNBOUND = "RUNTIME_INSTANCE_UNBOUND"
 #: 调用方未声明 readiness（旧签名默认放行）→ 视为“未证明”，不得开新仓。
 READINESS_UNPROVEN = "READINESS_UNPROVEN"
 #: 入参形状不合法（非本模块的数据结构）→ 结构化拒绝，不抛裸 AttributeError。
@@ -1600,6 +1608,10 @@ def key_fingerprint(api_key: str | None, *, length: int = 16) -> str | None:
 #: 不猜共享文件是否已应用补丁。
 U15_FU1_RUNTIME_INSTANCE_GUARD = "U15-FU1"
 
+#: 两态探测标记（U15-FU2 交付物存在性）：哨兵不再能从**授权路径**（K04 绑定
+#: 校验）通过。
+U15_FU2_RUNTIME_INSTANCE_SENTINEL_GUARD = "U15-FU2"
+
 #: 运行代**占位符**：读起来像一个值，实际**不是**运行代。
 #:
 #: 它们的来源是"上游默认填充"（例如 ``os.getenv("MTA_RUNTIME_INSTANCE_ID",
@@ -1817,6 +1829,13 @@ def verify_account_binding(
     提出了域绑定要求而运行代没有该字段 → ``SCOPE_HASH_UNBOUND``（不是静默跳过）；
     ``expected`` 与 ``actual`` 的 ``scope_hash`` 也必须逐字相等，否则
     ``SCOPE_HASH_MISMATCH``。只有两边都为 None（未声明域）时才不比较。
+
+    U15-FU2：**哨兵实例号不是运行代**。任一侧（``expected`` / ``actual``）的
+    ``runtime_instance_id`` 落在 :data:`RUNTIME_INSTANCE_PLACEHOLDERS` 里即
+    ``RUNTIME_INSTANCE_UNBOUND``（复用既有码，未新造）。这正是"两侧都带同一个
+    哨兵 → ``generation_id`` 逐字相等 → 绑定通过"的堵口：被污染的 registry
+    铸出的 ``"unknown"`` 运行代，从此**不能**再让一份管理授权读成"已证明的
+    运行代"。真值（``unknownverse`` 等只是长得像的值）不受影响。
     """
     reasons: list[str] = []
     if actual is None:
@@ -1824,6 +1843,9 @@ def verify_account_binding(
     if not isinstance(actual, RuntimeGeneration) or not isinstance(expected, RuntimeGeneration):
         # 入参不是本模块的运行代：结构化拒绝，不抛裸 AttributeError（500）。
         return AccountBinding(False, (RUNTIME_GENERATION_MALFORMED,))
+    if (is_placeholder_runtime_instance_id(expected.runtime_instance_id)
+            or is_placeholder_runtime_instance_id(actual.runtime_instance_id)):
+        reasons.append(RUNTIME_INSTANCE_UNBOUND)
     if _text(environment) and _text(actual.environment) != _text(environment).lower():
         reasons.append("ENVIRONMENT_MISMATCH")
     if _text(account_ref) and _text(actual.account_ref) != _text(account_ref):

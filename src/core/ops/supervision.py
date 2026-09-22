@@ -61,11 +61,16 @@ __all__ = [
     "RunRegistry",
     "SupervisionDecision",
     "SupervisionLedger",
+    "U15_FU2_RUN_REGISTRY_SENTINEL_GUARD",
     "load_or_mint_run_record",
     "lock_scope_report",
     "operator_clear_manual_recovery",
     "plan_supervision",
 ]
+
+#: 两态探测标记（U15-FU2 交付物存在性）：``RunRegistry.load()`` 把哨兵实例号
+#: 视为"无记录"（触发重新铸造），而不是当成合法的既有运行代。
+U15_FU2_RUN_REGISTRY_SENTINEL_GUARD = "U15-FU2"
 
 #: 有界退避：第 1/2/3 次重启的等待秒数（任务卡明示 30/60/120）。
 BACKOFF_SCHEDULE_SECONDS: tuple[float, ...] = (30.0, 60.0, 120.0)
@@ -230,12 +235,14 @@ class RunRegistry:
         self.record: RunRecord | None = None
 
     def load(self) -> RunRecord | None:
+        from core.runtime_identity import is_placeholder_runtime_instance_id
+
         payload = _read_json(self.path)
         if payload is None:
             self.record = None
             return None
         try:
-            self.record = RunRecord(
+            record = RunRecord(
                 environment=str(payload["environment"]),
                 account_ref=str(payload["account_ref"]),
                 runtime_instance_id=str(payload["runtime_instance_id"]),
@@ -249,6 +256,17 @@ class RunRegistry:
         except (KeyError, TypeError, ValueError):
             # 运行代文件损坏 → 视为不存在（重新铸造），但绝不静默当作"同代"。
             self.record = None
+            return None
+        # U15-FU2（残留 A，源头 fail-closed）：持久化文件里的**哨兵**实例号
+        # （``"unknown"`` 等上游占位填充）读起来像一个运行代，实际不是。
+        # 与"文件损坏"**同口径**：视为**无记录** → ``load_or_mint`` 走重新铸造
+        # 分支，得到真实实例号。方向是**恢复正确行为**（拿回真值），不是放宽：
+        # 修前这里会把哨兵当成"合法的既有运行代"继承下来。
+        # 复用 runtime_identity 的**唯一**哨兵判定，不在此处另立第二份名单。
+        if is_placeholder_runtime_instance_id(record.runtime_instance_id):
+            self.record = None
+            return None
+        self.record = record
         return self.record
 
     def persist(self, record: RunRecord) -> RunRecord:
@@ -264,7 +282,10 @@ class RunRegistry:
         """返回 ``(记录, 是否新铸)``。环境/账户不符即重新铸造（不继承他人运行代）。"""
         import uuid as _uuid
 
-        from core.runtime_identity import mint_runtime_generation
+        from core.runtime_identity import (
+            mint_runtime_generation,
+            resolve_runtime_instance_id,
+        )
 
         existing = self.load()
         # 只有"同一环境 + 同一账户"才继承运行代。``generation_id`` 由环境/账户/
@@ -278,7 +299,9 @@ class RunRegistry:
         if same_scope and existing.runtime_instance_id:
             instance = existing.runtime_instance_id
         else:
-            instance = runtime_instance_id or _uuid.uuid4().hex
+            # U15-FU2：调用方显式传入的实例号同样过**唯一**哨兵口径 —— 哨兵
+            # 不能冒充运行代，直接重铸真实实例号（``None``/空白/哨兵同一处理）。
+            instance = resolve_runtime_instance_id(runtime_instance_id) or _uuid.uuid4().hex
         generation = mint_runtime_generation(
             environment=environment,
             account_ref=account_ref,
