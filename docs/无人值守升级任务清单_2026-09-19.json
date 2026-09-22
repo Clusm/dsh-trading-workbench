@@ -5365,13 +5365,35 @@
           "integration_commit": "merge task/U15-FU1 @ bf9b304（owned 路径逐字节一致）；集成 ce0eafe"
         },
         "U15-FU2": {
-          "status": "IN_PROGRESS",
+          "status": "READY_FOR_REVIEW",
           "branch": "task/U15-FU2",
           "worktree": "mat-wt/U15F2",
           "base": "85722e2",
           "targets_issue": "U15FU1-K04-SENTINEL-RESIDUAL（+ U15-FU1 自认的 mint_runtime_generation 残留）",
           "defect": "**运行代哨兵值 `\"unknown\"` 仍能从另外两条路径被当成合法身份**：**A（源头）** `mint_runtime_generation`/`RunRegistry.load()` 未动 —— 损坏/遗留的 runtime_generation.json（实例号写成 \"unknown\"）**仍能被读进来并铸出哨兵运行代**，U15-FU1 只保证它被标 UNPROVEN、没阻止它产生。**B（授权路径，I 已逐行核对确认可达）**：`management_authorization.py:177` 的门禁是 `if not str(generation.runtime_instance_id or \"\").strip()` -> **\"unknown\" 非空直接过**；`runtime_identity.py:1801 verify_account_binding` 的关键比较是 `actual.generation_id != expected.generation_id`，而 `generation_id` **由含实例号的成分派生** -> **两边都带同一哨兵时逐字相等、绑定通过**。结论：被污染的 registry 可让『绑定到某个运行代』的授权**实际绑在占位符上**。",
-          "direction_requirement": "**A（源头）** 读取侧把哨兵实例号视为**无记录 -> 重新铸造**（方向是恢复正确行为，不是放宽）。**B（授权路径）** 把哨兵识别**下沉到 K04 绑定校验**，使哨兵从任何路径进来绑定都**不通过**并产出**可区分的既有原因码**（优先复用 `RUNTIME_INSTANCE_UNBOUND` 或 FU1 既有码，**不新造语义重叠码**）。硬要求：**复用 U15-FU1 的哨兵名单/判定**（不得第二份 —— 那正是本族成因），必要时抽成单一函数；不得放宽既有判定；7/200/30/0.999/120 不动；**不得误杀** unknownverse/known/n/a-x 这类像哨兵的真值；不得把『缺运行代』变成『服务起不来』；不得吞 KI/SystemExit。**补丁包必须提交进分支**（上轮出现过未被 head 跟踪的问题）。"
+          "direction_requirement": "**A（源头）** 读取侧把哨兵实例号视为**无记录 -> 重新铸造**（方向是恢复正确行为，不是放宽）。**B（授权路径）** 把哨兵识别**下沉到 K04 绑定校验**，使哨兵从任何路径进来绑定都**不通过**并产出**可区分的既有原因码**（优先复用 `RUNTIME_INSTANCE_UNBOUND` 或 FU1 既有码，**不新造语义重叠码**）。硬要求：**复用 U15-FU1 的哨兵名单/判定**（不得第二份 —— 那正是本族成因），必要时抽成单一函数；不得放宽既有判定；7/200/30/0.999/120 不动；**不得误杀** unknownverse/known/n/a-x 这类像哨兵的真值；不得把『缺运行代』变成『服务起不来』；不得吞 KI/SystemExit。**补丁包必须提交进分支**（上轮出现过未被 head 跟踪的问题）。",
+          "code_head": "6a24fb5",
+          "tip": "8c67af8",
+          "changed_files": "4 文件 +338/-7：src/core/ops/supervision.py(+29)、src/core/runtime_identity.py(+22)、src/core/management_authorization.py(+15)、tests/acceptance/test_runtime_identity.py(+279)",
+          "patch_package": "docs/dispatch/patches/U15-FU2/6a24fb5/（4 diff + README + 20 evidence）；**已被 head 跟踪（25 个文件）**，未重演 FU5 的 N2",
+          "residue_A": "`RunRegistry.load()`：`RunRecord(instance='unknown', restarts=3)` -> **`None`（视为无记录）**；`load_or_mint()`：`instance='unknown' created=False restarts=3`（哨兵被当『同一代』继承）-> **`instance='355b1d7d…' created=True restarts=0`（重铸出真实实例号）**",
+          "residue_B": "`verify_account_binding(哨兵,哨兵)`：`allowed=True reasons=()` -> **`allowed=False ('RUNTIME_INSTANCE_UNBOUND',)`**；`resolve_account_domain` 同；`issue_management_authorization` 由成功 -> **拒绝**；**端到端** `evaluate_management_request`（污染 registry -> 授权结论）：`submit_allowed=True binding_reason_codes=()` -> **`submit_allowed=False binding_reason_codes=('RUNTIME_INSTANCE_UNBOUND',)`**，`reconcile_allowed=True`（既有边界未变）",
+          "caliber_reuse": "**未造第二份名单**：复用 FU1 的 `RUNTIME_INSTANCE_PLACEHOLDERS` + 单一函数 `resolve_runtime_instance_id`（哨兵/空/非字符串 -> `None`）与 `is_placeholder_runtime_instance_id`；`RunRegistry.load()`/`load_or_mint`、`verify_account_binding`、K04 两道门禁**共 5 个调用点**统一改调它们。原因码复用既有 `RUNTIME_INSTANCE_UNBOUND`，只在 runtime_identity 加**同名常量**去重，**未新造码**。",
+          "reverse_evidence": "两态逐字相同：真值绑定 `allowed=True reasons=()` 且端到端 `submit_allowed=True`（**不新增阻断**）；`unknownverse`/`known`/`n-a-x`/`UNKNOWN-X` 全通过（**不误杀**）；真值 registry（`rt-persisted-1`, restarts=4）**不重铸**；缺 `actual` 仍 `RUNTIME_GENERATION_UNPROVEN`、未声明 scope 不比较、轮换后绑定照常、畸形入参仍 `RUNTIME_GENERATION_MALFORMED`。",
+          "delta": "L19 沙箱两树 `git ls-files`=**892**，`smoke_u10a_release_package.py` **确实执行到**；**NEW_FAIL=∅ FIXED=∅ CHANGED=1**（仅 u10a 尾部 release_id 哈希，rc 均 0，**非行为变化**）；94 脚本两态非零退出均 0。U15 验收 **298/0**；**新测试 × 未打补丁 src = 291/0**。同批 U12 50/0、U13 166、U09 86/0、U02 158/0。`check_quality OK files=304` 无新 exclude。3 配置 × 4 diff 全 `Checking patch`、0 Skipped；4 份 diff 应用到 base 后与 head **SAME×4**（补丁自足）。",
+          "unfinished": [
+            "①`mint_runtime_generation(\"unknown\")` **仍能构造**哨兵运行代对象（本轮按任务只改**读取侧+判定侧**；构造是纯函数，改了会动公开契约与 `generation_id` 确定性）。作者称**所有消费入口现已拒绝/标记它** —— **待 Q 遍历消费入口独立核查有无漏网**。",
+            "②`verify_account_binding` 对**空串**实例号仍 `allowed=True`（FU1 的哨兵函数按设计只认非空字符串）；作者称可达性极低（受支持的构造器都会拒/重铸），K04 门禁侧已由 `resolve_runtime_instance_id is None` 覆盖空串。**待 Q 独立判定可达性**。",
+            "③`load()` 的『哨兵即无记录』会连 `restarts` 一起丢弃（与『文件损坏』既有口径一致）—— 被污染过的状态根会重新计数。",
+            "④未触碰登记项之外的代码；阈值 `7/200/30/0.999/120` 一个未动（diff 新增行无数字字面量改动、无新增 except）。"
+          ],
+          "verification": {
+            "session": "Q (reviews/U15-FU2/R1/q)",
+            "candidate": "8c67af8",
+            "verdict": "PENDING",
+            "reports_dir": "docs/dispatch/reviews/U15-FU2/8c67af8/",
+            "focus": "重点：①A 自建 fixture 前后对照（重铸是恢复正确行为、不是洗白）；②**B 必须端到端**（污染 registry -> 授权结论 `submit_allowed` 由 True 变 False）；③**反向证据逐条**（真值不新增阻断、像哨兵的真值不误杀、真值 registry 不重铸、binding 既有语义未变）——任何一条被修坏判阻塞；④**口径单一性**（全仓不得有第二份哨兵名单/第二套归一化）；⑤**独立判定两条未尽事项**，尤其遍历消费入口找漏网；⑥门禁数字未动。"
+          }
         }
       }
     },
