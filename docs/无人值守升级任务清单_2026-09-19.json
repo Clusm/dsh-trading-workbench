@@ -5232,6 +5232,15 @@
             ]
           },
           "integration_commit": "merge task/U13-FU4 @ 109d97f（owned 路径逐字节一致：git diff 109d97f HEAD = 0 行）"
+        },
+        "U13-FU5": {
+          "status": "IN_PROGRESS",
+          "branch": "task/U13-FU5",
+          "worktree": "mat-wt/U13F5",
+          "base": "1d737b5",
+          "targets_issue": "U13-FU5-FALSE-QUIESCENCE（P0）",
+          "defect": "recovery.py:check_writer_stopped 在 (FileNotFoundError, OSError, JSONDecodeError) 时 return，把『读不出』当『写者已停』；create_epoch_bundle 随后无条件写 writer_stopped: True（:545），verify_epoch_bundle（:589-591）强制要求该标志、restore_recovery_bundle.py:132 亦信任 -> **写者仍在运行时造出并被接受一份被声明为『同一时刻静止』的撕裂恢复点**。",
+          "direction_requirement": "四情形区分，与刚落地 U13-FU4 同口径：①锁不存在 -> 允许（合法）②可解析+pid 存活 -> 拒绝（现状）③可解析+pid 已死 -> 允许（遗留锁，合法）④存在但不可解析/无可用 pid -> **fail-closed 拒绝**，抛可区分可行动错误。硬要求：读不出 != 写者已停；**优先复用 U13-FU4 的 LockUnreadableError/_read_holder，避免第二套口径**；不得用『存在即拒绝』的粗糙写法修坏合法遗留锁路径；不得吞 KI/SystemExit；**须核对 scripts/create_recovery_bundle.py:179 是否绕过 create_epoch_bundle 的检查**。"
         }
       }
     },
