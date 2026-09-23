@@ -227,7 +227,12 @@ web3_intel:
   rotation_count: 4
   # 真实钱包跟踪和 Token Audit 必须显式配置，空值表示 unknown/unconfigured。
   watched_wallets: []
-  token_contracts: {}
+  # 首个影子试点：UNI 官方以太坊主网代币合约（Uniswap 开发者文档）。
+  # 仅用于链上代币审计，不代表 UNIUSDT 永续合约本身存在该合约风险。
+  token_contracts:
+    UNIUSDT:
+      chain_id: "1"
+      address: "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984"
   etherscan_api_key_env: ETHERSCAN_API_KEY
   liquidation_stream_enabled: true
   # 仅用于影子结果核算，不改变下单手续费、风险档或仓位。
