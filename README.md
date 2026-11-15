@@ -5,6 +5,7 @@
 **把 AI 决策链、交易执行与风控，搬进 DeepSeek Harness 的工作台。**
 
 <p>
+  <a href="https://www.npmjs.com/package/dsh-trading-workbench"><img alt="npm" src="https://img.shields.io/npm/v/dsh-trading-workbench?style=flat-square&color=cb3837"></a>
   <a href="https://github.com/Clusm/dsh-trading-workbench/actions"><img alt="tests" src="https://img.shields.io/badge/tests-204%20passing-2ea043?style=flat-square"></a>
   <a href="package.json"><img alt="dsh" src="https://img.shields.io/badge/dsh-%3E%3D0.2.2--rc.1%20%3C0.3.0-4b6bfb?style=flat-square"></a>
   <a href="package.json"><img alt="node" src="https://img.shields.io/badge/node-%3E%3D22.19-3c873a?style=flat-square"></a>
@@ -101,15 +102,17 @@ flowchart LR
 **要求**：DSH ≥ `0.2.2-rc.1`、Node ≥ 22.19；Python 3.11+（建议 3.13，用于交易服务）。
 
 ```sh
-# 从 Git 安装（仓库根即 bundle）
+# npm（推荐）
+dsh plugin --profile <profile> add dsh-trading-workbench
+
+# 或者从 Git 安装（仓库根即 bundle）
 dsh plugin --profile <profile> add github:Clusm/dsh-trading-workbench
 
-# 或本地打包安装
-npm pack
-dsh plugin --profile <profile> add ./dsh-trading-workbench-0.1.0.tgz
+# 本地打包安装
+npm pack && dsh plugin --profile <profile> add ./dsh-trading-workbench-0.1.0.tgz
 ```
 
-也可以在 DSH 里：**设置 → 插件 → 搜索 `dsh-trading-workbench` → 安装**（发布到 npm 后）。
+在 DSH 里也可以：**设置 → 插件 → 搜索 `dsh-trading-workbench` → 安装**。
 
 安装后重载插件（或重启 DSH）：侧边栏出现「交易工作台」，顶栏多出「AI 决策」。
 
@@ -180,7 +183,7 @@ docs/                     # 设计文档与截图
 - Demo-only, loopback-only. No credentials → read-only. Credentials are written to a local `0600` file from the settings UI, never stored in the browser.
 
 ```sh
-dsh plugin --profile <profile> add github:Clusm/dsh-trading-workbench
+dsh plugin --profile <profile> add dsh-trading-workbench
 ```
 
 ---
