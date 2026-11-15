@@ -1,0 +1,27 @@
+{
+  "_comment": "One entry of the format-1 plugin index (https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json). Send this to the catalog repo (awesome-dsh-plugin / dsh-plugin-catalog) or host your own index.json and add it under Plugins → Discover → Index sources. Replace <you> and the timestamps before submitting.",
+  "name": "dsh-trading-workbench",
+  "title": "<you>/dsh-trading-workbench",
+  "description": {
+    "en": "Trading workbench for DeepSeek Harness: AI decision chain with a per-day round archive, Demo execution and risk views over a local Python service.",
+    "zh": "DeepSeek Harness 的交易工作台：AI 决策链、按日归档的轮次历史、Demo 执行与风控视图，数据来自本机 Python 交易服务。"
+  },
+  "homepage": "https://awesome-dsh-plugin.com/p/<you>/dsh-trading-workbench/",
+  "repository": {
+    "url": "https://github.com/<you>/dsh-trading-workbench"
+  },
+  "metadata": {
+    "category": "tools",
+    "keywords": ["trading", "workbench", "demo", "decision-chain"],
+    "labels": [],
+    "sortKeys": {}
+  },
+  "versions": [
+    {
+      "version": "0.1.0",
+      "publishTimestamp": 0,
+      "source": { "type": "npm" },
+      "engines": { "node": ">=22.19" }
+    }
+  ]
+}

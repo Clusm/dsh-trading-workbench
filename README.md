@@ -1,3 +1,22 @@
+# dsh-trading-workbench
+
+> 本仓库同时托管 **DSH Trading Workbench**（DeepSeek Harness 交易工作台插件 + Python 交易服务），
+> 源码在 [`trading-workbench/`](trading-workbench/README.md)；下面是它所依赖的参考交易引擎 multi-agent-trader。
+
+![交易工作台：账户与风险、持仓与保护、AI 摘要、今日流水](trading-workbench/docs/screenshots/workbench-cockpit.png)
+
+![AI 决策：本轮结论、确定性评分卡、红蓝对比](trading-workbench/docs/screenshots/workbench-ai-decisions.png)
+
+一键安装（DSH 插件，npm 发布后）：
+
+```sh
+dsh plugin --profile <profile> add dsh-trading-workbench
+```
+
+或在 DSH 里「设置 → 插件 → 搜索 dsh-trading-workbench」。没有交易服务的机器上，插件会给出
+「初始化服务」向导：检测 Python → 建虚拟环境 → 安装依赖 → 启动 → 用服务自己的 `/health` 校验。
+
+---
 # multi-agent-trader
 
 本地运行的多 Agent 数字货币合约实验系统。系统仅处理币安 USD-M、USDT 本位永续合约

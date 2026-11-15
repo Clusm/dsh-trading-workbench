@@ -1,0 +1,11 @@
+dist/
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+*.log
+data/
+*.sqlite*
+host-rounds*.json
+plugin/client/screens/
+.release/
