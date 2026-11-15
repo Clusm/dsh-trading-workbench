@@ -9,3 +9,6 @@ data/
 host-rounds*.json
 client/screens/
 .release/
+.env
+.env.*
+!.env.example
