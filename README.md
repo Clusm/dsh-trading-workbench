@@ -13,7 +13,7 @@
   <img alt="status" src="https://img.shields.io/badge/status-preview-8b949e?style=flat-square">
 </p>
 
-[English](#english) · [快速开始](#快速开始) · [架构](#架构) · [安全边界](#安全边界) · [开发](#开发与测试)
+[English](#english) · [AI 交易范围](#ai-交易的范围与决策链) · [快速开始](#快速开始) · [架构](#架构) · [安全边界](#安全边界) · [开发](#开发与测试)
 
 </div>
 
@@ -27,16 +27,39 @@
 
 ---
 
-## 为什么做这个
+## AI 交易的范围与决策链
 
-LLM 进入交易回路后，最贵的不是「下单」这个动作，而是两个问题：**它为什么这么决定**，以及**当时到底发生了什么**。
+**范围** —— 在固定的 20 币白名单内，每 10 分钟跑一轮，决定「这轮做不做、做多还是做空、什么价位进、止损止盈在哪、下多少」；有持仓时只做减风险的管理动作。
 
-市面上多数"AI 交易"面板只给你一个结论。这个工作台把每一轮决策做成可复核的事实：分析、辩论、决策、风控、执行逐段留痕，失败也留痕；每轮带原因码与一句话归因；逐调用审计角色、延迟、token 与结束方式；归档按日分文件、全量保留，默认只看今天，其余日期按需查询。
+**不做** —— 不选品（白名单运行时固定，不自动轮换）、不联网、不调用工具、不改风控阈值、不越过确定性闸门、不碰实盘资金。
+
+### 一轮的 7 个角色
+
+| # | 角色 | 决定什么 | 明确不能做 |
+|---|---|---|---|
+| 1 | `analysis` | 在候选中排序、选出 `primary_symbol`、给触发与失效条件 | 不给订单参数、不做交易决定 |
+| 2 | `red_team` | 固定做多，对称两轮辩论 | 不做空、R2 前不看蓝队回应 |
+| 3 | `blue_team` | 固定做空，对称两轮辩论 | 不做多、R2 前不看红队回应 |
+| 4 | `decision` | 三选一：做多 / 做空 / 不交易，并复制所选方案 | 不折中、不改 entry/SL/TP |
+| 5 | `risk` | 审核、否决、降仓（只能收紧） | 不放宽硬上限、不翻转方向 |
+| 6 | `execution` | 把已批准方案转成订单计划；管理已有仓位 | 不直接下单、不加仓、不反向开仓 |
+| 7 | `review` | 每日归因、校准、经验沉淀（不阻塞交易循环） | 不改规则、不评价未平仓盈亏 |
+
+红蓝固定立场、R1 并行开场、R2 看对方开场后回应；由**确定性评分卡**（无 LLM）打分，防止「和稀泥」与方向漂移。每角色档位、超时与 token 上限固定；任一角色失败按 `no_trade` + 原因码收口，不无界重试。
+
+### 输入是什么
+
+模型只看**一份预先生成的证据快照**（`md-evidence/1`）：闭合 K 线、指标、衍生品（资金费 / 持仓量 / 多空比）、关键位、流动性、数据健康，外加账户、持仓、硬上限与历史教训。快照由服务端确定性生成、落盘并带 hash，同轮同角色切片字节级可复现 —— 所以「它为什么这么决定」能被复核，而不是靠模型自述。
+
+唯一例外是 `universe.market_scan`：它把**白名单外**的全市场异动也列出来，让模型看见「外面在涨什么」，但每行标记 `in_whitelist=false`，**不能**当候选交易。
+
+### 输出怎么约束
+
+模型只输出结构化 JSON，逐份过 schema + 语义校验 + 数值红线；不合法就重试或降级为 `no_trade`，绝不把自由文本当订单。通过后还要过硬风控与执行前闸门（入场区间、报价年龄、止损止盈合法性、轮内规则冻结）。AI 的建议只能比硬规则**更严**，不能更松。
 
 > Demo only。不接真钱、不代管资金、不读取浏览器里的密钥；没有凭据时全链路只读。
 
 ---
-
 ## 功能
 
 | 模块 | 你会看到 |
@@ -181,6 +204,12 @@ docs/                     # 设计文档与截图
 - Deterministic scorecard (S/A/B/C + gates) next to each decision — explicitly **not** a return forecast.
 - The service is optional at install time: a first-run wizard checks Python/venv/deps/service, then creates the venv, installs requirements, starts the service and verifies its own `/health`.
 - Demo-only, loopback-only. No credentials → read-only. Credentials are written to a local `0600` file from the settings UI, never stored in the browser.
+
+**Scope** — inside a fixed 20-symbol whitelist, one round every 10 minutes decides *whether* to trade, the side, the entry zone, SL/TP and size; with an open position it only takes risk-reducing management actions. It does **not** pick symbols (the whitelist is frozen at runtime), go online, call tools, change risk thresholds, bypass the deterministic gates, or touch real money.
+
+**The chain (7 roles)** — `analysis` (ranks candidates, picks `primary_symbol`) → `red_team` / `blue_team` (fixed long / short, two symmetric rounds) → `decision` (long / short / no-trade, three-way) → `risk` (veto or size down, tighten only) → `execution` (turns the approved plan into an order plan, never places it) → `review` (daily attribution, off the trading loop). A deterministic, LLM-free scorecard scores each debate so the decision cannot paper over a weak case.
+
+**Input** — the model only reads one pre-built, hashed, byte-reproducible evidence snapshot (`md-evidence/1`): closed candles, indicators, derivatives (funding / OI / long-short ratio), key levels, liquidity, data health, plus account, positions, hard limits and past lessons. `universe.market_scan` is the one exception: it shows whole-market movers *outside* the whitelist for awareness only, each row flagged `in_whitelist=false` and never tradeable.
 
 ```sh
 dsh plugin --profile <profile> add dsh-trading-workbench
