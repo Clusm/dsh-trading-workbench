@@ -1,5 +1,0 @@
-scripts=94 base_fail=0 patch_fail=0
-NEW_FAIL(pristine 0 -> patched !=0): EMPTY
-FIXED (pristine !=0 -> patched 0): EMPTY
-SAME_FAIL: EMPTY
-CHANGED(tail differs among same_fail): EMPTY

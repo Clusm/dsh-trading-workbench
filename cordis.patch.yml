@@ -1,0 +1,4 @@
+- insert:
+    - id: trading-workbench
+      name: 'dsh-trading-workbench'
+      config: {}

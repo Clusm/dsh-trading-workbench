@@ -1,9 +1,0 @@
-### PATCHED 1fe6037
-REPO=C:\Users\Tao\Desktop\币安\mat-wt\U13F5
-intact_lock_bundle=REJECTED RuntimeError
-corrupt_lock_bundle=REJECTED LockUnreadableError
-  chained_cause=JSONDecodeError: Expecting value: line 1 column 1 (char 0)
-  actionable=True
-published_bundles=[]
-writer_still_alive=True
-exit=0

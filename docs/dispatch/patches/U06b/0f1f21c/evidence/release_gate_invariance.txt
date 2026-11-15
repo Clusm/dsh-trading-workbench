@@ -1,9 +1,0 @@
-v2 标签写入行数      : 50
-shadow_v2_labels 行数 前/后: 0 / 50 (标签确实落库)
-directional_candidates 前: 3
-directional_candidates 后: 3
-release_readiness 前/后 : NO_GO / NO_GO
-门禁报告(除 generated_at)逐字相同: True
-generated_at 差异仅来自墙钟: True (故比较时排除该字段)
-shadow_v2_coverage: {"authority": "src/core/release_evidence.py (U09 固定并版本化)", "by_reason": {}, "by_state": {"LABELED": 50}, "counts_toward_release_gate": false, "coverage": 1.0, "decided": 50, "execution_weight": 0.0, "experiment_key": null, "labeled": 50, "missing": 0, "note": "v2 研究标签逐原因计数；不参与发布门禁，不产生执行后果。", "pending": 0, "schema": "u06b-shadow-v2-labels-v1"}
-schema_migrations 最高版本: 17

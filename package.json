@@ -1,0 +1,87 @@
+{
+  "name": "dsh-trading-workbench",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness trading workbench: AI decision chain with a per-day round archive, Demo execution and risk views over a local Python trading service.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "host",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "service",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.19",
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "trading",
+    "workbench",
+    "binance-demo"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Clusm/dsh-trading-workbench.git"
+  },
+  "homepage": "https://github.com/Clusm/dsh-trading-workbench#readme",
+  "bugs": {
+    "url": "https://github.com/Clusm/dsh-trading-workbench/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "scripts": {
+    "check": "node client/checks.mjs",
+    "check:render": "node client/render-smoke.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-locale": "*",
+    "@deepseek-ai/dsh-client-ui-layout": "*",
+    "@deepseek-ai/dsh-client-ui-sidebar": "*",
+    "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-layout": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-sidebar": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  }
+}

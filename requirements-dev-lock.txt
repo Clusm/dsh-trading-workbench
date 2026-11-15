@@ -1,3 +1,0 @@
-# Exact development tools; runtime packages come from the shared lock below.
--r requirements-lock.txt
-ruff==0.16.6

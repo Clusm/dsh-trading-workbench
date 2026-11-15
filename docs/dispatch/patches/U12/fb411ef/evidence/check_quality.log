@@ -1,8 +1,0 @@
-All checks passed!
-PROFILE LOCK OK sha256=333d6a6b1e324cfa6721bc7a3b2dc56f5997530633903f4605e386e6bf392a61
-  locked_fields=30 symbols=20 quote=USDT
-No broken requirements found.
-DEPENDENCY LOCK OK packages=50 sha256=a28db842304ac10ab8349d5bb62a23bf52a75a0ee803d5a3791f98218b8e66d4
-  python=3.13 platform=win32
-SECRET SCAN OK files=579 registered_false_positives=2 skipped_bare_identifiers=10 unparsable_python_files=0
-QUALITY CHECK OK files=295 untracked=0

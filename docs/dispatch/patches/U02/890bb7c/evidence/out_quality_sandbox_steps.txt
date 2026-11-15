@@ -1,8 +1,0 @@
-files=265 untracked=0
-rc=0 -m ruff check 
-    All checks passed!
-rc=0 -m py_compile scripts/_js_check.py 
-rc=0 scripts/verify_profile_lock.py 
-rc=0 scripts/verify_dependency_lock.py 
-rc=1 scripts/scan_tracked_secrets.py SECRET SCAN FAIL docs\dispatch\RESUME.md:36 rule=secret-assignment
-

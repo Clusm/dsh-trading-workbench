@@ -1,5 +1,0 @@
-# 失败集合增量对比（comm）
-pristine FAIL 行数: 10
-patched  FAIL 行数: 10
---- NEW_FAIL (patched-only) ---
---- FIXED (pristine-only) ---

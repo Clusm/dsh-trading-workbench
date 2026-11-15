@@ -1,5 +1,0 @@
-scripts pristine=85 patched=85 same_set=True
-nonzero pristine=0 patched=0
-NEW_FAIL=[]
-FIXED=[]
-BOTH_NONZERO=[]

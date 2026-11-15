@@ -1,7 +1,0 @@
-pristine=d52bd68 patched=709e11a
-sets_equal=True
-pristine_total=94 patched_total=94
-pristine_nonzero=0 patched_nonzero=0
-NEW_FAIL=[]
-FIXED=[]
-BOTH_NONZERO=[]

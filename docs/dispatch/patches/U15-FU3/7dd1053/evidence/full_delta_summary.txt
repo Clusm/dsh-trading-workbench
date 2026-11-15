@@ -1,7 +1,0 @@
-scripts=94 pristine_nonzero=0 patched_nonzero=0
-NEW_FAIL: ∅
-FIXED: ∅
-CHANGED: 1
-   ('scripts/smoke_u10a_release_package.py', 0, 0, "备注: 沙箱已跟踪文件 918 个，release_id=rel-cd1f800ab8a593ac9c52；按 KI04 范围豁免未扫描（仓库扫描器登记一致）：['docs/无人值守升级任务清单_2026-09-19.json']", "备注: 沙箱已跟踪文件 918 个，release_id=rel-ae04b32cc4af3c7d37ee；按 KI04 范围豁免未扫描（仓库扫描器登记一致）：['docs/无人值守升级任务清单_2026-09-19.json']")
-TAIL_DIFF_ONLY (same rc, different last line):
-   scripts/smoke_u10a_release_package.py: "备注: 沙箱已跟踪文件 918 个，release_id=rel-cd1f800ab8a593ac9c52；按 KI04 范围豁免未扫描（仓库扫描器登记一致）：['docs/无人值守升级任务清单_2026-09-19.json']" -> "备注: 沙箱已跟踪文件 918 个，release_id=rel-ae04b32cc4af3c7d37ee；按 KI04 范围豁免未扫描（仓库扫描器登记一致）：['docs/无人值守升级任务清单_2026-09-19.json']"

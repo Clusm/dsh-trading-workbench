@@ -1,9 +1,0 @@
-### PRISTINE 1d737b5
-REPO=C:\Users\Tao\AppData\Local\Temp\pristine
-intact_lock_bundle=REJECTED RuntimeError
-corrupt_lock_bundle=REJECTED RuntimeError
-  chained_cause=LockUnreadableError: 单实例锁文件存在但无法解析，拒绝启动（读不出持有者 PID，不能确认它是否已死亡）：C:\Users\Tao\AppData\Local\Temp\fu5-crb-_glbkazu\proj\data\trading_service.lock
-  actionable=True
-published_bundles=[]
-writer_still_alive=True
-exit=0
