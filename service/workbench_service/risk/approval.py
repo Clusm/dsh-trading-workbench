@@ -151,6 +151,8 @@ class ApprovalManager:
             or (self._authorization.rules_version if self._authorization else None),
             "evidence": context.get("evidence"),
             "evidence_age_ms": context.get("evidence_age_ms"),
+            "strategy_context": context.get("strategy_context"),
+            "strategy_mode_revision": context.get("strategy_mode_revision"),
             "plan_hash": plan_hash,
             "plan": plan.normalized_dict(),
             "approved_qty": dec_text(verdict.approved_qty),

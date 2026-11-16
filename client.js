@@ -28,7 +28,7 @@
  */
 
 window.__ModuleLoader__.load({
-  id: '@local/dsh-trading-workbench',
+  id: 'dsh-trading-workbench',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -39,6 +39,7 @@ window.__ModuleLoader__.load({
     const STATE_URL = `${API}/state`
     const HEALTH_URL = `${API}/health`
     const PRICES_URL = `${API}/market/prices`
+    const MARKS_URL = `${API}/market/marks`
     const ENVELOPE_URL = `${API}/risk/envelope`
     const ROUNDS_URL = `${API}/rounds`
     // 16 §1: first-run bootstrap (readiness + one setup job).
@@ -53,6 +54,7 @@ window.__ModuleLoader__.load({
     // then fall back to the normal cadence.
     const POLL_RETRY_MS = 800
     const MARKET_POLL_MS = 8000
+    const MARK_QUOTE_POLL_MS = 2000
     const ENVELOPE_POLL_MS = 30000
     const POLL_RUNNING_MS = 3000
     const HEALTH_MS = 30000
@@ -85,6 +87,10 @@ window.__ModuleLoader__.load({
     const TEXT = {
       'ops.title': ['操作历史', 'Operation history'],
       'ops.refresh': ['刷新历史', 'Refresh history'],
+      'quote.history': ['历史快照', 'Historical snapshot'],
+      'quote.live': ['实时标记价', 'Live mark'],
+      'quote.account': ['账户快照', 'Account snapshot'],
+      'quote.accountStale': ['账户数据过期，持仓及保护待确认', 'Account data stale; position and protection unconfirmed'],
       'ops.scope': ['最近 100 条本地审计记录；旧版本操作不补造。待确认不代表未执行，请先核对回执与持仓。', 'Latest 100 local audit records; no fabricated older history. Pending does not mean unexecuted; check receipts and positions.'],
       'ops.empty': ['暂无操作记录', 'No operation records'],
       'ops.failedLoad': ['操作历史暂不可用', 'Operation history unavailable'],
@@ -2725,11 +2731,25 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function resolvePositions(state) {
+    function serviceScope(state) {
+      return [state?.service?.base_url, state?.service?.ledger_id, state?.venue ?? 'demo'].join('|')
+    }
+
+    function resolvePositions(state, quotes = null, now = Date.now()) {
+      const exchange = state?.portfolio?.exchange
+      const accountAt = exchange?.last_success_at ?? state?.portfolio?.fetched_at
+      const accountAge = ageFrom(accountAt, now)
+      const accountStale = exchange?.stale === true || exchange?.reachable === false || accountAge === null || accountAge > 30000
       const rows = (Array.isArray(state?.positions) ? state.positions : []).map((raw, index) => {
         const protection = protectionOf(raw)
         const side = String(raw?.side ?? raw?.position_side ?? '').toLowerCase()
-        const mark = num(raw?.mark)
+        const quote = quotes?.[raw?.symbol]
+        const quoteAt = num(quote?.as_of_ms)
+        const quoteAge = quoteAt === null ? null : Math.max(0, now - quoteAt)
+        const accountStamp = accountAt ? Date.parse(accountAt) : NaN
+        const useQuote = num(quote?.mark) > 0 && quoteAt !== null && quoteAt <= now + 5000 && (!Number.isFinite(accountStamp) || quoteAt >= accountStamp)
+        const freshQuote = quote?.stale === false && quoteAge !== null && quoteAge <= 5000 && num(quote?.mark) > 0
+        const mark = useQuote ? num(quote.mark) : num(raw?.mark)
         const entry = num(raw?.entry)
         const liq = num(raw?.liq_price)
         const sl = num(raw?.sl)
@@ -2746,6 +2766,10 @@ window.__ModuleLoader__.load({
           qty: raw?.qty ?? null,
           entry,
           mark,
+          quoteAge: useQuote ? quoteAge : accountAge,
+          quoteStale: !useQuote || !freshQuote,
+          accountStale,
+          accountAge,
           upnl: num(raw?.upnl),
           sl,
           tp,
@@ -2760,7 +2784,7 @@ window.__ModuleLoader__.load({
           raw,
         }
       })
-      return { rows, reason: emptyReason(state, 'positions') }
+      return { rows, reason: emptyReason(state, 'positions'), stale: accountStale, accountAge }
     }
 
     function resolveOrders(state) {
@@ -3365,12 +3389,13 @@ window.__ModuleLoader__.load({
           row.margin === null ? '—' : fmtNum(row.margin, 1), row.leverage ? ` · ${row.leverage}×` : '')),
       h('td', { className: 'b-num-cell' },
         h('div', { className: 'b-cell-main b-num' }, fmtNum(row.mark, 2)),
+        h('div', { className: 'b-cell-sub' }, row.quoteStale ? t('quote.history') : t('quote.live'), ' · ', row.quoteAge === null ? '—' : fmtAge(row.quoteAge)),
         h('div', { className: 'b-cell-sub' }, row.entry === null ? '—' : `入 ${fmtNum(row.entry, 2)}`)),
       h('td', { className: 'b-num-cell' },
         h('div', { className: 'b-cell-main' }, h(Num, { value: row.upnl })),
-        h('div', { className: 'b-cell-sub' }, '—')),
+        h('div', { className: 'b-cell-sub' }, row.accountStale ? t('quote.history') : t('quote.account'), ' · ', row.accountAge === null ? '—' : fmtAge(row.accountAge))),
       h('td', null,
-        h('div', { className: 'b-cell-main' }, h(Protection, { protection: row.protection })),
+        h('div', { className: 'b-cell-main' }, row.accountStale ? h('span', { className: 'twb-hint' }, t('quote.history'), ' · ') : null, h(Protection, { protection: row.protection })),
         h('div', { className: 'b-cell-sub' }, `${t('positions.stop')} ${row.stopDist === null ? t('common.notProvided') : `${row.stopDist.toFixed(1)}%`}`)),
       h('td', null,
         h('div', { className: 'b-cell-main b-num' }, row.liqDist === null ? t('positions.unknownLiq') : `${row.liqDist.toFixed(1)}%`),
@@ -3391,6 +3416,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'twb-card-head' },
           h('span', { className: 'twb-sec-num' }, '02'),
           h('span', { className: 'twb-card-title' }, t('positions.title')),
+          model.positions.stale ? h('span', { role: 'status', className: 'twb-hint twb-warn' }, t('quote.accountStale')) : null,
           h('span', { className: 'twb-chip twb-chip--quiet' }, String(rows.length)),
           h('span', { className: 'twb-hint' }, fmt(zh('positions.snapshot'), { age: model.positions.age === null ? '—' : fmtAge(model.positions.age) }))),
         h('div', { className: 'twb-table-wrap' },
@@ -4099,6 +4125,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'twb-concl-sub' },
             `${t('concl.reason')}: ${reason.label} · ${t('concl.evidence')}: ${model.freshness.age === null ? t('concl.notProvided') : fmt(zh('drawer.ageNote'), { n: Math.round(model.freshness.age / 1000) })}`),
           running ? null : h(ReasonDetailLines, { reason, t, className: 'twb-concl-details' }),
+          round.strategy ? h('div', { className: 'twb-hint' }, `${round.strategy.name} · v${round.strategy.version} · ${round.strategy_selection_reason ?? ''}`) : null,
           h('div', { className: 'twb-concl-actions', style: { marginTop: 8 } },
             h('button', { type: 'button', className: 'twb-btn twb-btn--secondary', onClick: () => onEvidence('round', round) }, t('concl.evidenceBtn')))),
         h(AttributionCard, { round, t }),
@@ -6240,6 +6267,103 @@ window.__ModuleLoader__.load({
             : h('ul', { className: 'twb-settings-list' }, (model.gaps ?? []).map((gap, index) => h('li', { key: `gap-${index}` }, String(gap))))))
     }
 
+    function StrategiesPanel({ lang }) {
+      const text = (zh, en) => lang === 'en' ? en : zh
+      const base = `${API}/strategies`
+      const [nonce, setNonce] = React.useState(0)
+      const listing = useJson(base, nonce, true)
+      const configuration = useJson(`${base}/config`, nonce, true)
+      const [selected, setSelected] = React.useState(null)
+      const [name, setName] = React.useState('')
+      const [source, setSource] = React.useState('')
+      const [rules, setRules] = React.useState('{}')
+      const [answers, setAnswers] = React.useState({})
+      const [confirmed, setConfirmed] = React.useState(false)
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState(null)
+      const [requestedMode, setRequestedMode] = React.useState('native')
+      const strategy = (listing.data?.strategies ?? []).find(item => item.strategy_id === selected)
+      const draft = strategy?.draft
+      React.useEffect(() => {
+        if (selected && !strategy) return
+        setName(strategy?.name ?? '')
+        setSource(draft?.source_text ?? '')
+        setRules(JSON.stringify(draft?.rules ?? {}, null, 2))
+        setAnswers(draft?.answers ?? {})
+        setConfirmed(false)
+      }, [selected, strategy])
+      React.useEffect(() => { if (configuration.data?.config) setRequestedMode(configuration.data.config.mode) }, [configuration.data])
+      const request = async (suffix, method, body) => {
+        const response = await fetch(base + suffix, { method, credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+        const result = await response.json()
+        if (!response.ok || result.ok === false) throw new Error(result.error?.message ?? result.error?.code ?? `HTTP_${response.status}`)
+        return result
+      }
+      const act = async (fn) => {
+        if (busy) return
+        setBusy(true); setError(null)
+        try { await fn(); setConfirmed(false); setNonce(n => n + 1) }
+        catch (e) { setError(e.message) }
+        finally { setBusy(false) }
+      }
+      const save = () => act(async () => {
+        if (!selected) {
+          const result = await request('', 'POST', { name: name.trim() || text('未命名策略', 'Untitled strategy'), source_text: source })
+          setSelected(result.strategy.strategy_id)
+          return
+        }
+        await request(`/${selected}/draft`, 'PUT', { revision: draft.revision, source_text: source, rules: JSON.parse(rules), answers, questions: draft.questions ?? [], suggestions: draft.suggestions ?? [], sources: draft.sources ?? {}, summary: draft.summary ?? '' })
+      })
+      const input = (label, props, type = 'input') => h('label', { className: 'twb-settings-row' }, h('span', null, label), h(type, props))
+      const button = (label, onClick, disabled = false) => h('button', { type: 'button', className: 'twb-btn twb-btn--secondary', disabled: busy || disabled, onClick }, label)
+      const validation = draft?.validation
+      return h(SettingsBlock, { title: text('策略挂载', 'Mounted strategies'), sub: text('确认规则后挂载；启用不代表立即下单，仍受总调度和风控约束。', 'Mount confirmed rules; execution remains subject to scheduling and risk controls.') },
+        listing.error ? h('div', { role: 'alert' }, text('策略读取失败，请确认 Service 已升级', 'Cannot load strategies; check Service version'), button(text('重试', 'Retry'), () => setNonce(n => n + 1))) : null,
+        error ? h('div', { role: 'alert', className: 'twb-modal-note' }, error) : null,
+        h('div', { className: 'twb-hint' }, text('首版自动执行支持实时标记价阈值，周期用于信号去重，不代表K线收盘判断；其他规则可保存完善，不擅自简化后执行。', 'Initial execution supports live mark thresholds; timeframe is a deduplication window, not a candle-close condition. Other rules remain drafts for clarification.')),
+        configuration.data?.config ? h('div', { className: 'twb-settings-row' },
+          h('span', null, text('运行模式', 'Run mode')),
+          h('select', { value: requestedMode, disabled: busy, onChange: e => setRequestedMode(e.target.value) },
+            h('option', { value: 'native' }, text('原生 AI', 'Native AI')),
+            h('option', { value: 'mounted' }, text('已授权策略', 'Authorized strategies'))),
+          button(text('保存模式（下轮生效，总调度保持原状）', 'Save mode (next round; scheduler unchanged)'), () => act(() => request('/config', 'PUT', { mode: requestedMode, revision: configuration.data.config.revision })))) : null,
+        h('div', { className: 'twb-settings-row' },
+          h('select', { 'aria-label': text('选择策略', 'Select strategy'), value: selected ?? '', disabled: busy, onChange: e => setSelected(e.target.value || null) },
+            h('option', { value: '' }, text('新建策略', 'New strategy')),
+            ...(listing.data?.strategies ?? []).map(item => h('option', { key: item.strategy_id, value: item.strategy_id }, `${item.name} · v${item.current_version || 0} · ${item.enabled ? text('已启用', 'Enabled') : item.current_version ? text('已挂载 · 未启用', 'Mounted, disabled') : text('草稿', 'Draft')}`))),
+          button(text('新建', 'New'), () => { setSelected(null); setSource(''); setName(''); setRules('{}'); setAnswers({}) })),
+        input(text('策略名称', 'Name'), { value: name, maxLength: 100, disabled: busy, onChange: e => setName(e.target.value) }),
+        selected ? button(text('仅改名', 'Rename only'), () => act(() => request(`/${selected}`, 'PATCH', { name })), !name.trim()) : null,
+        input(text('策略原文 / 补充说明', 'Original strategy / clarification'), { value: source, maxLength: 20000, rows: 7, disabled: busy, onChange: e => { setSource(e.target.value); setConfirmed(false) } }, 'textarea'),
+        input(text('导入文本（不执行代码）', 'Import text (never executes code)'), { type: 'file', accept: '.txt,.md,text/plain,text/markdown', disabled: busy, onChange: async e => {
+          const file = e.target.files?.[0]
+          if (!file) return
+          if (file.size > 65536) { setError(text('文件超过64KB', 'File exceeds 64KB')); return }
+          try { const value = await file.text(); if (value.length > 20000) throw new Error(text('文本超过20000字符', 'Text exceeds 20,000 characters')); setSource(value); setConfirmed(false) } catch (e) { setError(e.message) }
+        } }),
+        ...(draft?.questions ?? []).map(q => input(q.question, { key: q.id, value: answers[q.id] ?? '', disabled: busy, onChange: e => { setAnswers(prev => ({ ...prev, [q.id]: e.target.value })); setConfirmed(false) } })),
+        button(text(selected ? '保存原文与回答' : '创建草稿', selected ? 'Save text and answers' : 'Create draft'), save, !source.trim()),
+        selected ? button(text('AI 理解 / 继续澄清', 'AI analysis / clarify'), () => act(async () => {
+          // Persist the exact current revision before starting analysis.
+          const saved = await request(`/${selected}/draft`, 'PUT', { revision: draft.revision, source_text: source, rules: JSON.parse(rules), answers, questions: draft.questions ?? [], suggestions: draft.suggestions ?? [], sources: draft.sources ?? {}, summary: draft.summary ?? '' })
+          setNonce(n => n + 1)
+          await request(`/${selected}/analyze`, 'POST', { revision: saved.strategy.draft.revision })
+        }), !source.trim()) : null,
+        draft ? h('div', null,
+          h('p', null, draft.summary || text('尚未分析', 'Not analyzed')),
+          ...(draft.suggestions ?? []).map((item, index) => h('p', { key: index, className: 'twb-hint' }, text('AI 建议：', 'AI suggestion: '), typeof item === 'string' ? item : JSON.stringify(item))),
+          h('details', null, h('summary', null, text('结构化规则与来源（可核对/修正）', 'Structured rules and provenance')),
+            h('textarea', { rows: 10, value: rules, disabled: busy, onChange: e => { setRules(e.target.value); setConfirmed(false) }, 'aria-label': text('结构化策略规则', 'Structured strategy rules') }),
+            h('pre', null, JSON.stringify(draft.sources ?? {}, null, 2))),
+          h('div', { className: 'twb-hint' }, [...(validation?.issues ?? []), ...(validation?.unsupported ?? [])].join('；')),
+          h('label', null, h('input', { type: 'checkbox', checked: confirmed, disabled: busy, onChange: e => setConfirmed(e.target.checked) }), text('我已核对原文、规则和 AI 建议；按已保存草稿确认挂载', 'I reviewed the original, rules and AI suggestions; mount the saved draft')),
+          button(text('确认挂载（不自动启用）', 'Confirm mount (not enable)'), () => act(() => request(`/${selected}/mount`, 'POST', { revision: draft.revision, content_hash: draft.content_hash, request_id: `mount:${selected}:${draft.revision}:${draft.content_hash}`, confirmed: true })), !confirmed || !validation?.valid || source !== draft.source_text || rules !== JSON.stringify(draft.rules ?? {}, null, 2) || JSON.stringify(answers) !== JSON.stringify(draft.answers ?? {}))) : null,
+        strategy?.current_version ? h('div', null,
+          h('p', null, text('当前已确认版本：', 'Confirmed version: '), `v${strategy.current_version} · ${strategy.confirmed_version?.content_hash ?? ''}`),
+          button(strategy.enabled ? text('停用新开仓（保留已有仓位管理）', 'Disable new entries (keep position management)') : text('启用已确认版本', 'Enable confirmed version'), () => act(() => request(`/${selected}/authorization`, 'POST', { generation: strategy.generation, enabled: !strategy.enabled })), !strategy.enabled && !strategy.confirmed_version?.validation?.execution_ready)) : null,
+        busy ? h('div', { role: 'status' }, text('处理中…', 'Working…')) : null)
+    }
+
     function SettingsBody({ model, t, group, onOpenSystem, lang, onLanguage, appearance, onAppearance, density, onDensity }) {
       const active = SETTINGS_GROUPS.includes(group) ? group : 'connection'
       // The fund calibers are read only while the account/diagnostics groups are
@@ -6263,6 +6387,7 @@ window.__ModuleLoader__.load({
       if (active === 'trading') return h(TradingGroup, { model, t })
       if (active === 'automation') {
         return h(React.Fragment, null,
+          h(StrategiesPanel, { lang }),
           h(AutomationPanel, { model, t }),
           h(SchedulePanel, { model, t }),
           h(TriggersBlock, { model, t }),
@@ -6665,6 +6790,64 @@ window.__ModuleLoader__.load({
       return result
     }
 
+    // Independent single-flight display quotes; account polling never resets this loop.
+    function useMarkQuotes(url) {
+      const [result, setResult] = React.useState({ key: null, data: null, error: null })
+      React.useEffect(() => {
+        let disposed = false, inFlight = false, timer = null, controller = null, failures = 0
+        const hidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden'
+        const scheduleNext = (delay) => {
+          clearTimeout(timer)
+          if (!disposed && !hidden()) timer = setTimeout(load, delay)
+        }
+        const load = async () => {
+          if (disposed || inFlight || hidden() || !url) return
+          inFlight = true
+          controller = new AbortController()
+          const timeout = setTimeout(() => controller.abort(), 6000)
+          let delay = MARK_QUOTE_POLL_MS
+          try {
+            const response = await fetch(url, { credentials: 'same-origin', signal: controller.signal, headers: { accept: 'application/json' } })
+            const body = await response.json()
+            if (!response.ok) {
+              const retry = Number(response.headers?.get?.('retry-after'))
+              if (Number.isFinite(retry) && retry > 0) delay = Math.max(delay, retry * 1000)
+              throw new Error(body?.error?.code ?? `HTTP_${response.status}`)
+            }
+            failures = 0
+            if (!disposed) setResult((prev) => {
+              const prices = { ...(body.prices ?? {}) }
+              for (const [symbol, quote] of Object.entries(prices)) {
+                const old = prev.key === url ? prev.data?.prices?.[symbol] : null
+                if (old?.as_of_ms && quote?.as_of_ms && quote.as_of_ms < old.as_of_ms) {
+                  prices[symbol] = { ...old, stale: true, error: 'OUT_OF_ORDER' }
+                }
+              }
+              return { key: url, data: { ...body, prices }, error: null }
+            })
+          } catch (error) {
+            failures++
+            delay = Math.max(delay, Math.min(30000, MARK_QUOTE_POLL_MS * 2 ** Math.min(failures, 4)))
+            if (!disposed) setResult((prev) => ({ key: url, data: prev.key === url ? prev.data : null, error: error.message }))
+          } finally {
+            clearTimeout(timeout)
+            inFlight = false
+            scheduleNext(delay)
+          }
+        }
+        const visibility = () => { clearTimeout(timer); if (!hidden()) load() }
+        if (typeof document !== 'undefined') document.addEventListener?.('visibilitychange', visibility)
+        load()
+        return () => {
+          disposed = true
+          clearTimeout(timer)
+          controller?.abort()
+          if (typeof document !== 'undefined') document.removeEventListener?.('visibilitychange', visibility)
+        }
+      }, [url])
+      return result.key === url ? result : { data: null, error: null }
+    }
+
     // ---- B+ editorial cockpit ------------------------------------------------
     function BSectionHead({ num, title, en, meta }) {
       return h('div', { className: 'twb-sec-head' },
@@ -6948,6 +7131,14 @@ window.__ModuleLoader__.load({
         `${marketNonce}#${marketSymbol}`,
         true,
       )
+      const markSymbols = [...new Set((stateData?.positions ?? []).map((row) => row.symbol).filter(Boolean))].sort().slice(0, 10)
+      const markScope = `${serviceScope(stateData)}:${markSymbols.join(',')}`
+      const markPoll = useMarkQuotes(markSymbols.length ? `${MARKS_URL}?symbols=${encodeURIComponent(markSymbols.join(','))}&scope=${encodeURIComponent(markScope)}` : null)
+      const [, setQuoteClock] = React.useState(0)
+      React.useEffect(() => {
+        const timer = setInterval(() => { if (typeof document === 'undefined' || document.visibilityState !== 'hidden') setQuoteClock((n) => n + 1) }, 1000)
+        return () => clearInterval(timer)
+      }, [])
       const envelopePoll = useJson(ENVELOPE_URL, envelopeNonce, true)
       const roundDetail = useJson(
         selectedRoundId ? `${ROUNDS_URL}/${encodeURIComponent(selectedRoundId)}` : '',
@@ -7032,7 +7223,7 @@ window.__ModuleLoader__.load({
         if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return undefined
         const timer = setTimeout(() => setMarketNonce((value) => value + 1), MARKET_POLL_MS)
         return () => clearTimeout(timer)
-      }, [marketNonce, marketPoll.data, stateData])
+      }, [marketNonce, marketPoll.data])
 
       // current risk envelope: 30s
       React.useEffect(() => {
@@ -7129,8 +7320,9 @@ window.__ModuleLoader__.load({
       const marketAge = marketAsOf !== null ? Math.max(0, now - marketAsOf) : num(marketQuote?.age_ms)
       const equity = resolveEquity(stateData)
       const account = resolveAccount(stateData, equity)
-      const positions = resolvePositions(stateData)
-      positions.age = ageFrom(stateData?.portfolio?.fetched_at, now)
+      const positionQuotes = markPoll.error ? Object.fromEntries(Object.entries(markPoll.data?.prices ?? {}).map(([symbol, quote]) => [symbol, { ...quote, stale: true }])) : markPoll.data?.prices
+      const positions = resolvePositions(stateData, positionQuotes, now)
+      positions.age = positions.accountAge
       const orders = resolveOrders(stateData)
       const fills = resolveFills(stateData)
       const reviews = resolveReviews(stateData)

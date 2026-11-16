@@ -25,6 +25,9 @@ from typing import Any
 
 from ..config import Settings
 from ..errors import ServiceError
+from ..strategies import StrategyStore
+from ..strategies.locking import execution_guard
+from ..strategies.execution import validate_entry, reserve_signal, record_result, restore_position_metadata
 from ..ledger.numbers import dec_text, to_decimal
 from ..ledger.store import Ledger, bucket_iso, utc_now
 from ..risk.approval import ApprovalError, ApprovalManager
@@ -59,7 +62,8 @@ def _serialized(method):
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
         with self._exec_lock:
-            return method(self, *args, **kwargs)
+            with execution_guard(self.ledger.path):
+                return method(self, *args, **kwargs)
 
     return wrapper
 
@@ -110,6 +114,7 @@ class ExecutionService:
         self.credentials = credentials
         self._clock = clock
         self.leases = ExecutionLeaseStore(ledger, clock=self._clock)
+        self.strategies = StrategyStore(ledger.path)
         self._started = False
         self._start_lock = threading.Lock()
         # A01: one account-level mutation boundary for submit/close/repair/control.
@@ -445,6 +450,7 @@ class ExecutionService:
 
         if self.broker is None:
             return
+        restore_position_metadata(self.strategies)
         hours = float(getattr(self.settings, "auto_time_stop_hours", 0) or 0)
         now = datetime.fromtimestamp(self._clock(), tz=timezone.utc)
         for row in self.ledger.list_positions():
@@ -456,6 +462,8 @@ class ExecutionService:
                 continue
             deadline = _parse_dt(row.get("deadline_at"))
             if deadline is None:
+                if ";strategy:" in str(row.get("time_stop_source") or ""):
+                    continue  # Confirmed strategy explicitly has no time stop.
                 if hours <= 0:
                     continue
                 opened = _parse_dt(row.get("opened_at"))
@@ -1361,6 +1369,7 @@ class ExecutionService:
         revoked = self.leases.revoke_run(str(payload.get("run_id") or ""), "stale_run")
         return {"ok": True, "revoked": revoked}
 
+    @_serialized
     def evaluate(self, payload: dict[str, Any], *, trace_id: str | None = None) -> dict[str, Any]:
         self._assert_lease(payload.get("lease_id"))
         cycle_id = str(payload.get("cycle_id") or f"m{uuid.uuid4().hex[:8]}")
@@ -1392,6 +1401,9 @@ class ExecutionService:
             symbol=plan.symbol,
             leverage=plan.leverage,
         )
+        plan, strategy_context = validate_entry(self.strategies, payload.get("strategy_context"), plan, market_facts, now_ms=int(self._clock() * 1000), compile_plan=True)
+        if strategy_context and snapshot and snapshot.positions:
+            raise ServiceError(409, "E_STRATEGY_POSITION_LIMIT", "已有仓位，不能新增策略开仓")
         filters = self._filters_view(plan.symbol)
         verdict, approval = self.risk.evaluate(
             plan,
@@ -1403,6 +1415,8 @@ class ExecutionService:
                 "evidence": evidence,
                 "evidence_age_ms": evidence_age_ms,
                 "rules_version": self.risk.rules_version(),
+                "strategy_context": strategy_context,
+                "strategy_mode_revision": self.strategies.config()["revision"],
             },
         )
         if not verdict.approved:
@@ -1484,6 +1498,9 @@ class ExecutionService:
         except ApprovalError as exc:
             raise ServiceError(exc.status_code, exc.code, exc.message, details=exc.details) from exc
         approved_qty = to_decimal(approval_payload.get("approved_qty"), Decimal("0")) or Decimal("0")
+        strategy_context = approval_payload.get("strategy_context")
+        if payload.get("strategy_context") != strategy_context:
+            raise ServiceError(409, "E_STRATEGY_PLAN_MISMATCH", "P2 策略上下文与批准不一致")
 
         # T20：规则版本校验必须**两侧都成立**。旧写法 `if expected_rules and ...` 在
         # 令牌未携带 rules_version 时直接短路跳过——只要绕过 risk 侧（或将来新增入口）
@@ -1575,7 +1592,11 @@ class ExecutionService:
         self._assert_lease(lease_id)
 
 
-        time_stop = self._time_stop_request(plan)
+        plan, strategy_context = validate_entry(self.strategies, strategy_context, plan, refresh.get("market", {}), now_ms=int(self._clock() * 1000), expected_mode_revision=approval_payload.get("strategy_mode_revision"))
+        if strategy_context and snapshot and snapshot.positions:
+            raise ServiceError(409, "E_STRATEGY_POSITION_LIMIT", "已有仓位，不能新增策略开仓")
+        time_stop = self._time_stop_request(plan, strategy_context=strategy_context)
+        reserve_signal(self.strategies, strategy_context, plan, time_stop=time_stop)
         try:
             result = self.broker.open_market(
                 plan,
@@ -1584,6 +1605,7 @@ class ExecutionService:
                 trace_id=trace_id,
                 time_stop=time_stop,
             )
+            record_result(self.strategies, strategy_context, plan, result)
         except OutboxUncertain as exc:
             raise ServiceError(
                 202,
@@ -2009,11 +2031,14 @@ class ExecutionService:
             "market": market,
         }
 
-    def _time_stop_request(self, plan: OrderPlan) -> dict[str, Any] | None:
+    def _time_stop_request(self, plan: OrderPlan, *, strategy_context=None) -> dict[str, Any] | None:
         """建仓时确定 time_stop 期限与来源计划版本（随仓位持久化）。"""
 
         hours = float(getattr(self.settings, "auto_time_stop_hours", 0) or 0)
-        if hours <= 0:
+        if strategy_context:
+            version = self.strategies.version(strategy_context["strategy_id"], strategy_context["version"])
+            hours = float(version["rules"]["exit"].get("time_stop_hours", 0))
+        if hours <= 0 and not strategy_context:
             return None
         opened = datetime.fromtimestamp(self._clock(), tz=timezone.utc)
         deadline = opened + timedelta(hours=hours)
@@ -2021,9 +2046,11 @@ class ExecutionService:
             f"plan:{plan.cycle_id or 'unknown'};"
             f"rules:{self.risk.rules_version()};hours:{hours}"
         )
+        if strategy_context:
+            source += f";strategy:{strategy_context['strategy_id']};version:{strategy_context['version']}"
         return {
             "opened_at": _iso_utc(opened),
-            "deadline_at": _iso_utc(deadline),
+            "deadline_at": _iso_utc(deadline) if hours > 0 else None,
             "source": source,
             "hours": hours,
         }

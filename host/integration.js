@@ -43,6 +43,7 @@ import { createSessionLlm, SESSION_LLM_SCRIPTS, SESSION_LLM_TRANSPORT } from './
 import { ROLE_LABELS, toRoundSummary, toRoundView } from './round-view.js'
 import { RoundArchive, archiveDay, parseRoundDate } from './round-archive.js'
 import { createServiceSetup } from './service-setup.js'
+import { StrategyAssistant, eligibleStrategies } from './strategies.js'
 import { currentBuild, setLoadedConfigRevision } from './build.js'
 import {
   LLM_CONFIG_FILE,
@@ -78,6 +79,8 @@ export const ROUNDS_PATH = `${API_PREFIX}/rounds`
 /** 15 §4: the archived days the date picker may offer (newest first). */
 export const ROUNDS_DATES_PATH = `${ROUNDS_PATH}/dates`
 export const MARKET_PRICES_PATH = `${API_PREFIX}/market/prices`
+export const MARKET_MARKS_PATH = `${API_PREFIX}/market/marks`
+export const STRATEGIES_PATH = `${API_PREFIX}/strategies`
 export const RISK_ENVELOPE_PATH = `${API_PREFIX}/risk/envelope`
 export const CLOSE_PATH = `${API_PREFIX}/positions/close`
 export const REPAIR_PATH = `${API_PREFIX}/protection/repair`
@@ -1302,6 +1305,7 @@ export class WorkbenchHostIntegration {
       ? createSessionLlm({ script: this.llmScript })
       : null
     this.llm = llm ?? this.sessionLlm?.llm ?? ctx?.llm ?? null
+    this.strategyAssistant = new StrategyAssistant({ llm: this.llm, route: route ?? (ctx ? resolveHarnessRoute(ctx) : null) })
     this.route = route ?? (this.llmMode === 'session_fixture'
       ? { provider: 'session', model: 'in-conversation', source: SESSION_LLM_TRANSPORT }
       : (ctx ? resolveHarnessRoute(ctx) : null))
@@ -3487,6 +3491,8 @@ export class WorkbenchHostIntegration {
     let cycleCreated = false
     let cycleResponse = null
     let leaseId = null
+    let strategyContext = null
+    let selectedStrategy = null
     try {
       const leaseTtlS = Math.max(120, Math.ceil((Number(this.runTimeoutMs) + 60_000) / 1000))
       const lease = await client.acquireLease({ run_id: roundId, owner: 'host', ttl_s: leaseTtlS })
@@ -3507,7 +3513,35 @@ export class WorkbenchHostIntegration {
         credentialsConfigured: this.lastCredentialsConfigured,
         llmMode: this.llmMode,
       }))
-      const primarySymbol = symbol || DEFAULT_SYMBOL
+      let primarySymbol = symbol || DEFAULT_SYMBOL
+      if (snapshot.ready?.capabilities?.strategies === true) {
+        const { config: strategyConfig } = await client.strategy('/config')
+        if (!['native', 'mounted'].includes(strategyConfig?.mode)) throw new HostIntegrationError('E_STRATEGY_MODE', '策略运行模式不可确认', { status: 409 })
+        if (strategyConfig.mode === 'mounted') {
+          const { strategies } = await client.strategy('/authorized')
+          const symbols = [...new Set((strategies ?? []).flatMap(s => s.confirmed_version?.rules?.symbols ?? []))].slice(0, 10)
+          const quotes = symbols.length ? await client.marks(symbols) : { prices: {} }
+          const eligible = eligibleStrategies(strategies ?? [], quotes.prices, this.now())
+          const choice = await this.strategyAssistant.choose(eligible, { prices: quotes.prices })
+          selectedStrategy = choice.strategy
+          record.strategy_selection_reason = choice.reason
+          if (!selectedStrategy) {
+            record.status = 'no_trade'; record.outcome = 'no_trade'; record.reasonCode = 'NO_ELIGIBLE_STRATEGY'
+            record.headline = '无交易：没有满足条件的已授权策略'
+            record.finishedAt = nowIso(this.now()); record.durationMs = this.now() - started
+            this.lastRunAt = record.finishedAt; this.store.upsert(record)
+            return { ok: true, round: roundViewOf(record) }
+          }
+          const rule = selectedStrategy.confirmed_version.rules
+          primarySymbol = rule.symbols.find(s => eligibleStrategies([selectedStrategy], { [s]: quotes.prices[s] }, this.now()).length) ?? rule.symbols[0]
+          const ms = { '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 }[rule.timeframes[0]]
+          strategyContext = { strategy_id: selectedStrategy.strategy_id, version: selectedStrategy.current_version,
+            generation: selectedStrategy.generation, mode_revision: strategyConfig.revision,
+            signal_key: `${rule.timeframes[0]}:${Math.floor(this.now()/ms)}` }
+          record.strategy = { ...strategyContext, name: selectedStrategy.name, rules: rule }
+          record.symbol = primarySymbol
+        }
+      }
       try {
         let cycle
         try {
@@ -3676,7 +3710,7 @@ export class WorkbenchHostIntegration {
           this.setInFlightStage('p1', 'P1 风控闸门')
           try {
             const plan = planForService(execution, activeCycleId)
-            const response = await client.evaluatePlan(plan, activeCycleId, leaseId)
+            const response = await client.evaluatePlan(plan, activeCycleId, leaseId, strategyContext)
             p1Raw = response
             const mapped = p1ResultFromService(response)
             p1Token = mapped.token
@@ -3770,6 +3804,7 @@ export class WorkbenchHostIntegration {
               cycle_id: activeCycleId,
               plan: p1Plan,
               lease_id: leaseId,
+              ...(strategyContext ? { strategy_context: strategyContext } : {}),
             })
             return p2ResultFromService(response)
           } catch (error) {
@@ -3812,6 +3847,7 @@ export class WorkbenchHostIntegration {
         equity: executionAccountContext({ cycleResponse, snapshot }).equity,
         config: {
           ...(this.config ?? {}),
+          strategy: selectedStrategy ? record.strategy : null,
           now: this.now,
           roleMaxTokens: {
             ...ROLE_MAX_TOKENS,
@@ -4250,6 +4286,30 @@ export class WorkbenchHostIntegration {
     }
 
     try {
+      if (pathname === STRATEGIES_PATH || pathname.startsWith(`${STRATEGIES_PATH}/`)) {
+        if (!isSameOriginRequest(req, this.ctx)) return sendJson(res, 403, { ok: false, error: { code: 'CROSS_ORIGIN_BLOCKED' } })
+        const suffix = pathname.slice(STRATEGIES_PATH.length)
+        const allowed = /^(?:\/(?:config|authorized)|\/[a-zA-Z0-9_-]+(?:\/(?:draft|mount|authorization|analyze|versions\/\d+))?)?$/.test(suffix)
+        if (!allowed) return sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND' } })
+        if (!['GET', 'POST', 'PUT', 'PATCH'].includes(req.method)) return methodNotAllowed(res, ['GET', 'POST', 'PUT', 'PATCH'])
+        let body
+        if (req.method !== 'GET') {
+          requireJsonRequest(req)
+          body = await readJsonBody(req, 100000)
+        }
+        if (suffix.endsWith('/analyze')) {
+          if (req.method !== 'POST') return methodNotAllowed(res, ['POST'])
+          const id = suffix.split('/')[1]
+          try {
+            const result = await this.callService(client => this.strategyAssistant.analyze(client, id, body.revision))
+            return sendJson(res, 200, { ...result, ok: true })
+          } catch (error) {
+            return sendJson(res, error.status ?? 502, { ok: false, error: { code: error.code ?? 'E_STRATEGY_ANALYSIS', message: error.message } })
+          }
+        }
+        const result = await this.callService(client => client.strategy(suffix, { method: req.method, body }))
+        return sendJson(res, 200, { ...result, ok: true })
+      }
       if (pathname === RUN_PATH) {
         if (req.method !== 'POST') return methodNotAllowed(res, ['POST'])
         if (!isSameOriginRequest(req, this.ctx)) {
@@ -4316,6 +4376,13 @@ export class WorkbenchHostIntegration {
         }
         sendJson(res, 200, hit)
         return
+      }
+      if (pathname === MARKET_MARKS_PATH) {
+        if (req.method !== 'GET') return methodNotAllowed(res, ['GET'])
+        if (!isSameOriginRequest(req, this.ctx)) return sendJson(res, 403, { ok: false, error: { code: 'CROSS_ORIGIN_BLOCKED' } })
+        const symbols = parsePriceSymbols(requestUrl.searchParams.get('symbols'))
+        const payload = await this.callService((client) => client.marks(symbols))
+        return sendJson(res, 200, { ...payload, ok: true })
       }
       if (pathname === MARKET_PRICES_PATH) {
         if (req.method !== 'GET') return methodNotAllowed(res, ['GET'])
@@ -4615,6 +4682,9 @@ export class WorkbenchHostIntegration {
       { kind: 'exact', path: ROUNDS_PATH, handler: (req, res) => this.handle(req, res) },
       { kind: 'prefix', path: ROUNDS_PATH, handler: (req, res) => this.handle(req, res) },
       { kind: 'exact', path: MARKET_PRICES_PATH, handler: (req, res) => this.handle(req, res) },
+      { kind: 'exact', path: MARKET_MARKS_PATH, handler: (req, res) => this.handle(req, res) },
+      { kind: 'exact', path: STRATEGIES_PATH, handler: (req, res) => this.handle(req, res) },
+      { kind: 'prefix', path: STRATEGIES_PATH, handler: (req, res) => this.handle(req, res) },
       { kind: 'exact', path: RISK_ENVELOPE_PATH, handler: (req, res) => this.handle(req, res) },
       { kind: 'exact', path: CONTROL_PATH, handler: (req, res) => this.handle(req, res) },
       { kind: 'exact', path: AUTOMATION_STOP_PATH, handler: (req, res) => this.handle(req, res) },

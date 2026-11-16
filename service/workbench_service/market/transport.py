@@ -253,6 +253,7 @@ class MarketTransport:
         priority: str = "normal",
         purpose: str = "",
         group: str = "general",
+        timeout_s: float | None = None,
     ) -> Any:
         normalized_weight = max(1, int(weight))
         with self._lock:
@@ -276,7 +277,8 @@ class MarketTransport:
 
         response: httpx.Response | None = None
         try:
-            response = self._client.get(path, params=dict(params or {}))
+            options = {"timeout": max(0.1, float(timeout_s))} if timeout_s is not None else {}
+            response = self._client.get(path, params=dict(params or {}), **options)
         except httpx.TimeoutException as exc:
             self._note_status("timeout")
             raise MarketTimeout(f"upstream timeout on {path}: {type(exc).__name__}") from exc

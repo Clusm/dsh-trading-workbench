@@ -753,6 +753,13 @@ export function toRoundView(record) {
     finishedAt: record?.finishedAt ?? null,
     durationMs: record?.durationMs ?? null,
     symbol: record?.symbol ?? null,
+    strategy: record?.strategy ? {
+      strategy_id: record.strategy.strategy_id,
+      version: record.strategy.version,
+      name: String(record.strategy.name ?? '').slice(0, 100),
+      signal_key: record.strategy.signal_key,
+    } : null,
+    strategy_selection_reason: typeof record?.strategy_selection_reason === 'string' ? record.strategy_selection_reason.slice(0, 300) : null,
     mode: result?.mode ?? (result?.degraded ? 'opening_only' : null),
     debateMode: result?.debateMode ?? null,
     degraded: result?.degraded ?? false,
@@ -810,6 +817,8 @@ export function toRoundSummary(record) {
     finishedAt: view.finishedAt,
     durationMs: view.durationMs,
     symbol: view.symbol,
+    strategy: view.strategy,
+    strategy_selection_reason: view.strategy_selection_reason,
     // T15: the list must be able to say "blocked by the gate" without fetching
     // the full round detail.
     blockedByGate: Boolean(view.gate && view.gate.ok === false),

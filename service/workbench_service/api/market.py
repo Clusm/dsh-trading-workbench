@@ -427,6 +427,25 @@ def market_klines(
         return _market_error_response(request, exc)
 
 
+@router.get("/marks", summary="lightweight display-only mark quotes")
+def market_marks(
+    request: Request,
+    symbols: str = Query(default="BTCUSDT", max_length=300),
+    _auth: None = Depends(require_auth),
+) -> Any:
+    _guard(request)
+    service = _market_service(request)
+    wanted = list(dict.fromkeys(item.strip().upper() for item in symbols.split(",") if item.strip()))
+    if not wanted or len(wanted) > 10 or any(not is_valid_symbol(s) for s in wanted):
+        raise ServiceError(400, "E_INVALID_SYMBOLS", "request 1 to 10 valid symbols")
+    try:
+        return service.mark_snapshot(wanted)
+    except UnknownSymbol as exc:
+        raise ServiceError(400, "E_SYMBOL_NOT_ALLOWED", str(exc)) from exc
+    except MarketUpstreamError as exc:
+        return _market_error_response(request, exc)
+
+
 @router.get("/prices", summary="read-only last/mark/index/spread snapshot")
 def market_prices(
     request: Request,

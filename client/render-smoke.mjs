@@ -630,6 +630,8 @@ function releaseAutomation() {
 let savedConfig = null
 let serverState = makeState()
 let serverHealth = HEALTH
+const strategyRecords = []
+let marksOverride = null
 const requestLog = []
 const timers = []
 let pendingStateResolvers = []
@@ -643,6 +645,40 @@ async function fetchStub(url, options) {
   const target = String(url)
   const path = target.split('?')[0]
   requestLog.push({ url: target, method, body: options?.body ?? null })
+  if (path.includes('/market/marks')) return reply({ ok: true, prices: marksOverride ?? {} })
+  if (path.includes('/strategies')) {
+    const sent = options?.body ? JSON.parse(options.body) : {}
+    const suffix = path.split('/strategies')[1]
+    const wrap = body => reply(JSON.parse(JSON.stringify(body)))
+    if (suffix === '/config') return wrap({ config: { mode: 'native', revision: 0 } })
+    if (!suffix && method === 'GET') return wrap({ strategies: strategyRecords })
+    if (!suffix && method === 'POST') {
+      const item = { strategy_id: 'strategy-ui', name: sent.name, current_version: null, enabled: false, generation: 0,
+        draft: { revision: 1, source_text: sent.source_text, rules: {}, questions: [], answers: {}, suggestions: [], sources: {}, summary: '', content_hash: 'a'.repeat(64), validation: { valid: false, issues: ['缺少规则'], execution_ready: false } } }
+      strategyRecords.push(item); return wrap({ strategy: item })
+    }
+    const item = strategyRecords.find(s => s.strategy_id === suffix.split('/')[1])
+    if (!item) return wrap({ strategies: [] })
+    if (suffix.endsWith('/draft')) {
+      item.draft = { ...item.draft, ...sent, revision: sent.revision + 1 }
+      return wrap({ strategy: item })
+    }
+    if (suffix.endsWith('/analyze')) {
+      item.draft = { ...item.draft, revision: item.draft.revision + 1, summary: '价格阈值示例，来自用户原文',
+        rules: { symbols: ['BTCUSDT'], timeframes: ['15m'], entry: { kind: 'mark_threshold', side: 'long', operator: 'gt', value: 100 }, exit: { stop_loss_pct: 0.02, take_profit_pct: 0.04 }, invalidation: { kind: 'stop_loss' }, position_constraints: { max_positions: 1 }, required_data: ['mark_price'], requires_ai: false },
+        validation: { valid: true, execution_ready: true, issues: [], unsupported: [] } }
+      return wrap({ strategy: item })
+    }
+    if (suffix.endsWith('/mount')) {
+      item.current_version = 1; item.generation++
+      item.confirmed_version = { rules: item.draft.rules, validation: item.draft.validation, content_hash: item.draft.content_hash }
+      return wrap({ strategy: item })
+    }
+    if (suffix.endsWith('/authorization')) { item.enabled = sent.enabled; item.generation++; return wrap({ strategy: item }) }
+    if (method === 'PATCH') { item.name = sent.name; return wrap({ strategy: item }) }
+    return wrap({ strategy: item })
+  }
+
   if (method === 'POST' && target.endsWith('/run')) {
     if (flags.hangRun) {
       return new Promise((resolve, reject) => {
@@ -3397,6 +3433,43 @@ serverState = makeState()
 serverHealth = HEALTH
 flags.setupReady = false
 await render(panel)
+
+// Q: lightweight marks update a position without changing official UPnL.
+runtime.instances.clear()
+serverState = makeState()
+marksOverride = { BTCUSDT: { mark: 69999.12, as_of_ms: Date.now(), stale: false } }
+await render(panel)
+expect('Q01 fresh mark overlays the position while account staleness stays visible',
+  textOf(currentTree).includes('69,999.12') && textOf(currentTree).includes('实时标记价') && textOf(currentTree).includes('历史快照'))
+expect('Q02 marks request carries held symbols on the independent route', requestLog.some(r => r.url.includes('/market/marks?symbols=BTCUSDT')))
+marksOverride = null
+
+// S: exercise real component handlers through draft, AI analysis, mount and enable.
+runtime.instances.clear()
+await render(panel)
+await click('设置')
+await click('自动化')
+const strategySource = findAll(currentTree, n => n.tag === 'textarea' && n.props?.maxLength === 20000)[0]
+expect('S30 strategy editor is in the existing automation group', Boolean(strategySource))
+strategySource.props.onChange({ target: { value: 'BTCUSDT 标记价大于100做多，15m每周期一次，止损2%止盈4%，最多一仓' } })
+await render(panel)
+await click('创建草稿')
+expect('S31 creating a draft does not enable or mount it', strategyRecords.length === 1 && !strategyRecords[0].enabled && !strategyRecords[0].current_version)
+await click('AI 理解 / 继续澄清')
+expect('S32 AI analysis remains a draft and renders the returned rules', textOf(currentTree).includes('价格阈值示例') && !strategyRecords[0].current_version)
+const confirmation = findAll(currentTree, n => n.tag === 'input' && n.props?.type === 'checkbox').find(n => !n.props.disabled)
+confirmation.props.onChange({ target: { checked: true } })
+await render(panel)
+await click('确认挂载（不自动启用）')
+expect('S33 mount is separate from execution authorization', strategyRecords[0].current_version === 1 && !strategyRecords[0].enabled && textOf(currentTree).includes('已挂载 · 未启用'))
+await click('启用已确认版本')
+expect('S34 enabling only posts the explicit strategy authorization', strategyRecords[0].enabled && requestLog.some(r => r.url.endsWith('/strategy-ui/authorization') && JSON.parse(r.body).enabled === true))
+const oldVersion = strategyRecords[0].current_version
+const nameInput = findAll(currentTree, n => n.tag === 'input' && n.props?.maxLength === 100)[0]
+nameInput.props.onChange({ target: { value: '我的阈值策略' } })
+await render(panel)
+await click('仅改名')
+expect('S35 rename preserves version and strategy ID', strategyRecords[0].name === '我的阈值策略' && strategyRecords[0].current_version === oldVersion && strategyRecords[0].strategy_id === 'strategy-ui')
 
 // ---- report --------------------------------------------------------------
 for (const line of notes) console.log(line)

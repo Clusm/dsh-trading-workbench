@@ -2975,3 +2975,51 @@ test('preflight ignores a flat position row', async () => {
   const verdict = await env.integration.preflight()
   assert.equal(verdict.code === 'POSITION_OPEN', false)
 })
+
+function mountedStrategyService({ eligible = true, authorized = true, configFail = false } = {}) {
+  const base = makeFakeService({ credentials: true })
+  const oldFetch = base.fetchImpl
+  const strategy = { strategy_id: 'test-mounted', name: '阈值测试', current_version: 1, generation: 1, enabled: true,
+    confirmed_version: { validation: { execution_ready: true }, rules: { symbols: ['BTCUSDT'], timeframes: ['15m'], entry: { kind: 'mark_threshold', side: 'long', operator: 'gt', value: 68000 }, exit: { stop_loss_pct: 0.02, take_profit_pct: 0.04 } } } }
+  base.fetchImpl = async (url, options = {}) => {
+    const u = new URL(url)
+    if (u.pathname === '/api/ready') return jsonResponse(200, { ready: true, service_ready: true, capabilities: { strategies: true } })
+    if (u.pathname === '/api/strategies/config') return configFail ? jsonResponse(503, { error: { code: 'STRATEGY_CONFIG_DOWN' } }) : jsonResponse(200, { config: { mode: 'mounted', revision: 2 } })
+    if (u.pathname === '/api/strategies/authorized') return jsonResponse(200, { strategies: authorized ? [strategy] : [] })
+    if (u.pathname === '/api/market/marks') return jsonResponse(200, { prices: { BTCUSDT: { mark: eligible ? 68240 : 67000, as_of_ms: NOW, stale: false } } })
+    return oldFetch(url, options)
+  }
+  return base
+}
+
+test('mounted run freezes strategy identity into both P1/P2 and archived view', async () => {
+  const env = makeIntegration({ service: mountedStrategyService() })
+  const result = await env.integration.run()
+  const evaluate = env.service.calls.find(c => c.path === '/api/risk/evaluate')
+  const submit = env.service.calls.find(c => c.path === '/api/execution/order')
+  assert.ok(evaluate, JSON.stringify(result.round))
+  assert.ok(submit, JSON.stringify(result.round))
+  assert.equal(evaluate.body.strategy_context.strategy_id, 'test-mounted')
+  assert.equal(evaluate.body.strategy_context.mode_revision, 2)
+  assert.match(evaluate.body.strategy_context.signal_key, /^15m:\d+$/)
+  assert.deepEqual(submit.body.strategy_context, evaluate.body.strategy_context)
+  assert.equal(result.round.strategy.strategy_id, 'test-mounted')
+  assert.ok(result.round.strategy_selection_reason)
+})
+
+test('mounted mode with no enabled or eligible strategy never falls back to native AI', async () => {
+  for (const options of [{ authorized: false }, { eligible: false }]) {
+    const env = makeIntegration({ service: mountedStrategyService(options) })
+    const result = await env.integration.run()
+    assert.equal(result.round.reasonCode, 'NO_ELIGIBLE_STRATEGY')
+    assert.equal(env.fakeLlm.seen.length, 0)
+    assert.equal(env.service.calls.filter(c => ['/api/risk/evaluate','/api/execution/order'].includes(c.path)).length, 0)
+  }
+})
+
+test('strategy-capable service config failure blocks instead of native fallback', async () => {
+  const env = makeIntegration({ service: mountedStrategyService({ configFail: true }) })
+  await assert.rejects(env.integration.run())
+  assert.equal(env.fakeLlm.seen.length, 0)
+  assert.equal(env.service.calls.filter(c => c.path === '/api/execution/order').length, 0)
+})

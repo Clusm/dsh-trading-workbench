@@ -212,10 +212,19 @@ export class WorkbenchServiceClient {
     return this.request(`/api/market/prices?symbols=${encodeURIComponent(list)}`)
   }
 
-  evaluatePlan(plan, cycleId, leaseId = null) {
+  marks(symbols) {
+    return this.request(`/api/market/marks?symbols=${encodeURIComponent(symbols.join(','))}`)
+  }
+
+  strategy(suffix = '', options = {}) {
+    return this.request(`/api/strategies${suffix}`, options)
+  }
+
+  evaluatePlan(plan, cycleId, leaseId = null, strategyContext = null) {
     const envelope = { plan }
     if (cycleId) envelope.cycle_id = cycleId
     if (leaseId) envelope.lease_id = leaseId
+    if (strategyContext) envelope.strategy_context = strategyContext
     return this.request('/api/risk/evaluate', { method: 'POST', body: envelope })
   }
 

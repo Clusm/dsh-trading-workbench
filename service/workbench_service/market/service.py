@@ -89,6 +89,9 @@ class MarketService:
         self._tickers_at = 0.0
         self._tickers_stale = False
         self._price_cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
+        self._mark_lock = threading.Lock()
+        self._marks: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._mark_retry: dict[str, tuple[float, str]] = {}
         self._health_cache: dict[str, Any] | None = None
         self._health_at = 0.0
         # 全市场异动扫描按小时刷新：数据（24h ticker 全量）已在 tickers 缓存里，
@@ -187,6 +190,62 @@ class MarketService:
             if self._tickers is None:
                 return None
             return round(max(0.0, time.time() - self._tickers_at), 3)
+
+    def mark_snapshot(self, symbols: Iterable[str]) -> dict[str, Any]:
+        """Lightweight display-only quotes; no depth/account/clock queries.
+
+        Per-symbol cache and a separate lock coalesce readers across tabs without
+        blocking the account/analysis cache. Failure never advances evidence time.
+        """
+        wanted = sorted(set(str(symbol).upper() for symbol in symbols))
+        if not wanted or len(wanted) > 10:
+            raise ValueError("request 1 to 10 symbols")
+        if any(symbol not in self.settings.whitelist for symbol in wanted):
+            raise UnknownSymbol("symbol not in whitelist")
+        result = {}
+        with self._mark_lock:
+            deadline = time.monotonic() + 4.0
+            for symbol in wanted:
+                mono = time.monotonic()
+                cached = self._marks.get(symbol)
+                retry = self._mark_retry.get(symbol)
+                if (cached is None or mono - cached[0] >= C.PRICE_TTL_S_CACHE) and not (retry and retry[0] > mono):
+                    try:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0.1:
+                            raise MarketUpstreamError(None, "MARK_BUDGET_EXHAUSTED", "display quote batch budget exhausted")
+                        raw = self.transport.get_json(
+                            "/fapi/v1/premiumIndex", {"symbol": symbol},
+                            weight=C.WEIGHT_PREMIUM, purpose="prices",
+                            timeout_s=min(1.5, remaining),
+                        )
+                        mark = _float(raw.get("markPrice")) if isinstance(raw, dict) else None
+                        as_of = _int(raw.get("time")) if isinstance(raw, dict) else None
+                        if mark is None or mark <= 0:
+                            raise MarketUpstreamError(None, "MARK_INVALID", "invalid mark quote")
+                        received = int(time.time() * 1000)
+                        if as_of is not None and as_of > received + 5000:
+                            raise MarketUpstreamError(None, "MARK_CLOCK_INVALID", "quote timestamp is in the future")
+                        if cached and as_of and cached[1].get("as_of_ms") and as_of < cached[1]["as_of_ms"]:
+                            raise MarketUpstreamError(None, "MARK_OUT_OF_ORDER", "older quote rejected")
+                        self._marks[symbol] = (time.monotonic(), {
+                            "mark": mark, "as_of_ms": as_of,
+                            "received_at_ms": received, "source": "rest:premiumIndex",
+                        })
+                        self._mark_retry.pop(symbol, None)
+                    except MarketUpstreamError as exc:
+                        delay = max(5.0, float(getattr(exc, "retry_after_s", 0) or 0))
+                        self._mark_retry[symbol] = (time.monotonic() + delay, exc.code)
+                cached = self._marks.get(symbol)
+                error = self._mark_retry.get(symbol)
+                quote = dict(cached[1]) if cached else {"mark": None, "as_of_ms": None, "received_at_ms": None, "source": "unavailable"}
+                age = int(time.time() * 1000) - quote["as_of_ms"] if quote.get("as_of_ms") else None
+                quote.update(stale=bool(error) or age is None or age > 5000,
+                             error=error[1] if error else None,
+                             retry_after_s=max(0, error[0] - time.monotonic()) if error else 0)
+                result[symbol] = quote
+        return {"prices": result, "received_at_ms": int(time.time() * 1000),
+                "source_base_url": self.settings.base_url}
 
     # ------------------------------------------------------------------ prices
     def price_snapshot(self, symbols: Iterable[str]) -> dict[str, dict[str, Any]]:

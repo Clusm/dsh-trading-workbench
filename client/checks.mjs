@@ -37,8 +37,10 @@ const LIVE_TOKENS = new Set([
 // M2/M3（2026-11-14）刻意把「实盘」从禁用列表移除：Live 现在是真实能力，
 // 界面必须能如实显示实盘环境（且未知不得冒充 demo）。其余词仍然禁用——
 // 它们代表“用上了但没做到”的过度承诺，与 Live 支持无关。
-const FORBIDDEN_TEXT = ['策略', '通道', '漏斗', '回测']
-const FORBIDDEN_EN = [/\bstrategy\b/i, /\bbacktest\b/i, /\bfunnel\b/i, /\blive trading\b/i, /\breal[- ]money\b/i]
+// Mounted strategies are an explicitly supported surface as of the 2026-11-16 plan.
+// Unimplemented channel/funnel/backtest/live-trading surfaces remain forbidden.
+const FORBIDDEN_TEXT = ['通道', '漏斗', '回测']
+const FORBIDDEN_EN = [/\bbacktest\b/i, /\bfunnel\b/i, /\blive trading\b/i, /\breal[- ]money\b/i]
 
 const SOURCE = readFileSync(CLIENT_PATH, 'utf8')
 const failures = []
@@ -63,7 +65,7 @@ const fakeWindow = {
 // client.js is a classic script; evaluate it with only `window` in scope.
 new Function('window', SOURCE)(fakeWindow)
 
-check('module loader id', spec?.id === '@local/dsh-trading-workbench', String(spec?.id))
+check('module loader id matches distributable package', spec?.id === JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).name, String(spec?.id))
 check('factory exported', typeof spec?.factory === 'function')
 
 const reactStub = {

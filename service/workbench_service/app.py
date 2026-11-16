@@ -40,6 +40,8 @@ from .api import execution as execution_api
 from .api import health as health_api
 from .api import market as market_api
 from .api import risk as risk_api
+from .api import strategies as strategies_api
+from .strategies import StrategyStore
 from .config import SERVICE_NAME, Settings
 from .db import init_db, utc_now_iso
 from .errors import ServiceError
@@ -149,6 +151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db = init_db(settings.data_dir, pid=os.getpid(), version=settings.service_version)
         app.state.db_status = db
         if db.ok:
+            app.state.strategy_store = StrategyStore(settings.db_path)
             logger.info(
                 "db_ready path=%s schema=%s journal=%s boot_count=%s ledger=%s migrations=%s",
                 db.path,
@@ -287,6 +290,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(execution_api.router)
     app.include_router(cycles_api.router)
     app.include_router(ai_audit_api.router)
+    app.include_router(strategies_api.router)
 
     @app.get("/", include_in_schema=False)
     def index() -> dict[str, Any]:

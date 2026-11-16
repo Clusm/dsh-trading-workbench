@@ -1,6 +1,6 @@
 {
   "name": "dsh-trading-workbench",
-  "version": "0.1.1",
+  "version": "0.2.0-dev.1",
   "description": "DeepSeek Harness trading workbench: AI decision chain with a per-day round archive, Demo execution and risk views over a local Python trading service.",
   "type": "module",
   "main": "./index.js",
