@@ -2099,6 +2099,21 @@ window.__ModuleLoader__.load({
 .twb-strategies-page details{margin:16px 0}
 .twb-strategies-page details summary{cursor:pointer;margin-bottom:12px}
 .twb-strategies-page .twb-hint{line-height:1.7;overflow-wrap:anywhere}
+
+.twb-strategy-status{display:inline-flex;align-items:center;gap:7px;padding:4px 9px;border:1px solid var(--twb-b-rule-3);border-radius:4px;font-size:11px;white-space:nowrap;color:var(--twb-ink-2)}
+.twb-strategy-status::before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor}
+.twb-strategy-status[data-state='draft']{color:var(--twb-ink-3)}
+.twb-strategy-status[data-state='enabled']{font-weight:600;border-color:var(--twb-ink-2)}
+.twb-strategies-page label.twb-settings-row>span{font-size:12px;font-weight:500;color:var(--twb-ink-2)}
+.twb-strategies-page textarea{line-height:1.75;min-height:130px}
+.twb-strategies-page textarea[aria-label]{font-family:var(--twb-num);font-size:12px}
+.twb-strategies-page input[type='file']::file-selector-button{border:0;border-right:1px solid var(--twb-b-rule-3);background:transparent;color:inherit;padding:2px 12px 2px 0;margin-right:12px;cursor:pointer}
+.twb-strategies-page :is(input,textarea,select,button,summary):focus-visible{outline:2px solid var(--twb-ink-2);outline-offset:3px}
+.twb-strategies-page :is(input,textarea,select):disabled{opacity:.55;cursor:not-allowed}
+.twb-strategy-review,.twb-strategy-authorization{margin-top:22px;padding-top:18px;border-top:1px solid var(--twb-b-rule-2)}
+.twb-strategy-review>label{display:flex;align-items:flex-start;gap:7px;font-size:12px;line-height:1.7;margin:16px 0 10px}
+.twb-strategy-review>label input{flex-shrink:0;margin-top:4px}
+.twb-strategy-authorization>p{margin:0 0 8px;font-size:12px;color:var(--twb-ink-2)}
 [data-strategies-page][hidden]{display:none!important}
 @media(max-width:760px){.twb-strategies-heading{align-items:flex-start;flex-direction:column}.twb-strategies-page .twb-settings-row>select{width:100%}}
 `
@@ -6353,9 +6368,9 @@ window.__ModuleLoader__.load({
         await request(`/${selected}/draft`, 'PUT', { revision: draft.revision, source_text: source, rules: JSON.parse(rules), answers, questions: draft.questions ?? [], suggestions: draft.suggestions ?? [], sources: draft.sources ?? {}, summary: draft.summary ?? '' })
       })
       const input = (label, props, type = 'input') => h('label', { className: 'twb-settings-row' }, h('span', null, label), h(type, props))
-      const button = (label, onClick, disabled = false) => h('button', { type: 'button', className: 'twb-btn twb-btn--secondary', disabled: busy || disabled, onClick }, label)
+      const button = (label, onClick, disabled = false, tone = 'secondary') => h('button', { type: 'button', className: `twb-btn twb-btn--${tone}`, disabled: busy || disabled, onClick }, label)
       const validation = draft?.validation
-      return h(SettingsBlock, { title: text('策略挂载', 'Mounted strategies'), sub: text('确认规则后挂载；启用不代表立即下单，仍受总调度和风控约束。', 'Mount confirmed rules; execution remains subject to scheduling and risk controls.') },
+      return h(SettingsBlock, { title: text('策略编辑', 'Strategy editor'), aside: h('span', { className: 'twb-strategy-status', 'data-state': strategy?.enabled ? 'enabled' : strategy?.current_version ? 'mounted' : 'draft' }, strategy?.enabled ? text('已启用', 'Enabled') : strategy?.current_version ? text('已挂载 · 未启用', 'Mounted, disabled') : text('草稿', 'Draft')), sub: text('确认规则后挂载；启用不代表立即下单，仍受总调度和风控约束。', 'Mount confirmed rules; execution remains subject to scheduling and risk controls.') },
         listing.loading && !listing.data ? h('p', { role: 'status' }, text('正在读取策略…', 'Loading strategies…')) : null,
         listing.error ? h('div', { role: 'alert' }, text('策略读取失败，请确认 Service 已升级', 'Cannot load strategies; check Service version'), button(text('重试', 'Retry'), () => setNonce(n => n + 1))) : null,
         configuration.error ? h('div', { role: 'alert' }, text('运行模式读取失败，暂不可修改。', 'Cannot read run mode; changes are unavailable.'), button(text('重新读取', 'Reload'), () => setNonce(n => n + 1))) : null,
@@ -6382,14 +6397,14 @@ window.__ModuleLoader__.load({
           try { const value = await file.text(); if (value.length > 20000) throw new Error(text('文本超过20000字符', 'Text exceeds 20,000 characters')); setSource(value); setConfirmed(false) } catch (e) { setError(e.message) }
         } }),
         ...(draft?.questions ?? []).map(q => input(q.question, { key: q.id, value: answers[q.id] ?? '', disabled: busy, onChange: e => { setAnswers(prev => ({ ...prev, [q.id]: e.target.value })); setConfirmed(false) } })),
-        button(text(selected ? '保存原文与回答' : '创建草稿', selected ? 'Save text and answers' : 'Create draft'), save, !source.trim()),
+        button(text(selected ? '保存原文与回答' : '创建草稿', selected ? 'Save text and answers' : 'Create draft'), save, !source.trim(), selected ? 'secondary' : 'primary'),
         selected ? button(text('AI 理解 / 继续澄清', 'AI analysis / clarify'), () => act(async () => {
           // Persist the exact current revision before starting analysis.
           const saved = await request(`/${selected}/draft`, 'PUT', { revision: draft.revision, source_text: source, rules: JSON.parse(rules), answers, questions: draft.questions ?? [], suggestions: draft.suggestions ?? [], sources: draft.sources ?? {}, summary: draft.summary ?? '' })
           setNonce(n => n + 1)
           await request(`/${selected}/analyze`, 'POST', { revision: saved.strategy.draft.revision })
-        }), !source.trim()) : null,
-        draft ? h('div', null,
+        }), !source.trim(), validation?.valid ? 'secondary' : 'primary') : null,
+        draft ? h('div', { className: 'twb-strategy-review' },
           h('p', null, draft.summary || text('尚未分析', 'Not analyzed')),
           ...(draft.suggestions ?? []).map((item, index) => h('p', { key: index, className: 'twb-hint' }, text('AI 建议：', 'AI suggestion: '), typeof item === 'string' ? item : JSON.stringify(item))),
           h('details', null, h('summary', null, text('结构化规则与来源（可核对/修正）', 'Structured rules and provenance')),
@@ -6397,9 +6412,9 @@ window.__ModuleLoader__.load({
             h('pre', null, JSON.stringify(draft.sources ?? {}, null, 2))),
           h('div', { className: 'twb-hint' }, [...(validation?.issues ?? []), ...(validation?.unsupported ?? [])].join('；')),
           h('label', null, h('input', { type: 'checkbox', checked: confirmed, disabled: busy, onChange: e => setConfirmed(e.target.checked) }), text('我已核对原文、规则和 AI 建议；按已保存草稿确认挂载', 'I reviewed the original, rules and AI suggestions; mount the saved draft')),
-          button(text('确认挂载（不自动启用）', 'Confirm mount (not enable)'), () => act(() => request(`/${selected}/mount`, 'POST', { revision: draft.revision, content_hash: draft.content_hash, request_id: `mount:${selected}:${draft.revision}:${draft.content_hash}`, confirmed: true })), !confirmed || !validation?.valid || source !== draft.source_text || rules !== JSON.stringify(draft.rules ?? {}, null, 2) || JSON.stringify(answers) !== JSON.stringify(draft.answers ?? {}))) : null,
-        strategy?.current_version ? h('div', null,
-          h('p', null, text('当前已确认版本：', 'Confirmed version: '), `v${strategy.current_version} · ${strategy.confirmed_version?.content_hash ?? ''}`),
+          button(text('确认挂载（不自动启用）', 'Confirm mount (not enable)'), () => act(() => request(`/${selected}/mount`, 'POST', { revision: draft.revision, content_hash: draft.content_hash, request_id: `mount:${selected}:${draft.revision}:${draft.content_hash}`, confirmed: true })), !confirmed || !validation?.valid || source !== draft.source_text || rules !== JSON.stringify(draft.rules ?? {}, null, 2) || JSON.stringify(answers) !== JSON.stringify(draft.answers ?? {}), 'primary')) : null,
+        strategy?.current_version ? h('div', { className: 'twb-strategy-authorization' },
+          h('p', null, text('当前已确认版本：', 'Confirmed version: '), h('strong', null, `v${strategy.current_version}`)),
           button(strategy.enabled ? text('停用新开仓（保留已有仓位管理）', 'Disable new entries (keep position management)') : text('启用已确认版本', 'Enable confirmed version'), () => act(() => request(`/${selected}/authorization`, 'POST', { generation: strategy.generation, enabled: !strategy.enabled })), !strategy.enabled && !strategy.confirmed_version?.validation?.execution_ready)) : null,
         busy ? h('div', { role: 'status' }, text('处理中…', 'Working…')) : null)
     }
