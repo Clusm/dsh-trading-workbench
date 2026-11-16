@@ -4,7 +4,7 @@
  * Scope (P0):
  *  - S0/S1/S2/S3/S4 shell: one workspace switcher, one context bar, one
  *    attention bar, one scroll container, one status bar.
- *  - Two first-level workspaces: cockpit (操作台) and AI (本轮 / 历史 / 复盘).
+ *  - Three first-level workspaces: cockpit, AI decisions and strategy management.
  *  - Cockpit: account+risk band, positions with the six-code protection
  *    contract and stop/liquidation distance, AI conclusion, orders/fills
  *    (collapsed to one row when both are empty), today's AI summary.
@@ -67,7 +67,7 @@ window.__ModuleLoader__.load({
       exec: 's2.catExec',
       pending: 's2.catPending',
     }
-    const WORKSPACES = ['cockpit', 'ai']
+    const WORKSPACES = ['cockpit', 'ai', 'strategies']
     const AI_VIEWS = ['current', 'history', 'review']
     const DRAWER_TABS = ['evidence', 'prompt', 'json', 'rules', 'timing']
     // F2 (§3.1): one settings entry reaches exactly these five groups. Order is
@@ -158,6 +158,7 @@ window.__ModuleLoader__.load({
 
       'ws.cockpit': ['操作台', 'Cockpit'],
       'ws.ai': ['AI 决策', 'AI decisions'],
+      'ws.strategies': ['策略管理', 'Strategies'],
       'nav.cockpit': ['操作台', 'Cockpit'],
       'nav.ai': ['AI 决策', 'AI decisions'],
       'ai.current': ['本轮', 'This round'],
@@ -2078,6 +2079,28 @@ window.__ModuleLoader__.load({
   .twb-drawer{width:100%;max-width:100%}
 }
 
+
+/* Strategy management is a first-level page; keep the editor readable at all widths. */
+.twb-strategies-page{max-width:1080px;margin:0 auto;padding-bottom:24px}
+.twb-strategies-heading{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:24px}
+.twb-strategies-heading h1{margin:0;font-size:22px;font-weight:600}
+.twb-strategies-heading p{margin:8px 0 0;color:var(--twb-ink-3);font-size:12px;line-height:1.6}
+.twb-strategy-policy{border-left:3px solid var(--twb-b-rule-3);padding:12px 16px;background:var(--twb-s1);margin-bottom:24px;font-size:12px;line-height:1.7}
+.twb-strategy-policy p{margin:6px 0 0;color:var(--twb-ink-2)}
+.twb-strategies-page .twb-settings-block{border-top:1px solid var(--twb-b-rule-2);padding-top:20px}
+.twb-strategies-page .twb-settings-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:16px 0}
+.twb-strategies-page label.twb-settings-row{align-items:flex-start;flex-direction:column}
+.twb-strategies-page input:not([type='checkbox']),.twb-strategies-page textarea,.twb-strategies-page select{box-sizing:border-box;max-width:100%;min-width:0;padding:9px 10px;border:1px solid var(--twb-b-rule-3);border-radius:4px;background:var(--twb-s0);color:var(--twb-ink-1);font:inherit}
+.twb-strategies-page label.twb-settings-row input:not([type='file']),.twb-strategies-page textarea{width:100%;resize:vertical}
+.twb-strategies-page input[type='checkbox']{accent-color:var(--twb-ink-1);margin-right:8px}
+.twb-strategies-page .twb-btn{margin:6px 8px 6px 0;white-space:normal;height:auto;min-height:32px}
+.twb-strategies-page pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
+.twb-strategies-page [role='alert']{color:var(--twb-danger);margin:12px 0}
+.twb-strategies-page details{margin:16px 0}
+.twb-strategies-page details summary{cursor:pointer;margin-bottom:12px}
+.twb-strategies-page .twb-hint{line-height:1.7;overflow-wrap:anywhere}
+[data-strategies-page][hidden]{display:none!important}
+@media(max-width:760px){.twb-strategies-heading{align-items:flex-start;flex-direction:column}.twb-strategies-page .twb-settings-row>select{width:100%}}
 `
 
     // ---- helpers -----------------------------------------------------------
@@ -6267,12 +6290,27 @@ window.__ModuleLoader__.load({
             : h('ul', { className: 'twb-settings-list' }, (model.gaps ?? []).map((gap, index) => h('li', { key: `gap-${index}` }, String(gap))))))
     }
 
-    function StrategiesPanel({ lang }) {
+    function StrategiesPage({ lang, active }) {
+      const text = (zh, en) => lang === 'en' ? en : zh
+      return h('section', { className: 'twb-strategies-page', 'aria-label': text('策略管理页面', 'Strategy management page') },
+        h('header', { className: 'twb-strategies-heading' },
+          h('div', null,
+            h('h1', null, text('策略管理', 'Strategies')),
+            h('p', null, text('导入策略 → AI 澄清 → 核对并挂载 → 授权执行', 'Import → Clarify with AI → Review and mount → Authorize'))),
+          h('span', { className: 'twb-chip twb-chip--quiet' }, text('挂载与启用分开', 'Mount and enable separately'))),
+        h('aside', { className: 'twb-strategy-policy', 'aria-label': text('交易决策边界', 'Trading decision boundaries') },
+          h('strong', null, text('当前执行方式：AI 辅助执行', 'Current execution: AI-assisted')),
+          h('p', null, text('策略限定交易条件和方向；AI 可以选择执行或跳过；独立风控决定能否下单。', 'The strategy defines conditions and direction. AI may execute or skip. Independent risk controls decide whether an order is allowed.')),
+          h('p', null, text('意见冲突时不开新仓，不允许反向交易或放宽风险；止损与强制退出继续按已确认规则执行。', 'Conflicts prevent new entries, opposite trades and risk expansion. Confirmed stops and mandatory exits remain effective.'))),
+        h(StrategiesPanel, { lang, active }))
+    }
+
+    function StrategiesPanel({ lang, active = true }) {
       const text = (zh, en) => lang === 'en' ? en : zh
       const base = `${API}/strategies`
       const [nonce, setNonce] = React.useState(0)
-      const listing = useJson(base, nonce, true)
-      const configuration = useJson(`${base}/config`, nonce, true)
+      const listing = useJson(base, nonce, active)
+      const configuration = useJson(`${base}/config`, nonce, active)
       const [selected, setSelected] = React.useState(null)
       const [name, setName] = React.useState('')
       const [source, setSource] = React.useState('')
@@ -6291,7 +6329,7 @@ window.__ModuleLoader__.load({
         setRules(JSON.stringify(draft?.rules ?? {}, null, 2))
         setAnswers(draft?.answers ?? {})
         setConfirmed(false)
-      }, [selected, strategy])
+      }, [selected, draft?.revision, strategy?.name])
       React.useEffect(() => { if (configuration.data?.config) setRequestedMode(configuration.data.config.mode) }, [configuration.data])
       const request = async (suffix, method, body) => {
         const response = await fetch(base + suffix, { method, credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
@@ -6318,7 +6356,9 @@ window.__ModuleLoader__.load({
       const button = (label, onClick, disabled = false) => h('button', { type: 'button', className: 'twb-btn twb-btn--secondary', disabled: busy || disabled, onClick }, label)
       const validation = draft?.validation
       return h(SettingsBlock, { title: text('策略挂载', 'Mounted strategies'), sub: text('确认规则后挂载；启用不代表立即下单，仍受总调度和风控约束。', 'Mount confirmed rules; execution remains subject to scheduling and risk controls.') },
+        listing.loading && !listing.data ? h('p', { role: 'status' }, text('正在读取策略…', 'Loading strategies…')) : null,
         listing.error ? h('div', { role: 'alert' }, text('策略读取失败，请确认 Service 已升级', 'Cannot load strategies; check Service version'), button(text('重试', 'Retry'), () => setNonce(n => n + 1))) : null,
+        configuration.error ? h('div', { role: 'alert' }, text('运行模式读取失败，暂不可修改。', 'Cannot read run mode; changes are unavailable.'), button(text('重新读取', 'Reload'), () => setNonce(n => n + 1))) : null,
         error ? h('div', { role: 'alert', className: 'twb-modal-note' }, error) : null,
         h('div', { className: 'twb-hint' }, text('首版自动执行支持实时标记价阈值，周期用于信号去重，不代表K线收盘判断；其他规则可保存完善，不擅自简化后执行。', 'Initial execution supports live mark thresholds; timeframe is a deduplication window, not a candle-close condition. Other rules remain drafts for clarification.')),
         configuration.data?.config ? h('div', { className: 'twb-settings-row' },
@@ -6387,7 +6427,6 @@ window.__ModuleLoader__.load({
       if (active === 'trading') return h(TradingGroup, { model, t })
       if (active === 'automation') {
         return h(React.Fragment, null,
-          h(StrategiesPanel, { lang }),
           h(AutomationPanel, { model, t }),
           h(SchedulePanel, { model, t }),
           h(TriggersBlock, { model, t }),
@@ -7044,7 +7083,8 @@ window.__ModuleLoader__.load({
         })()
       }
       const initialQuery = initialQueryRef.current
-      const [workspace, setWorkspace] = React.useState(() => initialQuery?.get('ws') === 'ai' ? 'ai' : 'cockpit')
+      const [workspace, setWorkspace] = React.useState(() => WORKSPACES.includes(initialQuery?.get('ws')) ? initialQuery.get('ws') : 'cockpit')
+      const [strategiesVisited, setStrategiesVisited] = React.useState(() => initialQuery?.get('ws') === 'strategies')
       const [aiView, setAiView] = React.useState(() => {
         const view = initialQuery?.get('view')
         return ['current', 'history', 'review'].includes(view) ? view : 'current'
@@ -7872,6 +7912,7 @@ window.__ModuleLoader__.load({
             value: workspace,
             onChange: (id) => {
               setWorkspace(id)
+              if (id === 'strategies') setStrategiesVisited(true)
               // Opening the AI workspace always starts from the newest round;
               // the round list still lets the user pick an older one.
               if (id === 'ai') setSelectedRoundId(stateData?.last_round?.roundId ?? null)
@@ -8093,7 +8134,8 @@ window.__ModuleLoader__.load({
           : null,
         h('main', { className: 'twb-s3', role: 'tabpanel', id: `twb-ws-panel-${workspace}`, 'aria-labelledby': `twb-ws-tab-${workspace}` },
           h('div', { className: 'twb-canvas' },
-            loading ? h('div', { className: 'twb-card', style: { padding: 24 } }, t('state.loading')) : workspace === 'cockpit' ? cockpit : ai)),
+            workspace === 'strategies' ? null : loading ? h('div', { className: 'twb-card', style: { padding: 24 } }, t('state.loading')) : workspace === 'cockpit' ? cockpit : ai,
+            strategiesVisited ? h('div', { hidden: workspace !== 'strategies', 'data-strategies-page': 'true' }, h(StrategiesPage, { lang, active: workspace === 'strategies' })) : null)),
         h('footer', { className: 'twb-s4' },
           h('span', null, h('span', { className: `twb-s4-dot ${hostState === 'offline' ? 'twb-s4-dot--danger' : hostState === 'degraded' ? 'twb-s4-dot--warn' : ''}` }), `${t('s4.host')} ${hostState === 'offline' ? t('s4.offline') : hostState === 'degraded' ? t('s4.unknown') : t('s4.online')}`),
           h('span', { className: 'sep' }, '·'),

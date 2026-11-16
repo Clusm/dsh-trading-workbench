@@ -3447,10 +3447,12 @@ marksOverride = null
 // S: exercise real component handlers through draft, AI analysis, mount and enable.
 runtime.instances.clear()
 await render(panel)
-await click('设置')
-await click('自动化')
+expect('S29 strategy management is a first-level navigation item', findAll(currentTree, n => n.props?.id === 'twb-ws-tab-strategies' && n.props?.role === 'tab').length === 1)
+expect('S29a strategy APIs are lazy until the page opens', !findAll(currentTree, n => n.props?.['data-strategies-page']).length)
+await click('策略管理')
 const strategySource = findAll(currentTree, n => n.tag === 'textarea' && n.props?.maxLength === 20000)[0]
-expect('S30 strategy editor is in the existing automation group', Boolean(strategySource))
+expect('S30 strategy editor is on its own page', Boolean(strategySource) && findAll(currentTree, n => n.props?.id === 'twb-ws-panel-strategies').length === 1)
+expect('S30a strategy page explains AI veto and mandatory exits', textOf(currentTree).includes('当前执行方式：AI 辅助执行') && textOf(currentTree).includes('止损与强制退出继续按已确认规则执行'))
 strategySource.props.onChange({ target: { value: 'BTCUSDT 标记价大于100做多，15m每周期一次，止损2%止盈4%，最多一仓' } })
 await render(panel)
 await click('创建草稿')
@@ -3470,6 +3472,29 @@ nameInput.props.onChange({ target: { value: '我的阈值策略' } })
 await render(panel)
 await click('仅改名')
 expect('S35 rename preserves version and strategy ID', strategyRecords[0].name === '我的阈值策略' && strategyRecords[0].current_version === oldVersion && strategyRecords[0].strategy_id === 'strategy-ui')
+
+// Preserve an unsaved editor while moving between first-level pages.
+const beforeNavigation = findAll(currentTree, n => n.tag === 'textarea' && n.props?.maxLength === 20000)[0]
+beforeNavigation.props.onChange({ target: { value: '未保存的补充说明' } })
+await render(panel)
+await click('操作台')
+expect('S36 strategy page is hidden on cockpit', findAll(currentTree, n => n.props?.['data-strategies-page'] && n.props.hidden === true).length === 1)
+await click('策略管理')
+expect('S37 navigation preserves unsaved strategy text', findAll(currentTree, n => n.tag === 'textarea' && n.props?.maxLength === 20000)[0].props.value === '未保存的补充说明')
+await click('设置')
+await click('自动化')
+expect('S38 automation settings no longer own the strategy editor', !SOURCE.slice(SOURCE.indexOf('    function SettingsBody('), SOURCE.indexOf('    function SettingsBody(') + 2000).includes('h(StrategiesPanel'))
+await click('关闭')
+await click('EN')
+expect('S39 strategy page supports English navigation and copy', textOf(currentTree).includes('Current execution: AI-assisted') && findAll(currentTree, n => n.props?.id === 'twb-ws-tab-strategies').length === 1)
+
+const workspaceTabs = findAll(currentTree, n => n.props?.role === 'tablist')[0]
+workspaceTabs.props.onKeyDown({ key: 'End', preventDefault() {} })
+await render(panel)
+expect('S40 keyboard End reaches strategy management', findAll(currentTree, n => n.props?.id === 'twb-ws-tab-strategies' && n.props['aria-selected'] === 'true').length === 1)
+findAll(currentTree, n => n.props?.role === 'tablist')[0].props.onKeyDown({ key: 'ArrowRight', preventDefault() {} })
+await render(panel)
+expect('S41 keyboard navigation wraps to cockpit', findAll(currentTree, n => n.props?.id === 'twb-ws-tab-cockpit' && n.props['aria-selected'] === 'true').length === 1)
 
 // ---- report --------------------------------------------------------------
 for (const line of notes) console.log(line)
