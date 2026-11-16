@@ -132,7 +132,7 @@ dsh plugin --profile <profile> add dsh-trading-workbench
 dsh plugin --profile <profile> add github:Clusm/dsh-trading-workbench
 
 # 本地打包安装
-npm pack && dsh plugin --profile <profile> add ./dsh-trading-workbench-0.1.0.tgz
+npm pack && dsh plugin --profile <profile> add ./dsh-trading-workbench-0.1.1.tgz
 ```
 
 在 DSH 里也可以：**设置 → 插件 → 搜索 `dsh-trading-workbench` → 安装**。
@@ -156,6 +156,8 @@ npm pack && dsh plugin --profile <profile> add ./dsh-trading-workbench-0.1.0.tgz
 
 ## 安全边界
 
+- **升级提示**：HTTP 准入修复从 0.1.1 起生效；npm 上的 0.1.0 不包含修复。可立即安装已修复的 GitHub 标签：`dsh plugin --profile <profile> add github:Clusm/dsh-trading-workbench#v0.1.1`。升级后重载插件，并确认 `/health` 的版本为 0.1.1。
+- **DSH 统一准入（0.1.1 起）**：所有工作台 HTTP 路由先调用 `ctx.connection.requestRejection(req)`，再执行原有本机/同源及业务校验。遵循 DSH 的 Host、Origin 和已配置的登录规则；准入服务不可用时返回 503，不放行。脚本、代理和健康检查也需满足宿主访问规则；Python Service 到币安的行情与交易请求不经过这一层。
 - **Demo only**：服务启动时要求 demo 行情基址；没有凭据时全链路只读。
 - **两把独立开关**：本机调度器（是否自动跑）与服务端控制态（是否允许开新仓）互不代替 —— 停掉调度不等于让服务继续开仓，反之亦然。
 - **凭据只在磁盘**：Demo/实盘 key 经设置页写入本机 `0600` 文件，浏览器不缓存、日志不记录、归档不落库。

@@ -11,7 +11,7 @@
  */
 
 const PLUGIN_ID = '@local/dsh-trading-workbench'
-const PLUGIN_VERSION = '0.1.0'
+const PLUGIN_VERSION = '0.1.1'
 const API_PREFIX = '/trading-workbench/api'
 const HEALTH_PATH = `${API_PREFIX}/health`
 const PROBE_PATH = `${API_PREFIX}/probe/llm`
@@ -26,13 +26,14 @@ import {
 } from './host/integration.js'
 import { createAutoScheduler } from './host/scheduler.js'
 import { currentBuild, markHostLoad } from './host/build.js'
+import { admittedWebRoutes } from './host/http-admission.js'
 
 const SCHEDULE_PATH = `${API_PREFIX}/schedule`
 
 // agentDefaultModel is required to resolve the route: without it the probe
 // cannot know which provider/model Harness selected. It is a hard dependency,
 // so it is declared here rather than read opportunistically.
-export const inject = ['webServer', 'llm', 'agentDefaultModel']
+export const inject = ['webServer', 'connection', 'llm', 'agentDefaultModel']
 
 // Last probe result, kept in Host memory for /health. It is intentionally
 // not persisted: after a Host restart it is "never" until the next probe.
@@ -279,8 +280,9 @@ export function apply(ctx, config) {
 
   ctx.effect(() => {
     const disposers = []
+    const webRoutes = admittedWebRoutes(ctx)
     try {
-      disposers.push(ctx.webServer.register({
+      disposers.push(webRoutes.register({
         kind: 'exact',
         path: HEALTH_PATH,
         handler: (req, res) => {
@@ -328,10 +330,10 @@ export function apply(ctx, config) {
       }))
 
       for (const route of integration.routes()) {
-        disposers.push(ctx.webServer.register(route))
+        disposers.push(webRoutes.register(route))
       }
 
-      disposers.push(ctx.webServer.register({
+      disposers.push(webRoutes.register({
         kind: 'exact',
         path: PROBE_PATH,
         handler: async (req, res) => {
@@ -371,7 +373,7 @@ export function apply(ctx, config) {
         },
       }))
 
-      disposers.push(ctx.webServer.register({
+      disposers.push(webRoutes.register({
         kind: 'exact',
         path: SCHEDULE_PATH,
         handler: (req, res) => {
