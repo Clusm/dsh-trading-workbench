@@ -36,6 +36,7 @@ window.__ModuleLoader__.load({
 
     // ---- routes (Host only) -------------------------------------------------
     const API = '/trading-workbench/api'
+    const CLIENT_VERSION = '0.2.0-dev.4'
     const STATE_URL = `${API}/state`
     const HEALTH_URL = `${API}/health`
     const PRICES_URL = `${API}/market/prices`
@@ -1740,7 +1741,8 @@ window.__ModuleLoader__.load({
   --twb-paper:color-mix(in srgb,var(--twb-warn) 3.2%,var(--twb-s0));
   --twb-paper-1:color-mix(in srgb,var(--twb-warn) 2.6%,var(--twb-s1));
   --twb-b-ink-1:color-mix(in srgb,var(--twb-ink-1) 96%,var(--twb-warn) 4%);
-  --twb-b-ink-3:color-mix(in srgb,var(--twb-ink-2) 64%,transparent);
+  --twb-b-ink-2:var(--twb-ink-2);
+  --twb-b-ink-3:color-mix(in srgb,var(--twb-ink-2) 78%,transparent);
   --twb-b-rule:color-mix(in srgb,var(--twb-ink-1) 9%,transparent);
   --twb-b-rule-2:color-mix(in srgb,var(--twb-ink-1) 16%,transparent);
   --twb-b-rule-3:color-mix(in srgb,var(--twb-ink-1) 30%,transparent);
@@ -2079,6 +2081,53 @@ window.__ModuleLoader__.load({
   .twb-drawer{width:100%;max-width:100%}
 }
 
+
+
+/* Shared interaction and responsive shell; no trading permissions change. */
+.twb-root{container:twb-shell / inline-size}
+.twb-root :is(button,input,select,textarea,summary,a):focus-visible{outline:2px solid var(--twb-ink-2);outline-offset:3px}
+.twb-root :is(button,input,select,textarea):disabled{cursor:not-allowed}
+.twb-root button:disabled:hover{box-shadow:none}
+.twb-root .twb-seg{border:0}
+.twb-root .twb-seg button{white-space:nowrap;flex-shrink:0}
+.twb-root .twb-seg button:focus-visible{outline-offset:-4px}
+.twb-root :is(.twb-card-head,.twb-concl-head,.twb-ai-head){min-width:0;flex-wrap:wrap;row-gap:10px}
+.twb-root :is(.twb-num,.twb-mono,.b-account-hero .num){font-variant-numeric:tabular-nums}
+.twb-root :is(.twb-concl-detail,.twb-empty-hint,.twb-report-card p){overflow-wrap:anywhere}
+.twb-root .twb-table-wrap{overscroll-behavior:contain}
+.twb-root .twb-table-wrap thead th{position:sticky;top:0;z-index:2;background:var(--twb-paper)}
+.twb-root .twb-table tbody tr:hover td{background:var(--twb-row-hover)}
+.twb-root .twb-s1{overflow-x:auto;scrollbar-width:thin;min-height:44px}
+.twb-root .twb-s1>*{flex-shrink:0}
+.twb-root .twb-s4{overflow-x:auto;white-space:nowrap;min-height:30px;scrollbar-width:thin}
+.twb-root .twb-s4>span{flex-shrink:0}
+.twb-root .twb-settings-sub{line-height:1.7;max-width:75ch}
+.twb-root .twb-drawer{max-width:100%;overscroll-behavior:contain}
+.twb-root .twb-json{overflow-wrap:anywhere}
+@container twb-shell (max-width:1100px){
+  .twb-s0{height:auto;min-height:64px;padding:12px 24px 0;gap:12px;flex-wrap:wrap}
+  .twb-s0>.twb-seg{order:10;flex-basis:100%;gap:24px;overflow-x:auto}
+  .twb-s0>.twb-seg button{height:44px}
+  .twb-s1,.twb-s2,.twb-s4{padding-left:24px;padding-right:24px}
+  .twb-canvas,[data-workspace='ai'] .twb-canvas{padding:24px}
+  .twb-s2{height:auto;min-height:40px;flex-wrap:wrap;padding-top:8px;padding-bottom:8px}
+  .twb-s2-reason{white-space:normal;overflow-wrap:anywhere;flex:1 1 180px}
+}
+@container twb-shell (max-width:800px){
+  .twb-s0{padding-left:16px;padding-right:16px;gap:10px}
+  .twb-s0>.twb-seg{gap:20px}
+  .twb-s1,.twb-s2,.twb-s4{padding-left:16px;padding-right:16px}
+  .twb-canvas,[data-workspace='ai'] .twb-canvas{padding:20px 16px}
+  .twb-row{row-gap:20px;margin-bottom:24px}
+  .twb-root .twb-span7,.twb-root .twb-span5{grid-column:1/-1}
+  [data-workspace='ai'] .twb-ai-grid{grid-template-columns:minmax(0,1fr);gap:20px}
+  [data-workspace='ai'] .twb-ai-list{border-right:0;border-bottom:1px solid var(--twb-b-rule-2);padding-bottom:12px}
+  [data-workspace='ai'] .twb-ai-list-body{max-height:200px}
+  [data-workspace='ai'] .twb-ai-head{height:auto;min-height:52px;gap:12px;padding-bottom:12px}
+  .twb-ai-head>.twb-seg{flex-basis:100%}
+  .twb-table{min-width:680px}
+  .twb-settings-kv{grid-template-columns:minmax(80px,30%) minmax(0,1fr)}
+}
 
 /* Strategy management is a first-level page; keep the editor readable at all widths. */
 .twb-strategies-page{max-width:1080px;margin:0 auto;padding-bottom:24px}
@@ -5719,7 +5768,7 @@ window.__ModuleLoader__.load({
         [t('system.ledger'), service.ledger_id ?? '—'],
         [t('system.auth'), service.auth_mode ?? '—'],
         [t('system.token'), service.token_source ?? '—'],
-        [t('system.version'), '0.1.0'],
+        [t('system.version'), CLIENT_VERSION],
         [t('system.control'), `${controlLabel(model.control)} (${model.control})`],
         [t('system.newEntry'), model.entry?.blocked ? `${t('s4.entryBlocked')} · ${model.entry.reasons.map((item) => item.label).join(' / ')}` : t('s4.entryAllowed')],
       ]
@@ -8170,7 +8219,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'sep' }, '·'),
           h('span', null, t('s4.readonly')),
           h('span', { className: 'twb-spacer' }),
-          h('span', null, 'v0.1.0')),
+          h('span', null, `v${CLIENT_VERSION}`)),
         notice
           ? h('div', {
             className: 'twb-toast',
