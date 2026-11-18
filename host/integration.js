@@ -124,6 +124,8 @@ export const LIVE_SETUP_PATH = `${API_PREFIX}/live-setup`
  * 所以 Demo key 只能走"写本机 0600 文件 + 只回指纹"这一条路。
  */
 export const DEMO_SETUP_PATH = `${API_PREFIX}/demo-setup`
+/** 主界面与设置页共用的 Demo ↔ Live 环境预检与切换路由。 */
+export const VENUE_SWITCH_PATH = `${API_PREFIX}/venue/switch`
 
 /** 只用于算凭据指纹；明文不参与任何返回值或日志。 */
 function credentialFingerprint(value) {
@@ -2472,6 +2474,31 @@ export class WorkbenchHostIntegration {
     return override ? { ...derived, ...override } : derived
   }
 
+  venueModeFilePath() {
+    return path.resolve(String(this.dataDir), 'venue-mode.json')
+  }
+
+  readPreferredVenue() {
+    try {
+      const file = this.venueModeFilePath()
+      if (fs.existsSync(file)) {
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+        const v = String(parsed?.venue ?? '').trim().toLowerCase()
+        if (v === 'demo' || v === 'live') return v
+      }
+    } catch { /* fallback to env/demo */ }
+    const envVenue = String(this.env?.WORKBENCH_VENUE ?? '').trim().toLowerCase()
+    return envVenue === 'live' ? 'live' : 'demo'
+  }
+
+  writePreferredVenue(venue) {
+    const normalized = String(venue ?? '').trim().toLowerCase() === 'live' ? 'live' : 'demo'
+    const file = this.venueModeFilePath()
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify({ venue: normalized, updated_at: nowIso(this.now()) }, null, 2), 'utf8')
+    return normalized
+  }
+
   /**
    * Environment for the spawned service. The Host must not launder its own
    * Node/Electron env quirks into the Python service: Node's NO_PROXY may list
@@ -2479,8 +2506,16 @@ export class WorkbenchHostIntegration {
    * InvalidURL (observed 2026-11-15: the service booted read-only because its
    * execution client could not be built). Keep the user's proxy, fix the syntax.
    */
-  serviceSpawnEnv(dotenvPath) {
-    const env = { ...(this.env ?? process.env), WORKBENCH_DOTENV_FILE: dotenvPath }
+  serviceSpawnEnv(dotenvPath, { venue = null } = {}) {
+    const targetVenue = (venue || this.readPreferredVenue() || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
+    const env = {
+      ...(this.env ?? process.env),
+      WORKBENCH_VENUE: targetVenue,
+      WORKBENCH_DOTENV_FILE: dotenvPath,
+    }
+    if (targetVenue === 'live') {
+      env.WORKBENCH_LIVE_ENV_FILE = this.liveEnvFilePath()
+    }
     for (const key of ['NO_PROXY', 'no_proxy']) {
       const value = env[key]
       if (typeof value === 'string' && value.includes('[')) {
@@ -2547,7 +2582,14 @@ export class WorkbenchHostIntegration {
       })
       if (!response?.ok) return { ok: false, status: response?.status ?? null, error: 'HTTP_NOT_OK' }
       const body = await response.json().catch(() => null)
-      return { ok: body?.ok === true, status: response.status, service_ready: body?.ready ?? null }
+      return {
+        ok: body?.ok === true,
+        status: response.status,
+        service_ready: body?.ready ?? null,
+        venue: typeof body?.venue === 'string' ? body.venue : null,
+        pid: Number.isInteger(body?.pid) ? body.pid : null,
+        identity: body?.identity ?? null,
+      }
     } catch (error) {
       return { ok: false, error: String(error?.code ?? error?.name ?? error?.message ?? 'UNREACHABLE') }
     } finally {
@@ -2578,7 +2620,7 @@ export class WorkbenchHostIntegration {
     const already = await this.probeServiceHealth()
     if (already.ok) {
       this.serviceStartLast = { at: nowIso(this.now()), ok: true, already: true, waited_ms: 0, pid: null }
-      return { ok: true, state: 'running', already: true, ready: true, waited_ms: 0, pid: null }
+      return { ok: true, state: 'running', already: true, ready: true, waited_ms: 0, pid: null, venue: already.venue ?? null }
     }
     this.serviceStartInFlight = this.launchService()
     try {
@@ -2589,12 +2631,36 @@ export class WorkbenchHostIntegration {
     }
   }
 
-  async launchService() {
+  syncVenueApiToken(rootDataDir, targetDataDir) {
+    if (rootDataDir === targetDataDir) return
+    const rootToken = path.join(rootDataDir, '.api-token')
+    const targetToken = path.join(targetDataDir, '.api-token')
+    try {
+      fs.mkdirSync(targetDataDir, { recursive: true })
+      if (fs.existsSync(rootToken)) {
+        const tokenText = fs.readFileSync(rootToken, 'utf8')
+        if (tokenText.trim()) {
+          fs.writeFileSync(targetToken, tokenText, { encoding: 'utf8', mode: 0o600 })
+        }
+      } else if (fs.existsSync(targetToken)) {
+        const tokenText = fs.readFileSync(targetToken, 'utf8')
+        if (tokenText.trim()) {
+          fs.writeFileSync(rootToken, tokenText, { encoding: 'utf8', mode: 0o600 })
+        }
+      }
+    } catch { /* best effort token sync */ }
+  }
+
+  async launchService({ venue = null } = {}) {
     const startedAt = this.now()
     const paths = this.serviceLauncherPaths()
     const logs = this.serviceLogPaths()
     const url = new URL(this.serviceBaseUrl)
     const port = url.port || (url.protocol === 'https:' ? '443' : '80')
+    const targetVenue = (venue || this.readPreferredVenue() || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
+    const rootDataDir = path.resolve(String(this.dataDir))
+    const serviceDataDir = targetVenue === 'live' ? path.join(rootDataDir, 'live') : rootDataDir
+    this.syncVenueApiToken(rootDataDir, serviceDataDir)
     fs.mkdirSync(logs.dir, { recursive: true })
     const outFd = fs.openSync(logs.stdout, 'a')
     const errFd = fs.openSync(logs.stderr, 'a')
@@ -2604,10 +2670,10 @@ export class WorkbenchHostIntegration {
         paths.entry,
         '--host', url.hostname || '127.0.0.1',
         '--port', String(port),
-        '--data-dir', path.resolve(String(this.dataDir)),
+        '--data-dir', serviceDataDir,
       ], {
         cwd: path.dirname(paths.entry),
-        env: this.serviceSpawnEnv(paths.dotenv),
+        env: this.serviceSpawnEnv(paths.dotenv, { venue: targetVenue }),
         detached: true,
         windowsHide: true,
         stdio: ['ignore', outFd, errFd],
@@ -2625,18 +2691,22 @@ export class WorkbenchHostIntegration {
       try { fs.closeSync(errFd) } catch { /* already closed */ }
     }
     const pid = child?.pid ?? null
-    this.logger?.info?.(`[twb] service start requested pid=${pid} port=${port}`)
+    this.logger?.info?.(`[twb] service start requested pid=${pid} port=${port} venue=${targetVenue}`)
     const deadline = Date.now() + this.serviceStartTimeoutMs
     let lastProbe = null
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, SERVICE_START_POLL_MS))
       lastProbe = await this.probeServiceHealth({ timeoutMs: 1200 })
       if (lastProbe.ok) {
+        if (venue && lastProbe.venue && lastProbe.venue !== targetVenue) {
+          continue
+        }
+        this.syncVenueApiToken(rootDataDir, serviceDataDir)
         const waited = Date.now() - startedAt
-        this.serviceStartLast = { at: nowIso(this.now()), ok: true, pid, waited_ms: waited }
+        this.serviceStartLast = { at: nowIso(this.now()), ok: true, pid, waited_ms: waited, venue: lastProbe.venue ?? targetVenue }
         this.logCommand('service/start', { pid, waited_ms: waited, ok: true })
-        this.logger?.info?.(`[twb] service ready pid=${pid} waited=${waited}ms`)
-        return { ok: true, state: 'started', pid, ready: true, waited_ms: waited }
+        this.logger?.info?.(`[twb] service ready pid=${pid} waited=${waited}ms venue=${lastProbe.venue ?? targetVenue}`)
+        return { ok: true, state: 'started', pid, ready: true, waited_ms: waited, venue: lastProbe.venue ?? targetVenue }
       }
     }
     const waited = Date.now() - startedAt
@@ -2907,6 +2977,312 @@ export class WorkbenchHostIntegration {
       effective_dotenv: this.serviceLauncherPaths().dotenv,
       note: 'credential stored on disk only; the browser never receives it back',
     })
+  }
+
+  /**
+   * 预检当前环境与目标环境（Demo ↔ Live），严格遵守 §3.3：
+   *  - 源服务若有未平仓位（qty != 0）或未决挂单/outbox，拒绝切换；
+   *  - 切换到 Live 时必须已配置 Live 凭据（绝不借用 Demo 凭据）；
+   *  - 切换到 Demo 允许无凭据启动（只读模式）。
+   */
+  async venueSwitchPreflight({ target = null } = {}) {
+    const health = await this.probeServiceHealth({ timeoutMs: 1500 })
+    const currentVenue = health.ok && typeof health.venue === 'string'
+      ? health.venue
+      : (typeof this.lastServiceBlock?.venue === 'string' ? this.lastServiceBlock.venue : null)
+    const preferredVenue = this.readPreferredVenue()
+    const rawTarget = typeof target === 'string' ? target.trim().toLowerCase() : ''
+    const targetVenue = (rawTarget === 'live' || rawTarget === 'demo')
+      ? rawTarget
+      : ((currentVenue || preferredVenue) === 'live' ? 'demo' : 'live')
+
+    const demoSetup = this.readDemoSetup()
+    const liveSetup = this.readLiveSetup()
+    const paths = this.serviceLauncherPaths()
+    const env = this.env ?? process.env ?? {}
+    const demoEnvConfigured = Boolean(
+      (demoSetup.exists && demoSetup.fingerprint)
+      || (env.WORKBENCH_DEMO_API_KEY && env.WORKBENCH_DEMO_API_SECRET)
+      || (env.BINANCE_DEMO_API_KEY && env.BINANCE_DEMO_API_SECRET)
+      || (paths.dotenv && paths.dotenv !== demoSetup.path && fileExists(paths.dotenv)),
+    )
+    const liveEnvConfigured = Boolean(
+      (liveSetup.exists && liveSetup.fingerprint)
+      || (env.BINANCE_LIVE_API_KEY && env.BINANCE_LIVE_API_SECRET)
+      || (env.WORKBENCH_LIVE_API_KEY && env.WORKBENCH_LIVE_API_SECRET),
+    )
+
+    let openPositionsCount = 0
+    let pendingOrdersCount = 0
+    let positionsReadable = !health.ok
+    let ordersReadable = !health.ok
+    if (health.ok) {
+      const tokenInfo = this.tokenInfo()
+      if (tokenInfo.present && tokenInfo.token) {
+        const client = this.clientWithToken(tokenInfo.token)
+        try {
+          const [posRes, ordRes, statusRes] = await Promise.all([
+            client.positions().catch(() => null),
+            client.orders(200).catch(() => null),
+            client.status().catch(() => null),
+          ])
+          if (posRes && Array.isArray(posRes.positions)) {
+            positionsReadable = true
+            openPositionsCount = posRes.positions.filter((p) => {
+              const q = Number(p?.qty ?? p?.positionAmt ?? 0)
+              return Number.isFinite(q) && Math.abs(q) > 0
+            }).length
+          } else if (statusRes && Array.isArray(statusRes.positions)) {
+            positionsReadable = true
+            openPositionsCount = statusRes.positions.filter((p) => {
+              const q = Number(p?.qty ?? p?.positionAmt ?? 0)
+              return Number.isFinite(q) && Math.abs(q) > 0
+            }).length
+          }
+          if (ordRes && Array.isArray(ordRes.orders)) {
+            ordersReadable = true
+            const liveStatuses = new Set(['NEW', 'PARTIALLY_FILLED', 'SUBMITTING', 'UNKNOWN'])
+            pendingOrdersCount = ordRes.orders.filter((o) => liveStatuses.has(String(o?.status ?? '').toUpperCase()) || o?.pending_confirmation === true).length
+          }
+          const outbox = statusRes?.outbox ?? null
+          if (outbox && typeof outbox === 'object') {
+            ordersReadable = true
+            const outboxPending = (Number(outbox.pending_confirmation_count ?? outbox.pending_count ?? 0) || 0)
+              + (Number(outbox.unknown ?? 0) || 0)
+              + (Number(outbox.submitting ?? 0) || 0)
+            if (outboxPending > pendingOrdersCount) pendingOrdersCount = outboxPending
+          }
+        } catch {
+          // keep readable flags false if unexpected error
+        }
+      }
+    }
+
+    const capability = this.serviceStartCapability()
+    const blockers = []
+    if (!capability.supported) {
+      blockers.push('SERVICE_LAUNCHER_UNAVAILABLE')
+    }
+    if (health.ok && !positionsReadable) {
+      blockers.push('SOURCE_POSITIONS_UNREADABLE')
+    }
+    if (health.ok && openPositionsCount > 0) {
+      blockers.push('OPEN_POSITIONS')
+    }
+    if (health.ok && pendingOrdersCount > 0) {
+      blockers.push('PENDING_ORDERS')
+    }
+    if (targetVenue === 'live' && !liveEnvConfigured) {
+      blockers.push('LIVE_CREDENTIALS_MISSING')
+    }
+
+    const checks = [
+      {
+        id: 'positions_flat',
+        ok: !health.ok || (positionsReadable && openPositionsCount === 0),
+        detail: !health.ok
+          ? '服务未运行（将直接以目标环境启动）'
+          : !positionsReadable
+            ? '无法读取当前账户持仓状态'
+            : openPositionsCount === 0
+              ? '当前账户无未平仓位 (0)'
+              : `当前仍有 ${openPositionsCount} 个未平仓位，请先平仓后再切换`,
+      },
+      {
+        id: 'orders_clear',
+        ok: !health.ok || (ordersReadable && pendingOrdersCount === 0),
+        detail: !health.ok
+          ? '服务未运行（无在途订单）'
+          : !ordersReadable
+            ? '无法读取当前挂单与在途状态'
+            : pendingOrdersCount === 0
+              ? '当前无在途或未决挂单 (0)'
+              : `当前有 ${pendingOrdersCount} 笔挂单或未确认订单，请等待收敛后再切换`,
+      },
+      {
+        id: 'target_credentials',
+        ok: targetVenue === 'live' ? liveEnvConfigured : true,
+        detail: targetVenue === 'live'
+          ? (liveEnvConfigured
+            ? `实盘凭据已就绪（指纹 ${liveSetup.fingerprint ?? 'env'}）`
+            : '缺少实盘 API Key / Secret（可在下方直接录入保存，绝不借用模拟盘凭据）')
+          : (demoEnvConfigured
+            ? `模拟盘凭据已就绪（指纹 ${demoSetup.fingerprint ?? 'dotenv'}）`
+            : '未配置模拟盘凭据（切换后将以只读行情模式运行，不签名下单）'),
+      },
+      {
+        id: 'launcher_ready',
+        ok: capability.supported === true,
+        detail: capability.supported
+          ? '本机服务进程启动器就绪（独立 SQLite 账本物理隔离）'
+          : `本机启动器不可用（${capability.reason ?? 'UNKNOWN'}）`,
+      },
+    ]
+
+    const rootDataDir = path.resolve(String(this.dataDir))
+    return {
+      ok: true,
+      contract: 'trading-workbench/venue-switch/1',
+      current_venue: currentVenue,
+      preferred_venue: preferredVenue,
+      target_venue: targetVenue,
+      already_on_target: Boolean(health.ok && currentVenue === targetVenue),
+      service_online: Boolean(health.ok),
+      service_pid: health.pid ?? null,
+      open_positions_count: openPositionsCount,
+      pending_orders_count: pendingOrdersCount,
+      venues: {
+        demo: {
+          venue: 'demo',
+          host: 'demo-fapi.binance.com',
+          data_dir: rootDataDir,
+          credentials_configured: demoEnvConfigured,
+          fingerprint: demoSetup.fingerprint ?? null,
+          credential_file: demoSetup.path,
+        },
+        live: {
+          venue: 'live',
+          host: 'fapi.binance.com',
+          data_dir: path.join(rootDataDir, 'live'),
+          credentials_configured: liveEnvConfigured,
+          fingerprint: liveSetup.fingerprint ?? null,
+          credential_file: liveSetup.path,
+        },
+      },
+      checks,
+      blockers,
+      can_switch: blockers.length === 0,
+      checked_at: nowIso(this.now()),
+    }
+  }
+
+  async stopRunningServiceProcess(pid) {
+    if (this.spawnImpl === spawn && Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
+      try {
+        process.kill(pid, 'SIGTERM')
+      } catch { /* process may already have exited */ }
+    }
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      const probe = await this.probeServiceHealth({ timeoutMs: 500 })
+      if (!probe.ok) return true
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    return false
+  }
+
+  async switchVenue({ target, confirm } = {}) {
+    const targetVenue = typeof target === 'string' ? target.trim().toLowerCase() : ''
+    if (targetVenue !== 'demo' && targetVenue !== 'live') {
+      throw new HostIntegrationError('E_VENUE_INVALID', 'target must be "demo" or "live"', { status: 422 })
+    }
+    const expectedConfirm = targetVenue === 'live' ? 'SWITCH_TO_LIVE' : 'SWITCH_TO_DEMO'
+    if (confirm !== expectedConfirm) {
+      throw new HostIntegrationError('E_CONFIRM_REQUIRED', `confirm must equal "${expectedConfirm}"`, {
+        status: 422,
+        details: { expected: expectedConfirm },
+      })
+    }
+    if (this.serviceStartInFlight) {
+      throw new HostIntegrationError('E_SERVICE_START_IN_FLIGHT', 'a service start or venue switch is already in progress', {
+        status: 409,
+        retryable: true,
+      })
+    }
+    const preflight = await this.venueSwitchPreflight({ target: targetVenue })
+    if (!preflight.can_switch) {
+      throw new HostIntegrationError(
+        'E_VENUE_SWITCH_BLOCKED',
+        `venue switch to ${targetVenue} blocked: ${preflight.blockers.join(', ')}`,
+        {
+          status: 409,
+          retryable: false,
+          details: { blockers: preflight.blockers, preflight },
+        },
+      )
+    }
+    if (preflight.already_on_target) {
+      this.writePreferredVenue(targetVenue)
+      return {
+        ok: true,
+        already: true,
+        switched: false,
+        previous_venue: preflight.current_venue,
+        venue: targetVenue,
+        preflight,
+      }
+    }
+
+    // 1) 先暂停自动交易（关本地调度 + 请求原服务 pause，不平仓、不撤保护单）
+    try {
+      await this.stopAutomation({ reason: `operator switched venue to ${targetVenue}` })
+    } catch { /* best effort before stopping old process */ }
+
+    // 2) 若当前服务在线，停止旧进程并等待端口释放
+    if (preflight.service_online) {
+      await this.stopRunningServiceProcess(preflight.service_pid)
+    }
+
+    // 3) 持久化目标环境偏好并按目标环境拉起新服务（物理隔离账本目录）
+    this.writePreferredVenue(targetVenue)
+    this.portfolioCache = null
+    this.serviceStartInFlight = this.launchService({ venue: targetVenue })
+    let launchResult
+    try {
+      launchResult = await this.serviceStartInFlight
+    } finally {
+      this.serviceStartInFlight = null
+    }
+
+    // 4) 切换到实盘或新环境后，默认将新服务的控制态置为 pause，需用户显式开启自动交易
+    try {
+      const tokenInfo = this.tokenInfo()
+      if (tokenInfo.present && tokenInfo.token) {
+        const client = this.clientWithToken(tokenInfo.token)
+        const ctrl = await client.control({
+          state: CONTROL_STOP_STATE,
+          confirm: CONTROL_STOP_STATE.toUpperCase(),
+          reason: `switched venue to ${targetVenue}; manual start required`,
+          request_id: `req-venue-${randomUUID().slice(0, 8)}`,
+        })
+        if (ctrl?.control) this.lastControl = controlInfoOf(ctrl.control)
+      }
+    } catch { /* best effort control pause on new service */ }
+
+    this.portfolioCache = null
+    this.logCommand('venue/switch', {
+      requestId: `venue-${targetVenue}-${Date.now()}`,
+      symbol: targetVenue.toUpperCase(),
+      reason: `switched from ${preflight.current_venue ?? 'offline'} to ${targetVenue}`,
+    })
+    return {
+      ok: true,
+      already: false,
+      switched: true,
+      previous_venue: preflight.current_venue,
+      venue: launchResult?.venue ?? targetVenue,
+      service: launchResult,
+      preflight,
+    }
+  }
+
+  async handleVenueSwitch(req, res, requestUrl) {
+    if (!isSameOriginRequest(req, this.ctx)) {
+      return sendJson(res, 403, { ok: false, error: { code: 'CROSS_ORIGIN_BLOCKED', message: 'Same-origin only.' } })
+    }
+    if (req.method === 'GET') {
+      const target = requestUrl.searchParams.get('target')
+      const preflight = await this.venueSwitchPreflight({ target })
+      return sendJson(res, 200, preflight)
+    }
+    if (req.method !== 'POST') return methodNotAllowed(res, ['GET', 'POST'])
+    requireJsonRequest(req)
+    const body = await readJsonBody(req, MAX_COMMAND_BODY_BYTES)
+    const result = await this.switchVenue({
+      target: body?.target,
+      confirm: body?.confirm,
+    })
+    return sendJson(res, 200, result)
   }
 
   async handleAutomationStart(req, res) {
@@ -4924,6 +5300,10 @@ export class WorkbenchHostIntegration {
       if (pathname === DEMO_SETUP_PATH) {
         return this.handleDemoSetup(req, res)
       }
+      if (pathname === VENUE_SWITCH_PATH) {
+        await this.handleVenueSwitch(req, res, requestUrl)
+        return
+      }
       if (pathname === PNL_PATH) {
         if (req.method !== 'GET') return methodNotAllowed(res, ['GET'])
         if (!isSameOriginRequest(req, this.ctx)) {
@@ -5140,6 +5520,9 @@ export class WorkbenchHostIntegration {
       { kind: 'exact', path: PNL_PATH, handler: (req, res) => this.handle(req, res) },
       { kind: 'exact', path: LLM_CATALOG_PATH, handler: (req, res) => this.handle(req, res) },
       { kind: 'exact', path: LLM_CONFIG_PATH, handler: (req, res) => this.handle(req, res) },
+      { kind: 'exact', path: LIVE_SETUP_PATH, handler: (req, res) => this.handle(req, res) },
+      { kind: 'exact', path: DEMO_SETUP_PATH, handler: (req, res) => this.handle(req, res) },
+      { kind: 'exact', path: VENUE_SWITCH_PATH, handler: (req, res) => this.handle(req, res) },
       { kind: 'exact', path: CLOSE_PATH, handler: (req, res) => this.handle(req, res) },
       { kind: 'exact', path: REPAIR_PATH, handler: (req, res) => this.handle(req, res) },
       { kind: 'exact', path: RECONCILE_PATH, handler: (req, res) => this.handle(req, res) },

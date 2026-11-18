@@ -317,6 +317,7 @@ function jsonResponse(status, body) {
   return {
     ok: status >= 200 && status < 300,
     status,
+    json: async () => body,
     text: async () => JSON.stringify(body),
   }
 }
@@ -3027,13 +3028,13 @@ test('strategy-capable service config failure blocks instead of native fallback'
 
 // ---- Phase-2 & P0/P1 Dual-Engine Strategy Suite ---------------------------
 
-test('P0-1: plugin identity is dsh-trading-workbench 0.2.0 and launcher root points to package root', () => {
+test('P0-1: plugin identity is dsh-trading-workbench 0.2.1 and launcher root points to package root', () => {
   const pkgPath = fileURLToPath(new URL('../package.json', import.meta.url))
   const expectedRoot = path.dirname(pkgPath)
   const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
-  assert.equal(pkg.version, '0.2.0')
+  assert.equal(pkg.version, '0.2.1')
   assert.equal(PLUGIN_ID, 'dsh-trading-workbench')
-  assert.equal(PLUGIN_VERSION, '0.2.0')
+  assert.equal(PLUGIN_VERSION, '0.2.1')
 
   const env = makeIntegration()
   const paths = env.integration.serviceLauncherPaths()
@@ -3361,5 +3362,127 @@ test('Phase-2 /state exposes strategy_summary and /strategies routes allow attri
   const analyzeRes = await callRoute('POST', '/trading-workbench/api/strategies/s1/analyze', { revision: 1 })
   assert.equal(analyzeRes.status, 200)
   assert.deepEqual(seenAnalyzeRoutes[0], { provider: 'dsh-live', model: 'dynamic-model-v3' })
+})
+
+test('Venue switch API runs preflight, blocks on open positions or missing Live credentials, and switches Demo <-> Live cleanly', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'twb-venue-switch-'))
+  const tokenFile = path.join(dir, '.api-token')
+  fs.writeFileSync(tokenFile, `${SERVICE_TOKEN}\n`, 'utf8')
+  const fakePython = path.join(dir, 'python-fake')
+  const fakeEntry = path.join(dir, 'run_service.py')
+  fs.writeFileSync(fakePython, 'echo ok\n', 'utf8')
+  fs.writeFileSync(fakeEntry, 'print("ok")\n', 'utf8')
+
+  let activeVenue = 'demo'
+  let serviceOnline = true
+  let openPositions = [{ symbol: 'BTCUSDT', qty: '0.02' }]
+  const spawnedCalls = []
+
+  const fetchImpl = async (url, options = {}) => {
+    const u = new URL(url)
+    if (u.pathname === '/health') {
+      if (!serviceOnline) throw new Error('ECONNREFUSED')
+      return jsonResponse(200, { ok: true, ready: true, venue: activeVenue, pid: 99999 })
+    }
+    if (u.pathname === '/api/positions') {
+      return jsonResponse(200, { positions: openPositions })
+    }
+    if (u.pathname === '/api/orders') {
+      return jsonResponse(200, { orders: [] })
+    }
+    if (u.pathname === '/api/status') {
+      return jsonResponse(200, { positions: openPositions, outbox: { pending_count: 0 } })
+    }
+    if (u.pathname === '/api/control') {
+      return jsonResponse(200, { control: { state: 'pause', reason: 'test' } })
+    }
+    return jsonResponse(200, { ok: true })
+  }
+
+  const integration = createIntegration({
+    serviceBaseUrl: 'http://127.0.0.1:8791',
+    dataDir: dir,
+    tokenFile,
+    fetchImpl,
+    serviceLauncher: { python: fakePython, entry: fakeEntry, dotenv: path.join(dir, 'demo.env') },
+    spawnImpl: (cmd, args, opts) => {
+      spawnedCalls.push({ cmd, args, env: opts.env })
+      activeVenue = opts.env.WORKBENCH_VENUE
+      serviceOnline = true
+      return { pid: 42424, unref() {} }
+    },
+    serviceStartTimeoutMs: 5000,
+    now: () => NOW,
+  })
+  integration.stopRunningServiceProcess = async () => {
+    serviceOnline = false
+    return true
+  }
+
+  const callRoute = async (method, urlPath, body = null) => {
+    const raw = body !== null ? Buffer.from(JSON.stringify(body), 'utf8') : null
+    const req = {
+      method,
+      url: urlPath,
+      socket: { remoteAddress: '127.0.0.1' },
+      headers: { host: '127.0.0.1:8791', ...(raw ? { 'content-type': 'application/json' } : {}) },
+      on(event, handler) {
+        if (event === 'data' && raw) handler(raw)
+        if (event === 'end') handler()
+      },
+      resume() {},
+    }
+    const res = demoSetupRes()
+    await integration.handle(req, res)
+    return res.rec
+  }
+
+  // 1) Preflight with open position + missing Live credentials reports both blockers
+  const pfBlocked = await callRoute('GET', '/trading-workbench/api/venue/switch?target=live')
+  assert.equal(pfBlocked.status, 200)
+  assert.equal(pfBlocked.body.can_switch, false)
+  assert.ok(pfBlocked.body.blockers.includes('OPEN_POSITIONS'))
+  assert.ok(pfBlocked.body.blockers.includes('LIVE_CREDENTIALS_MISSING'))
+
+  // 2) Attempting POST while blocked returns 409 E_VENUE_SWITCH_BLOCKED
+  const blockedPost = await callRoute('POST', '/trading-workbench/api/venue/switch', {
+    target: 'live',
+    confirm: 'SWITCH_TO_LIVE',
+  })
+  assert.equal(blockedPost.status, 409)
+  assert.equal(blockedPost.body.error.code, 'E_VENUE_SWITCH_BLOCKED')
+
+  // 3) Save Live credentials and clear open positions -> switch to Live succeeds
+  openPositions = []
+  const saveLive = await callRoute('POST', '/trading-workbench/api/live-setup', {
+    apiKey: 'live-api-key-123456',
+    apiSecret: 'live-api-secret-654321',
+  })
+  assert.equal(saveLive.status, 200)
+
+  const switchLive = await callRoute('POST', '/trading-workbench/api/venue/switch', {
+    target: 'live',
+    confirm: 'SWITCH_TO_LIVE',
+  })
+  assert.equal(switchLive.status, 200)
+  assert.equal(switchLive.body.ok, true)
+  assert.equal(switchLive.body.switched, true)
+  assert.equal(switchLive.body.venue, 'live')
+  assert.equal(spawnedCalls.length, 1)
+  assert.equal(spawnedCalls[0].env.WORKBENCH_VENUE, 'live')
+  assert.ok(spawnedCalls[0].args.includes(path.join(dir, 'live')))
+  assert.equal(fs.existsSync(path.join(dir, 'live', '.api-token')), true)
+  assert.equal(integration.readPreferredVenue(), 'live')
+
+  // 4) Switch back to Demo succeeds with isolated root dataDir
+  const switchDemo = await callRoute('POST', '/trading-workbench/api/venue/switch', {
+    target: 'demo',
+    confirm: 'SWITCH_TO_DEMO',
+  })
+  assert.equal(switchDemo.status, 200)
+  assert.equal(switchDemo.body.venue, 'demo')
+  assert.equal(spawnedCalls.length, 2)
+  assert.equal(spawnedCalls[1].env.WORKBENCH_VENUE, 'demo')
+  assert.equal(integration.readPreferredVenue(), 'demo')
 })
 

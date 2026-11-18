@@ -36,7 +36,7 @@ window.__ModuleLoader__.load({
 
     // ---- routes (Host only) -------------------------------------------------
     const API = '/trading-workbench/api'
-    const CLIENT_VERSION = '0.2.0'
+    const CLIENT_VERSION = '0.2.1'
     const STATE_URL = `${API}/state`
     const HEALTH_URL = `${API}/health`
     const PRICES_URL = `${API}/market/prices`
@@ -80,6 +80,8 @@ window.__ModuleLoader__.load({
     const LIVE_SETUP_URL = `${API}/live-setup`
     // Demo 接入：与实盘同一套语义，目标是 dataDir 下的 demo.env（基线 §5.3）。
     const DEMO_SETUP_URL = `${API}/demo-setup`
+    // 环境切换（Demo ↔ Live）：预检持仓/挂单/凭据并重启本机服务到对应环境独立账本。
+    const VENUE_SWITCH_URL = `${API}/venue/switch`
     const UP_DOWN_KEY = 'twb.appearance.updown'
     const DENSITY_KEY = 'twb.appearance.density'
     const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
@@ -1199,6 +1201,32 @@ window.__ModuleLoader__.load({
       'reason.E_STRATEGY_SIGNAL_FALSE': ['策略入场条件未满足', 'Strategy entry condition not met'],
       'reason.E_STRATEGY_SIGNAL_DUPLICATE': ['当前周期该策略信号已触发过（去重跳过）', 'Strategy signal already triggered in this window (deduplicated)'],
       'reason.E_STRATEGY_NOT_AUTHORIZED': ['策略未获执行授权或已触发熔断', 'Strategy not authorized for execution or circuit tripped'],
+      // ---- 0.2.1 UX: Main-screen Demo ↔ Live environment switcher ----
+      'venue.switchAria': ['交易环境与模拟盘/实盘切换', 'Trading venue and Demo/Live switch'],
+      'venue.switchHint': ['点击切换模拟盘（Demo）与实盘（Live）环境（含持仓/挂单安全预检）', 'Click to switch between Demo and Live venues (with position/order safety preflight)'],
+      'venue.switchToLiveBtn': ['⇄ 切换实盘', '⇄ Switch to Live'],
+      'venue.switchToDemoBtn': ['⇄ 切回模拟盘', '⇄ Switch to Demo'],
+      'venue.openSwitchDialog': ['切换模拟盘 / 实盘', 'Switch Demo / Live'],
+      'venue.dialogTitle': ['切换交易环境（模拟盘 Demo ↔ 实盘 Live）', 'Switch trading venue (Demo ↔ Live)'],
+      'venue.dialogSub': ['切换前自动执行安全预检：有未平仓位或未决挂单时禁止切换；两个环境使用物理隔离的独立 SQLite 账本。', 'Safety preflight runs before switching: open positions or pending orders block the switch; Demo and Live use physically isolated SQLite ledgers.'],
+      'venue.currentLabel': ['当前运行环境', 'Current active venue'],
+      'venue.targetLabel': ['选择目标环境', 'Select target venue'],
+      'venue.optionDemo': ['模拟盘 DEMO (demo-fapi.binance.com)', 'DEMO venue (demo-fapi.binance.com)'],
+      'venue.optionLive': ['实盘 LIVE (fapi.binance.com · 真实资金)', 'LIVE venue (fapi.binance.com · real funds)'],
+      'venue.preflightTitle': ['切换前安全预检', 'Pre-switch safety preflight'],
+      'venue.recheck': ['重新预检', 'Re-check'],
+      'venue.checking': ['预检中…', 'Checking…'],
+      'venue.checkPass': ['通过', 'PASS'],
+      'venue.checkBlock': ['阻断', 'BLOCKED'],
+      'venue.alreadyOnTarget': ['当前服务已运行在该环境，无需重复切换。', 'The service is already running in this venue.'],
+      'venue.liveSafetyWarn': ['实盘安全提示：实盘连接 fapi.binance.com 并使用真实账户资金。切换完成后自动交易默认处于「已暂停」状态，需核对无误后手动启动。', 'LIVE venue notice: connects to fapi.binance.com with real account funds. After switching, automatic execution starts paused and requires manual activation.'],
+      'venue.demoSafetyNote': ['模拟盘提示：连接币安合约测试网 demo-fapi.binance.com，使用模拟资金与独立 Demo 账本。', 'DEMO venue notice: connects to Binance futures testnet demo-fapi.binance.com with simulated funds and an isolated Demo ledger.'],
+      'venue.quickLiveCredTitle': ['尚未配置实盘 API 凭据（可直接在此录入本机 0600 凭据文件并重检）', 'Live API credentials missing (save to local 0600 file here and re-check)'],
+      'venue.confirmToLive': ['确认切换到实盘 (LIVE)', 'Confirm switch to LIVE'],
+      'venue.confirmToDemo': ['确认切换到模拟盘 (DEMO)', 'Confirm switch to DEMO'],
+      'venue.switching': ['正在安全切换并重启服务…', 'Switching venue and restarting service…'],
+      'venue.switchedToLive': ['已切换到实盘（LIVE · fapi.binance.com），自动交易已默认暂停', 'Switched to LIVE venue (fapi.binance.com); automatic execution is paused'],
+      'venue.switchedToDemo': ['已切换到模拟盘（DEMO · demo-fapi.binance.com）', 'Switched to DEMO venue (demo-fapi.binance.com)'],
     }
 
     // ---- reasonCode -> 中文标签（03 §8 唯一词表：75 行 / 89 码） ------------
@@ -2222,7 +2250,16 @@ window.__ModuleLoader__.load({
 .twb-strategy-review>label input{flex-shrink:0;margin-top:4px}
 .twb-strategy-authorization>p{margin:0 0 8px;font-size:12px;color:var(--twb-ink-2)}
 [data-strategies-page][hidden]{display:none!important}
-@media(max-width:760px){.twb-strategies-heading{align-items:flex-start;flex-direction:column}.twb-strategies-page .twb-settings-row>select{width:100%}.twb-strat-rule-rows{grid-template-columns:minmax(0,1fr)}}
+.twb-env-group{display:inline-flex;align-items:center;gap:8px;min-width:0;flex-shrink:0}
+.twb-venue-switch-btn{height:24px;padding:0 9px;font-size:11px;font-weight:600;border-radius:4px;white-space:nowrap;border:1px solid var(--twb-b-rule-3);background:var(--twb-s1);color:var(--twb-b-ink-1);cursor:pointer}
+.twb-venue-switch-btn:hover{border-color:var(--twb-ink-1);background:var(--twb-row-hover)}
+.twb-venue-switch-btn.is-live{border-color:var(--twb-edge-danger);color:var(--twb-danger)}
+.twb-venue-target-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:8px 0 12px}
+.twb-venue-opt{display:flex;flex-direction:column;align-items:flex-start;gap:3px;padding:9px 11px;border:1px solid var(--twb-b-rule-2);border-radius:5px;background:var(--twb-s1);color:var(--twb-ink-1);font-size:12px;font-weight:600;text-align:left;cursor:pointer}
+.twb-venue-opt[aria-pressed='true']{border-color:var(--twb-ink-1);background:color-mix(in srgb,var(--twb-ink-1) 8%,var(--twb-s1))}
+.twb-venue-opt[data-venue-select='live'][aria-pressed='true']{border-color:var(--twb-edge-danger);background:var(--twb-tint-danger);color:var(--twb-danger)}
+.twb-venue-opt span{font-size:10px;font-weight:400;color:var(--twb-ink-2);font-family:var(--twb-num)}
+@media(max-width:760px){.twb-strategies-heading{align-items:flex-start;flex-direction:column}.twb-strategies-page .twb-settings-row>select{width:100%}.twb-strat-rule-rows{grid-template-columns:minmax(0,1fr)}.twb-venue-target-grid{grid-template-columns:minmax(0,1fr)}}
 `
 
     // ---- helpers -----------------------------------------------------------
@@ -5277,7 +5314,7 @@ window.__ModuleLoader__.load({
     }
 
     // ---- drawer ------------------------------------------------------------
-    function Drawer({ model, drawer, t, onClose, onTab, onOpenSystem, lang, onLanguage, appearance, onAppearance, density, onDensity }) {
+    function Drawer({ model, drawer, t, onClose, onTab, onOpenSystem, onOpenVenueSwitch, lang, onLanguage, appearance, onAppearance, density, onDensity }) {
       const closeRef = React.useRef(null)
       const rootRef = React.useRef(null)
       const restoreRef = React.useRef(null)
@@ -5327,6 +5364,7 @@ window.__ModuleLoader__.load({
           model, t,
           group: settingsGroup,
           onOpenSystem,
+          onOpenVenueSwitch,
           lang, onLanguage, appearance, onAppearance, density, onDensity,
         })
         : isConfig
@@ -6202,17 +6240,28 @@ window.__ModuleLoader__.load({
       h('ul', { className: 'twb-settings-list' }, (data?.steps ?? []).map((step, index) => h('li', { key: index }, step))))
     }
 
-    function ConnectionGroup({ model, t, pnl, onRefreshPnl, liveSetup, onLiveSaved, demoSetup, onDemoSaved }) {
+    function ConnectionGroup({ model, t, pnl, onRefreshPnl, liveSetup, onLiveSaved, demoSetup, onDemoSaved, onOpenVenueSwitch }) {
       const service = model.service ?? {}
       const host = model.host ?? {}
       const env = host.environment ?? null
+      const currentVenue = env?.venue ?? service.venue ?? null
       const credentials = service.credentials_configured === undefined ? null : service.credentials_configured
       const fingerprint = service.key_fingerprint ?? service.credential_fingerprint ?? null
       return h(React.Fragment, null,
         h(SettingsBlock, {
           title: t('set.group.connection'),
           sub: t('set.envLocked'),
-          aside: h(ReadonlyMark, { t }),
+          aside: h('span', { className: 'twb-chips' },
+            h(ReadonlyMark, { t }),
+            onOpenVenueSwitch
+              ? h('button', {
+                type: 'button',
+                className: 'twb-btn twb-btn--secondary',
+                style: { height: 24 },
+                'data-settings-venue-switch': 'true',
+                onClick: () => onOpenVenueSwitch(currentVenue === 'live' ? 'demo' : 'live'),
+              }, t('venue.openSwitchDialog'))
+              : null),
         },
         h(SettingsKv, { rows: [
           [t('set.env'), (() => {
@@ -7383,7 +7432,7 @@ window.__ModuleLoader__.load({
         busy ? h('div', { role: 'status' }, text('处理中…', 'Working…')) : null))
     }
 
-    function SettingsBody({ model, t, group, onOpenSystem, lang, onLanguage, appearance, onAppearance, density, onDensity }) {
+    function SettingsBody({ model, t, group, onOpenSystem, onOpenVenueSwitch, lang, onLanguage, appearance, onAppearance, density, onDensity }) {
       const active = SETTINGS_GROUPS.includes(group) ? group : 'connection'
       // The fund calibers are read only while the account/diagnostics groups are
       // open; the cockpit keeps the cheaper /state snapshot.
@@ -7401,6 +7450,7 @@ window.__ModuleLoader__.load({
           onLiveSaved: () => setLiveNonce((value) => value + 1),
           demoSetup,
           onDemoSaved: () => setDemoNonce((value) => value + 1),
+          onOpenVenueSwitch,
         })
       }
       if (active === 'trading') return h(TradingGroup, { model, t })
@@ -7702,6 +7752,243 @@ window.__ModuleLoader__.load({
             'aria-busy': String(busy),
             onClick: startSetup,
           }, busy ? t('setup.running') : t('setup.start'))))
+    }
+
+    function VenueSwitchDialog({ t, currentVenue, initialTarget, onClose, onSwitched }) {
+      const defaultTarget = initialTarget === 'demo' || initialTarget === 'live'
+        ? initialTarget
+        : (currentVenue === 'live' ? 'demo' : 'live')
+      const [target, setTarget] = React.useState(defaultTarget)
+      const [preflight, setPreflight] = React.useState(null)
+      const [checking, setChecking] = React.useState(true)
+      const [switching, setSwitching] = React.useState(false)
+      const [error, setError] = React.useState(null)
+      const [liveApiKey, setLiveApiKey] = React.useState('')
+      const [liveApiSecret, setLiveApiSecret] = React.useState('')
+      const [savingKey, setSavingKey] = React.useState(false)
+      const [keyNotice, setKeyNotice] = React.useState(null)
+      const mounted = React.useRef(true)
+
+      React.useEffect(() => () => { mounted.current = false }, [])
+
+      const loadPreflight = async (nextTarget) => {
+        const tgt = nextTarget ?? target
+        setChecking(true)
+        setError(null)
+        try {
+          const resp = await fetch(`${VENUE_SWITCH_URL}?target=${encodeURIComponent(tgt)}`, {
+            credentials: 'same-origin',
+            headers: { accept: 'application/json' },
+          })
+          const body = await resp.json().catch(() => null)
+          if (!mounted.current) return
+          if (!resp.ok || body?.ok === false) {
+            throw new Error(body?.error?.message ?? body?.error?.code ?? `HTTP_${resp.status}`)
+          }
+          setPreflight(body)
+        } catch (err) {
+          if (mounted.current) setError(String(err?.message ?? err))
+        } finally {
+          if (mounted.current) setChecking(false)
+        }
+      }
+
+      React.useEffect(() => {
+        loadPreflight(target)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [target])
+
+      const saveInlineLiveCredentials = async () => {
+        if (savingKey || !liveApiKey.trim() || !liveApiSecret.trim()) return
+        setSavingKey(true)
+        setKeyNotice(null)
+        try {
+          const resp = await fetch(LIVE_SETUP_URL, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ apiKey: liveApiKey.trim(), apiSecret: liveApiSecret.trim() }),
+          })
+          const body = await resp.json().catch(() => null)
+          if (!mounted.current) return
+          if (!resp.ok || body?.ok === false) {
+            setKeyNotice({ ok: false, text: body?.error?.message ?? `HTTP_${resp.status}` })
+          } else {
+            setLiveApiKey('')
+            setLiveApiSecret('')
+            setKeyNotice({ ok: true, text: fmt(zh('live.saved'), { fingerprint: body.fingerprint ?? '—', path: body.file?.path ?? '—' }) })
+            await loadPreflight(target)
+          }
+        } catch (err) {
+          if (mounted.current) setKeyNotice({ ok: false, text: String(err?.message ?? err) })
+        } finally {
+          if (mounted.current) setSavingKey(false)
+        }
+      }
+
+      const confirmSwitch = async () => {
+        if (switching || checking) return
+        setSwitching(true)
+        setError(null)
+        try {
+          const confirmWord = target === 'live' ? 'SWITCH_TO_LIVE' : 'SWITCH_TO_DEMO'
+          const resp = await fetch(VENUE_SWITCH_URL, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ target, confirm: confirmWord }),
+          })
+          const body = await resp.json().catch(() => null)
+          if (!mounted.current) return
+          if (!resp.ok || body?.ok === false) {
+            if (body?.error?.details?.preflight) setPreflight(body.error.details.preflight)
+            throw new Error(body?.error?.message ?? body?.error?.code ?? `HTTP_${resp.status}`)
+          }
+          onSwitched?.(body)
+        } catch (err) {
+          if (mounted.current) setError(String(err?.message ?? err))
+        } finally {
+          if (mounted.current) setSwitching(false)
+        }
+      }
+
+      const activeCurrent = preflight?.current_venue ?? currentVenue ?? null
+      const currentBadge = activeCurrent === 'live'
+        ? t('env.live')
+        : activeCurrent === 'demo'
+          ? t('env.demo')
+          : t('env.unknown')
+      const checks = Array.isArray(preflight?.checks) ? preflight.checks : []
+      const blockers = Array.isArray(preflight?.blockers) ? preflight.blockers : []
+      const alreadyOnTarget = preflight?.already_on_target === true
+      const canSwitch = preflight?.can_switch === true && !alreadyOnTarget && !checking && !switching
+      const missingLiveCreds = target === 'live' && blockers.includes('LIVE_CREDENTIALS_MISSING')
+
+      return h('div', {
+        className: 'twb-precheck twb-setup twb-venue-dialog',
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-label': t('venue.dialogTitle'),
+        'data-venue-dialog': 'true',
+      },
+      h('div', { className: 'twb-precheck-head' },
+        h('span', { className: 'twb-card-title' }, t('venue.dialogTitle')),
+        h(Chip, {
+          text: `${t('venue.currentLabel')}: ${currentBadge}`,
+          tone: activeCurrent === 'live' ? 'danger' : 'quiet',
+        }),
+        h('span', { className: 'twb-spacer' }),
+        h('button', {
+          type: 'button',
+          className: 'twb-btn twb-btn--ghost',
+          disabled: checking || switching,
+          onClick: () => loadPreflight(target),
+        }, checking ? t('venue.checking') : t('venue.recheck')),
+        h('button', {
+          type: 'button',
+          className: 'twb-btn twb-btn--ghost',
+          disabled: switching,
+          onClick: onClose,
+        }, t('common.close'))),
+      h('div', { className: 'twb-hint twb-setup-sub' }, t('venue.dialogSub')),
+      h('div', { className: 'twb-card-title', style: { marginTop: 6 } }, t('venue.targetLabel')),
+      h('div', { className: 'twb-venue-target-grid', role: 'group', 'aria-label': t('venue.targetLabel') },
+        h('button', {
+          type: 'button',
+          className: 'twb-venue-opt',
+          'data-venue-select': 'demo',
+          'aria-pressed': String(target === 'demo'),
+          disabled: switching,
+          onClick: () => setTarget('demo'),
+        },
+        h('strong', null, t('venue.optionDemo')),
+        h('span', null, preflight?.venues?.demo?.data_dir ?? 'data/workbench-v1.sqlite')),
+        h('button', {
+          type: 'button',
+          className: 'twb-venue-opt',
+          'data-venue-select': 'live',
+          'aria-pressed': String(target === 'live'),
+          disabled: switching,
+          onClick: () => setTarget('live'),
+        },
+        h('strong', null, t('venue.optionLive')),
+        h('span', null, preflight?.venues?.live?.data_dir ?? 'data/live/workbench-v1.sqlite'))),
+      h('div', { className: 'twb-card-title', style: { marginBottom: 4 } }, t('venue.preflightTitle')),
+      h('div', { className: 'twb-setup-rows' },
+        checks.map((item) => h('div', {
+          key: item.id,
+          className: 'twb-setup-row',
+          'data-venue-check': item.id,
+          'data-ok': String(item.ok === true),
+        },
+        h(Chip, {
+          text: item.ok ? t('venue.checkPass') : t('venue.checkBlock'),
+          tone: item.ok ? 'quiet' : 'danger',
+        }),
+        h('span', { className: 'twb-setup-d' }, item.detail)))),
+      missingLiveCreds
+        ? h('div', { className: 'twb-panel', style: { marginTop: 10 }, 'data-venue-live-cred-box': 'true' },
+          h('div', { className: 'twb-card-title', style: { marginBottom: 6 } }, t('venue.quickLiveCredTitle')),
+          h('div', { className: 'twb-chips', style: { flexWrap: 'wrap', gap: 6, marginBottom: 4 } },
+            h('input', {
+              type: 'password',
+              autoComplete: 'off',
+              className: 'twb-input',
+              'data-venue-live-key': 'apiKey',
+              placeholder: t('live.apiKey'),
+              value: liveApiKey,
+              disabled: savingKey || switching,
+              onChange: (event) => setLiveApiKey(event.target.value),
+              style: { minWidth: 200 },
+            }),
+            h('input', {
+              type: 'password',
+              autoComplete: 'off',
+              className: 'twb-input',
+              'data-venue-live-key': 'apiSecret',
+              placeholder: t('live.apiSecret'),
+              value: liveApiSecret,
+              disabled: savingKey || switching,
+              onChange: (event) => setLiveApiSecret(event.target.value),
+              style: { minWidth: 200 },
+            }),
+            h('button', {
+              type: 'button',
+              className: 'twb-btn twb-btn--secondary',
+              'data-venue-live-save': 'true',
+              disabled: savingKey || switching || !liveApiKey.trim() || !liveApiSecret.trim(),
+              onClick: saveInlineLiveCredentials,
+            }, savingKey ? t('live.saving') : t('live.save'))),
+          keyNotice ? h('div', { className: 'twb-hint', 'data-venue-live-notice': keyNotice.ok ? 'ok' : 'error' }, keyNotice.text) : null)
+        : null,
+      h('div', {
+        className: target === 'live' ? 'twb-modal-note twb-modal-note--danger' : 'twb-modal-note',
+        style: { marginTop: 10 },
+      }, target === 'live' ? t('venue.liveSafetyWarn') : t('venue.demoSafetyNote')),
+      alreadyOnTarget
+        ? h('div', { className: 'twb-hint', style: { marginTop: 6 } }, t('venue.alreadyOnTarget'))
+        : null,
+      error
+        ? h('div', { className: 'twb-hint twb-setup-error', role: 'alert', style: { marginTop: 6 } }, error)
+        : null,
+      h('div', { className: 'twb-precheck-foot', style: { marginTop: 10 } },
+        h('span', { className: 'twb-spacer' }),
+        h('button', {
+          type: 'button',
+          className: 'twb-btn twb-btn--secondary',
+          disabled: switching,
+          onClick: onClose,
+        }, t('action.cancel')),
+        h('button', {
+          type: 'button',
+          className: 'twb-btn twb-btn--primary',
+          'data-venue-switch-confirm': 'true',
+          disabled: !canSwitch,
+          'aria-busy': String(switching),
+          onClick: confirmSwitch,
+        }, switching
+          ? t('venue.switching')
+          : (target === 'live' ? t('venue.confirmToLive') : t('venue.confirmToDemo')))))
     }
 
     function PrecheckPanel({ precheck, entry, t, busy, onClose, onRun, onFix }) {
@@ -8115,6 +8402,7 @@ window.__ModuleLoader__.load({
       const [pendingOpen, setPendingOpen] = React.useState(false)
       // 16 §1: the first-run environment wizard (readiness -> setup job -> ready).
       const [setupOpen, setSetupOpen] = React.useState(false)
+      const [venueSwitchTarget, setVenueSwitchTarget] = React.useState(null)
       const [runPhase, setRunPhase] = React.useState('idle')
       const [refreshing, setRefreshing] = React.useState(false)
       const [refreshTick, setRefreshTick] = React.useState(0)
@@ -8919,14 +9207,24 @@ window.__ModuleLoader__.load({
             const env = model.host?.environment ?? null
             const venue = env?.known === false ? null : (env?.venue ?? model.service?.venue ?? null)
             const label = venue === 'live' ? t('env.live') : venue === 'demo' ? t('env.demo') : t('env.unknown')
-            return h('span', {
-              className: venue === 'live' ? 'twb-env twb-env--live' : 'twb-env',
-              'data-env': venue ?? 'unknown',
-              'data-env-live': venue === 'live' ? 'true' : 'false',
-              title: venue === 'live'
-                ? t('env.liveHint')
-                : fmt(zh('env.accountHint'), { ledger: model.accountShort ?? zh('env.accountUnknown') }),
-            }, model.accountShort ? `${label} · ${model.accountShort}` : label)
+            const nextTarget = venue === 'live' ? 'demo' : 'live'
+            return h('div', { className: 'twb-env-group', role: 'group', 'aria-label': t('venue.switchAria') },
+              h('span', {
+                className: venue === 'live' ? 'twb-env twb-env--live' : 'twb-env',
+                'data-env': venue ?? 'unknown',
+                'data-env-live': venue === 'live' ? 'true' : 'false',
+                title: venue === 'live'
+                  ? t('env.liveHint')
+                  : fmt(zh('env.accountHint'), { ledger: model.accountShort ?? zh('env.accountUnknown') }),
+              }, model.accountShort ? `${label} · ${model.accountShort}` : label),
+              h('button', {
+                type: 'button',
+                className: `twb-btn twb-btn--secondary twb-venue-switch-btn${venue === 'live' ? ' is-live' : ''}`,
+                'data-venue-switch-open': 'true',
+                'data-venue-target': nextTarget,
+                title: t('venue.switchHint'),
+                onClick: () => setVenueSwitchTarget(nextTarget),
+              }, venue === 'live' ? t('venue.switchToDemoBtn') : t('venue.switchToLiveBtn')))
           })(),
           h('div', { className: 'twb-lang twb-lang-inline', role: 'group', 'aria-label': lang === 'zh' ? '语言' : 'Language' },
             h('button', {
@@ -9030,6 +9328,27 @@ window.__ModuleLoader__.load({
           onRefresh: () => { refresh() },
         }) : null,
         setupOpen ? h(ServiceSetupDialog, { t, onClose: () => setSetupOpen(false), onReady: () => { setNonce((v) => v + 1); setHealthNonce((v) => v + 1); setEnvelopeNonce((v) => v + 1) } }) : null,
+        venueSwitchTarget
+          ? h(VenueSwitchDialog, {
+            t,
+            currentVenue: model.host?.environment?.known === false ? null : (model.host?.environment?.venue ?? model.service?.venue ?? null),
+            initialTarget: venueSwitchTarget,
+            onClose: () => setVenueSwitchTarget(null),
+            onSwitched: (res) => {
+              const nextVenue = res?.venue ?? venueSwitchTarget
+              setVenueSwitchTarget(null)
+              setRefreshTick((v) => v + 1)
+              setNonce((v) => v + 1)
+              setHealthNonce((v) => v + 1)
+              setEnvelopeNonce((v) => v + 1)
+              setMarketNonce((v) => v + 1)
+              setNotice({
+                kind: nextVenue === 'live' ? 'warn' : 'quiet',
+                text: nextVenue === 'live' ? t('venue.switchedToLive') : t('venue.switchedToDemo'),
+              })
+            },
+          })
+          : null,
         pendingOpen ? h(PendingPanel, {
           items: attention,
           t,
@@ -9187,6 +9506,7 @@ window.__ModuleLoader__.load({
             onClose: () => { if (!controlFlight.current) setDrawer(null) },
             onTab: (tab) => setDrawer((prev) => (prev ? { ...prev, tab } : prev)),
             onOpenSystem: () => setDrawer({ type: 'system', tab: 'evidence' }),
+            onOpenVenueSwitch: (target) => { setDrawer(null); setVenueSwitchTarget(target || 'live') },
             lang,
             onLanguage: (value) => setLanguage(value),
             appearance,

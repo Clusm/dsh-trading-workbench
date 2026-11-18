@@ -6,14 +6,14 @@
 
 <p>
   <a href="https://www.npmjs.com/package/dsh-trading-workbench"><img alt="npm" src="https://img.shields.io/npm/v/dsh-trading-workbench?style=flat-square&color=cb3837"></a>
-  <a href="https://github.com/Clusm/dsh-trading-workbench/actions"><img alt="tests" src="https://img.shields.io/badge/tests-225%20passing-2ea043?style=flat-square"></a>
+  <a href="https://github.com/Clusm/dsh-trading-workbench/actions"><img alt="tests" src="https://img.shields.io/badge/tests-226%20passing-2ea043?style=flat-square"></a>
   <a href="package.json"><img alt="dsh" src="https://img.shields.io/badge/dsh-%3E%3D0.2.2--rc.1%20%3C0.3.0-4b6bfb?style=flat-square"></a>
   <a href="package.json"><img alt="node" src="https://img.shields.io/badge/node-%3E%3D22.19-3c873a?style=flat-square"></a>
-  <img alt="venue" src="https://img.shields.io/badge/venue-Binance%20Demo-f0b90b?style=flat-square">
-  <img alt="status" src="https://img.shields.io/badge/status-v0.2.0-2ea043?style=flat-square">
+  <img alt="venue" src="https://img.shields.io/badge/venue-Demo%20%2F%20Live-f0b90b?style=flat-square">
+  <img alt="status" src="https://img.shields.io/badge/status-v0.2.1-2ea043?style=flat-square">
 </p>
 
-[English](#english) · [v0.2.0 更新日志](#v020-更新说明) · [AI 交易范围](#ai-交易的范围与决策链) · [策略管理与双执行引擎](#策略管理与双执行引擎) · [快速开始](#快速开始) · [架构](#架构) · [安全边界](#安全边界) · [开发](#开发与测试)
+[English](#english) · [v0.2.1 更新日志](#v021--v020-更新说明) · [AI 交易范围](#ai-交易的范围与决策链) · [策略管理与双执行引擎](#策略管理与双执行引擎) · [快速开始](#快速开始) · [架构](#架构) · [安全边界](#安全边界) · [开发](#开发与测试)
 
 </div>
 
@@ -70,7 +70,7 @@
 | **AI 决策 · 历史** | 按归档日期查询（今天默认）、按结果筛选、耗时分布、单轮详情与调用审计 |
 | **AI 决策 · 分析** | 轮次分布、原因码构成、权益曲线、资金口径（服务端 `/pnl`）、AI 日报 |
 | **设置** | 连接与账户、Demo/实盘凭据接入（只写本机 0600 文件）、自动调度、只读限额、运行身份诊断 |
-| **顶栏** | 全局运行模式徽章（`原生 AI` / `已授权策略`）、空转与熔断注意力提醒、预检、运行一轮、启停自动交易、服务一键启动、**环境初始化向导** |
+| **顶栏** | **主屏幕模拟盘/实盘一键切换与安全预检弹窗（`⇄ 切换实盘` / `⇄ 切回模拟盘`）**、全局运行模式徽章（`原生 AI` / `已授权策略`）、空转与熔断注意力提醒、预检、运行一轮、启停自动交易、服务一键启动、**环境初始化向导** |
 
 ---
 
@@ -90,10 +90,14 @@
 
 ---
 
-## v0.2.0 更新说明
+## v0.2.1 & v0.2.0 更新说明
 
-相比 `v0.1.1`，`v0.2.0` 主要新增与优化：
+相比 `v0.1.1`，`v0.2.0` / `v0.2.1` 主要新增与优化：
 
+- **主界面顶栏 Demo（模拟盘）↔ Live（实盘）一键切换与安全预检弹窗（`v0.2.1`）**：在主界面顶栏 `S0` 环境徽标旁直接提供 `⇄ 切换实盘` / `⇄ 切回模拟盘` 交互按钮（同时也在「设置 → 连接与账户」中提供入口），后端配套 `/trading-workbench/api/venue/switch` 路由：
+  1. 切换前自动核验 4 项安全指标（当前账户无未平仓位、无未决/在途挂单、目标环境凭据就绪、本机启动器可用）；
+  2. 若切换至实盘但尚未录入 `live.env` 凭据，支持直接在切换弹窗内录入实盘 API Key / Secret（仅写本机 `0600` 文件）并立即重检，无需跳出弹窗；
+  3. 切换时先自动暂停调度与控制态（`pause`，绝不误平仓），并以独立物理隔离账本目录（Demo: `<dataDir>`，Live: `<dataDir>/live`）重启本地 Python 服务，切换完成后自动交易默认处于暂停状态，需人工核对后显式开启。
 - **独立轻量持仓标记价通道（`/api/market/marks`）**：可见页面持仓标记价 2 秒单飞刷新（服务端校准时钟 `age_ms`、按标的 singleflight 合并、≥5 标的自动批量拉取、乱序报价拒绝、页面隐藏自动暂停）；持仓表保留官方账户快照 `uPnL` 同时提供实时标记价参考浮盈，并对 `< $1` 低价币自适应 2/4/5/6 位小数精度。
 - **一级「策略管理」工作区与生命周期闭环**：新增策略草稿 CAS、AI 澄清、不可变版本挂载、独立启停授权（`generation` CAS）与运行模式切换（`mode_revision` CAS）。
 - **「规则直通」与「AI 辅助」双执行引擎 + AI 否决归因**：支持 0 LLM 延迟规则直通 P1/P2 执行，以及 AI 辅助模式下的否决避险/踏空回溯统计。

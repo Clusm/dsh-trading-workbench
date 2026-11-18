@@ -842,8 +842,14 @@ check('the setup copy exists in both languages',
     .every((key) => key in (dict.zh ?? {}) && key in (dict.en ?? {})) &&
     (dict.zh['s2.setupService'] ?? '') === '初始化服务')
 
-// ---- 20. 0.2.0: adaptive fmtPrice, calibrated quotes & strategy UX ---------
-check('client version is 0.2.0', SOURCE.includes("const CLIENT_VERSION = '0.2.0'"))
+// ---- 20. 0.2.0 / 0.2.1: adaptive fmtPrice, calibrated quotes, strategy UX & venue switcher ----
+check('client version is 0.2.1', SOURCE.includes("const CLIENT_VERSION = '0.2.1'"))
+check('main screen top bar exposes Demo/Live venue switch button and VenueSwitchDialog',
+  SOURCE.includes("'data-venue-switch-open': 'true'") &&
+    SOURCE.includes('function VenueSwitchDialog(') &&
+    SOURCE.includes('VENUE_SWITCH_URL') &&
+    INTEGRATION_SOURCE.includes('export const VENUE_SWITCH_PATH = ') &&
+    INTEGRATION_SOURCE.includes('async handleVenueSwitch('))
 const STRATEGY_REASON_KEYS = [
   'reason.NO_ELIGIBLE_STRATEGY',
   'reason.STRATEGY_AI_CONFLICT',

@@ -11,7 +11,7 @@
  */
 
 export const PLUGIN_ID = 'dsh-trading-workbench'
-export const PLUGIN_VERSION = '0.2.0'
+export const PLUGIN_VERSION = '0.2.1'
 const API_PREFIX = '/trading-workbench/api'
 const HEALTH_PATH = `${API_PREFIX}/health`
 const PROBE_PATH = `${API_PREFIX}/probe/llm`

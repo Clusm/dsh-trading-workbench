@@ -638,6 +638,8 @@ let strategyAttributionOverride = null
 let strategyPreviewOverride = null
 let strategyListFailOnce = 0
 let marksOverride = null
+let venueSwitchLiveCredReady = false
+let venueSwitchOpenPositions = 0
 const requestLog = []
 const timers = []
 let pendingStateResolvers = []
@@ -652,6 +654,65 @@ async function fetchStub(url, options) {
   const path = target.split('?')[0]
   requestLog.push({ url: target, method, body: options?.body ?? null })
   if (path.includes('/market/marks')) return reply({ ok: true, prices: marksOverride ?? {} })
+  if (path.endsWith('/live-setup') && method === 'POST') {
+    venueSwitchLiveCredReady = true
+    return reply({
+      ok: true,
+      file: { path: 'data/credentials/live.env', exists: true },
+      fingerprint: 'livefp88',
+      restartRequired: true,
+    })
+  }
+  if (path.endsWith('/venue/switch')) {
+    const currentVenue = serverState?.service?.venue ?? 'demo'
+    if (method === 'GET') {
+      const targetVenue = new URL(target, 'http://fixture.local').searchParams.get('target') || (currentVenue === 'live' ? 'demo' : 'live')
+      const blockers = []
+      if (venueSwitchOpenPositions > 0) blockers.push('OPEN_POSITIONS')
+      if (targetVenue === 'live' && !venueSwitchLiveCredReady) blockers.push('LIVE_CREDENTIALS_MISSING')
+      return reply({
+        ok: true,
+        contract: 'trading-workbench/venue-switch/1',
+        current_venue: currentVenue,
+        preferred_venue: currentVenue,
+        target_venue: targetVenue,
+        already_on_target: currentVenue === targetVenue,
+        service_online: true,
+        open_positions_count: venueSwitchOpenPositions,
+        pending_orders_count: 0,
+        venues: {
+          demo: { venue: 'demo', host: 'demo-fapi.binance.com', data_dir: 'data', credentials_configured: true, fingerprint: 'demofp11' },
+          live: { venue: 'live', host: 'fapi.binance.com', data_dir: 'data/live', credentials_configured: venueSwitchLiveCredReady, fingerprint: venueSwitchLiveCredReady ? 'livefp88' : null },
+        },
+        checks: [
+          { id: 'positions_flat', ok: venueSwitchOpenPositions === 0, detail: venueSwitchOpenPositions === 0 ? '当前账户无未平仓位 (0)' : `当前仍有 ${venueSwitchOpenPositions} 个未平仓位` },
+          { id: 'orders_clear', ok: true, detail: '当前无在途或未决挂单 (0)' },
+          { id: 'target_credentials', ok: targetVenue === 'live' ? venueSwitchLiveCredReady : true, detail: targetVenue === 'live' ? (venueSwitchLiveCredReady ? '实盘凭据已就绪（指纹 livefp88）' : '缺少实盘 API Key / Secret') : '模拟盘凭据已就绪' },
+          { id: 'launcher_ready', ok: true, detail: '本机服务进程启动器就绪' },
+        ],
+        blockers,
+        can_switch: blockers.length === 0,
+      })
+    }
+    if (method === 'POST') {
+      const sent = JSON.parse(options?.body || '{}')
+      const nextVenue = sent.target === 'live' ? 'live' : 'demo'
+      serverState = {
+        ...serverState,
+        service: { ...(serverState.service ?? {}), venue: nextVenue, demo_only: nextVenue === 'demo', ledger_id: `ledger-${nextVenue}-01` },
+        host: {
+          ...(serverState.host ?? {}),
+          environment: { venue: nextVenue, demo_only: nextVenue === 'demo', source: 'service-guard', known: true },
+        },
+      }
+      return reply({
+        ok: true,
+        switched: true,
+        previous_venue: currentVenue,
+        venue: nextVenue,
+      })
+    }
+  }
   if (path.includes('/strategies')) {
     const sent = options?.body ? JSON.parse(options.body) : {}
     const suffix = path.split('/strategies')[1]
@@ -3822,6 +3883,45 @@ expect('U16 AI round conclusion shows 规则直通 badge alongside strategy name
   rdRoundText.includes('BTC 顺势直通 · v3') &&
     findAll(currentTree, n => n.props?.['data-execution-mode'] === 'rule_direct').length >= 1,
   rdRoundText.slice(0, 900))
+
+// U17-U19: Main-screen Demo ↔ Live switcher button + VenueSwitchDialog preflight, inline Live credentials & switch execution
+venueSwitchLiveCredReady = false
+venueSwitchOpenPositions = 0
+const topSwitchBtn = findAll(currentTree, n => n.props?.['data-venue-switch-open'] === 'true')[0]
+expect('U17 main screen top bar renders Demo ↔ Live switch button next to environment badge',
+  Boolean(topSwitchBtn) && textOf(topSwitchBtn).includes('切换实盘') &&
+    topSwitchBtn.props?.['data-venue-target'] === 'live')
+
+await click('⇄ 切换实盘')
+const dlgMissingText = textOf(currentTree)
+expect('U18 VenueSwitchDialog runs preflight and shows inline Live API credential input when missing',
+  findAll(currentTree, n => n.props?.['data-venue-dialog'] === 'true').length === 1 &&
+    dlgMissingText.includes('切换交易环境（模拟盘 Demo ↔ 实盘 Live）') &&
+    dlgMissingText.includes('缺少实盘 API Key / Secret') &&
+    findAll(currentTree, n => n.props?.['data-venue-live-cred-box'] === 'true').length === 1 &&
+    findAll(currentTree, n => n.props?.['data-venue-switch-confirm'] === 'true')[0]?.props?.disabled === true,
+  dlgMissingText.slice(-900))
+
+const inlineKeyInput = findAll(currentTree, n => n.props?.['data-venue-live-key'] === 'apiKey')[0]
+const inlineSecInput = findAll(currentTree, n => n.props?.['data-venue-live-key'] === 'apiSecret')[0]
+inlineKeyInput.props.onChange({ target: { value: 'live-key-test-123456' } })
+inlineSecInput.props.onChange({ target: { value: 'live-sec-test-654321' } })
+await render(panel)
+await click('保存到本机')
+const dlgReadyText = textOf(currentTree)
+expect('U18a saving inline Live credentials re-runs preflight and enables Confirm switch to LIVE',
+  dlgReadyText.includes('实盘凭据已就绪（指纹 livefp88）') &&
+    findAll(currentTree, n => n.props?.['data-venue-switch-confirm'] === 'true')[0]?.props?.disabled === false,
+  dlgReadyText.slice(-900))
+
+await click('确认切换到实盘 (LIVE)')
+const switchedText = textOf(currentTree)
+expect('U19 confirming switch to LIVE updates top-bar environment badge to 实盘 and button to 切回模拟盘',
+  findAll(currentTree, n => n.props?.['data-env'] === 'live' && n.props?.['data-env-live'] === 'true').length === 1 &&
+    findAll(currentTree, n => n.props?.['data-venue-switch-open'] === 'true' && n.props?.['data-venue-target'] === 'demo').length === 1 &&
+    switchedText.includes('⇄ 切回模拟盘') &&
+    switchedText.includes('已切换到实盘（LIVE · fapi.binance.com）'),
+  switchedText.slice(0, 600))
 
 strategyPreviewOverride = null
 strategyAttributionOverride = null
