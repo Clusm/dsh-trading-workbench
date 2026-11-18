@@ -842,6 +842,34 @@ check('the setup copy exists in both languages',
     .every((key) => key in (dict.zh ?? {}) && key in (dict.en ?? {})) &&
     (dict.zh['s2.setupService'] ?? '') === '初始化服务')
 
+// ---- 20. 0.2.0: adaptive fmtPrice, calibrated quotes & strategy UX ---------
+check('client version is 0.2.0', SOURCE.includes("const CLIENT_VERSION = '0.2.0'"))
+const STRATEGY_REASON_KEYS = [
+  'reason.NO_ELIGIBLE_STRATEGY',
+  'reason.STRATEGY_AI_CONFLICT',
+  'reason.E_STRATEGY_SIGNAL_FALSE',
+  'reason.E_STRATEGY_SIGNAL_DUPLICATE',
+  'reason.E_STRATEGY_NOT_AUTHORIZED',
+]
+check('strategy reason labels exist in both zh and en',
+  STRATEGY_REASON_KEYS.every((key) => typeof dict.zh?.[key] === 'string' && dict.zh[key].length > 0 && typeof dict.en?.[key] === 'string' && dict.en[key].length > 0),
+  STRATEGY_REASON_KEYS.filter((key) => !(key in (dict.zh ?? {})) || !(key in (dict.en ?? {}))).join(', '))
+check('adaptive fmtPrice handles 2/4/5/6 decimals',
+  SOURCE.includes('abs >= 100 ? 2 : abs >= 1 ? 4 : abs >= 0.01 ? 5 : abs > 0 ? 6 : 2'))
+check('positions resolve server-calibrated quote age_ms and reference estUpnl',
+  SOURCE.includes('num(quote?.age_ms)') && SOURCE.includes('estUpnl') && SOURCE.includes("'data-est-upnl'"))
+check('quote clock interval is scoped to cockpit with positions or portfolio',
+  SOURCE.includes("const needQuoteClock = workspace === 'cockpit'"))
+check('S1 strategy mode pill and S2 strategy alerts are wired',
+  SOURCE.includes("'data-strategy-mode'") &&
+    SOURCE.includes('strategy-mounted-empty') &&
+    SOURCE.includes('strategy-circuit-tripped'))
+check('strategy workspace ships templates, rule card, dual engine, CB and trigger warning',
+  SOURCE.includes("'data-strategy-templates'") &&
+    SOURCE.includes("'data-rule-summary-card'") &&
+    SOURCE.includes("'data-immediate-trigger'") &&
+    SOURCE.includes("lastSyncedKey"))
+
 // ---- report --------------------------------------------------------------
 for (const line of notes) console.log(line)
 if (failures.length > 0) {

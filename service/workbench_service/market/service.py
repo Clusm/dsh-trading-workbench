@@ -92,6 +92,7 @@ class MarketService:
         self._mark_lock = threading.Lock()
         self._marks: dict[str, tuple[float, dict[str, Any]]] = {}
         self._mark_retry: dict[str, tuple[float, str]] = {}
+        self._mark_inflight: dict[str, threading.Event] = {}
         self._health_cache: dict[str, Any] | None = None
         self._health_at = 0.0
         # 全市场异动扫描按小时刷新：数据（24h ticker 全量）已在 tickers 缓存里，
@@ -191,61 +192,176 @@ class MarketService:
                 return None
             return round(max(0.0, time.time() - self._tickers_at), 3)
 
+    def _store_mark_row(self, symbol: str, raw: Any, *, now_ms: int) -> None:
+        mark = _float(raw.get("markPrice")) if isinstance(raw, dict) else None
+        as_of = _int(raw.get("time")) if isinstance(raw, dict) else None
+        if mark is None or mark <= 0:
+            raise MarketUpstreamError(None, "MARK_INVALID", "invalid mark quote")
+        if as_of is not None and as_of > now_ms + 10_000:
+            raise MarketUpstreamError(None, "MARK_CLOCK_INVALID", "quote timestamp is in the future")
+        cached = self._marks.get(symbol)
+        if cached and as_of and cached[1].get("as_of_ms") and as_of < cached[1]["as_of_ms"]:
+            raise MarketUpstreamError(None, "MARK_OUT_OF_ORDER", "older quote rejected")
+        quote_data: dict[str, Any] = {
+            "mark": mark,
+            "as_of_ms": as_of,
+            "received_at_ms": now_ms,
+            "source": "rest:premiumIndex",
+        }
+        funding = _float(raw.get("lastFundingRate")) if isinstance(raw, dict) else None
+        if funding is not None:
+            quote_data["funding_rate"] = funding
+        self._marks[symbol] = (time.monotonic(), quote_data)
+        self._mark_retry.pop(symbol, None)
+
     def mark_snapshot(self, symbols: Iterable[str]) -> dict[str, Any]:
         """Lightweight display-only quotes; no depth/account/clock queries.
 
-        Per-symbol cache and a separate lock coalesce readers across tabs without
-        blocking the account/analysis cache. Failure never advances evidence time.
+        Per-symbol cache and singleflight coalescing coordinate readers across tabs
+        without holding the lock across slow network I/O or blocking analysis caches.
+        Failure never advances evidence time.
         """
         wanted = sorted(set(str(symbol).upper() for symbol in symbols))
         if not wanted or len(wanted) > 10:
             raise ValueError("request 1 to 10 symbols")
         if any(symbol not in self.settings.whitelist for symbol in wanted):
             raise UnknownSymbol("symbol not in whitelist")
-        result = {}
+
+        deadline = time.monotonic() + 4.0
+        need_fetch: list[str] = []
+        own_events: dict[str, threading.Event] = {}
+        wait_events: list[threading.Event] = []
         with self._mark_lock:
-            deadline = time.monotonic() + 4.0
+            mono = time.monotonic()
             for symbol in wanted:
-                mono = time.monotonic()
                 cached = self._marks.get(symbol)
                 retry = self._mark_retry.get(symbol)
-                if (cached is None or mono - cached[0] >= C.PRICE_TTL_S_CACHE) and not (retry and retry[0] > mono):
-                    try:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0.1:
-                            raise MarketUpstreamError(None, "MARK_BUDGET_EXHAUSTED", "display quote batch budget exhausted")
-                        raw = self.transport.get_json(
-                            "/fapi/v1/premiumIndex", {"symbol": symbol},
-                            weight=C.WEIGHT_PREMIUM, purpose="prices",
-                            timeout_s=min(1.5, remaining),
+                expired = cached is None or (mono - cached[0]) >= C.PRICE_TTL_S_CACHE
+                backed_off = retry is not None and retry[0] > mono
+                if expired and not backed_off:
+                    inflight = self._mark_inflight.get(symbol)
+                    if inflight is not None:
+                        wait_events.append(inflight)
+                    else:
+                        ev = threading.Event()
+                        self._mark_inflight[symbol] = ev
+                        own_events[symbol] = ev
+                        need_fetch.append(symbol)
+
+        try:
+            remaining_symbols = list(need_fetch)
+            if len(remaining_symbols) >= 5:
+                try:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.1:
+                        raise MarketUpstreamError(
+                            None, "MARK_BUDGET_EXHAUSTED", "display quote batch budget exhausted"
                         )
-                        mark = _float(raw.get("markPrice")) if isinstance(raw, dict) else None
-                        as_of = _int(raw.get("time")) if isinstance(raw, dict) else None
-                        if mark is None or mark <= 0:
-                            raise MarketUpstreamError(None, "MARK_INVALID", "invalid mark quote")
-                        received = int(time.time() * 1000)
-                        if as_of is not None and as_of > received + 5000:
-                            raise MarketUpstreamError(None, "MARK_CLOCK_INVALID", "quote timestamp is in the future")
-                        if cached and as_of and cached[1].get("as_of_ms") and as_of < cached[1]["as_of_ms"]:
-                            raise MarketUpstreamError(None, "MARK_OUT_OF_ORDER", "older quote rejected")
-                        self._marks[symbol] = (time.monotonic(), {
-                            "mark": mark, "as_of_ms": as_of,
-                            "received_at_ms": received, "source": "rest:premiumIndex",
-                        })
-                        self._mark_retry.pop(symbol, None)
-                    except MarketUpstreamError as exc:
-                        delay = max(5.0, float(getattr(exc, "retry_after_s", 0) or 0))
+                    raw_batch = self.transport.get_json(
+                        "/fapi/v1/premiumIndex",
+                        {},
+                        weight=10,
+                        purpose="prices",
+                        timeout_s=min(2.5, remaining),
+                    )
+                    now_batch = self.now_ms()
+                    if isinstance(raw_batch, list):
+                        by_symbol = {
+                            str(item.get("symbol")).upper(): item
+                            for item in raw_batch
+                            if isinstance(item, dict) and item.get("symbol")
+                        }
+                        with self._mark_lock:
+                            for sym in remaining_symbols:
+                                try:
+                                    self._store_mark_row(sym, by_symbol.get(sym), now_ms=now_batch)
+                                except MarketUpstreamError as exc:
+                                    delay = max(5.0, float(getattr(exc, "retry_after_s", 0) or 0))
+                                    self._mark_retry[sym] = (time.monotonic() + delay, exc.code)
+                        remaining_symbols = []
+                    elif isinstance(raw_batch, dict):
+                        sym_in_dict = str(raw_batch.get("symbol") or "").upper()
+                        if sym_in_dict and sym_in_dict in remaining_symbols:
+                            with self._mark_lock:
+                                try:
+                                    self._store_mark_row(sym_in_dict, raw_batch, now_ms=now_batch)
+                                except MarketUpstreamError as exc:
+                                    delay = max(5.0, float(getattr(exc, "retry_after_s", 0) or 0))
+                                    self._mark_retry[sym_in_dict] = (time.monotonic() + delay, exc.code)
+                            remaining_symbols = [s for s in remaining_symbols if s != sym_in_dict]
+                        elif not sym_in_dict and raw_batch.get("markPrice") is not None:
+                            with self._mark_lock:
+                                for sym in remaining_symbols:
+                                    try:
+                                        self._store_mark_row(sym, raw_batch, now_ms=now_batch)
+                                    except MarketUpstreamError as exc:
+                                        delay = max(5.0, float(getattr(exc, "retry_after_s", 0) or 0))
+                                        self._mark_retry[sym] = (time.monotonic() + delay, exc.code)
+                            remaining_symbols = []
+                except MarketUpstreamError as exc:
+                    delay = max(5.0, float(getattr(exc, "retry_after_s", 0) or 0))
+                    with self._mark_lock:
+                        until = time.monotonic() + delay
+                        for sym in remaining_symbols:
+                            self._mark_retry[sym] = (until, exc.code)
+                    remaining_symbols = []
+
+            for symbol in remaining_symbols:
+                try:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.1:
+                        raise MarketUpstreamError(
+                            None, "MARK_BUDGET_EXHAUSTED", "display quote batch budget exhausted"
+                        )
+                    raw = self.transport.get_json(
+                        "/fapi/v1/premiumIndex",
+                        {"symbol": symbol},
+                        weight=C.WEIGHT_PREMIUM,
+                        purpose="prices",
+                        timeout_s=min(1.5, remaining),
+                    )
+                    with self._mark_lock:
+                        self._store_mark_row(symbol, raw, now_ms=self.now_ms())
+                except MarketUpstreamError as exc:
+                    delay = max(5.0, float(getattr(exc, "retry_after_s", 0) or 0))
+                    with self._mark_lock:
                         self._mark_retry[symbol] = (time.monotonic() + delay, exc.code)
+        finally:
+            if own_events:
+                with self._mark_lock:
+                    for sym, ev in own_events.items():
+                        if self._mark_inflight.get(sym) is ev:
+                            self._mark_inflight.pop(sym, None)
+                        ev.set()
+
+        for ev in wait_events:
+            ev.wait(timeout=max(0.05, deadline - time.monotonic()))
+
+        now = self.now_ms()
+        result: dict[str, Any] = {}
+        with self._mark_lock:
+            mono_now = time.monotonic()
+            for symbol in wanted:
                 cached = self._marks.get(symbol)
                 error = self._mark_retry.get(symbol)
-                quote = dict(cached[1]) if cached else {"mark": None, "as_of_ms": None, "received_at_ms": None, "source": "unavailable"}
-                age = int(time.time() * 1000) - quote["as_of_ms"] if quote.get("as_of_ms") else None
-                quote.update(stale=bool(error) or age is None or age > 5000,
-                             error=error[1] if error else None,
-                             retry_after_s=max(0, error[0] - time.monotonic()) if error else 0)
+                quote = (
+                    dict(cached[1])
+                    if cached
+                    else {"mark": None, "as_of_ms": None, "received_at_ms": None, "source": "unavailable"}
+                )
+                age = max(0, now - quote["as_of_ms"]) if quote.get("as_of_ms") else None
+                quote.update(
+                    age_ms=age,
+                    stale=bool(error) or age is None or age > 5000,
+                    error=error[1] if error else None,
+                    retry_after_s=max(0.0, error[0] - mono_now) if error else 0,
+                )
                 result[symbol] = quote
-        return {"prices": result, "received_at_ms": int(time.time() * 1000),
-                "source_base_url": self.settings.base_url}
+        return {
+            "prices": result,
+            "received_at_ms": now,
+            "source_base_url": self.settings.base_url,
+        }
 
     # ------------------------------------------------------------------ prices
     def price_snapshot(self, symbols: Iterable[str]) -> dict[str, dict[str, Any]]:

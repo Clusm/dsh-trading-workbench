@@ -22,7 +22,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 SERVICE_NAME = "trading-workbench"
-SERVICE_VERSION = "0.1.0-m1.1"
+SERVICE_VERSION = "0.2.0"
 SCHEMA_VERSION = 1
 
 DEFAULT_HOST = "127.0.0.1"

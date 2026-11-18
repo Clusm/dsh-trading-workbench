@@ -1,5 +1,5 @@
 /**
- * Host half of @local/dsh-trading-workbench (M1.0 skeleton).
+ * Host half of dsh-trading-workbench (M1.0 skeleton).
  *
  * Routes (loopback only):
  *  - GET  /trading-workbench/api/health
@@ -10,8 +10,8 @@
  * no Session, no tools, no external HTTP, no API keys.
  */
 
-const PLUGIN_ID = '@local/dsh-trading-workbench'
-const PLUGIN_VERSION = '0.2.0-dev.4'
+export const PLUGIN_ID = 'dsh-trading-workbench'
+export const PLUGIN_VERSION = '0.2.0'
 const API_PREFIX = '/trading-workbench/api'
 const HEALTH_PATH = `${API_PREFIX}/health`
 const PROBE_PATH = `${API_PREFIX}/probe/llm`

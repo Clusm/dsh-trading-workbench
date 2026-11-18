@@ -15,6 +15,8 @@ import math
 import os
 from dataclasses import dataclass, field
 
+from ..market.config import WHITELIST
+
 __all__ = [
     "RiskLimits",
     "RULE_SPECS",
@@ -27,7 +29,7 @@ __all__ = [
     "env_knobs",
 ]
 
-DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+DEFAULT_SYMBOLS = WHITELIST
 #: T19（权限红队）：能放大执行授权的字段只有这四个；它们不是 env 可写项，
 #: 只能改代码 + 评审（见 ENV_KNOBS 与 tests_execution/test_risk_rules.py）。
 AUTHORIZATION_FIELDS: tuple[str, ...] = (

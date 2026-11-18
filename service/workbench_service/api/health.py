@@ -93,7 +93,7 @@ def health(request: Request) -> dict[str, object]:
     return {
         "service": SERVICE_NAME,
         "ok": True,
-        "capabilities": {"strategies": True},
+        "capabilities": {"strategies": getattr(state, "strategy_store", None) is not None},
         "service_version": settings.service_version,
         "schema_version": settings.schema_version,
         "phase": state.phase,
@@ -143,7 +143,7 @@ def ready(request: Request, _auth: None = Depends(require_auth)) -> dict[str, ob
     control = status.get("control")
     return {
         "ready": new_entry_allowed,
-        "capabilities": {"strategies": True},
+        "capabilities": {"strategies": getattr(state, "strategy_store", None) is not None},
         "service_ready": service_ready,
         "new_entry_allowed": new_entry_allowed,
         "reasons": reasons,

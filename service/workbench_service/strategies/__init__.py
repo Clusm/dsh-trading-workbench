@@ -1,4 +1,4 @@
-"""Versioned strategy storage; never submits trades."""
+"""Versioned strategy storage, deterministic evaluator, and attribution."""
 
 from .store import StrategyStore
 

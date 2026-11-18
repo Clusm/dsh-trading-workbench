@@ -518,6 +518,7 @@ function makeState({
   availableDates = null,
   // 15 §10: the Host decision on whether the UI may offer 启动服务.
   serviceStart = null,
+  strategySummary = null,
 } = {}) {
   return {
     ok: true,
@@ -525,6 +526,7 @@ function makeState({
     rounds_date: roundsDate,
     available_dates: Array.isArray(availableDates) ? availableDates : [roundsDate],
     service_start: serviceStart,
+    ...(strategySummary ? { strategy_summary: strategySummary } : {}),
     service,
     automation,
     host,
@@ -631,6 +633,10 @@ let savedConfig = null
 let serverState = makeState()
 let serverHealth = HEALTH
 const strategyRecords = []
+let strategyModeState = { mode: 'native', revision: 0 }
+let strategyAttributionOverride = null
+let strategyPreviewOverride = null
+let strategyListFailOnce = 0
 let marksOverride = null
 const requestLog = []
 const timers = []
@@ -650,17 +656,34 @@ async function fetchStub(url, options) {
     const sent = options?.body ? JSON.parse(options.body) : {}
     const suffix = path.split('/strategies')[1]
     const wrap = body => reply(JSON.parse(JSON.stringify(body)))
-    if (suffix === '/config') return wrap({ config: { mode: 'native', revision: 0 } })
-    if (!suffix && method === 'GET') return wrap({ strategies: strategyRecords })
+    if (suffix === '/config') {
+      if (method === 'PUT') {
+        strategyModeState = { mode: sent.mode, revision: (sent.revision ?? 0) + 1 }
+      }
+      return wrap({ config: strategyModeState })
+    }
+    if (suffix === '/attribution') {
+      return wrap(strategyAttributionOverride ?? { ok: true, attribution: {} })
+    }
+    if (!suffix && method === 'GET') {
+      if (strategyListFailOnce > 0) {
+        strategyListFailOnce -= 1
+        return reply({ ok: false, error: { code: 'E_SERVICE_TIMEOUT' } }, 503)
+      }
+      return wrap({ strategies: strategyRecords })
+    }
     if (!suffix && method === 'POST') {
-      const item = { strategy_id: 'strategy-ui', name: sent.name, current_version: null, enabled: false, generation: 0,
-        draft: { revision: 1, source_text: sent.source_text, rules: {}, questions: [], answers: {}, suggestions: [], sources: {}, summary: '', content_hash: 'a'.repeat(64), validation: { valid: false, issues: ['缺少规则'], execution_ready: false } } }
+      const item = { strategy_id: `strategy-ui${strategyRecords.length ? `-${strategyRecords.length}` : ''}`, name: sent.name, current_version: null, enabled: false, generation: 0,
+        draft: { revision: 1, source_text: sent.source_text, rules: sent.rules ?? {}, questions: [], answers: {}, suggestions: [], sources: {}, summary: '', content_hash: 'a'.repeat(64), validation: { valid: false, issues: ['缺少规则'], execution_ready: false } } }
       strategyRecords.push(item); return wrap({ strategy: item })
     }
     const item = strategyRecords.find(s => s.strategy_id === suffix.split('/')[1])
     if (!item) return wrap({ strategies: [] })
+    if (suffix.endsWith('/preview')) {
+      return wrap(strategyPreviewOverride ?? { strategy: item })
+    }
     if (suffix.endsWith('/draft')) {
-      item.draft = { ...item.draft, ...sent, revision: sent.revision + 1 }
+      item.draft = { ...(item.draft ?? { questions: [], answers: {}, suggestions: [], sources: {}, summary: '', content_hash: 'b'.repeat(64), validation: { valid: true, execution_ready: true, issues: [] } }), ...sent, revision: (sent.revision ?? 0) + 1 }
       return wrap({ strategy: item })
     }
     if (suffix.endsWith('/analyze')) {
@@ -670,11 +693,20 @@ async function fetchStub(url, options) {
       return wrap({ strategy: item })
     }
     if (suffix.endsWith('/mount')) {
-      item.current_version = 1; item.generation++
+      item.current_version = (item.current_version ?? 0) + 1; item.generation++
       item.confirmed_version = { rules: item.draft.rules, validation: item.draft.validation, content_hash: item.draft.content_hash }
       return wrap({ strategy: item })
     }
-    if (suffix.endsWith('/authorization')) { item.enabled = sent.enabled; item.generation++; return wrap({ strategy: item }) }
+    if (suffix.endsWith('/authorization')) {
+      item.enabled = sent.enabled
+      if (sent.reset_circuit) {
+        item.circuit_state = 'ok'
+        item.circuit_reason = null
+        if (item.circuit) item.circuit = { ...item.circuit, state: 'ok', reason: null }
+      }
+      item.generation++
+      return wrap({ strategy: item })
+    }
     if (method === 'PATCH') { item.name = sent.name; return wrap({ strategy: item }) }
     return wrap({ strategy: item })
   }
@@ -3495,6 +3527,305 @@ expect('S40 keyboard End reaches strategy management', findAll(currentTree, n =>
 findAll(currentTree, n => n.props?.role === 'tablist')[0].props.onKeyDown({ key: 'ArrowRight', preventDefault() {} })
 await render(panel)
 expect('S41 keyboard navigation wraps to cockpit', findAll(currentTree, n => n.props?.id === 'twb-ws-tab-cockpit' && n.props['aria-selected'] === 'true').length === 1)
+
+// ---- U: 0.2.0 UX upgrades, sub-$1 adaptive fmtPrice, calibrated age & strategy suite ----
+await click('中')
+runtime.instances.clear()
+const CLEAN_POSITIONS = [POSITIONS[0]]
+
+// U01–U04: S1 global run-mode pill + S2 mounted-empty & circuit-tripped attention alerts
+serverState = makeState({
+  positions: CLEAN_POSITIONS,
+  strategySummary: { supported: true, mode: 'mounted', enabled_count: 2, tripped_count: 0, tripped_names: [] },
+})
+await render(panel)
+const s1MountedPill = findAll(currentTree, n => n.props?.['data-strategy-mode'] === 'mounted')[0]
+expect('U01 S1 renders mounted strategy mode pill with active count',
+  Boolean(s1MountedPill) && textOf(s1MountedPill).includes('已授权策略 · 2/5 启用'),
+  textOf(s1MountedPill))
+await click('已授权策略 · 2/5 启用')
+expect('U01a clicking S1 strategy mode pill navigates to strategies workspace',
+  findAll(currentTree, n => n.props?.id === 'twb-ws-tab-strategies' && n.props['aria-selected'] === 'true').length === 1)
+
+runtime.instances.clear()
+serverState = makeState({
+  positions: CLEAN_POSITIONS,
+  strategySummary: { supported: true, mode: 'native', enabled_count: 0 },
+})
+await render(panel)
+const s1NativePill = findAll(currentTree, n => n.props?.['data-strategy-mode'] === 'native')[0]
+expect('U02 S1 renders native AI mode pill',
+  Boolean(s1NativePill) && textOf(s1NativePill).includes('模式：原生 AI'),
+  textOf(s1NativePill))
+
+runtime.instances.clear()
+serverState = makeState({
+  positions: CLEAN_POSITIONS,
+  strategySummary: { supported: true, mode: 'mounted', enabled_count: 0, tripped_count: 0 },
+})
+await render(panel)
+const s2EmptyText = textOf(currentTree)
+expect('U03 S2 warns when authorized strategy mode has 0 enabled strategies',
+  s2EmptyText.includes('已授权策略模式下当前启用 0 个策略') && Boolean(findClickable('前往策略管理 →')),
+  s2EmptyText.slice(0, 500))
+await click('前往策略管理 →')
+expect('U03a S2 empty-strategy alert action jumps to strategies workspace',
+  findAll(currentTree, n => n.props?.id === 'twb-ws-tab-strategies' && n.props['aria-selected'] === 'true').length === 1)
+
+runtime.instances.clear()
+serverState = makeState({
+  positions: CLEAN_POSITIONS,
+  strategySummary: { supported: true, mode: 'mounted', enabled_count: 1, tripped_count: 1, tripped_names: ['BTC 顺势突破'] },
+})
+await render(panel)
+const s2TrippedText = textOf(currentTree)
+expect('U04 S2 warns when a strategy circuit breaker tripped',
+  s2TrippedText.includes('BTC 顺势突破 已触发策略熔断暂停新开仓'),
+  s2TrippedText.slice(0, 500))
+
+// U05–U07: sub-$1 adaptive fmtPrice, dual-track estUpnl, and server-calibrated quote age_ms
+runtime.instances.clear()
+const DOGE_POSITION = [{
+  key: 'DOGEUSDT:long:0',
+  symbol: 'DOGEUSDT',
+  side: 'long',
+  qty: '1000',
+  entry: 0.15000,
+  mark: 0.15125,
+  upnl: 1.25,
+  sl: 0.14500,
+  tp: 0.16800,
+  protection: 'OK',
+  protection_ok: true,
+  origin: 'ai',
+  leverage: 3,
+  margin: 50.0,
+  margin_mode: 'cross',
+  liq_price: 0.11000,
+  stale: false,
+}]
+serverState = makeState({ positions: DOGE_POSITION })
+// Simulate PC clock 12s ahead of server clock, while server reports calibrated age_ms = 420ms!
+marksOverride = {
+  DOGEUSDT: { mark: 0.16345, as_of_ms: Date.now() - 12000, age_ms: 420, stale: false },
+}
+await render(panel)
+const dogeCockpitText = textOf(currentTree)
+expect('U05 sub-$1 DOGEUSDT mark & entry render with 5-decimal adaptive precision',
+  dogeCockpitText.includes('0.16345') && dogeCockpitText.includes('入 0.15000'),
+  dogeCockpitText.slice(0, 700))
+expect('U06 official uPnL stays untouched while live reference estUpnl is shown',
+  dogeCockpitText.includes('+1.25') && dogeCockpitText.includes('参考浮盈 +13.45（实时标记价估算）') &&
+    findAll(currentTree, n => n.props?.['data-est-upnl'] === 'true').length === 1,
+  dogeCockpitText.slice(0, 700))
+expect('U07 server-calibrated age_ms keeps quote live despite 12s PC clock skew',
+  dogeCockpitText.includes('实时标记价'),
+  dogeCockpitText.slice(0, 700))
+await click('平仓')
+const dogeCloseText = textOf(currentTree)
+expect('U07a close dialog uses adaptive fmtPrice for sub-$1 mark',
+  dogeCloseText.includes('0.16345'),
+  dogeCloseText.slice(-500))
+await click('取消')
+marksOverride = null
+
+// U08–U16: templates, visual rule card, dual engine, circuit breaker, attribution, preview warning & resilience
+strategyRecords.length = 0
+strategyModeState = { mode: 'mounted', revision: 1 }
+strategyAttributionOverride = {
+  ok: true,
+  attribution: {
+    'strat-tripped': {
+      signals_count: 12,
+      executed_count: 5,
+      closed_trades: 5,
+      win_rate: 0.6,
+      realized_pnl_usdt: 48.5,
+      ai_veto_count: 3,
+      veto_saved_sl: 2,
+      veto_missed_tp: 1,
+    },
+  },
+}
+strategyPreviewOverride = {
+  ok: true,
+  triggered_now: true,
+  symbols: [
+    { symbol: 'SOLUSDT', mark: 162.35, distance_pct: 1.47, triggered: true, indicators: { EMA9: 161.2, EMA21: 159.8 } },
+  ],
+}
+strategyRecords.push(
+  {
+    strategy_id: 'strat-tripped',
+    name: 'SOL 金叉顺势',
+    current_version: 2,
+    enabled: false,
+    generation: 4,
+    circuit_state: 'tripped',
+    circuit_reason: '连续亏损达 2 笔',
+    draft: {
+      revision: 2,
+      source_text: 'SOL 4h 金叉做多',
+      rules: {
+        symbols: ['SOLUSDT'],
+        timeframes: ['4h'],
+        execution_mode: 'ai_assisted',
+        entry: { kind: 'ema_cross', side: 'long', timeframe: '4h', fast_period: 9, slow_period: 21, direction: 'bullish' },
+        exit: { stop_loss_pct: 0.015, take_profit_pct: 0.036, time_stop_hours: 24 },
+        circuit_breaker: { max_consecutive_losses: 2, max_cumulative_loss_usdt: 100 },
+      },
+      questions: [],
+      answers: {},
+      suggestions: [],
+      sources: {},
+      summary: 'SOL 4h EMA金叉策略',
+      content_hash: 'c'.repeat(64),
+      validation: { valid: true, execution_ready: true, issues: [] },
+    },
+    confirmed_version: {
+      rules: { symbols: ['SOLUSDT'], execution_mode: 'ai_assisted' },
+      validation: { valid: true, execution_ready: true },
+      content_hash: 'c'.repeat(64),
+    },
+  },
+  {
+    strategy_id: 'strat-nodraft',
+    name: 'ETH 无草稿归档策略',
+    current_version: 1,
+    enabled: true,
+    generation: 1,
+    draft: null,
+    confirmed_version: {
+      rules: {
+        symbols: ['ETHUSDT'],
+        timeframes: ['15m'],
+        execution_mode: 'rule_direct',
+        entry: { kind: 'mark_threshold', side: 'short', operator: 'lt', value: 3100 },
+        exit: { stop_loss_pct: 0.01, take_profit_pct: 0.02 },
+      },
+      validation: { valid: true, execution_ready: true },
+      content_hash: 'd'.repeat(64),
+    },
+  },
+)
+
+runtime.instances.clear()
+serverState = makeState()
+await render(panel)
+await click('策略管理')
+const stratFullText = textOf(currentTree)
+
+expect('U08 strategy overview table renders engine badges, attribution metrics, AI veto stats & tripped CB',
+  stratFullText.includes('SOL 金叉顺势 · v2') &&
+    stratFullText.includes('⚡ 已熔断') &&
+    stratFullText.includes('连续亏损达 2 笔') &&
+    stratFullText.includes('12 / 5') &&
+    stratFullText.includes('胜率 60% (5)') &&
+    stratFullText.includes('+48.50 USDT') &&
+    stratFullText.includes('否决 3 次（避险 2 / 踏空 1）') &&
+    stratFullText.includes('规则直通 (0延迟)'),
+  stratFullText.slice(0, 1200))
+
+expect('U09 starter templates and 20-symbol hard-risk reference are rendered',
+  stratFullText.includes('模板 1 · BTC 1h 收盘突破顺势（规则直通）') &&
+    stratFullText.includes('模板 2 · ETH 15m 标记价突破 + RSI 过滤（AI 辅助）') &&
+    stratFullText.includes('模板 3 · SOL 4h 双均线金叉 + 超时退出') &&
+    stratFullText.includes('AAVEUSDT') &&
+    stratFullText.includes('ZECUSDT') &&
+    stratFullText.includes('0.2% – 5.0%') &&
+    stratFullText.includes('≥ 1.2R'),
+  stratFullText.slice(0, 1200))
+
+await click('模板 1 · BTC 1h 收盘突破顺势（规则直通）')
+const tpl1Text = textOf(currentTree)
+expect('U10 clicking Template 1 populates rule-direct mode, policy header & human-readable rule card',
+  tpl1Text.includes('当前执行方式：规则直通执行（0 LLM 延迟）') &&
+    tpl1Text.includes('自然语言规则核对卡') &&
+    tpl1Text.includes('做多 LONG') &&
+    tpl1Text.includes('同时满足 2 项条件') &&
+    tpl1Text.includes('1h 闭合K线收盘价 > 95,000.00') &&
+    tpl1Text.includes('1h EMA(20) > EMA(60)') &&
+    tpl1Text.includes('盈亏比 2.50 R') &&
+    tpl1Text.includes('连亏 2 笔停用'),
+  tpl1Text.slice(0, 1500))
+
+// Test interactive circuit breaker & R:R / SL danger warning
+changeInput('累计亏损熔断金额 (USDT)', '250')
+await render(panel)
+expect('U11 circuit breaker input syncs into structured rules JSON and rule card',
+  textOf(currentTree).includes('累亏 250 USDT 熔断'))
+
+await click('解除熔断并重启用')
+expect('U12 Reset & Enable clears tripped circuit state and re-enables strategy',
+  strategyRecords[0].enabled === true && strategyRecords[0].circuit_state === 'ok')
+
+// Select strat-tripped to verify live preview & immediate-trigger warning + invalid JSON friendly error
+changeSelect('选择策略', 'strat-tripped')
+await render(panel)
+const pvText = textOf(currentTree)
+expect('U13 live market preview & immediate-trigger warning banner render above mount/enable',
+  pvText.includes('实时行情与触发距离预览') &&
+    pvText.includes('162.35') &&
+    pvText.includes('EMA9=161.20') &&
+    pvText.includes('⚠️ 当前实时行情已满足该策略入场条件！') &&
+    findAll(currentTree, n => n.props?.['data-immediate-trigger'] === 'true' && n.props?.role === 'status').length >= 1,
+  pvText.slice(-1200))
+
+const rawRulesBox = findAll(currentTree, n => n.tag === 'textarea' && String(n.props?.['aria-label'] ?? '').includes('结构化策略规则'))[0]
+rawRulesBox.props.onChange({ target: { value: JSON.stringify({ symbols: ['SOLUSDT'], exit: { stop_loss_pct: 0.06, take_profit_pct: 0.05 } }) } })
+await render(panel)
+expect('U14 rule card highlights R:R < 1.20R and SL outside 0.2%–5.0% in danger chip',
+  textOf(currentTree).includes('低于 1.20R 硬下限！') && textOf(currentTree).includes('止损超出 0.2%–5.0% 硬风控范围！'))
+
+rawRulesBox.props.onChange({ target: { value: '{broken json' } })
+await render(panel)
+await click('保存原文与回答')
+expect('U14a invalid structured rules JSON reports a friendly localized error message',
+  textOf(currentTree).includes('结构化规则 JSON 格式有误：'))
+
+// Transient listing error preserves unsaved edits via lastSyncedKey, and draft: null never throws
+rawRulesBox.props.onChange({ target: { value: '{"symbols":["SOLUSDT"]}' } })
+findAll(currentTree, n => n.tag === 'textarea' && n.props?.maxLength === 20000)[0].props.onChange({ target: { value: '断网也不丢失的草稿修改' } })
+await render(panel)
+strategyListFailOnce = 1
+await click('保存模式（下轮生效，总调度保持原状）')
+expect('U15a transient listing error surfaces retry alert without wiping unsaved draft',
+  textOf(currentTree).includes('策略读取失败') &&
+    findAll(currentTree, n => n.tag === 'textarea' && n.props?.maxLength === 20000)[0].props.value === '断网也不丢失的草稿修改')
+await click('重试')
+expect('U15b recovery after transient listing error preserves unsaved source text via lastSyncedKey',
+  findAll(currentTree, n => n.tag === 'textarea' && n.props?.maxLength === 20000)[0].props.value === '断网也不丢失的草稿修改')
+
+changeSelect('选择策略', 'strat-nodraft')
+await render(panel)
+expect('U15c selecting a strategy with draft === null renders cleanly without throwing',
+  textOf(currentTree).includes('做空 SHORT') && textOf(currentTree).includes('3,100.00'))
+
+// U16: AI Decisions CurrentRound displays 规则直通 badge when round.strategy.execution_mode === 'rule_direct'
+const RULE_DIRECT_ROUND = {
+  ...ROUND,
+  roundId: 'cyc-ruledirect-01',
+  strategy: { strategy_id: 'strat-nodraft', name: 'BTC 顺势直通', version: 3, execution_mode: 'rule_direct' },
+  strategy_selection_reason: '1h 收盘突破触发',
+}
+ROUNDS_BY_ID[RULE_DIRECT_ROUND.roundId] = RULE_DIRECT_ROUND
+runtime.instances.clear()
+serverState = makeState({
+  lastRound: RULE_DIRECT_ROUND,
+  rounds: [{ ...ROUND_SUMMARY, roundId: RULE_DIRECT_ROUND.roundId }],
+})
+await render(panel)
+await click('AI 决策')
+await click('本轮')
+const rdRoundText = textOf(currentTree)
+expect('U16 AI round conclusion shows 规则直通 badge alongside strategy name and version',
+  rdRoundText.includes('BTC 顺势直通 · v3') &&
+    findAll(currentTree, n => n.props?.['data-execution-mode'] === 'rule_direct').length >= 1,
+  rdRoundText.slice(0, 900))
+
+strategyPreviewOverride = null
+strategyAttributionOverride = null
+strategyModeState = { mode: 'native', revision: 0 }
 
 // ---- report --------------------------------------------------------------
 for (const line of notes) console.log(line)

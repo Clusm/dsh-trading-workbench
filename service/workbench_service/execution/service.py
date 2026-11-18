@@ -26,8 +26,16 @@ from typing import Any
 from ..config import Settings
 from ..errors import ServiceError
 from ..strategies import StrategyStore
+from ..strategies.attribution import check_and_trip_circuits
+from ..strategies.evaluator import entry_uses_klines, recommended_fetch_bars
 from ..strategies.locking import execution_guard
-from ..strategies.execution import validate_entry, reserve_signal, record_result, restore_position_metadata
+from ..strategies.execution import (
+    validate_entry,
+    reserve_signal,
+    record_result,
+    record_rejection,
+    restore_position_metadata,
+)
 from ..ledger.numbers import dec_text, to_decimal
 from ..ledger.store import Ledger, bucket_iso, utc_now
 from ..risk.approval import ApprovalError, ApprovalManager
@@ -100,6 +108,7 @@ class ExecutionService:
         client: DemoBinanceClient | None = None,
         broker: DemoBroker | None = None,
         credentials: DemoCredentials | None = None,
+        market_service: Any = None,
         clock=time.time,
     ) -> None:
         self.settings = settings
@@ -112,6 +121,7 @@ class ExecutionService:
         self.client = client
         self.broker = broker
         self.credentials = credentials
+        self.market_service = market_service
         self._clock = clock
         self.leases = ExecutionLeaseStore(ledger, clock=self._clock)
         self.strategies = StrategyStore(ledger.path)
@@ -702,6 +712,10 @@ class ExecutionService:
         equity = self._equity_info(snapshot)
         # 先按成交流水刷新连亏/冷却，再 sync 水位，保证返回的 risk_state 已是最新。
         self._refresh_loss_streak()
+        try:
+            check_and_trip_circuits(self.strategies)
+        except Exception as exc:  # noqa: BLE001 - 策略熔断检查不得阻断账户心跳
+            logger.warning("strategy_circuit_check_failed error=%s", type(exc).__name__)
         risk_state = self.state.sync(
             equity.session if equity.available else None, equity_available=equity.available
         )
@@ -1401,7 +1415,18 @@ class ExecutionService:
             symbol=plan.symbol,
             leverage=plan.leverage,
         )
-        plan, strategy_context = validate_entry(self.strategies, payload.get("strategy_context"), plan, market_facts, now_ms=int(self._clock() * 1000), compile_plan=True)
+        now_ms = int(self._clock() * 1000)
+        raw_strategy_ctx = payload.get("strategy_context")
+        plan, strategy_context = validate_entry(
+            self.strategies,
+            raw_strategy_ctx,
+            plan,
+            market_facts,
+            now_ms=now_ms,
+            compile_plan=True,
+            market_service=self.market_service,
+            bars=self._strategy_bars(raw_strategy_ctx, plan.symbol, now_ms),
+        )
         if strategy_context and snapshot and snapshot.positions:
             raise ServiceError(409, "E_STRATEGY_POSITION_LIMIT", "已有仓位，不能新增策略开仓")
         filters = self._filters_view(plan.symbol)
@@ -1592,7 +1617,21 @@ class ExecutionService:
         self._assert_lease(lease_id)
 
 
-        plan, strategy_context = validate_entry(self.strategies, strategy_context, plan, refresh.get("market", {}), now_ms=int(self._clock() * 1000), expected_mode_revision=approval_payload.get("strategy_mode_revision"))
+        now_ms = int(self._clock() * 1000)
+        approved_sig_key = (
+            strategy_context.get("signal_key") if isinstance(strategy_context, dict) else None
+        )
+        plan, strategy_context = validate_entry(
+            self.strategies,
+            strategy_context,
+            plan,
+            refresh.get("market", {}),
+            now_ms=now_ms,
+            expected_mode_revision=approval_payload.get("strategy_mode_revision"),
+            expected_signal_key=approved_sig_key,
+            market_service=self.market_service,
+            bars=self._strategy_bars(strategy_context, plan.symbol, now_ms),
+        )
         if strategy_context and snapshot and snapshot.positions:
             raise ServiceError(409, "E_STRATEGY_POSITION_LIMIT", "已有仓位，不能新增策略开仓")
         time_stop = self._time_stop_request(plan, strategy_context=strategy_context)
@@ -1606,6 +1645,13 @@ class ExecutionService:
                 time_stop=time_stop,
             )
             record_result(self.strategies, strategy_context, plan, result)
+            if strategy_context is not None:
+                self._record_executed_decision(
+                    strategy_context,
+                    plan,
+                    result=result,
+                    refreshed_mark=refresh.get("market", {}).get("mark"),
+                )
         except OutboxUncertain as exc:
             raise ServiceError(
                 202,
@@ -1621,8 +1667,11 @@ class ExecutionService:
                 },
             ) from exc
         except ExecutionRejected as exc:
+            record_rejection(self.strategies, strategy_context, plan, exc.code, exc.message)
             raise ServiceError(exc.status_code, exc.code, exc.message, details=exc.details) from exc
         except DemoApiError as exc:
+            err_code = "E_EXCHANGE_UNAVAILABLE" if exc.kind == "unknown" else (exc.code or "E_EXCHANGE_REJECT")
+            record_rejection(self.strategies, strategy_context, plan, err_code, exc.message)
             raise ServiceError(
                 502,
                 "E_EXCHANGE_UNAVAILABLE" if exc.kind == "unknown" else "E_EXCHANGE_REJECT",
@@ -1631,6 +1680,7 @@ class ExecutionService:
                 details=exc.as_dict(),
             ) from exc
         except ExecutionConfigError as exc:
+            record_rejection(self.strategies, strategy_context, plan, "E_NOT_READY", str(exc))
             raise ServiceError(503, "E_NOT_READY", str(exc)) from exc
 
         if result.get("position_unproven"):
@@ -1726,6 +1776,10 @@ class ExecutionService:
             raise ServiceError(exc.status_code, exc.code, exc.message, details=exc.details) from exc
         # 平仓后立即按已实现盈亏刷新连亏/冷却（R20 状态始终维护）
         self._refresh_loss_streak()
+        try:
+            check_and_trip_circuits(self.strategies)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("strategy_circuit_check_failed error=%s", type(exc).__name__)
         result.update({"venue": self.settings.venue, "demo_only": True, "ledger_id": self.ledger.ledger_id})
         return result
 
@@ -1904,6 +1958,10 @@ class ExecutionService:
     def reconcile(self) -> dict[str, Any]:
         self._require_broker()
         result = self.broker.reconcile()
+        try:
+            check_and_trip_circuits(self.strategies)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("strategy_circuit_check_failed error=%s", type(exc).__name__)
         result.update({"venue": self.settings.venue, "demo_only": True, "ledger_id": self.ledger.ledger_id})
         return result
 
@@ -2470,6 +2528,83 @@ class ExecutionService:
             {"market": market, "evidence_age_ms": evidence_age_ms}, base=base
         )
 
+    def _strategy_bars(self, strategy_context: Any, symbol: str, now_ms: int) -> Any:
+        """Fetch closed kline bars when a mounted strategy uses kline primitives and market_service is absent."""
+        if self.market_service is not None or self.client is None or not isinstance(strategy_context, dict):
+            return None
+        sid = strategy_context.get("strategy_id")
+        ver = strategy_context.get("version")
+        if not isinstance(sid, str) or not isinstance(ver, int) or isinstance(ver, bool) or ver < 1:
+            return None
+        try:
+            confirmed = self.strategies.version(sid, ver)
+        except Exception:  # noqa: BLE001
+            return None
+        rules = confirmed.get("rules") or {}
+        entry = rules.get("entry")
+        if not entry_uses_klines(entry):
+            return None
+        frames = rules.get("timeframes") or ["15m"]
+        timeframe = str(frames[0]) if isinstance(frames, list) and frames else "15m"
+        limit = min(1000, max(50, recommended_fetch_bars(entry, timeframe) + 1))
+        try:
+            payload = self.client.request(
+                "GET",
+                "/fapi/v1/klines",
+                {"symbol": symbol.upper(), "interval": timeframe, "limit": limit},
+                signed=False,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(payload, list):
+            return None
+        from ..market.klines import parse_kline_row
+
+        bars = []
+        for row in payload:
+            bar = parse_kline_row(row, source="rest", now_ms=now_ms)
+            if bar is not None and bar.final:
+                bars.append(bar)
+        return bars
+
+    def _record_executed_decision(
+        self,
+        strategy_context: dict[str, Any],
+        plan: OrderPlan,
+        *,
+        result: dict[str, Any],
+        refreshed_mark: Any = None,
+    ) -> None:
+        try:
+            confirmed = self.strategies.version(
+                strategy_context["strategy_id"], strategy_context["version"]
+            )
+            exec_mode = (confirmed.get("rules") or {}).get("execution_mode", "ai_assisted")
+            if exec_mode not in ("ai_assisted", "rule_direct"):
+                exec_mode = "ai_assisted"
+            self.strategies.record_decision(
+                strategy_context["strategy_id"],
+                {
+                    "cycle_id": str(plan.cycle_id or ""),
+                    "version": int(strategy_context["version"]),
+                    "symbol": plan.symbol,
+                    "side": plan.side,
+                    "signal_key": str(strategy_context["signal_key"]),
+                    "execution_mode": exec_mode,
+                    "outcome": "executed",
+                    "reason_code": "OK",
+                    "entry_mark": result.get("avg_price") or refreshed_mark,
+                    "sl_price": dec_text(plan.sl) if plan.sl else None,
+                    "tp_price": dec_text(plan.tp) if plan.tp else None,
+                    "details": {
+                        "client_order_id": result.get("client_order_id"),
+                        "status": result.get("status"),
+                    },
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - decision audit never aborts filled trade response
+            logger.warning("record_executed_decision_failed error=%s", type(exc).__name__)
+
 
 # ---------------------------------------------------------------------- 工厂
 def build_execution_service(
@@ -2481,6 +2616,7 @@ def build_execution_service(
     limits: RiskLimits | None = None,
     broker_options: dict[str, Any] | None = None,
     use_env_credentials: bool = True,
+    market_service: Any = None,
     clock=time.time,
 ) -> ExecutionService:
     """组装服务；``client`` 为空时尝试从 env/``.env.local`` 读取 Demo 凭据。"""
@@ -2548,6 +2684,7 @@ def build_execution_service(
         client=client,
         broker=broker,
         credentials=resolved_credentials,
+        market_service=market_service,
         clock=clock,
     )
 

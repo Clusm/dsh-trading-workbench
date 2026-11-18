@@ -12,3 +12,11 @@ client/screens/
 .env
 .env.*
 !.env.example
+
+# working material: design history and review artefacts stay local, never published
+docs/architecture-audit-*/
+docs/evidence-*/
+docs/live-mode/
+docs/product-review*/
+docs/redesign/
+docs/runtime-evidence-*/

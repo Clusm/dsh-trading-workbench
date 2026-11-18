@@ -151,7 +151,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db = init_db(settings.data_dir, pid=os.getpid(), version=settings.service_version)
         app.state.db_status = db
         if db.ok:
-            app.state.strategy_store = StrategyStore(settings.db_path)
+            try:
+                app.state.strategy_store = StrategyStore(settings.db_path)
+            except Exception as exc:  # noqa: BLE001
+                app.state.strategy_store = None
+                logger.error("strategy_store_unavailable path=%s error=%s", db.path, exc)
             logger.info(
                 "db_ready path=%s schema=%s journal=%s boot_count=%s ledger=%s migrations=%s",
                 db.path,
@@ -162,6 +166,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 db.migrations_applied,
             )
         else:
+            app.state.strategy_store = None
             logger.error("db_unavailable path=%s error=%s", db.path, db.error)
 
         app.state.phase = "ready" if (app.state.guard.ok and db.ok) else "degraded"
@@ -226,6 +231,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.started_at_iso = utc_now_iso()
     app.state.started_monotonic = time.monotonic()
     app.state.db_status = None
+    app.state.strategy_store = None
     app.state.last_probe = None
 
     @app.middleware("http")

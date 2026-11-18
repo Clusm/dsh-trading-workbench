@@ -1,4 +1,4 @@
-param(
+﻿param(
   [int]$Port = 8791,
   [string]$DataDir = '',
   [string]$HostBaseUrl = '',
@@ -45,6 +45,7 @@ if ([string]::IsNullOrWhiteSpace($python)) {
 # credentials.py only reads the Demo key/secret from this file; nothing else is injected.
 $dotenvCandidates = @(
   (Join-Path $serviceDir 'credentials\demo.env'),
+  (Join-Path $root '.env'),
   (Join-Path $workspace 'multi-agent-trader\.env')
 )
 $dotenv = $env:WORKBENCH_DOTENV_FILE

@@ -853,9 +853,11 @@ class DemoBroker:
             if previous_close is not None and previous_close > 0:
                 mark_move = abs((mark - previous_close) / previous_close)
 
+        funding = to_decimal(premium.get("lastFundingRate"))
         return {
             "mark": dec_text(mark),
             "index_price": None if index_price is None else dec_text(index_price),
+            "funding_rate": None if funding is None else dec_text(funding),
             "snapshot_age_ms": 0,
             "mark_move_60s_pct": None if mark_move is None else dec_text(mark_move),
             "mark_index_deviation_pct": None if deviation is None else dec_text(deviation),

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-SERVICE_VERSION = "0.1.0-m1.1"
+SERVICE_VERSION = "0.2.0"
 PROVENANCE_SERVICE = "market-gateway"
 SCHEMA_VERSION = "md-evidence/1"
 RENDER_VERSION = "md-evidence-prompt/1"

@@ -22,13 +22,19 @@ _LOCK = threading.Lock()
 def get_services(app: "FastAPI") -> "ExecutionService":
     services = getattr(app.state, "services", None)
     if services is not None:
+        market = getattr(app.state, "market", None)
+        if market is not None and getattr(services, "market_service", None) is None:
+            services.market_service = market
         return services
     from .service import build_execution_service
 
     with _LOCK:
         services = getattr(app.state, "services", None)
         if services is None:
-            services = build_execution_service(app.state.settings)
+            services = build_execution_service(
+                app.state.settings,
+                market_service=getattr(app.state, "market", None),
+            )
             app.state.services = services
             # A06: start the read-only supervisor once per service instance.
             try:

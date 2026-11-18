@@ -221,6 +221,59 @@ const SYMBOL_RE = /^[A-Z0-9]{2,20}USDT$/
 const CYCLE_ID_RE = /^[A-Za-z0-9._:-]{1,64}$/
 const CYCLE_EVIDENCE_SUFFIX = '/evidence'
 const CONTROL_BLOCKING = new Set(['close_only', 'paused', 'pause', 'emergency', 'halted'])
+const STRATEGY_BUSINESS_REJECT_CODES = new Set([
+  'E_STRATEGY_SIGNAL_FALSE',
+  'E_STRATEGY_PLAN_MISMATCH',
+  'E_STRATEGY_SIGNAL_DUPLICATE',
+])
+const STRATEGY_SKIP_REASON_LABELS = Object.freeze({
+  SIGNAL_ALREADY_USED: '本周期信号已消费',
+  E_STRATEGY_SIGNAL_DUPLICATE: '本周期信号已消费',
+  CIRCUIT_BREAKER_TRIPPED: '策略熔断已触发',
+  E_STRATEGY_CIRCUIT_TRIPPED: '策略熔断已触发',
+  SIGNAL_FALSE: '未满足入场触发条件',
+  CONDITION_NOT_MET: '未满足入场触发条件',
+  E_STRATEGY_SIGNAL_FALSE: '未满足入场触发条件',
+  DATA_STALE: '行情或指标数据过期',
+  QUOTE_STALE: '实时标记价过期',
+  KLINE_STALE: 'K线数据过期',
+  FUNDING_STALE: '资金费率数据过期',
+  DISABLED: '策略未启用',
+  NOT_AUTHORIZED: '策略未授权',
+  NOT_EXECUTION_READY: '策略校验未就绪',
+})
+
+function summarizeNoEligibleStrategy(choiceReason, skipped = [], hadCandidates = false) {
+  if (hadCandidates) {
+    const reason = typeof choiceReason === 'string' && choiceReason.trim()
+      ? choiceReason.trim()
+      : 'AI 选择本轮跳过不交易'
+    return { reason: reason.slice(0, 300), headline: `无交易：${reason.slice(0, 80)}` }
+  }
+  if (Array.isArray(skipped) && skipped.length > 0) {
+    const items = skipped.slice(0, 3).map((item) => {
+      if (!item || typeof item !== 'object') return String(item ?? '').trim()
+      const code = String(item.reason_code ?? item.code ?? item.reason ?? '').trim()
+      const label = STRATEGY_SKIP_REASON_LABELS[code] || item.detail || item.reason || code || '未触发'
+      const name = String(item.name ?? item.strategy_id ?? '').trim()
+      return name ? `${name}（${label}）` : String(label)
+    }).filter(Boolean)
+    if (items.length > 0) {
+      const detail = items.join('；')
+      return {
+        reason: `没有满足条件的已授权策略：${detail}`.slice(0, 300),
+        headline: `无交易：${detail}`.slice(0, 120),
+      }
+    }
+  }
+  const fallback = typeof choiceReason === 'string' && choiceReason.trim()
+    ? choiceReason.trim()
+    : '没有满足条件的已授权策略'
+  return {
+    reason: fallback.slice(0, 300),
+    headline: '无交易：没有满足条件的已授权策略',
+  }
+}
 
 export class HostIntegrationError extends Error {
   constructor(code, message, { status = 500, retryable = false, details = {}, round = null } = {}) {
@@ -740,7 +793,9 @@ function planForService(execution, cycleId) {
     sl: order.sl,
     tp: order.tp,
     confidence: typeof order.confidence === 'number' ? order.confidence : 0.6,
-    reasoning_ref: `ai-chain:${cycleId}`,
+    reasoning_ref: typeof order.reasoning_ref === 'string' && order.reasoning_ref.startsWith('rule-direct:')
+      ? order.reasoning_ref
+      : `ai-chain:${cycleId}`,
   }
 }
 
@@ -900,6 +955,7 @@ function emptyPortfolio(gapCode, detail = null) {
     startup: null,
     protection: null,
     control: null,
+    strategySummary: null,
     accountEmpty: true,
     accountGap: gapCode,
     gaps: [portfolioGapText(gapCode, detail)],
@@ -1722,6 +1778,23 @@ export class WorkbenchHostIntegration {
     return { provider: intended.provider, model: intended.model, effort: effective, source: 'roleRoutes' }
   }
 
+  /** Resolve the live LLM route for interactive strategy clarification/selection. */
+  async resolveStrategyRoute() {
+    const config = await this.ensureConfigReady()
+    if (config?.defaultRoute?.provider && config?.defaultRoute?.model) {
+      return {
+        provider: config.defaultRoute.provider,
+        model: config.defaultRoute.model,
+        source: 'llmConfig',
+      }
+    }
+    const harnessRoute = this.ctx ? resolveHarnessRoute(this.ctx) : null
+    if (harnessRoute?.provider && harnessRoute?.model) {
+      return harnessRoute
+    }
+    return this.route ?? null
+  }
+
   stateSync() {
     const token = this.tokenInfo()
     this.store.ensure()
@@ -1774,6 +1847,7 @@ export class WorkbenchHostIntegration {
       last_error: this.lastError,
       last_round: last,
       rounds: rounds.map(roundSummaryOf),
+      strategy_summary: this.portfolioCache?.value?.strategySummary ?? null,
       gaps: this.staticServiceGaps(),
     }
   }
@@ -1843,15 +1917,41 @@ export class WorkbenchHostIntegration {
       }
     }
 
-    const [statusR, positionsR, equityR, ordersR, fillsR, reviewsR, envelopeR, healthR] = await Promise.allSettled([
-      client.status(),
-      client.positions(),
-      client.equityCurve('all'),
-      client.orders(50),
-      client.fills(100),
-      client.reviews(20),
-      client.riskEnvelope(),
-      client.health(),
+    const strategySummaryPromise = ready?.capabilities?.strategies === false
+      ? Promise.resolve(null)
+      : Promise.all([client.strategy('/config'), client.strategy('')])
+        .then(([cfgRes, listRes]) => {
+          const cfg = cfgRes?.config
+          const strategies = Array.isArray(listRes?.strategies) ? listRes.strategies : null
+          if (!cfg || !strategies) return null
+          const isTripped = (s) => s?.circuit_state === 'tripped' || s?.circuit?.state === 'tripped'
+          return {
+            supported: true,
+            mode: cfg.mode ?? 'native',
+            revision: cfg.revision ?? null,
+            total_count: strategies.length,
+            enabled_count: strategies.filter((s) => Boolean(s?.enabled)).length,
+            tripped_count: strategies.filter(isTripped).length,
+            tripped_names: strategies.filter(isTripped).map((s) => String(s?.name ?? s?.strategy_id ?? '')).filter(Boolean),
+          }
+        })
+        .catch(() => null)
+
+    const [statusR, positionsR, equityR, ordersR, fillsR, reviewsR, envelopeR, healthR, strategySummary] = await Promise.all([
+      ...([
+        client.status(),
+        client.positions(),
+        client.equityCurve('all'),
+        client.orders(50),
+        client.fills(100),
+        client.reviews(20),
+        client.riskEnvelope(),
+        client.health(),
+      ].map((p) => p.then(
+        (v) => ({ status: 'fulfilled', value: v }),
+        (r) => ({ status: 'rejected', reason: r }),
+      ))),
+      strategySummaryPromise,
     ])
     const gaps = []
     const value = (result, label) => {
@@ -1972,6 +2072,7 @@ export class WorkbenchHostIntegration {
       // top bar must not have to invent. It rides with the portfolio because
       // that is where /api/risk/envelope is already fetched.
       control: controlInfoOf(envelope?.control),
+      strategySummary: strategySummary ?? null,
       accountEmpty: account.empty === true,
       accountGap: account.gap ?? null,
       gaps: [...new Set(gaps)],
@@ -2339,7 +2440,7 @@ export class WorkbenchHostIntegration {
    */
   serviceLauncherPaths() {
     const hostDir = path.dirname(fileURLToPath(import.meta.url))
-    const root = path.dirname(path.dirname(hostDir))
+    const root = path.dirname(hostDir)
     const workspace = path.dirname(root)
     const win = process.platform === 'win32'
     const env = this.env ?? {}
@@ -2355,10 +2456,10 @@ export class WorkbenchHostIntegration {
       ].map(venvPython).find((candidate) => fileExists(candidate))
       || resolveSystemPython(env)
       || null
-    // Demo 凭据文件同理：先看 settings 写下的 dataDir 凭据，再看参考项目的 .env。
+    // Demo 凭据文件同理：先看 settings 写下的 dataDir 凭据，再看包内 .env 与参考项目的 .env。
     const demoEnv = this.demoEnvFilePath()
     const dotenv = env.WORKBENCH_DOTENV_FILE
-      || [demoEnv, path.join(workspace, 'multi-agent-trader', '.env')].find((candidate) => fileExists(candidate))
+      || [demoEnv, path.join(root, '.env'), path.join(workspace, 'multi-agent-trader', '.env')].find((candidate) => fileExists(candidate))
       || demoEnv
     const derived = {
       root,
@@ -2555,7 +2656,7 @@ export class WorkbenchHostIntegration {
     return {
       ok: true,
       contract: HOST_ROUNDS_CONTRACT,
-      plugin: '@local/dsh-trading-workbench',
+      plugin: 'dsh-trading-workbench',
       data_dir: path.resolve(String(this.dataDir)),
       // 15 §3: `rounds_path` is the day-partition directory; the legacy
       // single-file cache (if it was migrated) stays visible for audit.
@@ -2893,6 +2994,7 @@ export class WorkbenchHostIntegration {
       performance: portfolio.performance ?? null,
       accountEmpty: portfolio.accountEmpty,
       accountGap: portfolio.accountGap,
+      strategy_summary: portfolio.strategySummary ?? null,
       portfolio: {
         fetched_at: portfolio.fetchedAt,
         source: portfolio.source,
@@ -2925,6 +3027,7 @@ export class WorkbenchHostIntegration {
     const truncated = records.length > MAX_ROUNDS_PER_DAY
     return {
       ok: true,
+      plugin: 'dsh-trading-workbench',
       date: day,
       today,
       rounds: records.slice(0, MAX_ROUNDS_PER_DAY).map(roundSummaryOf),
@@ -3514,31 +3617,109 @@ export class WorkbenchHostIntegration {
         llmMode: this.llmMode,
       }))
       let primarySymbol = symbol || DEFAULT_SYMBOL
-      if (snapshot.ready?.capabilities?.strategies === true) {
+      let executionMode = 'ai_assisted'
+      let selectedRule = null
+      let candidateMark = null
+      const rawPositions = Array.isArray(snapshot.positions)
+        ? snapshot.positions
+        : (Array.isArray(snapshot.status?.positions) ? snapshot.status.positions : [])
+      const openPositions = rawPositions.filter((p) => {
+        if (!p || typeof p !== 'object') return false
+        const q = Number(p.qty ?? p.positionAmt ?? p.quantity ?? 0)
+        return Number.isFinite(q) && q !== 0
+      })
+      if (openPositions.length > 0) {
+        primarySymbol = openPositions[0].symbol || primarySymbol
+        record.symbol = primarySymbol
+        strategyContext = null
+        record.strategy_selection_reason = '账户已有持仓，优先执行持仓风险管理，不触发新开仓策略'
+      } else if (snapshot.ready?.capabilities?.strategies === true) {
         const { config: strategyConfig } = await client.strategy('/config')
-        if (!['native', 'mounted'].includes(strategyConfig?.mode)) throw new HostIntegrationError('E_STRATEGY_MODE', '策略运行模式不可确认', { status: 409 })
+        if (!['native', 'mounted'].includes(strategyConfig?.mode)) {
+          throw new HostIntegrationError('E_STRATEGY_MODE', '策略运行模式不可确认', { status: 409 })
+        }
         if (strategyConfig.mode === 'mounted') {
-          const { strategies } = await client.strategy('/authorized')
-          const symbols = [...new Set((strategies ?? []).flatMap(s => s.confirmed_version?.rules?.symbols ?? []))].slice(0, 10)
-          const quotes = symbols.length ? await client.marks(symbols) : { prices: {} }
-          const eligible = eligibleStrategies(strategies ?? [], quotes.prices, this.now())
-          const choice = await this.strategyAssistant.choose(eligible, { prices: quotes.prices })
+          let candidates = []
+          let skipped = []
+          let selectionEvidence = {}
+          let legacyQuotes = null
+          try {
+            const evaluated = await client.evaluateStrategyCandidates({ now_ms: this.now() })
+            candidates = Array.isArray(evaluated?.candidates) ? evaluated.candidates : []
+            skipped = Array.isArray(evaluated?.skipped) ? evaluated.skipped : []
+            selectionEvidence = {
+              candidates_meta: candidates.map((c) => ({
+                strategy_id: c.strategy_id,
+                symbol: c.symbol ?? null,
+                side: c.side ?? null,
+                mark: c.mark ?? null,
+                indicator_facts: c.indicator_facts ?? null,
+              })),
+            }
+          } catch (evalError) {
+            if (evalError instanceof ServiceClientError && (evalError.status === 404 || evalError.code === 'E_NOT_FOUND' || evalError.code === 'E_SERVICE_HTTP_404')) {
+              const { strategies } = await client.strategy('/authorized')
+              const symbols = [...new Set((strategies ?? []).flatMap((s) => s.confirmed_version?.rules?.symbols ?? []))].slice(0, 20)
+              const quotes = symbols.length ? await client.marks(symbols) : { prices: {} }
+              legacyQuotes = quotes.prices ?? {}
+              candidates = eligibleStrategies(strategies ?? [], legacyQuotes, this.now())
+              selectionEvidence = { prices: legacyQuotes }
+            } else {
+              throw evalError
+            }
+          }
+          const chooseRoute = frozen.route ?? frozen.roleRoutes?.decision ?? frozen.snapshot?.default ?? this.route
+          const choice = await this.strategyAssistant.choose(candidates, selectionEvidence, {
+            llm: this.llm,
+            route: chooseRoute,
+          })
           selectedStrategy = choice.strategy
-          record.strategy_selection_reason = choice.reason
           if (!selectedStrategy) {
-            record.status = 'no_trade'; record.outcome = 'no_trade'; record.reasonCode = 'NO_ELIGIBLE_STRATEGY'
-            record.headline = '无交易：没有满足条件的已授权策略'
-            record.finishedAt = nowIso(this.now()); record.durationMs = this.now() - started
-            this.lastRunAt = record.finishedAt; this.store.upsert(record)
+            const noEligible = summarizeNoEligibleStrategy(choice.reason, skipped, candidates.length > 0)
+            record.strategy_selection_reason = noEligible.reason
+            record.status = 'no_trade'
+            record.outcome = 'no_trade'
+            record.reasonCode = 'NO_ELIGIBLE_STRATEGY'
+            record.headline = noEligible.headline
+            record.result = {
+              outcome: 'no_trade',
+              reasonCode: 'NO_ELIGIBLE_STRATEGY',
+              detail: noEligible.reason,
+              calls: [],
+              outputs: {},
+            }
+            record.finishedAt = nowIso(this.now())
+            record.durationMs = this.now() - started
+            this.lastRunAt = record.finishedAt
+            this.store.upsert(record)
             return { ok: true, round: roundViewOf(record) }
           }
-          const rule = selectedStrategy.confirmed_version.rules
-          primarySymbol = rule.symbols.find(s => eligibleStrategies([selectedStrategy], { [s]: quotes.prices[s] }, this.now()).length) ?? rule.symbols[0]
-          const ms = { '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 }[rule.timeframes[0]]
-          strategyContext = { strategy_id: selectedStrategy.strategy_id, version: selectedStrategy.current_version,
-            generation: selectedStrategy.generation, mode_revision: strategyConfig.revision,
-            signal_key: `${rule.timeframes[0]}:${Math.floor(this.now()/ms)}` }
-          record.strategy = { ...strategyContext, name: selectedStrategy.name, rules: rule }
+          record.strategy_selection_reason = choice.reason
+          selectedRule = selectedStrategy.rules ?? selectedStrategy.confirmed_version?.rules
+          executionMode = selectedStrategy.execution_mode ?? selectedRule?.execution_mode ?? 'ai_assisted'
+          primarySymbol = selectedStrategy.symbol
+            ?? (legacyQuotes
+              ? selectedRule?.symbols?.find((s) => eligibleStrategies([selectedStrategy], { [s]: legacyQuotes[s] }, this.now()).length > 0)
+              : null)
+            ?? selectedRule?.symbols?.[0]
+            ?? primarySymbol
+          const tf = selectedRule?.timeframes?.[0] ?? '15m'
+          const ms = { '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 }[tf] ?? 900000
+          const signalKey = selectedStrategy.signal_key ?? `${tf}:${Math.floor(this.now() / ms)}`
+          candidateMark = selectedStrategy.mark ?? legacyQuotes?.[primarySymbol]?.mark ?? null
+          strategyContext = {
+            strategy_id: selectedStrategy.strategy_id,
+            version: selectedStrategy.version ?? selectedStrategy.current_version,
+            generation: selectedStrategy.generation,
+            mode_revision: strategyConfig.revision,
+            signal_key: signalKey,
+          }
+          record.strategy = {
+            ...strategyContext,
+            name: selectedStrategy.name,
+            execution_mode: executionMode,
+            rules: selectedRule,
+          }
           record.symbol = primarySymbol
         }
       }
@@ -3764,11 +3945,14 @@ export class WorkbenchHostIntegration {
           this.setInFlightStage('p2', 'P2 执行')
           // §8·D / T15：真正提交前的最后一道确定性检查（同一个 evaluateEntryPlan）。
           // 拿不到提交价，所以只有时间类判定可以拦（见 preSubmitGateOf）。
-          preSubmitGate = preSubmitGateOf({
-            decision,
-            now: this.now(),
-            mode: this.config?.executionGate ?? DEFAULT_EXECUTION_GATE_MODE,
-          })
+          // rule_direct 无 AI 计划（由服务端 P1/P2 直接按策略规则核验实时条件），跳过 AI 计划有效期门禁。
+          preSubmitGate = executionMode === 'rule_direct'
+            ? null
+            : preSubmitGateOf({
+              decision,
+              now: this.now(),
+              mode: this.config?.executionGate ?? DEFAULT_EXECUTION_GATE_MODE,
+            })
           if (preSubmitGate?.enforced && preSubmitGate.ok === false) {
             return {
               ok: false,
@@ -3834,6 +4018,215 @@ export class WorkbenchHostIntegration {
         },
       }
 
+      if (selectedStrategy && executionMode === 'rule_direct') {
+        const rule = selectedRule ?? selectedStrategy.rules ?? selectedStrategy.confirmed_version?.rules
+        const side = String(rule?.entry?.side ?? 'long').toUpperCase()
+        const dir = side === 'LONG' ? 1 : -1
+        const slPct = Number(rule?.exit?.stop_loss_pct ?? 0)
+        const tpPct = Number(rule?.exit?.take_profit_pct ?? 0)
+        const refMark = Number(
+          candidateMark
+          ?? selectedStrategy.mark
+          ?? evidence?.symbols?.[primarySymbol]?.price?.mark
+          ?? evidence?.symbols?.[primarySymbol]?.price?.last
+          ?? 0,
+        )
+        if (localVerdict.verdict !== 'approved') {
+          const blockCode = CONTROL_BLOCKING.has(state) ? 'CONTROL_LOCKED' : 'HARD_RISK_REJECT'
+          const finished = this.now()
+          const blockedResult = {
+            ok: true,
+            calls: [],
+            mode: 'rule_direct',
+            outcome: 'no_trade',
+            reasonCode: blockCode,
+            detail: localVerdict.detail ?? blockCode,
+            outputs: {
+              decision: { action: 'NO_TRADE', side: null, symbol: primarySymbol },
+              execution: { executable: false, blocked_reason: blockCode, side, symbol: primarySymbol },
+            },
+          }
+          record.finishedAt = nowIso(finished)
+          record.durationMs = finished - started
+          record.result = blockedResult
+          record.status = 'no_trade'
+          record.outcome = 'no_trade'
+          record.reasonCode = blockCode
+          record.headline = `无交易：${blockCode}`
+          if (strategyContext) {
+            await client.recordStrategyDecision(strategyContext.strategy_id, {
+              cycle_id: activeCycleId,
+              version: strategyContext.version,
+              symbol: primarySymbol,
+              side,
+              signal_key: strategyContext.signal_key,
+              execution_mode: 'rule_direct',
+              outcome: 'risk_rejected',
+              reason_code: blockCode,
+              entry_mark: refMark > 0 ? refMark : null,
+              sl_price: refMark > 0 && slPct > 0 ? refMark * (1 - dir * slPct) : null,
+              tp_price: refMark > 0 && tpPct > 0 ? refMark * (1 + dir * tpPct) : null,
+              details: { mode: 'rule_direct', verdict: localVerdict.verdict },
+            }).catch(() => {})
+          }
+          if (cycleCreated) {
+            await finalizeCycleSafely(client, activeCycleId, {
+              outcome: 'no_trade',
+              reasonCode: blockCode,
+              errorCode: null,
+            }, record)
+          }
+          this.lastRunAt = nowIso(finished)
+          this.lastError = null
+          this.portfolioCache = null
+          this.store.upsert(record)
+          return { ok: true, round: roundViewOf(record) }
+        }
+
+        const sl = refMark * (1 - dir * slPct)
+        const tp = refMark * (1 + dir * tpPct)
+        const acctCtx = executionAccountContext({ cycleResponse, snapshot })
+        const rawEquity = acctCtx.equity?.session
+          ?? acctCtx.equity?.exchange
+          ?? acctCtx.account?.total_margin_balance
+          ?? acctCtx.account?.total_wallet_balance
+          ?? snapshot.envelope?.equity?.session
+          ?? 5000
+        const equityNum = Number.isFinite(Number(rawEquity)) && Number(rawEquity) > 0 ? Number(rawEquity) : 5000
+        const envRiskFrac = finite(snapshot.envelope?.limits?.per_trade?.max_risk_pct)
+        const capRiskVal = finite(capOverride.maxRiskPct)
+        const riskPct = envRiskFrac !== null && envRiskFrac > 0
+          ? envRiskFrac
+          : (capRiskVal !== null && capRiskVal > 0
+            ? (capRiskVal > 0.2 ? capRiskVal / 100 : capRiskVal)
+            : 0.01)
+        const rawQty = refMark > 0 && slPct > 0 ? Math.max(0.001, (equityNum * riskPct) / (refMark * slPct)) : 0.001
+        const leverage = Math.max(1, Math.min(Number(capOverride.maxLeverage ?? 5), 5))
+        const fmtNum = (val) => String(Number(Number(val).toFixed(8)))
+        const directOrderPlan = {
+          symbol: primarySymbol,
+          side,
+          action: 'open',
+          entry_type: 'MARKET',
+          leverage,
+          qty: fmtNum(rawQty),
+          sl: fmtNum(sl),
+          tp: fmtNum(tp),
+          confidence: 1.0,
+          reasoning_ref: `rule-direct:${strategyContext.strategy_id}:v${strategyContext.version}:${activeCycleId}`,
+        }
+        const directDecision = {
+          action: 'TRADE',
+          side,
+          symbol: primarySymbol,
+          plan: {
+            entry: { style: 'MARKET', price: refMark },
+            stop_loss: { price: Number(directOrderPlan.sl) },
+            take_profit: { price: Number(directOrderPlan.tp) },
+            leverage,
+            rr_to_target: slPct > 0 ? Number((tpPct / slPct).toFixed(2)) : null,
+          },
+        }
+        const directExecution = {
+          executable: true,
+          side,
+          symbol: primarySymbol,
+          order_plan: directOrderPlan,
+          rationale: '纯规则直连引擎按已确认策略参数生成确定性订单计划，0 LLM 调用。',
+        }
+        const p1 = await gateways.p1({
+          cycleId: activeCycleId,
+          decision: directDecision,
+          risk: null,
+          execution: directExecution,
+          calls: [],
+          evidence,
+        })
+        let p2 = null
+        if (p1 && ['approved', 'reduced'].includes(p1.verdict)) {
+          p2 = await gateways.p2({
+            cycleId: activeCycleId,
+            decision: directDecision,
+            risk: null,
+            execution: directExecution,
+            p1,
+            calls: [],
+            evidence,
+          })
+        }
+        if (this.abandonedRuns.has(roundId)) {
+          throw new HostIntegrationError(
+            'HOST_RUN_ABANDONED',
+            'round ownership was revoked before the rule_direct result could be finalized',
+            { status: 409, retryable: false, details: { round_id: roundId } },
+          )
+        }
+        const p1Verdict = p1Raw?.verdict ?? p1Error?.details?.verdict ?? null
+        record.riskVerdict = p1Verdict && typeof p1Verdict === 'object' ? p1Verdict : null
+        const directReasonCode = p2?.ok ? 'TRADE_EXECUTED' : (p2?.code ?? p1?.code ?? 'RULE_DIRECT_BLOCKED')
+        const directResult = {
+          ok: true,
+          calls: [],
+          mode: 'rule_direct',
+          outcome: p2?.ok ? 'trade' : 'no_trade',
+          reasonCode: directReasonCode,
+          outputs: {
+            decision: directDecision,
+            execution: directExecution,
+            p1,
+            p2,
+          },
+        }
+        const decisionOutcome = p2?.ok
+          ? 'executed'
+          : (!p1 || !['approved', 'reduced'].includes(p1.verdict) ? 'risk_rejected' : 'execution_blocked')
+        await client.recordStrategyDecision(strategyContext.strategy_id, {
+          cycle_id: activeCycleId,
+          version: strategyContext.version,
+          symbol: primarySymbol,
+          side,
+          signal_key: strategyContext.signal_key,
+          execution_mode: 'rule_direct',
+          outcome: decisionOutcome,
+          reason_code: directReasonCode,
+          entry_mark: refMark > 0 ? refMark : null,
+          sl_price: Number.isFinite(sl) && sl > 0 ? sl : null,
+          tp_price: Number.isFinite(tp) && tp > 0 ? tp : null,
+          order_id: p2?.order_id !== null && p2?.order_id !== undefined ? String(p2.order_id) : null,
+          details: {
+            mode: 'rule_direct',
+            p1_verdict: p1?.verdict ?? null,
+            p2_ok: p2?.ok ?? null,
+          },
+        }).catch(() => {})
+
+        const finished = this.now()
+        record.finishedAt = nowIso(finished)
+        record.durationMs = finished - started
+        record.result = directResult
+        record.outcome = directResult.outcome
+        record.reasonCode = directResult.reasonCode
+        record.status = p2?.ok ? 'done' : 'no_trade'
+        record.headline = p2?.ok ? '纯规则直连已通过 P1/P2 执行' : `无交易：${directReasonCode}`
+        record.error = null
+        if (directReasonCode === 'E_DEMO_CREDENTIALS_MISSING') {
+          record.serviceStatus = 'degraded'
+          record.gaps.push('P2 was skipped because Demo credentials are not configured; no real order was attempted.')
+        }
+        if (cycleCreated) {
+          await finalizeCycleSafely(client, activeCycleId, {
+            outcome: record.outcome,
+            reasonCode: record.reasonCode,
+            errorCode: null,
+          }, record)
+        }
+        this.lastRunAt = nowIso(finished)
+        this.lastError = null
+        this.portfolioCache = null
+        this.store.upsert(record)
+        return { ok: true, round: roundViewOf(record) }
+      }
+
       const result = await runChain({
         llm: this.llm,
         route: this.route,
@@ -3875,6 +4268,35 @@ export class WorkbenchHostIntegration {
 
       await this.persistAiAudit(client, activeCycleId, result, record, runEvents)
 
+      if (selectedStrategy && strategyContext && result.outcome === 'no_trade' && !p1Error && !p2Error) {
+        const rule = selectedRule ?? selectedStrategy.rules ?? selectedStrategy.confirmed_version?.rules
+        const entrySide = String(rule?.entry?.side ?? 'long').toLowerCase()
+        const dir = entrySide === 'long' ? 1 : -1
+        const slPct = Number(rule?.exit?.stop_loss_pct ?? 0)
+        const tpPct = Number(rule?.exit?.take_profit_pct ?? 0)
+        const refMark = Number(
+          candidateMark
+          ?? selectedStrategy.mark
+          ?? evidence?.symbols?.[primarySymbol]?.price?.mark
+          ?? evidence?.symbols?.[primarySymbol]?.price?.last
+          ?? 0,
+        )
+        await client.recordStrategyDecision(strategyContext.strategy_id, {
+          cycle_id: activeCycleId,
+          version: strategyContext.version,
+          symbol: primarySymbol,
+          side: entrySide.toUpperCase(),
+          signal_key: strategyContext.signal_key,
+          execution_mode: 'ai_assisted',
+          outcome: 'ai_vetoed',
+          reason_code: result.reasonCode,
+          entry_mark: refMark > 0 ? refMark : null,
+          sl_price: refMark > 0 && slPct > 0 ? refMark * (1 - dir * slPct) : null,
+          tp_price: refMark > 0 && tpPct > 0 ? refMark * (1 + dir * tpPct) : null,
+          details: { headline: result.reasonCode },
+        }).catch(() => {})
+      }
+
       // P1 returns RiskVerdict.as_dict() on approval, or inside the 422 error
       // details on rejection. Persist only the verdict so RoundView can surface
       // violations/blocking_rule; the approval token never leaves this scope.
@@ -3902,7 +4324,16 @@ export class WorkbenchHostIntegration {
         }
       }
       const gatewayFailure = p1Error ?? p2Error
-      if (gatewayFailure) {
+      if (gatewayFailure && STRATEGY_BUSINESS_REJECT_CODES.has(gatewayFailure.code)) {
+        record.status = 'no_trade'
+        record.outcome = 'no_trade'
+        record.reasonCode = gatewayFailure.code
+        record.headline = `无交易：${gatewayFailure.code}`
+        record.serviceStatus = 'ok'
+        record.errorStatus = null
+        record.httpStatus = 200
+        record.error = null
+      } else if (gatewayFailure) {
         const stage = p1Error ? 'P1' : 'P2'
         record.status = 'failed'
         record.outcome = 'failed'
@@ -4289,25 +4720,36 @@ export class WorkbenchHostIntegration {
       if (pathname === STRATEGIES_PATH || pathname.startsWith(`${STRATEGIES_PATH}/`)) {
         if (!isSameOriginRequest(req, this.ctx)) return sendJson(res, 403, { ok: false, error: { code: 'CROSS_ORIGIN_BLOCKED' } })
         const suffix = pathname.slice(STRATEGIES_PATH.length)
-        const allowed = /^(?:\/(?:config|authorized)|\/[a-zA-Z0-9_-]+(?:\/(?:draft|mount|authorization|analyze|versions\/\d+))?)?$/.test(suffix)
+        const allowed = /^(?:\/(?:config|authorized|attribution|evaluate-candidates)|\/[a-zA-Z0-9_-]+(?:\/(?:draft|mount|authorization|analyze|preview|decisions|versions\/\d+))?)?$/.test(suffix)
         if (!allowed) return sendJson(res, 404, { ok: false, error: { code: 'NOT_FOUND' } })
         if (!['GET', 'POST', 'PUT', 'PATCH'].includes(req.method)) return methodNotAllowed(res, ['GET', 'POST', 'PUT', 'PATCH'])
         let body
         if (req.method !== 'GET') {
           requireJsonRequest(req)
-          body = await readJsonBody(req, 100000)
+          body = await readJsonBody(req, 150000)
         }
         if (suffix.endsWith('/analyze')) {
           if (req.method !== 'POST') return methodNotAllowed(res, ['POST'])
           const id = suffix.split('/')[1]
+          if (body?.revision === undefined || body?.revision === null || (typeof body.revision !== 'number' && typeof body.revision !== 'string')) {
+            return sendJson(res, 422, { ok: false, error: { code: 'E_VALIDATION', message: 'revision is required' } })
+          }
           try {
-            const result = await this.callService(client => this.strategyAssistant.analyze(client, id, body.revision))
+            const dynamicRoute = await this.resolveStrategyRoute()
+            const dynamicLlm = this.llm ?? this.ctx?.llm ?? null
+            const result = await this.callService((client) => this.strategyAssistant.analyze(client, id, body.revision, {
+              llm: dynamicLlm,
+              route: dynamicRoute,
+            }))
+            this.portfolioCache = null
             return sendJson(res, 200, { ...result, ok: true })
           } catch (error) {
             return sendJson(res, error.status ?? 502, { ok: false, error: { code: error.code ?? 'E_STRATEGY_ANALYSIS', message: error.message } })
           }
         }
-        const result = await this.callService(client => client.strategy(suffix, { method: req.method, body }))
+        const targetSuffix = req.method === 'GET' && requestUrl.search ? `${suffix}${requestUrl.search}` : suffix
+        const result = await this.callService((client) => client.strategy(targetSuffix, { method: req.method, body }))
+        if (req.method !== 'GET') this.portfolioCache = null
         return sendJson(res, 200, { ...result, ok: true })
       }
       if (pathname === RUN_PATH) {

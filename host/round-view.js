@@ -758,6 +758,7 @@ export function toRoundView(record) {
       version: record.strategy.version,
       name: String(record.strategy.name ?? '').slice(0, 100),
       signal_key: record.strategy.signal_key,
+      execution_mode: record.strategy.execution_mode ?? 'ai_assisted',
     } : null,
     strategy_selection_reason: typeof record?.strategy_selection_reason === 'string' ? record.strategy_selection_reason.slice(0, 300) : null,
     mode: result?.mode ?? (result?.degraded ? 'opening_only' : null),

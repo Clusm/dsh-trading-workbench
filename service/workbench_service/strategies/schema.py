@@ -16,7 +16,12 @@ INSERT OR IGNORE INTO strategy_config VALUES (1,'native',0,'');
 CREATE TABLE IF NOT EXISTS strategies (
  strategy_id TEXT PRIMARY KEY, name TEXT NOT NULL,
  current_version INTEGER, enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
- generation INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+ generation INTEGER NOT NULL DEFAULT 0,
+ circuit_state TEXT NOT NULL DEFAULT 'ok',
+ circuit_reason TEXT,
+ circuit_tripped_at TEXT,
+ circuit_reset_at TEXT,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS strategy_drafts (
  strategy_id TEXT PRIMARY KEY REFERENCES strategies(strategy_id), revision INTEGER NOT NULL,
@@ -46,11 +51,38 @@ CREATE TABLE IF NOT EXISTS strategy_position_ownership (
  strategy_id TEXT NOT NULL, version INTEGER NOT NULL, generation INTEGER NOT NULL,
  opened_at TEXT NOT NULL, PRIMARY KEY(symbol,side,cycle_id)
 );
+CREATE TABLE IF NOT EXISTS strategy_decisions (
+ decision_id TEXT PRIMARY KEY,
+ strategy_id TEXT NOT NULL,
+ version INTEGER NOT NULL,
+ cycle_id TEXT NOT NULL,
+ symbol TEXT NOT NULL,
+ side TEXT NOT NULL,
+ signal_key TEXT NOT NULL,
+ execution_mode TEXT NOT NULL,
+ outcome TEXT NOT NULL,
+ reason_code TEXT,
+ entry_mark TEXT,
+ sl_price TEXT,
+ tp_price TEXT,
+ details_json TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ UNIQUE(strategy_id, cycle_id)
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_decisions_sid
+ ON strategy_decisions(strategy_id, created_at DESC);
 CREATE TRIGGER IF NOT EXISTS strategy_versions_no_update
  BEFORE UPDATE ON strategy_versions BEGIN SELECT RAISE(ABORT, 'confirmed strategy version is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS strategy_versions_no_delete
  BEFORE DELETE ON strategy_versions BEGIN SELECT RAISE(ABORT, 'confirmed strategy version cannot be deleted'); END;
 """
+
+_STRATEGY_MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("circuit_state", "ALTER TABLE strategies ADD COLUMN circuit_state TEXT NOT NULL DEFAULT 'ok'"),
+    ("circuit_reason", "ALTER TABLE strategies ADD COLUMN circuit_reason TEXT"),
+    ("circuit_tripped_at", "ALTER TABLE strategies ADD COLUMN circuit_tripped_at TEXT"),
+    ("circuit_reset_at", "ALTER TABLE strategies ADD COLUMN circuit_reset_at TEXT"),
+)
 
 
 def ensure_schema(path: Path) -> None:
@@ -59,7 +91,9 @@ def ensure_schema(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = _connect(path)
     try:
-        present = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='strategy_versions'").fetchone()
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='strategy_versions'"
+        ).fetchone()
         if not present and existed:
             directory = path.parent / "backups"
             directory.mkdir(parents=True, exist_ok=True)
@@ -70,6 +104,13 @@ def ensure_schema(path: Path) -> None:
             finally:
                 backup.close()
         conn.executescript("BEGIN IMMEDIATE;\n" + DDL + "\nCOMMIT;")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(strategies)").fetchall()}
+        missing = [(name, ddl) for name, ddl in _STRATEGY_MIGRATION_COLUMNS if name not in columns]
+        if missing:
+            conn.execute("BEGIN IMMEDIATE")
+            for _name, ddl in missing:
+                conn.execute(ddl)
+            conn.commit()
     except Exception:
         conn.rollback()
         raise

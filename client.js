@@ -36,7 +36,7 @@ window.__ModuleLoader__.load({
 
     // ---- routes (Host only) -------------------------------------------------
     const API = '/trading-workbench/api'
-    const CLIENT_VERSION = '0.2.0-dev.4'
+    const CLIENT_VERSION = '0.2.0'
     const STATE_URL = `${API}/state`
     const HEALTH_URL = `${API}/health`
     const PRICES_URL = `${API}/market/prices`
@@ -1180,6 +1180,25 @@ window.__ModuleLoader__.load({
       'ai.entryZone': ['允许入场范围', 'Allowed entry range'],
       'ai.validUntil': ['计划有效期至', 'Plan valid until'],
       'ai.zoneMissing': ['未提供（不扩大范围）', 'not provided (range is never widened)'],
+
+      // ---- 0.2.0 UX: live est uPnL, strategy mode badge, circuit alerts & reason codes ----
+      'quote.estUpnl': ['参考浮盈 {val}（实时标记价估算）', 'Est. {val} (live mark)'],
+      's1.modeMounted': ['已授权策略 · {n}/5 启用', 'Authorized strategies · {n}/5 active'],
+      's1.modeNative': ['模式：原生 AI', 'Mode: Native AI'],
+      's2.openStrategies': ['前往策略管理 →', 'Open strategies →'],
+      's2.strategyEmptyImpact': ['影响：已授权策略模式下当前启用 0 个策略，不会开立任何新仓', 'Impact: Authorized strategy mode has 0 active strategies; no new entries will open'],
+      's2.strategyEmptyReason': ['运行模式为「已授权策略」，但尚无已启用的确认版本策略', 'Run mode is Authorized strategies, but no confirmed strategy is enabled'],
+      's2.strategyEmptyNext': ['下一步：启用至少 1 个已挂载策略，或切回原生 AI 模式', 'Next: enable at least 1 mounted strategy, or switch back to Native AI mode'],
+      's2.strategyTrippedImpact': ['影响：部分策略触发自动熔断，已暂停对应策略新开仓', 'Impact: Strategy circuit breaker tripped; new entries for affected strategies are paused'],
+      's2.strategyTrippedReason': ['{names} 已触发策略熔断暂停新开仓', '{names} tripped strategy circuit breaker and paused new entries'],
+      's2.strategyTrippedNext': ['下一步：前往策略管理核对亏损原因，确认后可解除熔断并重启用', 'Next: inspect loss cause in Strategies, then reset circuit breaker and re-enable'],
+      'strat.execRuleDirectShort': ['规则直通', 'Rule-direct'],
+      'strat.execAiAssistedShort': ['AI 辅助', 'AI-assisted'],
+      'reason.NO_ELIGIBLE_STRATEGY': ['无满足条件的已启用策略', 'No eligible enabled strategy'],
+      'reason.STRATEGY_AI_CONFLICT': ['AI 评估与策略方向冲突，本轮跳过开仓', 'AI evaluation conflicted with strategy; entry skipped'],
+      'reason.E_STRATEGY_SIGNAL_FALSE': ['策略入场条件未满足', 'Strategy entry condition not met'],
+      'reason.E_STRATEGY_SIGNAL_DUPLICATE': ['当前周期该策略信号已触发过（去重跳过）', 'Strategy signal already triggered in this window (deduplicated)'],
+      'reason.E_STRATEGY_NOT_AUTHORIZED': ['策略未获执行授权或已触发熔断', 'Strategy not authorized for execution or circuit tripped'],
     }
 
     // ---- reasonCode -> 中文标签（03 §8 唯一词表：75 行 / 89 码） ------------
@@ -2152,7 +2171,46 @@ window.__ModuleLoader__.load({
 .twb-strategy-status{display:inline-flex;align-items:center;gap:7px;padding:4px 9px;border:1px solid var(--twb-b-rule-3);border-radius:4px;font-size:11px;white-space:nowrap;color:var(--twb-ink-2)}
 .twb-strategy-status::before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor}
 .twb-strategy-status[data-state='draft']{color:var(--twb-ink-3)}
-.twb-strategy-status[data-state='enabled']{font-weight:600;border-color:var(--twb-ink-2)}
+.twb-strategy-status[data-state='enabled']{font-weight:600;border-color:var(--twb-edge-up);background:var(--twb-tint-up);color:var(--twb-up)}
+.twb-strategy-status[data-state='tripped']{font-weight:600;border-color:var(--twb-edge-warn);background:var(--twb-tint-warn);color:var(--twb-warn)}
+.twb-s1 .twb-chip[data-strategy-mode]{height:22px;padding:0 8px;border-radius:3px;border:1px solid var(--twb-b-rule-2);background:var(--twb-s1);color:var(--twb-b-ink-1);font-size:11px;font-weight:600;cursor:pointer}
+.twb-s1 .twb-chip[data-strategy-mode='mounted']{border-color:var(--twb-edge-up);background:var(--twb-tint-up)}
+.twb-s1 .twb-chip[data-strategy-mode]:hover{border-color:var(--twb-b-rule-3)}
+.twb-strat-mode-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;margin-bottom:20px;background:var(--twb-s1);border:1px solid var(--twb-b-rule-2);border-radius:6px}
+.twb-strat-mode-metrics{display:flex;flex-wrap:wrap;align-items:center;gap:10px;font-size:12px}
+.twb-strat-mode-controls{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.twb-strat-overview{margin-bottom:24px;border:1px solid var(--twb-b-rule-2);border-radius:6px;background:var(--twb-s1);overflow:hidden}
+.twb-strat-overview-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 14px;border-bottom:1px solid var(--twb-b-rule-2);font-size:12px;font-weight:600}
+.twb-strat-overview .twb-table thead th{background:var(--twb-s2);font-size:11px;height:32px}
+.twb-strat-overview .twb-table tbody td{height:auto;padding:10px 8px;vertical-align:top;white-space:normal}
+.twb-strat-overview .twb-table tbody tr[data-selected='true'] td{background:color-mix(in srgb,var(--twb-accent) 7%,transparent)}
+.twb-strat-sub{font-size:11px;color:var(--twb-ink-2);line-height:1.5;margin-top:3px}
+.twb-strat-templates{margin:14px 0 18px;padding:14px;background:var(--twb-s1);border:1px solid var(--twb-b-rule-2);border-radius:6px}
+.twb-strat-tpl-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin-top:10px}
+.twb-strat-tpl-card{display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:10px 12px;border:1px solid var(--twb-b-rule-2);border-radius:5px;background:var(--twb-s0);text-align:left;cursor:pointer}
+.twb-strat-tpl-card:hover{border-color:var(--twb-ink-2);background:var(--twb-row-hover)}
+.twb-strat-tpl-card strong{font-size:12px;color:var(--twb-ink-1)}
+.twb-strat-tpl-card span{font-size:11px;color:var(--twb-ink-2);line-height:1.5}
+.twb-strat-ref{padding:10px 14px;background:var(--twb-s1);border:1px solid var(--twb-b-rule-2);border-radius:6px;font-size:12px}
+.twb-strat-ref-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:8px}
+.twb-strat-sym-list{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.twb-strat-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin:16px 0;padding:14px;background:var(--twb-s1);border:1px solid var(--twb-b-rule-2);border-radius:6px}
+.twb-strat-radio-list{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.twb-strat-radio{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:9px 12px;border:1px solid var(--twb-b-rule-2);border-radius:5px;background:var(--twb-s0);text-align:left;cursor:pointer}
+.twb-strat-radio[aria-checked='true']{border-color:var(--twb-ink-1);background:color-mix(in srgb,var(--twb-ink-1) 6%,var(--twb-s0))}
+.twb-strat-radio strong{font-size:12px;color:var(--twb-ink-1)}
+.twb-strat-radio span{font-size:11px;color:var(--twb-ink-2);line-height:1.45}
+.twb-strat-cb-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-top:8px}
+.twb-strat-cb-fields label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--twb-ink-2)}
+.twb-strat-rule-card{margin:16px 0;padding:14px 16px;background:var(--twb-s1);border:1px solid var(--twb-b-rule-2);border-radius:6px}
+.twb-strat-rule-rows{display:grid;grid-template-columns:minmax(100px,130px) minmax(0,1fr);gap:8px 14px;margin-top:10px;font-size:12px;line-height:1.6}
+.twb-strat-rule-k{color:var(--twb-ink-2);font-size:11px;font-weight:500}
+.twb-strat-rule-v{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
+.twb-strat-cond-list{margin:0;padding-left:18px;width:100%}
+.twb-strat-preview{margin:14px 0;padding:12px 14px;background:var(--twb-s2);border:1px solid var(--twb-line-1);border-radius:6px;font-size:12px}
+.twb-strat-preview-row{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:4px 0;border-bottom:1px solid var(--twb-b-rule)}
+.twb-strat-preview-row:last-child{border-bottom:0}
+.twb-strat-trigger-warn{margin:14px 0;padding:11px 14px;border-radius:6px;border:1px solid var(--twb-edge-warn);background:var(--twb-tint-warn);color:var(--twb-ink-1);font-size:12px;font-weight:600;line-height:1.6}
 .twb-strategies-page label.twb-settings-row>span{font-size:12px;font-weight:500;color:var(--twb-ink-2)}
 .twb-strategies-page textarea{line-height:1.75;min-height:130px}
 .twb-strategies-page textarea[aria-label]{font-family:var(--twb-num);font-size:12px}
@@ -2164,7 +2222,7 @@ window.__ModuleLoader__.load({
 .twb-strategy-review>label input{flex-shrink:0;margin-top:4px}
 .twb-strategy-authorization>p{margin:0 0 8px;font-size:12px;color:var(--twb-ink-2)}
 [data-strategies-page][hidden]{display:none!important}
-@media(max-width:760px){.twb-strategies-heading{align-items:flex-start;flex-direction:column}.twb-strategies-page .twb-settings-row>select{width:100%}}
+@media(max-width:760px){.twb-strategies-heading{align-items:flex-start;flex-direction:column}.twb-strategies-page .twb-settings-row>select{width:100%}.twb-strat-rule-rows{grid-template-columns:minmax(0,1fr)}}
 `
 
     // ---- helpers -----------------------------------------------------------
@@ -2245,7 +2303,8 @@ window.__ModuleLoader__.load({
     function fmtPrice(value) {
       const n = num(value)
       if (n === null) return null
-      const digits = Math.abs(n) >= 1000 ? 1 : 2
+      const abs = Math.abs(n)
+      const digits = abs >= 100 ? 2 : abs >= 1 ? 4 : abs >= 0.01 ? 5 : abs > 0 ? 6 : 2
       return n.toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits })
     }
 
@@ -2832,9 +2891,16 @@ window.__ModuleLoader__.load({
         const side = String(raw?.side ?? raw?.position_side ?? '').toLowerCase()
         const quote = quotes?.[raw?.symbol]
         const quoteAt = num(quote?.as_of_ms)
-        const quoteAge = quoteAt === null ? null : Math.max(0, now - quoteAt)
+        const rawServerAge = num(quote?.age_ms)
+        const validServerAge = rawServerAge !== null && rawServerAge >= 0 ? rawServerAge : null
+        const receivedAt = num(quote?._received_at_ms)
+        const elapsedSinceReceipt = receivedAt !== null ? Math.max(0, now - receivedAt) : 0
+        const quoteAge = validServerAge !== null
+          ? validServerAge + elapsedSinceReceipt
+          : (quoteAt === null ? null : Math.max(0, now - quoteAt))
         const accountStamp = accountAt ? Date.parse(accountAt) : NaN
-        const useQuote = num(quote?.mark) > 0 && quoteAt !== null && quoteAt <= now + 5000 && (!Number.isFinite(accountStamp) || quoteAt >= accountStamp)
+        const hasTimestamp = validServerAge !== null || (quoteAt !== null && quoteAt <= now + 5000)
+        const useQuote = num(quote?.mark) > 0 && hasTimestamp && (!Number.isFinite(accountStamp) || quoteAt === null || quoteAt >= accountStamp)
         const freshQuote = quote?.stale === false && quoteAge !== null && quoteAge <= 5000 && num(quote?.mark) > 0
         const mark = useQuote ? num(quote.mark) : num(raw?.mark)
         const entry = num(raw?.entry)
@@ -2842,6 +2908,11 @@ window.__ModuleLoader__.load({
         const sl = num(raw?.sl)
         const tp = num(raw?.tp)
         const dir = side === 'short' || side === 'sell' ? -1 : 1
+        const qtyNum = num(raw?.qty)
+        const absQty = qtyNum !== null ? Math.abs(qtyNum) : null
+        const estUpnl = useQuote && mark !== null && entry !== null && absQty !== null && absQty > 0
+          ? (mark - entry) * absQty * dir
+          : null
         let stopDist = null
         if (mark && sl) stopDist = ((mark - sl) * dir / mark) * 100
         let liqDist = null
@@ -2858,6 +2929,7 @@ window.__ModuleLoader__.load({
           accountStale,
           accountAge,
           upnl: num(raw?.upnl),
+          estUpnl,
           sl,
           tp,
           liq,
@@ -3054,6 +3126,37 @@ window.__ModuleLoader__.load({
           next: 's2.autoNext',
           action: 'system',
           actionLabel: 'top.menu.system',
+        })
+      }
+      const strategySummary = model.strategySummary
+      if (!serviceDown && strategySummary && (strategySummary.tripped_count ?? 0) > 0) {
+        const rawNames = Array.isArray(strategySummary.tripped_names) ? strategySummary.tripped_names.filter(Boolean) : []
+        const names = rawNames.length > 0
+          ? rawNames.join(LANG === 'en' ? ', ' : '、')
+          : `${strategySummary.tripped_count}`
+        push({
+          id: 'strategy-circuit-tripped',
+          priority: 28,
+          category: 'rule',
+          tone: 'warn',
+          impact: 's2.strategyTrippedImpact',
+          reason: fmt(zh('s2.strategyTrippedReason'), { names }),
+          next: 's2.strategyTrippedNext',
+          action: 'strategies',
+          actionLabel: 's2.openStrategies',
+        })
+      }
+      if (!serviceDown && strategySummary?.mode === 'mounted' && (strategySummary?.enabled_count ?? 0) === 0) {
+        push({
+          id: 'strategy-mounted-empty',
+          priority: 32,
+          category: 'rule',
+          tone: 'warn',
+          impact: 's2.strategyEmptyImpact',
+          reason: zh('s2.strategyEmptyReason'),
+          next: 's2.strategyEmptyNext',
+          action: 'strategies',
+          actionLabel: 's2.openStrategies',
         })
       }
       const round = model.round
@@ -3475,12 +3578,15 @@ window.__ModuleLoader__.load({
         h('div', { className: 'b-cell-sub' },
           row.margin === null ? '—' : fmtNum(row.margin, 1), row.leverage ? ` · ${row.leverage}×` : '')),
       h('td', { className: 'b-num-cell' },
-        h('div', { className: 'b-cell-main b-num' }, fmtNum(row.mark, 2)),
+        h('div', { className: 'b-cell-main b-num' }, fmtPrice(row.mark) ?? '—'),
         h('div', { className: 'b-cell-sub' }, row.quoteStale ? t('quote.history') : t('quote.live'), ' · ', row.quoteAge === null ? '—' : fmtAge(row.quoteAge)),
-        h('div', { className: 'b-cell-sub' }, row.entry === null ? '—' : `入 ${fmtNum(row.entry, 2)}`)),
+        h('div', { className: 'b-cell-sub' }, row.entry === null ? '—' : `入 ${fmtPrice(row.entry)}`)),
       h('td', { className: 'b-num-cell' },
         h('div', { className: 'b-cell-main' }, h(Num, { value: row.upnl })),
-        h('div', { className: 'b-cell-sub' }, row.accountStale ? t('quote.history') : t('quote.account'), ' · ', row.accountAge === null ? '—' : fmtAge(row.accountAge))),
+        h('div', { className: 'b-cell-sub' }, row.accountStale ? t('quote.history') : t('quote.account'), ' · ', row.accountAge === null ? '—' : fmtAge(row.accountAge)),
+        !row.quoteStale && row.estUpnl !== null
+          ? h('div', { className: 'b-cell-sub', 'data-est-upnl': 'true' }, fmt(zh('quote.estUpnl'), { val: `${row.estUpnl >= 0 ? '+' : ''}${fmtNum(row.estUpnl, 2)}` }))
+          : null),
       h('td', null,
         h('div', { className: 'b-cell-main' }, row.accountStale ? h('span', { className: 'twb-hint' }, t('quote.history'), ' · ') : null, h(Protection, { protection: row.protection })),
         h('div', { className: 'b-cell-sub' }, `${t('positions.stop')} ${row.stopDist === null ? t('common.notProvided') : `${row.stopDist.toFixed(1)}%`}`)),
@@ -4212,7 +4318,12 @@ window.__ModuleLoader__.load({
           h('div', { className: 'twb-concl-sub' },
             `${t('concl.reason')}: ${reason.label} · ${t('concl.evidence')}: ${model.freshness.age === null ? t('concl.notProvided') : fmt(zh('drawer.ageNote'), { n: Math.round(model.freshness.age / 1000) })}`),
           running ? null : h(ReasonDetailLines, { reason, t, className: 'twb-concl-details' }),
-          round.strategy ? h('div', { className: 'twb-hint' }, `${round.strategy.name} · v${round.strategy.version} · ${round.strategy_selection_reason ?? ''}`) : null,
+          round.strategy ? h('div', { className: 'twb-hint', style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 4 } },
+            h('span', null, `${round.strategy.name} · v${round.strategy.version}`),
+            (round.strategy.execution_mode ?? round.execution_mode) === 'rule_direct'
+              ? h('span', { className: 'twb-chip twb-chip--warn', 'data-execution-mode': 'rule_direct' }, t('strat.execRuleDirectShort'))
+              : null,
+            round.strategy_selection_reason ? h('span', null, `· ${round.strategy_selection_reason}`) : null) : null,
           h('div', { className: 'twb-concl-actions', style: { marginTop: 8 } },
             h('button', { type: 'button', className: 'twb-btn twb-btn--secondary', onClick: () => onEvidence('round', round) }, t('concl.evidenceBtn')))),
         h(AttributionCard, { round, t }),
@@ -5295,7 +5406,7 @@ window.__ModuleLoader__.load({
       const items = [
         [t('positions.symbol'), `${row.symbol} · ${sideLabel(row.side)}`],
         [t('positions.qty'), row.qty ?? '—'],
-        [t('positions.mark'), row.mark === null ? '—' : fmtNum(row.mark)],
+        [t('positions.mark'), row.mark === null ? '—' : (fmtPrice(row.mark) ?? '—')],
         [t('account.upnl'), row.upnl === null ? '—' : fmtNum(row.upnl)],
         [t('positions.protection'), `${protectionText(row.protection)}${row.protection.block ? ` · ${t('prot.blocks')}` : ''}`],
         [t('positions.distance'), `${row.stopDist === null ? t('common.notProvided') : `${row.stopDist.toFixed(1)}%`} / ${row.liqDist === null ? t('positions.unknownLiq') : `${row.liqDist.toFixed(1)}%`}`],
@@ -6354,28 +6465,227 @@ window.__ModuleLoader__.load({
             : h('ul', { className: 'twb-settings-list' }, (model.gaps ?? []).map((gap, index) => h('li', { key: `gap-${index}` }, String(gap))))))
     }
 
-    function StrategiesPage({ lang, active }) {
-      const text = (zh, en) => lang === 'en' ? en : zh
+    const DEFAULT_STRATEGY_SYMBOLS = [
+      'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ZECUSDT', 'XRPUSDT',
+      'ARBUSDT', 'UNIUSDT', 'DOGEUSDT', 'BNBUSDT', 'NEARUSDT',
+      'SUIUSDT', 'FILUSDT', 'ADAUSDT', 'LINKUSDT', 'OPUSDT',
+      'TRXUSDT', 'AAVEUSDT', 'AVAXUSDT', 'LTCUSDT', 'DOTUSDT',
+    ]
+
+    function buildStrategyTemplates(text) {
+      return [
+        {
+          id: 'tpl-btc-close-direct',
+          label: text('模板 1 · BTC 1h 收盘突破顺势（规则直通）', 'Template 1 · BTC 1h Close Breakout (Rule-direct)'),
+          desc: text('1h 闭合K线收盘 > 95,000 且 EMA20 > EMA60 · 0延迟直通 · SL 1.2% / TP 3.0% (2.50R)', '1h closed candle > 95,000 & EMA20 > EMA60 · Rule-direct · SL 1.2% / TP 3.0% (2.50R)'),
+          name: text('BTC 1h 收盘突破顺势', 'BTC 1h Close Breakout Trend'),
+          source: text(
+            'BTCUSDT 在 1h 闭合K线收盘价高于 95000 且 1h EMA(20) 高于 EMA(60) 时顺势做多；采用规则直通执行（0延迟），止损 1.2%，止盈 3.0%，最多 1 仓，连续亏损 2 笔自动熔断停用。',
+            'Go long BTCUSDT when 1h closed candle > 95000 and 1h EMA(20) > EMA(60); rule-direct execution, SL 1.2%, TP 3.0%, max 1 position, circuit breaker after 2 consecutive losses.',
+          ),
+          rules: {
+            symbols: ['BTCUSDT'],
+            timeframes: ['1h'],
+            execution_mode: 'rule_direct',
+            entry: {
+              kind: 'all',
+              side: 'long',
+              conditions: [
+                { kind: 'candle_close', operator: 'gt', value: 95000 },
+                { kind: 'ema_compare', fast: 20, slow: 60, operator: 'gt' },
+              ],
+            },
+            exit: { stop_loss_pct: 0.012, take_profit_pct: 0.03 },
+            invalidation: { kind: 'stop_loss' },
+            position_constraints: { max_positions: 1 },
+            circuit_breaker: { max_consecutive_losses: 2 },
+            required_data: ['klines'],
+            requires_ai: false,
+          },
+        },
+        {
+          id: 'tpl-eth-mark-rsi',
+          label: text('模板 2 · ETH 15m 标记价突破 + RSI 过滤（AI 辅助）', 'Template 2 · ETH 15m Mark Breakout + RSI (AI-assisted)'),
+          desc: text('实时标记价 > 3,300 且 15m RSI(14) < 72 · AI 辅助过滤 · SL 1.0% / TP 2.5% (2.50R)', 'Live mark > 3,300 & 15m RSI(14) < 72 · AI-assisted · SL 1.0% / TP 2.5% (2.50R)'),
+          name: text('ETH 15m 标记突破+RSI过滤', 'ETH 15m Mark Breakout + RSI'),
+          source: text(
+            'ETHUSDT 15m 实时标记价高于 3300 且 15m RSI(14) 小于 72（未超买）时做多；经 AI 辅助评估无冲突后开仓，止损 1.0%，止盈 2.5%，最多 1 仓。',
+            'Go long ETHUSDT when live mark > 3300 and 15m RSI(14) < 72; AI-assisted evaluation, SL 1.0%, TP 2.5%, max 1 position.',
+          ),
+          rules: {
+            symbols: ['ETHUSDT'],
+            timeframes: ['15m'],
+            execution_mode: 'ai_assisted',
+            entry: {
+              kind: 'all',
+              side: 'long',
+              conditions: [
+                { kind: 'mark_threshold', operator: 'gt', value: 3300 },
+                { kind: 'rsi_threshold', period: 14, operator: 'lt', value: 72 },
+              ],
+            },
+            exit: { stop_loss_pct: 0.01, take_profit_pct: 0.025 },
+            invalidation: { kind: 'stop_loss' },
+            position_constraints: { max_positions: 1 },
+            required_data: ['mark_price', 'klines'],
+            requires_ai: false,
+          },
+        },
+        {
+          id: 'tpl-sol-ema-cross',
+          label: text('模板 3 · SOL 4h 双均线金叉 + 超时退出', 'Template 3 · SOL 4h Dual EMA Cross + Time Stop'),
+          desc: text('4h EMA(9) 金叉 EMA(21) · SL 1.5% / TP 3.6% (2.40R) · 24h 超时 · 连亏2笔或累亏100U熔断', '4h EMA(9) bullish cross EMA(21) · SL 1.5% / TP 3.6% (2.40R) · 24h time stop · CB 2 losses / 100 USDT'),
+          name: text('SOL 4h 双均线金叉顺势', 'SOL 4h EMA Cross + Time Stop'),
+          source: text(
+            'SOLUSDT 4h 周期 EMA(9) 上穿 EMA(21) 金叉做多；止损 1.5%，止盈 3.6%，持仓满 24 小时超时退出；连续亏损 2 笔或累计亏损达 100 USDT 自动熔断。',
+            'Go long SOLUSDT on 4h EMA(9) bullish cross above EMA(21); SL 1.5%, TP 3.6%, 24h time stop; circuit breaker at 2 consecutive losses or 100 USDT cumulative loss.',
+          ),
+          rules: {
+            symbols: ['SOLUSDT'],
+            timeframes: ['4h'],
+            execution_mode: 'ai_assisted',
+            entry: {
+              kind: 'ema_cross',
+              side: 'long',
+              fast: 9,
+              slow: 21,
+              direction: 'bullish',
+            },
+            exit: { stop_loss_pct: 0.015, take_profit_pct: 0.036, time_stop_hours: 24 },
+            invalidation: { kind: 'stop_loss' },
+            position_constraints: { max_positions: 1 },
+            circuit_breaker: { max_consecutive_losses: 2, max_cumulative_loss_usdt: 100 },
+            required_data: ['klines'],
+            requires_ai: false,
+          },
+        },
+      ]
+    }
+
+    function opSymbolOf(op) {
+      const key = String(op ?? '').toLowerCase()
+      if (key === 'gt' || key === '>') return '>'
+      if (key === 'gte' || key === '>=') return '≥'
+      if (key === 'lt' || key === '<') return '<'
+      if (key === 'lte' || key === '<=') return '≤'
+      if (key === 'eq' || key === '==') return '='
+      return String(op || '?')
+    }
+
+    function describeRuleCondition(cond, text, fallbackTf = '') {
+      if (!cond || typeof cond !== 'object') return [text('未配置入场条件', 'No entry condition configured')]
+      const kind = String(cond.kind ?? '').toLowerCase()
+      const activeTf = cond.timeframe || fallbackTf
+      const tf = activeTf ? `${activeTf} ` : ''
+      const op = opSymbolOf(cond.operator)
+      if (kind === 'all') {
+        const subs = Array.isArray(cond.conditions ?? cond.items) ? (cond.conditions ?? cond.items) : []
+        const head = text(`同时满足 ${subs.length} 项条件`, `All ${subs.length} conditions met`)
+        const lines = subs.flatMap((sub) => describeRuleCondition(sub, text, fallbackTf))
+        return [head, ...lines.map((line) => `• ${line}`)]
+      }
+      if (kind === 'mark_threshold') {
+        const val = fmtPrice(cond.value) ?? String(cond.value ?? '—')
+        return [text(`实时标记价 ${op} ${val}`, `Live mark price ${op} ${val}`)]
+      }
+      if (kind === 'candle_close') {
+        const val = fmtPrice(cond.value) ?? String(cond.value ?? '—')
+        return [text(`${tf}闭合K线收盘价 ${op} ${val}`, `${tf}Closed candle price ${op} ${val}`)]
+      }
+      if (kind === 'ema_cross') {
+        const fast = cond.fast_period ?? cond.fast ?? 9
+        const slow = cond.slow_period ?? cond.slow ?? 21
+        const dir = String(cond.direction ?? (cond.side === 'short' ? 'bearish' : 'bullish')).toLowerCase()
+        const bull = dir === 'bullish' || dir === 'golden' || dir === 'up' || dir === 'cross_up'
+        return [text(
+          `${tf}EMA(${fast}) ${bull ? '金叉上穿' : '死叉下穿'} EMA(${slow})`,
+          `${tf}EMA(${fast}) ${bull ? 'bullish cross above' : 'bearish cross below'} EMA(${slow})`,
+        )]
+      }
+      if (kind === 'ema_compare') {
+        const fast = cond.fast_period ?? cond.fast ?? 20
+        const slow = cond.slow_period ?? cond.slow ?? 60
+        return [text(`${tf}EMA(${fast}) ${op} EMA(${slow})`, `${tf}EMA(${fast}) ${op} EMA(${slow})`)]
+      }
+      if (kind === 'rsi_threshold') {
+        const period = cond.period ?? 14
+        return [text(`${tf}RSI(${period}) ${op} ${cond.value ?? '—'}`, `${tf}RSI(${period}) ${op} ${cond.value ?? '—'}`)]
+      }
+      if (kind === 'funding_threshold') {
+        const n = num(cond.value)
+        const val = n !== null ? `${(n * 100).toFixed(4)}%` : String(cond.value ?? '—')
+        return [text(`资金费率 ${op} ${val}`, `Funding rate ${op} ${val}`)]
+      }
+      if (!kind) return [text('未配置入场条件', 'No entry condition configured')]
+      return [`${cond.kind}: ${JSON.stringify(cond)}`]
+    }
+
+    function resolveStrategyStats(item, attributionData) {
+      let ext = null
+      if (attributionData && typeof attributionData === 'object') {
+        const bag = attributionData.attribution
+        if (Array.isArray(bag)) ext = bag.find((row) => row?.strategy_id === item.strategy_id) ?? null
+        else if (bag && typeof bag === 'object') ext = bag[item.strategy_id] ?? null
+        if (!ext && Array.isArray(attributionData.strategies)) {
+          ext = attributionData.strategies.find((row) => row?.strategy_id === item.strategy_id) ?? null
+        }
+        if (!ext && Array.isArray(attributionData.items)) {
+          ext = attributionData.items.find((row) => row?.strategy_id === item.strategy_id) ?? null
+        }
+      }
+      const raw = { ...(item?.stats ?? item?.attribution ?? {}), ...(ext ?? {}) }
+      return {
+        signalsCount: num(raw.signals_count ?? raw.signal_count ?? raw.triggers) ?? 0,
+        executedCount: num(raw.executed_count ?? raw.trades_count ?? raw.fills_count) ?? 0,
+        closedTrades: num(raw.closed_trades ?? raw.closed_count) ?? 0,
+        winRate: num(raw.win_rate),
+        realizedPnl: num(raw.realized_pnl_usdt ?? raw.realized_pnl),
+        aiVetoCount: num(raw.ai_veto_count ?? raw.veto_count) ?? 0,
+        vetoSavedSl: num(raw.veto_saved_sl ?? raw.saved_sl_count) ?? 0,
+        vetoMissedTp: num(raw.veto_missed_tp ?? raw.missed_tp_count) ?? 0,
+      }
+    }
+
+    function isStrategyTripped(item) {
+      return item?.circuit_state === 'tripped'
+        || item?.circuit?.state === 'tripped'
+        || item?.circuit_breaker_state === 'tripped'
+    }
+
+    function StrategiesPage({ lang, active, liveMarks }) {
+      const text = (zhText, enText) => lang === 'en' ? enText : zhText
+      const [activeExecMode, setActiveExecMode] = React.useState('ai_assisted')
+      const isDirect = activeExecMode === 'rule_direct'
       return h('section', { className: 'twb-strategies-page', 'aria-label': text('策略管理页面', 'Strategy management page') },
         h('header', { className: 'twb-strategies-heading' },
           h('div', null,
             h('h1', null, text('策略管理', 'Strategies')),
-            h('p', null, text('导入策略 → AI 澄清 → 核对并挂载 → 授权执行', 'Import → Clarify with AI → Review and mount → Authorize'))),
+            h('p', null, text('导入或选模板 → AI 澄清 / 规则核对 → 挂载确认 → 授权执行与绩效归因', 'Template or import → Clarify & verify rules → Mount → Authorize & track attribution'))),
           h('span', { className: 'twb-chip twb-chip--quiet' }, text('挂载与启用分开', 'Mount and enable separately'))),
         h('aside', { className: 'twb-strategy-policy', 'aria-label': text('交易决策边界', 'Trading decision boundaries') },
-          h('strong', null, text('当前执行方式：AI 辅助执行', 'Current execution: AI-assisted')),
-          h('p', null, text('策略限定交易条件和方向；AI 可以选择执行或跳过；独立风控决定能否下单。', 'The strategy defines conditions and direction. AI may execute or skip. Independent risk controls decide whether an order is allowed.')),
+          h('strong', null, isDirect
+            ? text('当前执行方式：规则直通执行（0 LLM 延迟）', 'Current execution: Rule-direct (0 LLM latency)')
+            : text('当前执行方式：AI 辅助执行', 'Current execution: AI-assisted')),
+          h('p', null, isDirect
+            ? text('信号满足后跳过大模型评估，0 LLM 延迟直达 P1 确定性硬风控与下单执行。', 'Triggered signals skip LLM evaluation with 0 LLM latency and go straight to P1 deterministic hard risk and order execution.')
+            : text('策略限定交易条件和方向；AI 可以选择执行或跳过；独立风控决定能否下单。', 'The strategy defines conditions and direction. AI may execute or skip. Independent risk controls decide whether an order is allowed.')),
           h('p', null, text('意见冲突时不开新仓，不允许反向交易或放宽风险；止损与强制退出继续按已确认规则执行。', 'Conflicts prevent new entries, opposite trades and risk expansion. Confirmed stops and mandatory exits remain effective.'))),
-        h(StrategiesPanel, { lang, active }))
+        h(StrategiesPanel, { lang, active, liveMarks, onExecModeChange: setActiveExecMode }))
     }
 
-    function StrategiesPanel({ lang, active = true }) {
-      const text = (zh, en) => lang === 'en' ? en : zh
+    function StrategiesPanel({ lang, active = true, liveMarks = null, onExecModeChange }) {
+      const text = (zhText, enText) => lang === 'en' ? enText : zhText
       const base = `${API}/strategies`
       const [nonce, setNonce] = React.useState(0)
       const listing = useJson(base, nonce, active)
       const configuration = useJson(`${base}/config`, nonce, active)
+      const attribution = useJson(`${base}/attribution`, nonce, active)
       const [selected, setSelected] = React.useState(null)
+      const preview = useJson(
+        selected ? `${base}/${encodeURIComponent(selected)}/preview` : '',
+        `${nonce}#${selected ?? ''}`,
+        active && Boolean(selected),
+      )
       const [name, setName] = React.useState('')
       const [source, setSource] = React.useState('')
       const [rules, setRules] = React.useState('{}')
@@ -6384,88 +6694,693 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [error, setError] = React.useState(null)
       const [requestedMode, setRequestedMode] = React.useState('native')
-      const strategy = (listing.data?.strategies ?? []).find(item => item.strategy_id === selected)
-      const draft = strategy?.draft
+      const lastSyncedKey = React.useRef('__new__')
+      const lastSyncedName = React.useRef('')
+
+      const strategies = Array.isArray(listing.data?.strategies) ? listing.data.strategies : []
+      const strategy = strategies.find((item) => item.strategy_id === selected) ?? null
+      const draft = strategy?.draft ?? null
+
       React.useEffect(() => {
-        if (selected && !strategy) return
-        setName(strategy?.name ?? '')
-        setSource(draft?.source_text ?? '')
-        setRules(JSON.stringify(draft?.rules ?? {}, null, 2))
-        setAnswers(draft?.answers ?? {})
+        if (!selected) {
+          if (lastSyncedKey.current !== '__new__') {
+            lastSyncedKey.current = '__new__'
+            lastSyncedName.current = ''
+            setName('')
+            setSource('')
+            setRules('{}')
+            setAnswers({})
+            setConfirmed(false)
+          }
+          return
+        }
+        if (!strategy) return
+        const revKey = `${selected}:${draft?.revision ?? 0}`
+        if (lastSyncedKey.current !== revKey) {
+          lastSyncedKey.current = revKey
+          lastSyncedName.current = strategy.name ?? ''
+          setName(strategy.name ?? '')
+          setSource(draft?.source_text ?? '')
+          setRules(JSON.stringify(draft?.rules ?? strategy.confirmed_version?.rules ?? {}, null, 2))
+          setAnswers(draft?.answers ?? {})
+          setConfirmed(false)
+        } else if (strategy.name && strategy.name !== lastSyncedName.current) {
+          lastSyncedName.current = strategy.name
+          setName(strategy.name)
+        }
+      }, [selected, strategy, draft?.revision, strategy?.name])
+
+      React.useEffect(() => {
+        if (configuration.data?.config?.mode) setRequestedMode(configuration.data.config.mode)
+      }, [configuration.data])
+
+      const tryParseRules = (rawText) => {
+        try {
+          const parsed = JSON.parse(rawText || '{}')
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            return { ok: false, value: null, error: text('根节点必须是 JSON 对象', 'Root must be a JSON object') }
+          }
+          return { ok: true, value: parsed, error: null }
+        } catch (err) {
+          return { ok: false, value: null, error: String(err?.message ?? err) }
+        }
+      }
+
+      const parseRulesOrThrow = (rawText) => {
+        const res = tryParseRules(rawText)
+        if (!res.ok) {
+          throw new Error(text(`结构化规则 JSON 格式有误：${res.error}`, `Invalid structured rules JSON: ${res.error}`))
+        }
+        return res.value
+      }
+
+      const parsedState = tryParseRules(rules)
+      const parsedRules = parsedState.value ?? {}
+      const currentExecMode = parsedRules.execution_mode === 'rule_direct' ? 'rule_direct' : 'ai_assisted'
+
+      const lastReportedMode = React.useRef('ai_assisted')
+      React.useEffect(() => {
+        if (lastReportedMode.current !== currentExecMode && typeof onExecModeChange === 'function') {
+          lastReportedMode.current = currentExecMode
+          onExecModeChange(currentExecMode)
+        }
+      }, [currentExecMode])
+
+      const patchRules = (mutator) => {
+        const baseObj = parsedState.ok && parsedState.value ? JSON.parse(JSON.stringify(parsedState.value)) : {}
+        const nextObj = mutator(baseObj) || baseObj
+        setRules(JSON.stringify(nextObj, null, 2))
         setConfirmed(false)
-      }, [selected, draft?.revision, strategy?.name])
-      React.useEffect(() => { if (configuration.data?.config) setRequestedMode(configuration.data.config.mode) }, [configuration.data])
+      }
+
       const request = async (suffix, method, body) => {
-        const response = await fetch(base + suffix, { method, credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+        const response = await fetch(base + suffix, {
+          method,
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        })
         const result = await response.json()
-        if (!response.ok || result.ok === false) throw new Error(result.error?.message ?? result.error?.code ?? `HTTP_${response.status}`)
+        if (!response.ok || result.ok === false) {
+          throw new Error(result.error?.message ?? result.error?.code ?? `HTTP_${response.status}`)
+        }
         return result
       }
+
       const act = async (fn) => {
         if (busy) return
         setBusy(true); setError(null)
-        try { await fn(); setConfirmed(false); setNonce(n => n + 1) }
+        try { await fn(); setConfirmed(false); setNonce((n) => n + 1) }
         catch (e) { setError(e.message) }
         finally { setBusy(false) }
       }
+
       const save = () => act(async () => {
+        const validatedRules = parseRulesOrThrow(rules)
+        const hasRules = Object.keys(validatedRules).length > 0
         if (!selected) {
-          const result = await request('', 'POST', { name: name.trim() || text('未命名策略', 'Untitled strategy'), source_text: source })
-          setSelected(result.strategy.strategy_id)
+          const payload = {
+            name: name.trim() || text('未命名策略', 'Untitled strategy'),
+            source_text: source,
+          }
+          if (hasRules) payload.rules = validatedRules
+          const result = await request('', 'POST', payload)
+          const created = result.strategy
+          const returnedRules = created?.draft?.rules
+          if (hasRules && (!returnedRules || Object.keys(returnedRules).length === 0)) {
+            lastSyncedKey.current = `${created.strategy_id}:${created?.draft?.revision ?? 1}`
+            lastSyncedName.current = created?.name ?? payload.name
+          }
+          setSelected(created.strategy_id)
           return
         }
-        await request(`/${selected}/draft`, 'PUT', { revision: draft.revision, source_text: source, rules: JSON.parse(rules), answers, questions: draft.questions ?? [], suggestions: draft.suggestions ?? [], sources: draft.sources ?? {}, summary: draft.summary ?? '' })
+        await request(`/${selected}/draft`, 'PUT', {
+          revision: draft?.revision ?? 0,
+          source_text: source,
+          rules: validatedRules,
+          answers,
+          questions: draft?.questions ?? [],
+          suggestions: draft?.suggestions ?? [],
+          sources: draft?.sources ?? {},
+          summary: draft?.summary ?? '',
+        })
       })
+
+      const resetAndEnable = (target) => act(async () => {
+        try {
+          await request(`/${target.strategy_id}/authorization`, 'POST', {
+            generation: target.generation,
+            enabled: true,
+            reset_circuit: true,
+          })
+        } catch (err) {
+          if (/circuit/i.test(String(err?.message ?? ''))) {
+            const resetRes = await request(`/${target.strategy_id}/circuit/reset`, 'POST', { generation: target.generation })
+            const nextGen = resetRes?.strategy?.generation ?? ((target.generation ?? 0) + 1)
+            await request(`/${target.strategy_id}/authorization`, 'POST', { generation: nextGen, enabled: true })
+            return
+          }
+          throw err
+        }
+      })
+
+      const applyTemplate = (tpl) => {
+        setError(null)
+        if (!selected || !name.trim()) setName(tpl.name)
+        setSource(tpl.source)
+        setRules(JSON.stringify(tpl.rules, null, 2))
+        setConfirmed(false)
+      }
+
       const input = (label, props, type = 'input') => h('label', { className: 'twb-settings-row' }, h('span', null, label), h(type, props))
-      const button = (label, onClick, disabled = false, tone = 'secondary') => h('button', { type: 'button', className: `twb-btn twb-btn--${tone}`, disabled: busy || disabled, onClick }, label)
+      const button = (label, onClick, disabled = false, tone = 'secondary', extraProps = null) => h('button', {
+        type: 'button',
+        className: `twb-btn twb-btn--${tone}`,
+        disabled: busy || disabled,
+        onClick,
+        ...(extraProps ?? {}),
+      }, label)
+
+      // Top capacity & run-mode summary
+      const enabledStrategies = strategies.filter((item) => item.enabled && !isStrategyTripped(item))
+      const enabledCount = strategies.filter((item) => item.enabled).length
+      const monitoredSymbols = [...new Set(enabledStrategies.flatMap((item) => {
+        const syms = item.confirmed_version?.rules?.symbols ?? item.draft?.rules?.symbols ?? []
+        return Array.isArray(syms) ? syms : []
+      }))]
+      const activeMode = configuration.data?.config?.mode ?? requestedMode
+      const whitelistSymbols = Array.isArray(configuration.data?.supported_symbols) && configuration.data.supported_symbols.length > 0
+        ? configuration.data.supported_symbols
+        : DEFAULT_STRATEGY_SYMBOLS
+
+      // Rule verification summary calculation
+      const ruleSymbols = Array.isArray(parsedRules.symbols) ? parsedRules.symbols : []
+      const ruleTimeframes = Array.isArray(parsedRules.timeframes) ? parsedRules.timeframes : []
+      const entryObj = parsedRules.entry && typeof parsedRules.entry === 'object' ? parsedRules.entry : null
+      const resolvedSide = String(entryObj?.side ?? entryObj?.conditions?.[0]?.side ?? '').toLowerCase()
+      const conditionLines = describeRuleCondition(entryObj, text, ruleTimeframes[0] ?? '')
+      const slRaw = num(parsedRules.exit?.stop_loss_pct)
+      const tpRaw = num(parsedRules.exit?.take_profit_pct)
+      const slPct = slRaw === null ? null : (slRaw <= 1 ? slRaw * 100 : slRaw)
+      const tpPct = tpRaw === null ? null : (tpRaw <= 1 ? tpRaw * 100 : tpRaw)
+      const rrValue = slPct !== null && slPct > 0 && tpPct !== null && tpPct > 0 ? tpPct / slPct : null
+      const slOutOfBounds = slPct !== null && (slPct < 0.2 - 1e-9 || slPct > 5.0 + 1e-9)
+      const rrBelowFloor = rrValue !== null && rrValue < 1.2 - 1e-9
+      const timeStopHours = num(parsedRules.exit?.time_stop_hours ?? parsedRules.time_stop_hours)
+      const cbMaxConsec = num(parsedRules.circuit_breaker?.max_consecutive_losses) ?? 0
+      const cbMaxLossUsdt = num(parsedRules.circuit_breaker?.max_cumulative_loss_usdt) ?? 0
+      const hasAnyRules = ruleSymbols.length > 0 || Boolean(entryObj) || slPct !== null || tpPct !== null
+
+      // Live market preview & immediate-trigger guardrail
+      const rawPv = preview.data?.preview ?? preview.data
+      const pv = rawPv && typeof rawPv === 'object' && ('triggered_now' in rawPv || Array.isArray(rawPv.symbols) || (rawPv.symbols && typeof rawPv.symbols === 'object') || Array.isArray(rawPv.items))
+        ? rawPv
+        : null
+      const serverPvRows = (() => {
+        if (!pv) return []
+        if (Array.isArray(pv.symbols)) return pv.symbols
+        if (Array.isArray(pv.items)) return pv.items
+        if (pv.symbols && typeof pv.symbols === 'object') {
+          return Object.entries(pv.symbols).map(([sym, info]) => ({
+            symbol: sym,
+            ...(info && typeof info === 'object' ? info : { mark: info }),
+          }))
+        }
+        return []
+      })()
+      const findThresholdCond = (cond) => {
+        if (!cond || typeof cond !== 'object') return null
+        if (cond.kind === 'mark_threshold' || cond.kind === 'candle_close') return cond
+        if (cond.kind === 'all' && Array.isArray(cond.conditions)) {
+          return cond.conditions.find((c) => c?.kind === 'mark_threshold' || c?.kind === 'candle_close') ?? null
+        }
+        return null
+      }
+      const thresholdCond = findThresholdCond(entryObj)
+      const previewSymbols = [...new Set([...ruleSymbols, ...serverPvRows.map((r) => r?.symbol).filter(Boolean)])]
+      const mergedPreviewRows = previewSymbols.map((sym) => {
+        const srv = serverPvRows.find((r) => r?.symbol === sym) ?? null
+        const liveQuote = liveMarks?.[sym] ?? null
+        const mark = num(srv?.mark ?? srv?.mark_price ?? liveQuote?.mark ?? liveQuote?.last)
+        const thr = num(thresholdCond?.value)
+        const distPct = num(srv?.distance_pct) ?? (mark !== null && mark > 0 && thr !== null && thr > 0 ? ((mark - thr) / thr) * 100 : null)
+        let clientTriggered = false
+        if (entryObj?.kind === 'mark_threshold' && mark !== null && thr !== null) {
+          const op = String(entryObj.operator ?? '').toLowerCase()
+          if (op === 'gt' || op === '>') clientTriggered = mark > thr
+          else if (op === 'gte' || op === '>=') clientTriggered = mark >= thr
+          else if (op === 'lt' || op === '<') clientTriggered = mark < thr
+          else if (op === 'lte' || op === '<=') clientTriggered = mark <= thr
+        }
+        const indicators = srv?.indicators ?? srv?.readings ?? srv?.facts ?? null
+        const indicatorText = (() => {
+          if (!indicators) return liveQuote?.funding_rate !== undefined && num(liveQuote.funding_rate) !== null
+            ? `${text('资金费率', 'Funding')} ${(num(liveQuote.funding_rate) * 100).toFixed(4)}%`
+            : null
+          if (typeof indicators === 'string') return indicators
+          if (typeof indicators === 'object') {
+            return Object.entries(indicators)
+              .filter(([, v]) => v !== null && v !== undefined)
+              .map(([k, v]) => `${k}=${typeof v === 'number' ? fmtPrice(v) ?? v : v}`)
+              .join(' · ')
+          }
+          return null
+        })()
+        return {
+          symbol: sym,
+          mark,
+          distPct,
+          triggered: srv?.matched === true || srv?.triggered === true || srv?.triggered_now === true || clientTriggered,
+          indicatorText,
+        }
+      }).filter((row) => row.mark !== null || row.indicatorText || pv !== null)
+
+      const triggeredNow = pv?.triggered_now === true || mergedPreviewRows.some((row) => row.triggered)
+      const triggerWarningBanner = triggeredNow ? h('div', {
+        role: 'status',
+        className: 'twb-strat-trigger-warn',
+        'data-immediate-trigger': 'true',
+      }, text(
+        '⚠️ 当前实时行情已满足该策略入场条件！启用后下一轮调度将立即尝试触发开仓，请确认阈值无数量级笔误。',
+        '⚠️ Live market data already satisfies this strategy entry condition! Once enabled, the next scheduled round will immediately attempt to trigger an entry — verify your threshold has no magnitude typo.',
+      )) : null
+
       const validation = draft?.validation
-      return h(SettingsBlock, { title: text('策略编辑', 'Strategy editor'), aside: h('span', { className: 'twb-strategy-status', 'data-state': strategy?.enabled ? 'enabled' : strategy?.current_version ? 'mounted' : 'draft' }, strategy?.enabled ? text('已启用', 'Enabled') : strategy?.current_version ? text('已挂载 · 未启用', 'Mounted, disabled') : text('草稿', 'Draft')), sub: text('确认规则后挂载；启用不代表立即下单，仍受总调度和风控约束。', 'Mount confirmed rules; execution remains subject to scheduling and risk controls.') },
+      const strategyTripped = isStrategyTripped(strategy)
+      const statusState = strategyTripped
+        ? 'tripped'
+        : strategy?.enabled ? 'enabled' : strategy?.current_version ? 'mounted' : 'draft'
+      const statusText = strategyTripped
+        ? text('⚡ 已熔断', '⚡ Tripped')
+        : strategy?.enabled
+          ? text('已启用', 'Enabled')
+          : strategy?.current_version
+            ? text('已挂载 · 未启用', 'Mounted, disabled')
+            : text('草稿', 'Draft')
+
+      const templates = buildStrategyTemplates(text)
+      const draftRev = draft?.revision ?? 0
+      const draftHash = draft?.content_hash ?? ''
+      const isDraftDirty = Boolean(draft) && (
+        source !== (draft?.source_text ?? '')
+        || rules !== JSON.stringify(draft?.rules ?? {}, null, 2)
+        || JSON.stringify(answers) !== JSON.stringify(draft?.answers ?? {})
+      )
+
+      return h(React.Fragment, null,
+        // 1. Run Mode & Capacity Switcher Bar
+        h('div', { className: 'twb-strat-mode-bar', 'data-run-mode-bar': activeMode },
+          h('div', { className: 'twb-strat-mode-metrics' },
+            h('span', { className: `twb-chip ${activeMode === 'mounted' ? '' : 'twb-chip--quiet'}` },
+              activeMode === 'mounted' ? text('当前模式：已授权策略', 'Active mode: Authorized strategies') : text('当前模式：原生 AI', 'Active mode: Native AI')),
+            h('span', { className: 'twb-chip twb-chip--quiet twb-mono' }, text(`已启用 ${enabledCount}/5`, `Active ${enabledCount}/5`)),
+            h('span', { className: 'twb-chip twb-chip--quiet twb-mono' }, text(`监控标的 ${monitoredSymbols.length}/10`, `Symbols ${monitoredSymbols.length}/10`)),
+            activeMode === 'mounted' && enabledCount === 0
+              ? h('span', { className: 'twb-chip twb-chip--warn' }, text('0 启用策略：当前不会开新仓', '0 enabled: no new entries will open'))
+              : null),
+          configuration.data?.config ? h('div', { className: 'twb-strat-mode-controls' },
+            h('span', { className: 'twb-hint' }, text('运行模式', 'Run mode')),
+            h('select', { 'aria-label': text('运行模式', 'Run mode'), value: requestedMode, disabled: busy, onChange: (e) => setRequestedMode(e.target.value) },
+              h('option', { value: 'native' }, text('原生 AI', 'Native AI')),
+              h('option', { value: 'mounted' }, text('已授权策略', 'Authorized strategies'))),
+            button(
+              text('保存模式（下轮生效，总调度保持原状）', 'Save mode (next round; scheduler unchanged)'),
+              () => act(() => request('/config', 'PUT', { mode: requestedMode, revision: configuration.data.config.revision })),
+            )) : null),
+
+        // 2. Strategy Overview Table & Independent Attribution
+        strategies.length > 0 ? h('div', { className: 'twb-strat-overview', 'data-strategy-overview': 'true' },
+          h('div', { className: 'twb-strat-overview-head' },
+            h('span', null, text(`策略总览与独立绩效归因（共 ${strategies.length} 个）`, `Strategy overview & attribution (${strategies.length})`)),
+            button(text('新建', 'New'), () => {
+              lastSyncedKey.current = '__new__'
+              lastSyncedName.current = ''
+              setSelected(null); setSource(''); setName(''); setRules('{}'); setAnswers({}); setConfirmed(false)
+            })),
+          h('div', { className: 'twb-table-wrap' },
+            h('table', { className: 'twb-table' },
+              h('thead', null, h('tr', null,
+                h('th', { scope: 'col' }, text('名称 / 版本', 'Name / Version')),
+                h('th', { scope: 'col' }, text('执行引擎', 'Engine')),
+                h('th', { scope: 'col' }, text('状态与熔断', 'Status & CB')),
+                h('th', { scope: 'col', className: 'is-num' }, text('触发/成交 · 胜率', 'Signals/Exec · Win')),
+                h('th', { scope: 'col', className: 'is-num' }, text('净盈亏 / AI 否决归因', 'Realized PnL / Veto')),
+                h('th', { scope: 'col' }, text('快捷操作', 'Actions')))),
+              h('tbody', null, strategies.map((item) => {
+                const itemRules = item.confirmed_version?.rules ?? item.draft?.rules ?? {}
+                const itemExec = itemRules.execution_mode === 'rule_direct' ? 'rule_direct' : 'ai_assisted'
+                const tripped = isStrategyTripped(item)
+                const circuitReason = item.circuit_reason ?? item.circuit?.reason ?? item.circuit?.tripped_reason ?? ''
+                const stats = resolveStrategyStats(item, attribution.data)
+                const winRateStr = stats.winRate !== null
+                  ? `${(stats.winRate <= 1 ? stats.winRate * 100 : stats.winRate).toFixed(0)}%`
+                  : '—'
+                const pnlStr = stats.closedTrades > 0 && stats.realizedPnl !== null
+                  ? `${stats.realizedPnl >= 0 ? '+' : ''}${fmtNum(stats.realizedPnl, 2)} USDT`
+                  : '—'
+                const syms = Array.isArray(itemRules.symbols) ? itemRules.symbols : []
+                return h('tr', {
+                  key: item.strategy_id,
+                  'data-selected': String(selected === item.strategy_id),
+                  'data-strategy-row': item.strategy_id,
+                },
+                h('td', null,
+                  h('div', { style: { fontWeight: 600 } }, `${item.name} · ${item.current_version ? `v${item.current_version}` : text('未挂载', 'Unmounted')}`),
+                  syms.length > 0 ? h('div', { className: 'twb-strat-sub twb-mono' }, syms.join(', ')) : null),
+                h('td', null,
+                  itemExec === 'rule_direct'
+                    ? h('span', { className: 'twb-chip twb-chip--warn', 'data-engine': 'rule_direct' }, text('规则直通 (0延迟)', 'Rule-direct'))
+                    : h('span', { className: 'twb-chip twb-chip--quiet', 'data-engine': 'ai_assisted' }, text('AI 辅助过滤', 'AI-assisted'))),
+                h('td', null,
+                  h('span', {
+                    className: 'twb-strategy-status',
+                    'data-state': tripped ? 'tripped' : item.enabled ? 'enabled' : item.current_version ? 'mounted' : 'draft',
+                  }, tripped
+                    ? text('⚡ 已熔断', '⚡ Tripped')
+                    : item.enabled
+                      ? text('已启用', 'Enabled')
+                      : item.current_version
+                        ? text('已挂载 · 未启用', 'Mounted, disabled')
+                        : text('草稿', 'Draft')),
+                  tripped && circuitReason ? h('div', { className: 'twb-strat-sub' }, String(circuitReason)) : null),
+                h('td', { className: 'twb-num' },
+                  h('div', null, `${stats.signalsCount} / ${stats.executedCount}`),
+                  h('div', { className: 'twb-strat-sub' }, `${text('胜率', 'Win')} ${winRateStr}${stats.closedTrades > 0 ? ` (${stats.closedTrades})` : ''}`)),
+                h('td', { className: 'twb-num' },
+                  h('div', { className: stats.closedTrades > 0 && stats.realizedPnl !== null ? (stats.realizedPnl >= 0 ? 'twb-up' : 'twb-down') : '' }, pnlStr),
+                  stats.aiVetoCount > 0
+                    ? h('div', { className: 'twb-strat-sub' }, text(
+                      `否决 ${stats.aiVetoCount} 次（避险 ${stats.vetoSavedSl} / 踏空 ${stats.vetoMissedTp}）`,
+                      `Vetoed ${stats.aiVetoCount} (saved SL ${stats.vetoSavedSl} / missed TP ${stats.vetoMissedTp})`,
+                    ))
+                    : null),
+                h('td', null,
+                  button(text('编辑/查看', 'Edit / View'), () => setSelected(item.strategy_id)),
+                  tripped
+                    ? button(
+                      text('解除熔断并重启用', 'Reset & Enable'),
+                      () => resetAndEnable(item),
+                      false,
+                      'primary',
+                    )
+                    : item.current_version
+                      ? button(
+                        item.enabled ? text('停用', 'Disable') : text('启用', 'Enable'),
+                        () => act(() => request(`/${item.strategy_id}/authorization`, 'POST', { generation: item.generation, enabled: !item.enabled })),
+                        !item.enabled && !item.confirmed_version?.validation?.execution_ready,
+                      )
+                      : null))
+              }))))) : null,
+
+        // 3. Strategy Editor Block
+        h(SettingsBlock, {
+          title: text('策略编辑', 'Strategy editor'),
+          aside: h('span', { className: 'twb-strategy-status', 'data-state': statusState }, statusText),
+          sub: text('确认规则后挂载；启用不代表立即下单，仍受总调度和风控约束。', 'Mount confirmed rules; execution remains subject to scheduling and risk controls.'),
+        },
         listing.loading && !listing.data ? h('p', { role: 'status' }, text('正在读取策略…', 'Loading strategies…')) : null,
-        listing.error ? h('div', { role: 'alert' }, text('策略读取失败，请确认 Service 已升级', 'Cannot load strategies; check Service version'), button(text('重试', 'Retry'), () => setNonce(n => n + 1))) : null,
-        configuration.error ? h('div', { role: 'alert' }, text('运行模式读取失败，暂不可修改。', 'Cannot read run mode; changes are unavailable.'), button(text('重新读取', 'Reload'), () => setNonce(n => n + 1))) : null,
+        listing.error ? h('div', { role: 'alert' }, text('策略读取失败，请确认 Service 已升级', 'Cannot load strategies; check Service version'), button(text('重试', 'Retry'), () => setNonce((n) => n + 1))) : null,
+        configuration.error ? h('div', { role: 'alert' }, text('运行模式读取失败，暂不可修改。', 'Cannot read run mode; changes are unavailable.'), button(text('重新读取', 'Reload'), () => setNonce((n) => n + 1))) : null,
         error ? h('div', { role: 'alert', className: 'twb-modal-note' }, error) : null,
-        h('div', { className: 'twb-hint' }, text('首版自动执行支持实时标记价阈值，周期用于信号去重，不代表K线收盘判断；其他规则可保存完善，不擅自简化后执行。', 'Initial execution supports live mark thresholds; timeframe is a deduplication window, not a candle-close condition. Other rules remain drafts for clarification.')),
-        configuration.data?.config ? h('div', { className: 'twb-settings-row' },
-          h('span', null, text('运行模式', 'Run mode')),
-          h('select', { value: requestedMode, disabled: busy, onChange: e => setRequestedMode(e.target.value) },
-            h('option', { value: 'native' }, text('原生 AI', 'Native AI')),
-            h('option', { value: 'mounted' }, text('已授权策略', 'Authorized strategies'))),
-          button(text('保存模式（下轮生效，总调度保持原状）', 'Save mode (next round; scheduler unchanged)'), () => act(() => request('/config', 'PUT', { mode: requestedMode, revision: configuration.data.config.revision })))) : null,
+
+        // Quick-start Strategy Templates (UX-3)
+        h('div', { className: 'twb-strat-templates', 'data-strategy-templates': 'true' },
+          h('div', { style: { fontSize: 12, fontWeight: 600 } }, text('快速起步策略模板（点击一键填入草稿，可自由修改）', 'Quick-start strategy templates (one-click fill, customizable)')),
+          h('div', { className: 'twb-strat-tpl-grid' }, templates.map((tpl) => h('button', {
+            key: tpl.id,
+            type: 'button',
+            className: 'twb-strat-tpl-card',
+            'data-template-id': tpl.id,
+            disabled: busy,
+            onClick: () => applyTemplate(tpl),
+          },
+          h('strong', null, tpl.label),
+          h('span', null, tpl.desc))))),
+
+        // Capability & Hard-Risk Reference Collapsible (UX-3)
+        h('details', { className: 'twb-strat-ref' },
+          h('summary', null, text('支持能力与硬风控边界速查（20 个白名单标的 · 二期指标规则 · 硬风控底线）', 'Supported capabilities & hard risk boundaries (20 symbols · Phase-2 rules · Hard limits)')),
+          h('div', { className: 'twb-strat-ref-grid' },
+            h('div', null,
+              h('strong', null, text(`白名单合约标的（${whitelistSymbols.length} 个 USDT 永续）`, `Whitelisted USDT symbols (${whitelistSymbols.length})`)),
+              h('div', { className: 'twb-strat-sym-list' }, whitelistSymbols.map((sym) => h('span', { key: sym, className: 'twb-chip twb-chip--quiet twb-mono' }, sym)))),
+            h('div', null,
+              h('strong', null, text('支持的结构化规则类型', 'Supported structured rule types')),
+              h('ul', { className: 'twb-settings-list' },
+                h('li', null, text('实时标记价阈值 (mark_threshold)', 'Live mark threshold (mark_threshold)')),
+                h('li', null, text('闭合K线收盘确认 (candle_close)', 'Closed candle confirmation (candle_close)')),
+                h('li', null, text('EMA均线交叉 / 比较 (ema_cross / ema_compare)', 'EMA cross / comparison (ema_cross / ema_compare)')),
+                h('li', null, text('RSI阈值过滤 (rsi_threshold)', 'RSI threshold filter (rsi_threshold)')),
+                h('li', null, text('资金费率阈值 (funding_threshold)', 'Funding rate threshold (funding_threshold)')),
+                h('li', null, text('多条件 AND 组合 (all)', 'Multi-condition AND group (all)')))),
+            h('div', null,
+              h('strong', null, text('不可绕过的硬风控边界', 'Non-bypassable hard risk limits')),
+              h('ul', { className: 'twb-settings-list' },
+                h('li', null, text('止损距离范围：0.2% – 5.0%', 'Stop-loss distance: 0.2% – 5.0%')),
+                h('li', null, text('最小盈亏比底线：≥ 1.2R', 'Minimum R:R floor: ≥ 1.2R')),
+                h('li', null, text('并发启用上限：最多同时启用 5 个策略 / 10 个标的', 'Active cap: max 5 enabled strategies / 10 symbols')))))),
+
         h('div', { className: 'twb-settings-row' },
-          h('select', { 'aria-label': text('选择策略', 'Select strategy'), value: selected ?? '', disabled: busy, onChange: e => setSelected(e.target.value || null) },
+          h('select', { 'aria-label': text('选择策略', 'Select strategy'), value: selected ?? '', disabled: busy, onChange: (e) => setSelected(e.target.value || null) },
             h('option', { value: '' }, text('新建策略', 'New strategy')),
-            ...(listing.data?.strategies ?? []).map(item => h('option', { key: item.strategy_id, value: item.strategy_id }, `${item.name} · v${item.current_version || 0} · ${item.enabled ? text('已启用', 'Enabled') : item.current_version ? text('已挂载 · 未启用', 'Mounted, disabled') : text('草稿', 'Draft')}`))),
-          button(text('新建', 'New'), () => { setSelected(null); setSource(''); setName(''); setRules('{}'); setAnswers({}) })),
-        input(text('策略名称', 'Name'), { value: name, maxLength: 100, disabled: busy, onChange: e => setName(e.target.value) }),
+            ...strategies.map((item) => h('option', { key: item.strategy_id, value: item.strategy_id },
+              `${item.name} · v${item.current_version || 0} · ${isStrategyTripped(item) ? text('⚡ 已熔断', '⚡ Tripped') : item.enabled ? text('已启用', 'Enabled') : item.current_version ? text('已挂载 · 未启用', 'Mounted, disabled') : text('草稿', 'Draft')}`))),
+          button(text('新建', 'New'), () => {
+            lastSyncedKey.current = '__new__'
+            lastSyncedName.current = ''
+            setSelected(null); setSource(''); setName(''); setRules('{}'); setAnswers({}); setConfirmed(false)
+          })),
+
+        input(text('策略名称', 'Name'), { value: name, maxLength: 100, disabled: busy, onChange: (e) => setName(e.target.value) }),
         selected ? button(text('仅改名', 'Rename only'), () => act(() => request(`/${selected}`, 'PATCH', { name })), !name.trim()) : null,
-        input(text('策略原文 / 补充说明', 'Original strategy / clarification'), { value: source, maxLength: 20000, rows: 7, disabled: busy, onChange: e => { setSource(e.target.value); setConfirmed(false) } }, 'textarea'),
-        input(text('导入文本（不执行代码）', 'Import text (never executes code)'), { type: 'file', accept: '.txt,.md,text/plain,text/markdown', disabled: busy, onChange: async e => {
-          const file = e.target.files?.[0]
-          if (!file) return
-          if (file.size > 65536) { setError(text('文件超过64KB', 'File exceeds 64KB')); return }
-          try { const value = await file.text(); if (value.length > 20000) throw new Error(text('文本超过20000字符', 'Text exceeds 20,000 characters')); setSource(value); setConfirmed(false) } catch (e) { setError(e.message) }
-        } }),
-        ...(draft?.questions ?? []).map(q => input(q.question, { key: q.id, value: answers[q.id] ?? '', disabled: busy, onChange: e => { setAnswers(prev => ({ ...prev, [q.id]: e.target.value })); setConfirmed(false) } })),
+        input(text('策略原文 / 补充说明', 'Original strategy / clarification'), { value: source, maxLength: 20000, rows: 7, disabled: busy, onChange: (e) => { setSource(e.target.value); setConfirmed(false) } }, 'textarea'),
+        input(text('导入文本（不执行代码）', 'Import text (never executes code)'), {
+          type: 'file',
+          accept: '.txt,.md,text/plain,text/markdown',
+          disabled: busy,
+          onChange: async (e) => {
+            const targetEl = e.target
+            const file = targetEl?.files?.[0]
+            if (!file) return
+            try {
+              if (file.size > 65536) { setError(text('文件超过64KB', 'File exceeds 64KB')); return }
+              const value = await file.text()
+              if (value.length > 20000) throw new Error(text('文本超过20000字符', 'Text exceeds 20,000 characters'))
+              setSource(value)
+              setConfirmed(false)
+            } catch (err) {
+              setError(err.message)
+            } finally {
+              if (targetEl) targetEl.value = ''
+            }
+          },
+        }),
+        ...(draft?.questions ?? []).map((q) => input(q.question, { key: q.id, value: answers[q.id] ?? '', disabled: busy, onChange: (e) => { setAnswers((prev) => ({ ...prev, [q.id]: e.target.value })); setConfirmed(false) } })),
+
+        // Interactive Execution Mode & Strategy Circuit Breaker Controls (synchronized with rules JSON)
+        h('div', { className: 'twb-strat-controls', 'data-strategy-controls': 'true' },
+          h('div', null,
+            h('strong', { style: { fontSize: 12 } }, text('执行方式选择', 'Execution engine mode')),
+            h('div', { className: 'twb-strat-radio-list', role: 'radiogroup', 'aria-label': text('执行方式选择', 'Execution engine mode') },
+              h('button', {
+                type: 'button',
+                role: 'radio',
+                className: 'twb-strat-radio',
+                'aria-checked': String(currentExecMode === 'ai_assisted'),
+                'data-exec-mode-option': 'ai_assisted',
+                disabled: busy || !parsedState.ok,
+                onClick: () => patchRules((obj) => ({ ...obj, execution_mode: 'ai_assisted', requires_ai: true })),
+              },
+              h('strong', null, text('AI 辅助执行', 'AI-assisted execution')),
+              h('span', null, text('信号触发后经 AI 评估，冲突不开仓', 'AI evaluates triggered signals; conflicts skip entry'))),
+              h('button', {
+                type: 'button',
+                role: 'radio',
+                className: 'twb-strat-radio',
+                'aria-checked': String(currentExecMode === 'rule_direct'),
+                'data-exec-mode-option': 'rule_direct',
+                disabled: busy || !parsedState.ok,
+                onClick: () => patchRules((obj) => ({ ...obj, execution_mode: 'rule_direct', requires_ai: false })),
+              },
+              h('strong', null, text('规则直通执行', 'Rule-direct execution')),
+              h('span', null, text('条件触发后 0 LLM 延迟直达 P1 硬风控与下单', '0 LLM latency on trigger straight to P1 hard risk & order'))))),
+          h('div', null,
+            h('strong', { style: { fontSize: 12 } }, text('策略级自动熔断配置（0 = 关闭）', 'Strategy circuit breaker (0 = disabled)')),
+            h('div', { className: 'twb-strat-cb-fields' },
+              h('label', null,
+                h('span', null, text('连续亏损自动停用笔数', 'Max consecutive losses')),
+                h('input', {
+                  type: 'number',
+                  min: 0,
+                  max: 20,
+                  step: 1,
+                  'aria-label': text('连续亏损自动停用笔数', 'Max consecutive losses'),
+                  value: cbMaxConsec,
+                  disabled: busy || !parsedState.ok,
+                  onChange: (e) => {
+                    const nextVal = Math.max(0, Math.round(Number(e.target.value) || 0))
+                    patchRules((obj) => ({
+                      ...obj,
+                      circuit_breaker: { ...(obj.circuit_breaker ?? {}), max_consecutive_losses: nextVal },
+                    }))
+                  },
+                })),
+              h('label', null,
+                h('span', null, text('累计亏损熔断金额 (USDT)', 'Max cumulative loss (USDT)')),
+                h('input', {
+                  type: 'number',
+                  min: 0,
+                  step: 10,
+                  'aria-label': text('累计亏损熔断金额 (USDT)', 'Max cumulative loss (USDT)'),
+                  value: cbMaxLossUsdt,
+                  disabled: busy || !parsedState.ok,
+                  onChange: (e) => {
+                    const nextVal = Math.max(0, Number(e.target.value) || 0)
+                    patchRules((obj) => ({
+                      ...obj,
+                      circuit_breaker: { ...(obj.circuit_breaker ?? {}), max_cumulative_loss_usdt: nextVal },
+                    }))
+                  },
+                }))),
+            h('div', { className: 'twb-strat-sub', style: { marginTop: 8 } },
+              text('触发策略级熔断仅暂停该策略新开仓，已有持仓保护单继续有效。', 'Circuit breaker only pauses new entries for this strategy; existing position stops remain active.')))),
+
         button(text(selected ? '保存原文与回答' : '创建草稿', selected ? 'Save text and answers' : 'Create draft'), save, !source.trim(), selected ? 'secondary' : 'primary'),
         selected ? button(text('AI 理解 / 继续澄清', 'AI analysis / clarify'), () => act(async () => {
-          // Persist the exact current revision before starting analysis.
-          const saved = await request(`/${selected}/draft`, 'PUT', { revision: draft.revision, source_text: source, rules: JSON.parse(rules), answers, questions: draft.questions ?? [], suggestions: draft.suggestions ?? [], sources: draft.sources ?? {}, summary: draft.summary ?? '' })
-          setNonce(n => n + 1)
-          await request(`/${selected}/analyze`, 'POST', { revision: saved.strategy.draft.revision })
+          const validatedRules = parseRulesOrThrow(rules)
+          const saved = await request(`/${selected}/draft`, 'PUT', {
+            revision: draft?.revision ?? 0,
+            source_text: source,
+            rules: validatedRules,
+            answers,
+            questions: draft?.questions ?? [],
+            suggestions: draft?.suggestions ?? [],
+            sources: draft?.sources ?? {},
+            summary: draft?.summary ?? '',
+          })
+          setNonce((n) => n + 1)
+          await request(`/${selected}/analyze`, 'POST', { revision: saved.strategy?.draft?.revision ?? (draftRev + 1) })
         }), !source.trim(), validation?.valid ? 'secondary' : 'primary') : null,
+
+        // Human-Readable Visual Rule Verification Card (UX-2)
+        (draft || hasAnyRules || !parsedState.ok) ? h('div', { className: 'twb-strat-rule-card', 'data-rule-summary-card': 'true' },
+          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' } },
+            h('strong', { style: { fontSize: 13 } }, text('自然语言规则核对卡', 'Rule verification card')),
+            !parsedState.ok
+              ? h('span', { className: 'twb-chip twb-chip--danger' }, text(`JSON 语法待修正：${parsedState.error}`, `JSON syntax error: ${parsedState.error}`))
+              : h('span', { className: 'twb-chip twb-chip--quiet' }, currentExecMode === 'rule_direct' ? text('规则直通 (0延迟)', 'Rule-direct') : text('AI 辅助执行', 'AI-assisted'))),
+          parsedState.ok ? h('div', { className: 'twb-strat-rule-rows' },
+            h('div', { className: 'twb-strat-rule-k' }, text('方向 & 标的', 'Direction & symbols')),
+            h('div', { className: 'twb-strat-rule-v' },
+              resolvedSide === 'long'
+                ? h('span', { className: 'twb-chip', style: { borderColor: 'var(--twb-edge-up)', background: 'var(--twb-tint-up)', color: 'var(--twb-up)' } }, text('做多 LONG', 'LONG'))
+                : resolvedSide === 'short'
+                  ? h('span', { className: 'twb-chip', style: { borderColor: 'var(--twb-edge-danger)', background: 'var(--twb-tint-danger)', color: 'var(--twb-down)' } }, text('做空 SHORT', 'SHORT'))
+                  : h('span', { className: 'twb-chip twb-chip--quiet' }, text('方向未指定', 'Side unspecified')),
+              ...ruleSymbols.map((sym) => h('span', { key: sym, className: 'twb-chip twb-mono' }, sym)),
+              ...ruleTimeframes.map((tf) => h('span', { key: tf, className: 'twb-chip twb-chip--quiet twb-mono' }, tf)),
+              ruleSymbols.length === 0 ? h('span', { className: 'twb-hint' }, text('尚未指定标的', 'No symbols specified')) : null),
+            h('div', { className: 'twb-strat-rule-k' }, text('入场条件', 'Entry conditions')),
+            h('div', { className: 'twb-strat-rule-v' },
+              conditionLines.length <= 1
+                ? h('span', null, conditionLines[0] ?? '—')
+                : h('div', { style: { width: '100%' } },
+                  h('div', { style: { fontWeight: 600 } }, conditionLines[0]),
+                  h('ul', { className: 'twb-strat-cond-list' }, conditionLines.slice(1).map((line, idx) => h('li', { key: idx }, line.replace(/^•\s*/, '')))))),
+            h('div', { className: 'twb-strat-rule-k' }, text('退出与盈亏比', 'Exits & R:R')),
+            h('div', { className: 'twb-strat-rule-v' },
+              h('span', { className: slOutOfBounds ? 'twb-chip twb-chip--danger' : 'twb-chip twb-chip--quiet' },
+                `${text('止损', 'SL')} ${slPct === null ? '—' : `${slPct.toFixed(2)}%`}`),
+              h('span', { className: 'twb-chip twb-chip--quiet' },
+                `${text('止盈', 'TP')} ${tpPct === null ? '—' : `${tpPct.toFixed(2)}%`}`),
+              rrValue !== null
+                ? h('span', { className: rrBelowFloor ? 'twb-chip twb-chip--danger' : 'twb-chip', 'data-rr-badge': rrBelowFloor ? 'warn' : 'ok' },
+                  `${text('盈亏比', 'R:R')} ${rrValue.toFixed(2)} R${rrBelowFloor ? text('（低于 1.20R 硬下限！）', ' (< 1.20R floor!)') : ''}`)
+                : null,
+              slOutOfBounds
+                ? h('span', { className: 'twb-chip twb-chip--danger' }, text('止损超出 0.2%–5.0% 硬风控范围！', 'SL outside 0.2%–5.0% hard range!'))
+                : null,
+              h('span', { className: 'twb-hint' }, timeStopHours && timeStopHours > 0
+                ? text(`超时退出 ${timeStopHours} 小时`, `Time stop ${timeStopHours}h`)
+                : text('不限时', 'No time stop'))),
+            h('div', { className: 'twb-strat-rule-k' }, text('执行与保护', 'Execution & CB')),
+            h('div', { className: 'twb-strat-rule-v' },
+              h('span', null, currentExecMode === 'rule_direct' ? text('规则直通（跳过 AI 辩论）', 'Rule-direct (skips AI debate)') : text('AI 辅助评估（冲突不开仓）', 'AI-assisted (skips on conflict)')),
+              h('span', { className: 'twb-hint' }, (cbMaxConsec > 0 || cbMaxLossUsdt > 0)
+                ? [
+                  cbMaxConsec > 0 ? text(`连亏 ${cbMaxConsec} 笔停用`, `${cbMaxConsec} consec. losses`) : null,
+                  cbMaxLossUsdt > 0 ? text(`累亏 ${cbMaxLossUsdt} USDT 熔断`, `${cbMaxLossUsdt} USDT max loss`) : null,
+                ].filter(Boolean).join(' · ')
+                : text('策略级熔断关闭（全局风控仍生效）', 'Strategy CB off (global risk active)')))) : null) : null,
+
+        // Live Market Preview Strip
+        mergedPreviewRows.length > 0 ? h('div', { className: 'twb-strat-preview', 'data-strategy-preview': 'true' },
+          h('div', { style: { fontWeight: 600, marginBottom: 4 } }, text('实时行情与触发距离预览', 'Live market & trigger distance preview')),
+          mergedPreviewRows.map((row) => h('div', { key: row.symbol, className: 'twb-strat-preview-row' },
+            h('strong', { className: 'twb-mono' }, row.symbol),
+            h('span', { className: 'twb-mono' }, `${text('当前标记价', 'Mark')} ${fmtPrice(row.mark) ?? '—'}`),
+            row.distPct !== null
+              ? h('span', { className: 'twb-mono twb-hint' }, `${text('距触发阈值', 'Distance')} ${row.distPct >= 0 ? '+' : ''}${row.distPct.toFixed(2)}%`)
+              : null,
+            row.indicatorText ? h('span', { className: 'twb-hint twb-mono' }, row.indicatorText) : null,
+            row.triggered
+              ? h('span', { className: 'twb-chip twb-chip--warn' }, text('已满足触发条件', 'Triggered now'))
+              : null))) : null,
+
+        // Review & Mount Section
         draft ? h('div', { className: 'twb-strategy-review' },
           h('p', null, draft.summary || text('尚未分析', 'Not analyzed')),
           ...(draft.suggestions ?? []).map((item, index) => h('p', { key: index, className: 'twb-hint' }, text('AI 建议：', 'AI suggestion: '), typeof item === 'string' ? item : JSON.stringify(item))),
-          h('details', null, h('summary', null, text('结构化规则与来源（可核对/修正）', 'Structured rules and provenance')),
-            h('textarea', { rows: 10, value: rules, disabled: busy, onChange: e => { setRules(e.target.value); setConfirmed(false) }, 'aria-label': text('结构化策略规则', 'Structured strategy rules') }),
+          h('details', null,
+            h('summary', null, text('高级：结构化规则 JSON 与来源（可核对/修正）', 'Advanced: structured rules JSON and provenance')),
+            h('textarea', {
+              rows: 10,
+              value: rules,
+              disabled: busy,
+              onChange: (e) => { setRules(e.target.value); setConfirmed(false) },
+              'aria-label': text('结构化策略规则', 'Structured strategy rules'),
+            }),
             h('pre', null, JSON.stringify(draft.sources ?? {}, null, 2))),
           h('div', { className: 'twb-hint' }, [...(validation?.issues ?? []), ...(validation?.unsupported ?? [])].join('；')),
-          h('label', null, h('input', { type: 'checkbox', checked: confirmed, disabled: busy, onChange: e => setConfirmed(e.target.checked) }), text('我已核对原文、规则和 AI 建议；按已保存草稿确认挂载', 'I reviewed the original, rules and AI suggestions; mount the saved draft')),
-          button(text('确认挂载（不自动启用）', 'Confirm mount (not enable)'), () => act(() => request(`/${selected}/mount`, 'POST', { revision: draft.revision, content_hash: draft.content_hash, request_id: `mount:${selected}:${draft.revision}:${draft.content_hash}`, confirmed: true })), !confirmed || !validation?.valid || source !== draft.source_text || rules !== JSON.stringify(draft.rules ?? {}, null, 2) || JSON.stringify(answers) !== JSON.stringify(draft.answers ?? {}), 'primary')) : null,
+          isDraftDirty
+            ? h('div', { className: 'twb-hint', style: { color: 'var(--twb-warn)' } },
+              text('当前原文或规则参数有未保存修改，请先点击「保存原文与回答」或「AI 理解 / 继续澄清」后再确认挂载。', 'Unsaved draft edits detected; save or run AI clarify before mounting.'))
+            : null,
+          triggerWarningBanner,
+          h('label', null,
+            h('input', { type: 'checkbox', checked: confirmed, disabled: busy, onChange: (e) => setConfirmed(e.target.checked) }),
+            text('我已核对原文、规则和 AI 建议；按已保存草稿确认挂载', 'I reviewed the original, rules and AI suggestions; mount the saved draft')),
+          button(
+            text('确认挂载（不自动启用）', 'Confirm mount (not enable)'),
+            () => act(() => request(`/${selected}/mount`, 'POST', {
+              revision: draftRev,
+              content_hash: draftHash,
+              request_id: `mount:${selected}:${draftRev}:${draftHash}`,
+              confirmed: true,
+            })),
+            !confirmed || !validation?.valid || isDraftDirty,
+            'primary',
+          )) : null,
+
+        // Enable / Execution Grant Section
         strategy?.current_version ? h('div', { className: 'twb-strategy-authorization' },
+          !draft ? triggerWarningBanner : null,
           h('p', null, text('当前已确认版本：', 'Confirmed version: '), h('strong', null, `v${strategy.current_version}`)),
-          button(strategy.enabled ? text('停用新开仓（保留已有仓位管理）', 'Disable new entries (keep position management)') : text('启用已确认版本', 'Enable confirmed version'), () => act(() => request(`/${selected}/authorization`, 'POST', { generation: strategy.generation, enabled: !strategy.enabled })), !strategy.enabled && !strategy.confirmed_version?.validation?.execution_ready)) : null,
-        busy ? h('div', { role: 'status' }, text('处理中…', 'Working…')) : null)
+          strategyTripped
+            ? button(
+              text('解除熔断并重启用', 'Reset & Enable'),
+              () => resetAndEnable(strategy),
+              false,
+              'primary',
+            )
+            : button(
+              strategy.enabled
+                ? text('停用新开仓（保留已有仓位管理）', 'Disable new entries (keep position management)')
+                : text('启用已确认版本', 'Enable confirmed version'),
+              () => act(() => request(`/${selected}/authorization`, 'POST', { generation: strategy.generation, enabled: !strategy.enabled })),
+              !strategy.enabled && !strategy.confirmed_version?.validation?.execution_ready,
+            )) : null,
+        busy ? h('div', { role: 'status' }, text('处理中…', 'Working…')) : null))
     }
 
     function SettingsBody({ model, t, group, onOpenSystem, lang, onLanguage, appearance, onAppearance, density, onDensity }) {
@@ -6540,7 +7455,7 @@ window.__ModuleLoader__.load({
         [t('action.qty'), row.qty ?? '—'],
       ]
       if (isClose) {
-        rows.push([t('action.mark'), row.mark === null ? t('common.notProvided') : fmtNum(row.mark, 2)])
+        rows.push([t('action.mark'), row.mark === null ? t('common.notProvided') : (fmtPrice(row.mark) ?? '—')])
         rows.push([t('action.upnl'), row.upnl === null ? '—' : fmtNum(row.upnl, 2)])
       }
       const resultText = (() => {
@@ -6918,12 +7833,15 @@ window.__ModuleLoader__.load({
               throw new Error(body?.error?.code ?? `HTTP_${response.status}`)
             }
             failures = 0
+            const receivedAt = Date.now()
             if (!disposed) setResult((prev) => {
               const prices = { ...(body.prices ?? {}) }
               for (const [symbol, quote] of Object.entries(prices)) {
                 const old = prev.key === url ? prev.data?.prices?.[symbol] : null
                 if (old?.as_of_ms && quote?.as_of_ms && quote.as_of_ms < old.as_of_ms) {
                   prices[symbol] = { ...old, stale: true, error: 'OUT_OF_ORDER' }
+                } else if (quote && typeof quote === 'object') {
+                  prices[symbol] = { ...quote, _received_at_ms: receivedAt }
                 }
               }
               return { key: url, data: { ...body, prices }, error: null }
@@ -7239,10 +8157,14 @@ window.__ModuleLoader__.load({
       const markScope = `${serviceScope(stateData)}:${markSymbols.join(',')}`
       const markPoll = useMarkQuotes(markSymbols.length ? `${MARKS_URL}?symbols=${encodeURIComponent(markSymbols.join(','))}&scope=${encodeURIComponent(markScope)}` : null)
       const [, setQuoteClock] = React.useState(0)
+      const needQuoteClock = workspace === 'cockpit' && ((stateData?.positions?.length ?? 0) > 0 || Boolean(stateData?.portfolio?.fetched_at))
       React.useEffect(() => {
-        const timer = setInterval(() => { if (typeof document === 'undefined' || document.visibilityState !== 'hidden') setQuoteClock((n) => n + 1) }, 1000)
+        if (!needQuoteClock) return undefined
+        const timer = setInterval(() => {
+          if (typeof document === 'undefined' || document.visibilityState !== 'hidden') setQuoteClock((n) => n + 1)
+        }, 1000)
         return () => clearInterval(timer)
-      }, [])
+      }, [needQuoteClock])
       const envelopePoll = useJson(ENVELOPE_URL, envelopeNonce, true)
       const roundDetail = useJson(
         selectedRoundId ? `${ROUNDS_URL}/${encodeURIComponent(selectedRoundId)}` : '',
@@ -7548,10 +8470,13 @@ window.__ModuleLoader__.load({
       const llmInfo = healthData?.llm ?? stateData?.llm ?? null
       const llmState = !llmInfo ? 'unknown'
         : llmInfo.route_selected === false || llmInfo.routeSelected === false ? 'unknown' : 'online'
+      const strategySummary = stateData?.strategy_summary ?? null
+      const liveMarks = { ...(marketData?.prices ?? {}), ...(positionQuotes ?? {}) }
       const model = {
         state: stateData, health: healthData, service, serviceCode: stateCode, control, equity, account,
         positions, orders, fills, reviews, rounds, round, freshness, block, caps, dayStats, llm, gaps, emptyReasons,
         riskEnvelope: envelopeData,
+        strategySummary,
         controlBusy, setControlBusy, controlFlight,
         selectedRoundId, selectedRound, updown: appearance, entry, protectionSummary, hostState, llmState,
         market: { symbol: marketSymbol, quote: marketQuote, age: marketAge, error: marketPoll.error },
@@ -7870,6 +8795,7 @@ window.__ModuleLoader__.load({
         if (item.action === 'system') { setDrawer({ type: 'system', tab: 'evidence' }); return }
         if (item.action === 'start-service') { startService(); return }
         if (item.action === 'service-setup') { setSetupOpen(true); return }
+        if (item.action === 'strategies') { setWorkspace('strategies'); setStrategiesVisited(true); return }
         if (item.action === 'round') { openRound(round?.roundId) }
       }
 
@@ -8136,6 +9062,18 @@ window.__ModuleLoader__.load({
           })(),
           h('span', { className: 'twb-ctx-sep' }),
           h('span', { className: 'twb-ctx' }, h('span', null, t('s1.positions')), h('span', { className: 'v twb-mono' }, String(positions.rows.length)), h('span', null, `· ${t('s1.protection')}`), h('span', { className: 'v' }, positions.rows.length === 0 ? '—' : zh(protectionSummary ? protectionSummary.label : 'prot.ok'))),
+          (strategySummary && strategySummary.supported !== false && (strategySummary.mode === 'mounted' || strategySummary.mode === 'native'))
+            ? h(React.Fragment, null,
+              h('span', { className: 'twb-ctx-sep' }),
+              h('button', {
+                type: 'button',
+                className: 'twb-chip',
+                'data-strategy-mode': strategySummary.mode,
+                onClick: () => { setWorkspace('strategies'); setStrategiesVisited(true) },
+              }, strategySummary.mode === 'mounted'
+                ? fmt(zh('s1.modeMounted'), { n: strategySummary.enabled_count ?? 0 })
+                : t('s1.modeNative')))
+            : null,
           h('span', { className: 'twb-ctx-sep' }),
           h('button', { type: 'button', className: 'twb-ctx-btn', onClick: () => openRound(round?.roundId) },
             round ? `${t('s1.round')} #${String(round.roundId ?? '').slice(-6)} · ${statusLabel(round.status)} · ${freshness.age === null ? t('concl.notProvided') : fmtAge(freshness.age)}` : `${t('s1.round')} · ${t('s1.noRound')}`),
@@ -8199,7 +9137,7 @@ window.__ModuleLoader__.load({
         h('main', { className: 'twb-s3', role: 'tabpanel', id: `twb-ws-panel-${workspace}`, 'aria-labelledby': `twb-ws-tab-${workspace}` },
           h('div', { className: 'twb-canvas' },
             workspace === 'strategies' ? null : loading ? h('div', { className: 'twb-card', style: { padding: 24 } }, t('state.loading')) : workspace === 'cockpit' ? cockpit : ai,
-            strategiesVisited ? h('div', { hidden: workspace !== 'strategies', 'data-strategies-page': 'true' }, h(StrategiesPage, { lang, active: workspace === 'strategies' })) : null)),
+            strategiesVisited ? h('div', { hidden: workspace !== 'strategies', 'data-strategies-page': 'true' }, h(StrategiesPage, { lang, active: workspace === 'strategies', liveMarks })) : null)),
         h('footer', { className: 'twb-s4' },
           h('span', null, h('span', { className: `twb-s4-dot ${hostState === 'offline' ? 'twb-s4-dot--danger' : hostState === 'degraded' ? 'twb-s4-dot--warn' : ''}` }), `${t('s4.host')} ${hostState === 'offline' ? t('s4.offline') : hostState === 'degraded' ? t('s4.unknown') : t('s4.online')}`),
           h('span', { className: 'sep' }, '·'),

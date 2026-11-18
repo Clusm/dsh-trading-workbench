@@ -2218,3 +2218,72 @@ test('chain results carry the five-category label', async () => {
   assert.equal(risk.failureCategory, FAILURE_CATEGORIES.RISK_BLOCKED)
 })
 
+test('authorized strategy preserves fixed LONG/SHORT debate roles and skips on STRATEGY_AI_CONFLICT', async () => {
+  const shortStrategy = {
+    strategy_id: 'strat-short-1',
+    version: 1,
+    name: '空头动量策略',
+    execution_mode: 'ai_assisted',
+    rules: {
+      symbols: ['BTCUSDT'],
+      timeframes: ['15m'],
+      entry: { kind: 'mark_threshold', side: 'short', operator: 'lt', value: 70000 },
+      exit: { stop_loss_pct: 0.02, take_profit_pct: 0.04 },
+    },
+  }
+  const fake = makeFake() // decisionFixture chooses LONG ('red'), conflicting with shortStrategy
+  const gateways = {
+    p1: async () => { throw new Error('P1 must not run when strategy conflicts with AI decision') },
+  }
+  const result = await runChain({
+    llm: fake.llm,
+    route: { provider: 'fake', model: 'fake-1' },
+    evidence: evidenceFixture(),
+    hardRisk: { verdict: 'approved' },
+    gateways,
+    config: { ...baseConfig(), strategy: shortStrategy },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.outcome, 'no_trade')
+  assert.equal(result.reasonCode, 'STRATEGY_AI_CONFLICT')
+  assert.match(String(result.detail), /SHORT/)
+  // Risk and execution_entry must not be called once conflict is detected at decision
+  assert.equal(result.calls.some((c) => c.role_key === 'risk'), false)
+  assert.equal(result.calls.some((c) => c.role_key === 'execution_entry'), false)
+
+  // Verify debate prompts do NOT contain contradictory direction bans while decision DOES enforce strategy direction
+  const byRole = new Map()
+  for (const opts of fake.optionsSeen) {
+    byRole.set(roleKeyFrom(opts), opts)
+  }
+  for (const debateRole of ['red_opening', 'blue_opening', 'red_response', 'blue_response']) {
+    const opts = byRole.get(debateRole)
+    assert.ok(opts, `${debateRole} called`)
+    assert.doesNotMatch(opts.system, /不得改方向/)
+    assert.doesNotMatch(opts.system, /不可反向开仓/)
+    assert.match(opts.system, /严格保持你本队的固定多空立场/)
+    assert.equal(parsePayload(opts).authorized_strategy.strategy_id, 'strat-short-1')
+  }
+  for (const strictRole of ['analysis', 'decision']) {
+    const opts = byRole.get(strictRole)
+    assert.ok(opts, `${strictRole} called`)
+    assert.match(opts.system, /不可反向开仓/)
+    assert.equal(parsePayload(opts).authorized_strategy.strategy_id, 'strat-short-1')
+  }
+
+  // Also verify lean variant deterministic scorecard selection hits STRATEGY_AI_CONFLICT cleanly
+  const leanResult = await runChain({
+    llm: makeFake().llm,
+    route: { provider: 'fake', model: 'fake-1' },
+    evidence: evidenceFixture(),
+    hardRisk: { verdict: 'approved' },
+    gateways,
+    config: { ...baseConfig(), chainVariant: 'lean', strategy: shortStrategy },
+  })
+  assert.equal(leanResult.ok, true)
+  assert.equal(leanResult.outcome, 'no_trade')
+  assert.equal(leanResult.reasonCode, 'STRATEGY_AI_CONFLICT')
+  assert.equal(leanResult.calls.some((c) => c.role_key === 'risk'), false)
+})
+
+

@@ -78,3 +78,26 @@
 验证：337 项组件渲染检查、177 项静态检查通过。使用真实组件与测试数据导出的静态页面，在 Chrome/Edge 中检查了 1440px AI 页、1024px 操作台、760px 策略页；通过 Chrome DevTools 设置真实 480px/760px 视口重新检查操作台/AI/策略页，480px 页面宽度等于文档宽度，停止交易按钮处于视口内。检查产物保存在本地忽略目录 `.release/ui-preview/`，主题变量采用预览值，不代表 Harness 实际主题截图。
 
 本次没有修改交易判定、风控限额或策略授权逻辑。版本仍未部署到实际 Harness，不能将静态预览或组件测试当作已上线验证。
+
+
+### Review 收口、双执行引擎、二阶段规则原语与策略熔断（0.2.0）
+
+2026-11-18 完成全链路代码 Review 修复与二阶段能力扩展，版本号更新为 `0.2.0`：
+
+1. **P0/P1/P2 Review 问题收口与 20 币统一**：
+   - 同步单仓路径计算（`serviceLauncherPaths()` 修正为包根 `path.dirname(hostDir)` 并支持根 `.env`）与插件标识 `dsh-trading-workbench`；
+   - 执行风控 `DEFAULT_SYMBOLS` 与策略校验白名单统一对齐行情层 20 币白名单，策略校验强制对齐 `R09`（止损 `0.2%–5.0%`）与 `R10`（盈亏比 `≥ 1.2R`）；
+   - 账户已有持仓时优先进入持仓风险管理路径，不再被 `mounted` 新开仓预筛以 `NO_ELIGIBLE_STRATEGY` 短路；
+   - 信号周期去重（`strategy_signals`）前置到 `/api/strategies/evaluate-candidates` 与 P1 `validate_entry`，消除同周期重复空跑 LLM 链问题；增加 `15m` 跨周期边界容差及 P2 批准令牌 `signal_key` 绑定；
+   - 解耦红蓝辩论固定多空立场与策略方向约束，方向冲突确定性归为 `STRATEGY_AI_CONFLICT`（`no_trade`）；`StrategyAssistant` 支持每次调用动态解析最新模型路由；
+   - `mark_snapshot` 改用校准时钟 `now_ms()` 输出 `age_ms` 并支持按标的 singleflight 合并与 `≥ 5` 标的批量拉取；明确同步拒单如实写入 `strategy_signals`（`state='rejected'`）。
+2. **双执行引擎可选 + AI 否决绩效统计**：
+   - 策略支持 `execution_mode: "ai_assisted" | "rule_direct"`：`rule_direct` 在确定性条件满足后 0 LLM 延迟生成计划直走服务端 `createCycle` → P1 硬风控 → P2 下单；`ai_assisted` 在 AI 跳过/否决时记录 `strategy_decisions`（`ai_vetoed`），并结合后续闭合 K 线统计“成功避险（先触止损）”与“踏空（先触止盈）”。
+3. **二阶段确定性规则原语（零 `eval`）**：
+   - 新增纯函数求值器 `strategies/evaluator.py`，支持 `mark_threshold`、`candle_close`（闭合 K 线收盘确认）、`ema_cross`、`ema_compare`、`rsi_threshold`、`funding_threshold` 及 `all`（1–4 项 AND 复合条件）。
+4. **策略级独立绩效归因与策略级自动熔断**：
+   - 新增 `strategies/attribution.py` 与 `/api/strategies/attribution`，聚合各策略触发数、成交数、已平仓胜率与已实现净盈亏；支持 `circuit_breaker`（`max_consecutive_losses` / `max_cumulative_loss_usdt`）超限自动停用该策略新开仓并写审计，人工重启用时重置熔断统计基线。
+5. **用户视角 5 项体验升级**：
+   - 顶栏 `S1` 全局运行模式徽章与 `S2` 空转/熔断提醒；策略总览与绩效看板；自然语言规则核对卡 + 实时预览与**当前已满足条件立即触发预警**；内置 3 套二阶段策略模板与 20 币/硬风控速查；持仓行官方 `uPnL` + 实时标记价估算浮盈双轨展示及低价币 2/4/5/6 位自适应小数精度。
+
+离线验证结果：`node client/checks.mjs`（184 项通过）、`node client/render-smoke.mjs`（359 项通过）、Node 测试套件（225 项通过）、Python `tests_execution`（337 项通过，1 项原有基线跳过）、`test_m1_1_market.py`（49 项通过）、`test_mark_quotes.py`（6 项通过）。仍待真实 Demo 环境完成在线延时与 24 小时挂机验收。

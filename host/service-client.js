@@ -220,6 +220,14 @@ export class WorkbenchServiceClient {
     return this.request(`/api/strategies${suffix}`, options)
   }
 
+  evaluateStrategyCandidates(body = {}) {
+    return this.request('/api/strategies/evaluate-candidates', { method: 'POST', body })
+  }
+
+  recordStrategyDecision(strategyId, body) {
+    return this.request(`/api/strategies/${encodeURIComponent(strategyId)}/decisions`, { method: 'POST', body })
+  }
+
   evaluatePlan(plan, cycleId, leaseId = null, strategyContext = null) {
     const envelope = { plan }
     if (cycleId) envelope.cycle_id = cycleId

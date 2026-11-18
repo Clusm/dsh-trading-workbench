@@ -2,18 +2,18 @@
 
 # DSH Trading Workbench
 
-**把 AI 决策链、交易执行与风控，搬进 DeepSeek Harness 的工作台。**
+**把 AI 决策链、确定性策略挂载、交易执行与风控，搬进 DeepSeek Harness 的工作台。**
 
 <p>
   <a href="https://www.npmjs.com/package/dsh-trading-workbench"><img alt="npm" src="https://img.shields.io/npm/v/dsh-trading-workbench?style=flat-square&color=cb3837"></a>
-  <a href="https://github.com/Clusm/dsh-trading-workbench/actions"><img alt="tests" src="https://img.shields.io/badge/tests-204%20passing-2ea043?style=flat-square"></a>
+  <a href="https://github.com/Clusm/dsh-trading-workbench/actions"><img alt="tests" src="https://img.shields.io/badge/tests-225%20passing-2ea043?style=flat-square"></a>
   <a href="package.json"><img alt="dsh" src="https://img.shields.io/badge/dsh-%3E%3D0.2.2--rc.1%20%3C0.3.0-4b6bfb?style=flat-square"></a>
   <a href="package.json"><img alt="node" src="https://img.shields.io/badge/node-%3E%3D22.19-3c873a?style=flat-square"></a>
   <img alt="venue" src="https://img.shields.io/badge/venue-Binance%20Demo-f0b90b?style=flat-square">
-  <img alt="status" src="https://img.shields.io/badge/status-preview-8b949e?style=flat-square">
+  <img alt="status" src="https://img.shields.io/badge/status-v0.2.0-2ea043?style=flat-square">
 </p>
 
-[English](#english) · [AI 交易范围](#ai-交易的范围与决策链) · [快速开始](#快速开始) · [架构](#架构) · [安全边界](#安全边界) · [开发](#开发与测试)
+[English](#english) · [v0.2.0 更新日志](#v020-更新说明) · [AI 交易范围](#ai-交易的范围与决策链) · [策略管理与双执行引擎](#策略管理与双执行引擎) · [快速开始](#快速开始) · [架构](#架构) · [安全边界](#安全边界) · [开发](#开发与测试)
 
 </div>
 
@@ -64,12 +64,42 @@
 
 | 模块 | 你会看到 |
 | --- | --- |
-| **操作台** | 权益与今日盈亏、单笔风险/杠杆/持仓上限、持仓与保护单状态、AI 摘要卡、今日流水、待处理清单 |
-| **AI 决策 · 本轮** | 结论与原因码、确定性评分卡（S/A/B/C + 门禁）、红蓝对比与辩论双侧、决策依据、证据抽屉 |
+| **操作台** | 权益与今日盈亏、单笔风险/杠杆/持仓上限、持仓 2 秒轻量标记价与官方/参考双轨浮盈、低价币自适应小数精度、保护单状态、AI 摘要卡、今日流水、待处理清单 |
+| **策略管理** | 一键策略模板、自然语言导入与 AI 澄清问答、可视化自然语言规则核对卡、实时行情距离与**当前已满足条件立即触发预警**、「规则直通（0 LLM 延迟）」与「AI 辅助过滤」双执行引擎切换、单策略自动熔断与独立绩效归因看板 |
+| **AI 决策 · 本轮** | 结论与原因码、所选授权策略与执行模式徽章、确定性评分卡（S/A/B/C + 门禁）、红蓝对比与辩论双侧、决策依据、证据抽屉 |
 | **AI 决策 · 历史** | 按归档日期查询（今天默认）、按结果筛选、耗时分布、单轮详情与调用审计 |
 | **AI 决策 · 分析** | 轮次分布、原因码构成、权益曲线、资金口径（服务端 `/pnl`）、AI 日报 |
 | **设置** | 连接与账户、Demo/实盘凭据接入（只写本机 0600 文件）、自动调度、只读限额、运行身份诊断 |
-| **顶栏** | 预检、运行一轮、启停自动交易、服务一键启动、**环境初始化向导** |
+| **顶栏** | 全局运行模式徽章（`原生 AI` / `已授权策略`）、空转与熔断注意力提醒、预检、运行一轮、启停自动交易、服务一键启动、**环境初始化向导** |
+
+---
+
+## 策略管理与双执行引擎
+
+在「原生 AI」模式之外，工作台一级栏目提供独立的 **策略管理（`?ws=strategies`）**，支持将用户的自然语言/Markdown 交易策略转化为受版本控制与确定性校验的执行规则：
+
+1. **挂载与启用严格分离**：粘贴文本或选择内置模板 → AI 澄清缺项并生成结构化规则（超出当前执行能力的附加条件原样保留并禁止启用，绝不静默丢弃）→ 核对自然语言规则卡与实时触发距离后确认挂载（生成 SQLite Trigger 保护的不可变版本）→ 单独授权启用（最多同时启用 5 个策略、合计监控 10 个标的）。
+2. **双执行引擎可选**：
+   - **AI 辅助过滤（`ai_assisted`，默认）**：确定性条件触发后唤醒 AI 决策链评估，意见冲突不开新仓（`STRATEGY_AI_CONFLICT`）；被 AI 跳过/否决的信号自动记录并在后续闭合 K 线上做**事后归因（成功避险 vs 踏空）**。
+   - **规则直通执行（`rule_direct`，0 LLM 延迟）**：确定性条件满足后跳过大模型辩论，由确定性代码生成计划直接进入服务端 `createCycle` → **P1 硬风控（R00–R25 全部生效）→ P2 下单**。
+3. **二阶段确定性规则原语（零 `eval` 纯函数求值）**：
+   - 支持 `mark_threshold`（实时标记价阈值）、`candle_close`（**最新闭合 K 线收盘确认**，防插针假突破）、`ema_cross`（双均线金叉/死叉）、`ema_compare`（均线排列或收盘价对比）、`rsi_threshold`（Wilder RSI 过滤）、`funding_threshold`（资金费率阈值）以及 `all`（最多 4 项原子条件 AND 组合）。
+4. **策略级独立绩效归因与自动熔断**：
+   - 按策略聚合统计触发次数、成交次数、已平仓胜率、累计已实现净盈亏与 AI 否决绩效；
+   - 支持配置单策略熔断（`max_consecutive_losses` 连续亏损笔数 / `max_cumulative_loss_usdt` 累计亏损金额），触发后自动停用该策略新开仓（保留已有仓位保护），人工核查后一键解除熔断并重置统计基线。
+
+---
+
+## v0.2.0 更新说明
+
+相比 `v0.1.1`，`v0.2.0` 主要新增与优化：
+
+- **独立轻量持仓标记价通道（`/api/market/marks`）**：可见页面持仓标记价 2 秒单飞刷新（服务端校准时钟 `age_ms`、按标的 singleflight 合并、≥5 标的自动批量拉取、乱序报价拒绝、页面隐藏自动暂停）；持仓表保留官方账户快照 `uPnL` 同时提供实时标记价参考浮盈，并对 `< $1` 低价币自适应 2/4/5/6 位小数精度。
+- **一级「策略管理」工作区与生命周期闭环**：新增策略草稿 CAS、AI 澄清、不可变版本挂载、独立启停授权（`generation` CAS）与运行模式切换（`mode_revision` CAS）。
+- **「规则直通」与「AI 辅助」双执行引擎 + AI 否决归因**：支持 0 LLM 延迟规则直通 P1/P2 执行，以及 AI 辅助模式下的否决避险/踏空回溯统计。
+- **二阶段确定性规则原语**：新增闭合 K 线收盘确认（`candle_close`）、EMA 金叉/死叉与排列（`ema_cross` / `ema_compare`）、RSI 阈值（`rsi_threshold`）、资金费率阈值（`funding_threshold`）与 `all` 复合条件。
+- **策略级绩效归因与自动熔断**：新增 `/api/strategies/attribution` 与单策略连亏/累亏自动熔断保护。
+- **体验与安全加固**：20 币白名单在行情/风控/策略三端统一；策略校验前置对齐 `R09`（止损 `0.2%–5.0%`）与 `R10`（盈亏比 `≥ 1.2R`）；P1 信号前置去重与 `15m` 跨周期容差；已有持仓优先进入风险管理防短路；顶栏 `S1` 常驻模式徽章与 `S2` 空转/熔断提醒；内置 3 套开箱即用策略模板与当前已满足条件立即触发预警。
 
 ### 环境初始化向导
 
@@ -132,7 +162,7 @@ dsh plugin --profile <profile> add dsh-trading-workbench
 dsh plugin --profile <profile> add github:Clusm/dsh-trading-workbench
 
 # 本地打包安装
-npm pack && dsh plugin --profile <profile> add ./dsh-trading-workbench-0.1.1.tgz
+npm pack && dsh plugin --profile <profile> add ./dsh-trading-workbench-0.2.0.tgz
 ```
 
 在 DSH 里也可以：**设置 → 插件 → 搜索 `dsh-trading-workbench` → 安装**。
@@ -169,10 +199,10 @@ npm pack && dsh plugin --profile <profile> add ./dsh-trading-workbench-0.1.1.tgz
 ## 开发与测试
 
 ```sh
-npm test                  # 源码约束 + 渲染冒烟 + 单测
-node client/checks.mjs    # 177 条源码约束（路由/文案键/安全边界/分发前提）
-node client/render-smoke.mjs  # 320 条渲染断言（夹具驱动的小型 DOM 运行时）
-node --test test/*.test.mjs   # 204 条 Host/服务/归档/初始化单测
+npm test                      # 源码约束 + 渲染冒烟 + 单测
+node client/checks.mjs        # 184 条源码约束（路由/文案键/安全边界/分发前提）
+node client/render-smoke.mjs  # 359 条渲染断言（夹具驱动的小型 DOM 运行时）
+node --test test/*.test.mjs   # 225 条 Host/服务/归档/策略/双引擎单测
 ```
 
 客户端**没有构建步骤**：`client.js` 由 DSH 直接加载；渲染冒烟用自带的迷你 DOM 运行时，所以测试不需要浏览器。

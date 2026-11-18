@@ -225,18 +225,82 @@ const ATTRIBUTION = {
     next: '检查原路由为何不可用；回退已记录在审计',
     nextEn: 'Check why the primary route was unavailable; the fallback is audited',
   },
+  NO_ELIGIBLE_STRATEGY: {
+    category: '策略', categoryKey: 'strategy', stage: '策略筛选', stageKey: 'strategy_select', roleKey: null,
+    one: '当前无满足触发条件的已授权策略，本轮不交易',
+    oneEn: 'No authorized strategy met its trigger conditions this round; no trade',
+    next: '查看策略信号状态或等待下一轮行情触发',
+    nextEn: 'Check strategy signal status or wait for the next market trigger',
+  },
+  STRATEGY_AI_CONFLICT: {
+    category: '策略', categoryKey: 'strategy', stage: '决策', stageKey: 'decision', roleKey: 'decision',
+    one: 'AI 辩论结论与策略固定方向相反，按冲突不开新仓原则跳过',
+    oneEn: 'AI debate favoured the opposite direction of the authorized strategy; skipped per conflict rule',
+    next: '查看红蓝辩论依据；等待方向一致的下一轮信号',
+    nextEn: 'Review the red/blue debate arguments; wait for an aligned signal',
+  },
+  RULE_DIRECT_EXECUTED: {
+    category: '成功', categoryKey: 'success', stage: '纯规则直连', stageKey: 'chain_end', roleKey: null,
+    one: '纯规则直连策略已通过硬风控闸门（P1/P2）并提交执行',
+    oneEn: 'Direct-rule strategy passed hard risk gates (P1/P2) and executed',
+    next: '查看订单、持仓与策略归因统计',
+    nextEn: 'Check orders, positions and strategy attribution stats',
+  },
+  TRADE_EXECUTED: {
+    category: '成功', categoryKey: 'success', stage: '纯规则直连', stageKey: 'chain_end', roleKey: null,
+    one: '纯规则直连策略已通过硬风控闸门（P1/P2）并提交执行',
+    oneEn: 'Direct-rule strategy passed hard risk gates (P1/P2) and executed',
+    next: '查看订单、持仓与策略归因统计',
+    nextEn: 'Check orders, positions and strategy attribution stats',
+  },
+  RULE_DIRECT_BLOCKED: {
+    category: '执行闸门', categoryKey: 'gate', stage: 'P1/P2 闸门', stageKey: 'p1', roleKey: null,
+    one: '纯规则直连订单被风控或执行闸门拦截，未成交',
+    oneEn: 'Direct-rule order was blocked by risk or execution gates',
+    next: '查看 P1/P2 拦截原因与账户风控状态',
+    nextEn: 'Inspect P1/P2 rejection details and account risk state',
+  },
+  E_STRATEGY_SIGNAL_FALSE: {
+    category: '策略闸门', categoryKey: 'gate', stage: 'P1 策略复核', stageKey: 'p1', roleKey: null,
+    one: '服务端提交前复核发现策略触发条件已不再满足，按规则拦截',
+    oneEn: 'Server pre-submit recheck found the strategy signal no longer holds; blocked',
+    next: '行情在评估期间已回落或反转，等待下一轮有效信号',
+    nextEn: 'Market moved before submission; wait for the next valid signal',
+  },
+  E_STRATEGY_SIGNAL_DUPLICATE: {
+    category: '策略闸门', categoryKey: 'gate', stage: 'P1 策略复核', stageKey: 'p1', roleKey: null,
+    one: '该策略周期信号已消费，幂等去重拦截重复开仓',
+    oneEn: 'This strategy period signal was already consumed; duplicate entry blocked',
+    next: '无需处理，等待下一个 K 线周期新信号',
+    nextEn: 'No action needed; wait for the next timeframe bar signal',
+  },
+  E_STRATEGY_PLAN_MISMATCH: {
+    category: '策略闸门', categoryKey: 'gate', stage: 'P1 策略复核', stageKey: 'p1', roleKey: null,
+    one: '订单计划与已确认策略的标的、方向或止损止盈边界不一致，P1 拒绝',
+    oneEn: 'Order plan did not match the confirmed strategy symbol, side or SL/TP bounds (P1 reject)',
+    next: '检查策略参数与硬风控边界是否冲突',
+    nextEn: 'Check whether strategy parameters conflict with hard risk bounds',
+  },
+  E_STRATEGY_NOT_AUTHORIZED: {
+    category: '策略闸门', categoryKey: 'gate', stage: 'P1 策略复核', stageKey: 'p1', roleKey: null,
+    one: '策略未处于启用与运行授权状态（或已触发熔断自动停用），P1 拒绝',
+    oneEn: 'Strategy is not enabled and authorized (or was auto-paused by circuit breaker); P1 rejected',
+    next: '前往策略页检查启用授权或熔断状态',
+    nextEn: 'Open Strategies to check authorization or circuit breaker status',
+  },
 }
 
 /** Non-failure terminal codes: skipping is a legal outcome, not a broken round. */
 const SKIP_CODES = new Set([
   'E_CYCLE_DUPLICATE_SLOT', 'ROUND_IN_FLIGHT', 'OVERLAP_SKIPPED', 'AUTO_DISABLED',
   'DAILY_BUDGET_EXHAUSTED', 'PAUSED_AFTER_FAILURES', 'POSITION_OPEN', 'E_CYCLE_RUNNING',
-  'RUN_IN_PROGRESS',
+  'RUN_IN_PROGRESS', 'NO_ELIGIBLE_STRATEGY', 'E_STRATEGY_SIGNAL_DUPLICATE',
 ])
 
 const GATE_CODES = new Set([
   'BOTH_SIDES_UNTRADEABLE', 'CONTROL_LOCKED',
   'E_SYMBOL_NOT_ALLOWED', 'E_APPROVAL_INVALID', 'E_APPROVAL_REQUIRED', 'E_APPROVAL_REPLAY',
+  'RULE_DIRECT_BLOCKED', 'E_STRATEGY_SIGNAL_FALSE', 'E_STRATEGY_PLAN_MISMATCH', 'E_STRATEGY_NOT_AUTHORIZED',
 ])
 
 const GATE_PREFIXES = ['E_RISK_']
@@ -365,13 +429,13 @@ export function stopKindOf({ reasonCode = null, status = null, outcome = null } 
     if (String(status) === 'failed') return 'failed'
     return null
   }
-  if (base === 'TRADE_PLAN_READY') return 'completed'
+  if (base === 'TRADE_PLAN_READY' || base === 'TRADE_EXECUTED' || base === 'RULE_DIRECT_EXECUTED') return 'completed'
   if (SKIP_CODES.has(base)) return 'skipped'
   if (base === 'BOTH_SIDES_UNTRADEABLE') return 'gate_reject'
   if (GATE_CODES.has(base)) return 'gate_reject'
   if (GATE_PREFIXES.some((prefix) => base.startsWith(prefix))) return 'gate_reject'
   if (RISK_REJECT_CODES.has(base)) return 'risk_reject'
-  if (base === 'NO_CANDIDATE' || base === 'DECISION_NO_TRADE') return 'decision_no_trade'
+  if (base === 'NO_CANDIDATE' || base === 'DECISION_NO_TRADE' || base === 'STRATEGY_AI_CONFLICT') return 'decision_no_trade'
   if (base === 'EXECUTION_BLOCKED') return 'execution_blocked'
   if (base === 'ROUTE_FALLBACK_APPLIED') return 'completed'
   // P-05=A: a freeze failure is a legal termination (no call was started), not

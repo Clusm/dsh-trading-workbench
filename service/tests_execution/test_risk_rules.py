@@ -187,8 +187,12 @@ class RiskRuleTests(unittest.TestCase):
 
     # ------------------------------------------------------------------ 结构性
     def test_r01_whitelist(self) -> None:
-        verdict = evaluate(make_plan(symbol="DOGEUSDT"), make_ctx(), LIMITS, filters=None)
-        self.assertRejected(verdict, "R01")
+        self.assertEqual(len(LIMITS.symbols), 20)
+        unlisted = evaluate(make_plan(symbol="PEPEUSDT"), make_ctx(), LIMITS, filters=None)
+        self.assertRejected(unlisted, "R01")
+        listed = evaluate(make_plan(symbol="DOGEUSDT"), make_ctx(), LIMITS, filters=None)
+        self.assertNotIn("R01", rules_of(listed))
+        self.assertEqual(listed.verdict, "approved")
 
     def test_r01_exchange_status(self) -> None:
         filters = SymbolFiltersView(symbol="BTCUSDT", status="BREAK")

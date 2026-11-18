@@ -1,12 +1,20 @@
 # DSH Trading Workbench（`dsh-trading-workbench`）
 
-DeepSeek Harness 的交易工作台插件：AI 决策链、按日归档的轮次历史、Demo 执行与风控视图。
+DeepSeek Harness 的交易工作台插件：AI 决策链、确定性策略管理（支持「规则直通 0 延迟」与「AI 辅助过滤」双执行引擎、闭合 K 线与 EMA/RSI 指标原语、单策略自动熔断与绩效归因）、按日归档的轮次历史、2 秒轻量持仓标记价及 Demo 执行与风控视图。
 它由两半组成：
 
 | 半 | 语言 | 作用 |
 | --- | --- | --- |
-| Host 插件（本包） | Node ESM | 注册 `/trading-workbench/api/*`、跑 AI 决策链、把轮次写成本地按日归档、调用本机交易服务 |
-| 交易服务（`service/`） | Python | 行情/账户/持仓/订单事实源、Demo 下单与闸门 |
+| Host 插件（本包） | Node ESM | 注册 `/trading-workbench/api/*`、跑 AI 决策链与双执行引擎策略调度、把轮次写成本地按日归档、调用本机交易服务 |
+| 交易服务（`service/`） | Python | 行情/账户/持仓/订单事实源、策略版本与熔断存储、确定性规则求值、Demo 下单与闸门 |
+
+## AI 交易与策略执行的范围
+
+- **范围**：在固定的 20 币白名单内，每 10 分钟一轮，支持「原生 AI」或「已授权策略（规则直通 / AI 辅助过滤）」，决定做不做 / 做多还是做空 / 入场区间 / 止损止盈 / 仓位；有持仓时只做减风险的管理动作。
+- **不选品**：白名单运行时不轮换；`universe.market_scan` 会展示白名单外的全市场异动，但标记 `in_whitelist=false`，只作知情、不作候选。
+- **不联网、不调用工具**：模型只读一份确定性生成、带 hash、可复现的证据快照（`md-evidence/1`），所以"为什么这么决定"可以复核。
+- **7 个角色**：`analysis` → `red_team`/`blue_team`（固定多空、对称两轮）→ `decision`（三选一）→ `risk`（只能收紧）→ `execution`（转订单计划，不直接下单）→ `review`（每日归因，不阻塞交易）。
+- **只能更严**：无论是 AI 决策还是规则直通，最终都必须通过 P1/P2 硬风控（R00–R25）与执行前闸门；AI 或策略建议均不能放宽硬上限。
 
 ## 安装
 
@@ -21,10 +29,10 @@ dsh plugin --profile <profile> add dsh-trading-workbench
 或从本地目录 / tgz 安装：
 
 ```sh
-dsh plugin --profile <profile> add ./dsh-trading-workbench-0.1.0.tgz
+dsh plugin --profile <profile> add ./dsh-trading-workbench-0.2.0.tgz
 ```
 
-安装后**重载插件**（或重启 DSH）：侧边栏出现「交易工作台」，顶栏多出「AI 决策」页签。
+安装后**重载插件**（或重启 DSH）：侧边栏出现「交易工作台」，顶栏提供「操作台 / AI 决策 / 策略管理」三个一级工作区。
 
 ## 首次运行
 

@@ -17,6 +17,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { createIntegration, HostIntegrationError, capsFromEnvelope, portfolioGapText, resolveDefaultDataDir } from '../host/integration.js'
+import { PLUGIN_ID, PLUGIN_VERSION } from '../index.js'
 import { createAutoScheduler } from '../host/scheduler.js'
 import { toRoundView } from '../host/round-view.js'
 import { BUILD, currentBuild, hostLoadSeq, markHostLoad, setLoadedConfigRevision } from '../host/build.js'
@@ -3023,3 +3024,342 @@ test('strategy-capable service config failure blocks instead of native fallback'
   assert.equal(env.fakeLlm.seen.length, 0)
   assert.equal(env.service.calls.filter(c => c.path === '/api/execution/order').length, 0)
 })
+
+// ---- Phase-2 & P0/P1 Dual-Engine Strategy Suite ---------------------------
+
+test('P0-1: plugin identity is dsh-trading-workbench 0.2.0 and launcher root points to package root', () => {
+  const pkgPath = fileURLToPath(new URL('../package.json', import.meta.url))
+  const expectedRoot = path.dirname(pkgPath)
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
+  assert.equal(pkg.version, '0.2.0')
+  assert.equal(PLUGIN_ID, 'dsh-trading-workbench')
+  assert.equal(PLUGIN_VERSION, '0.2.0')
+
+  const env = makeIntegration()
+  const paths = env.integration.serviceLauncherPaths()
+  assert.equal(paths.root, expectedRoot)
+  assert.equal(paths.entry, path.join(expectedRoot, 'service', 'run_service.py'))
+  assert.equal(env.integration.hostInfo().plugin, 'dsh-trading-workbench')
+  assert.equal(env.integration.listRounds().plugin, 'dsh-trading-workbench')
+})
+
+test('P0-2: open position in mounted mode prioritizes risk management instead of short-circuiting NO_ELIGIBLE_STRATEGY', async () => {
+  const base = makeFakeService({
+    credentials: true,
+    statusPositions: [{ symbol: 'BTCUSDT', position_side: 'LONG', qty: '0.05', entry_price: '67500' }],
+  })
+  const oldFetch = base.fetchImpl
+  base.fetchImpl = async (url, options = {}) => {
+    const u = new URL(url)
+    if (u.pathname === '/api/ready') return jsonResponse(200, { ready: true, service_ready: true, capabilities: { strategies: true } })
+    if (u.pathname === '/api/strategies/config') return jsonResponse(200, { config: { mode: 'mounted', revision: 5 } })
+    if (u.pathname === '/api/strategies/evaluate-candidates') {
+      throw new Error('must not evaluate new-entry candidates when an open position exists')
+    }
+    if (u.pathname === '/api/strategies/authorized') {
+      throw new Error('must not select new-entry strategies when an open position exists')
+    }
+    return oldFetch(url, options)
+  }
+  const fakeLlm = makeFakeLlm({ mode: 'no_trade' })
+  const env = makeIntegration({ service: base, fakeLlm })
+  const result = await env.integration.run()
+  assert.equal(result.ok, true)
+  assert.notEqual(result.round.reasonCode, 'NO_ELIGIBLE_STRATEGY')
+  assert.equal(result.round.symbol, 'BTCUSDT')
+  assert.equal(result.round.strategy, null)
+  assert.match(result.round.strategy_selection_reason, /已有持仓/)
+  assert.ok(env.service.calls.some((c) => c.path === '/api/cycles'))
+  assert.ok(fakeLlm.seen.length >= 1, 'chain ran instead of short-circuiting')
+})
+
+function makePhase2StrategyService({
+  candidates = [],
+  skipped = [],
+  p1Code = null,
+  p1Status = null,
+  strategiesList = [],
+  mode = 'mounted',
+} = {}) {
+  const base = makeFakeService({ credentials: true, p1Code, p1Status })
+  const oldFetch = base.fetchImpl
+  const decisionsRecorded = []
+  base.decisionsRecorded = decisionsRecorded
+  base.fetchImpl = async (url, options = {}) => {
+    const u = new URL(url)
+    const method = options.method ?? 'GET'
+    const body = options.body ? JSON.parse(options.body) : null
+    if (u.pathname === '/api/ready') {
+      return jsonResponse(200, { ready: true, service_ready: true, capabilities: { strategies: true } })
+    }
+    if (u.pathname === '/api/strategies/config' && method === 'GET') {
+      return jsonResponse(200, { config: { mode, revision: 4 } })
+    }
+    if (u.pathname === '/api/strategies' && method === 'GET') {
+      return jsonResponse(200, { strategies: strategiesList })
+    }
+    if (u.pathname === '/api/strategies/evaluate-candidates' && method === 'POST') {
+      return jsonResponse(200, { mode, revision: 4, candidates, skipped })
+    }
+    if (/^\/api\/strategies\/[^/]+\/decisions$/.test(u.pathname) && method === 'POST') {
+      const strategyId = decodeURIComponent(u.pathname.split('/')[3])
+      decisionsRecorded.push({ strategyId, body })
+      return jsonResponse(200, { ok: true, decision: body })
+    }
+    if (u.pathname === '/api/strategies/attribution' && method === 'GET') {
+      return jsonResponse(200, { items: [{ strategy_id: 's1', win_rate: 0.6 }] })
+    }
+    if (/^\/api\/strategies\/[^/]+\/preview$/.test(u.pathname) && method === 'POST') {
+      return jsonResponse(200, { triggered: true, indicator_facts: { rsi14: 28.5 } })
+    }
+    return oldFetch(url, options)
+  }
+  return base
+}
+
+test('Phase-2 rule_direct executes P1 -> P2 with zero LLM calls and records strategy decision', async () => {
+  const directCandidate = {
+    strategy_id: 'strat-direct-1',
+    name: '纯规则突破直连',
+    version: 2,
+    current_version: 2,
+    generation: 3,
+    execution_mode: 'rule_direct',
+    symbol: 'BTCUSDT',
+    side: 'LONG',
+    signal_key: '15m:1994071',
+    mark: 68000,
+    rules: {
+      symbols: ['BTCUSDT'],
+      timeframes: ['15m'],
+      execution_mode: 'rule_direct',
+      entry: { kind: 'candle_close', side: 'long', operator: 'gt', value: 67800 },
+      exit: { stop_loss_pct: 0.02, take_profit_pct: 0.04 },
+    },
+  }
+  const service = makePhase2StrategyService({ candidates: [directCandidate] })
+  const llm = {
+    stream() {
+      throw new Error('rule_direct must make 0 LLM calls')
+    },
+  }
+  const env = makeIntegration({ service, fakeLlm: { llm, seen: [] } })
+  const result = await env.integration.run()
+
+  assert.equal(result.ok, true)
+  assert.equal(result.round.outcome, 'trade')
+  assert.equal(result.round.status, 'done')
+  assert.equal(result.round.mode, 'rule_direct')
+  assert.equal(result.round.reasonCode, 'TRADE_EXECUTED')
+  assert.equal(result.round.aiCalls.length, 0)
+  assert.equal(result.round.chain.stop_kind, 'completed')
+  assert.equal(result.round.chain.stopped_at, null)
+  assert.equal(result.round.strategy.strategy_id, 'strat-direct-1')
+  assert.equal(result.round.strategy.execution_mode, 'rule_direct')
+  assert.equal(result.round.attribution.mapped, true)
+
+  const p1Call = service.calls.find((c) => c.path === '/api/risk/evaluate')
+  const p2Call = service.calls.find((c) => c.path === '/api/execution/order')
+  assert.ok(p1Call)
+  assert.ok(p2Call)
+  assert.equal(p1Call.body.plan.side, 'LONG')
+  assert.equal(Number(p1Call.body.plan.sl), 66640)
+  assert.equal(Number(p1Call.body.plan.tp), 70720)
+  assert.equal(p1Call.body.strategy_context.signal_key, '15m:1994071')
+  assert.deepEqual(p2Call.body.strategy_context, p1Call.body.strategy_context)
+
+  assert.equal(service.decisionsRecorded.length, 1)
+  assert.equal(service.decisionsRecorded[0].strategyId, 'strat-direct-1')
+  assert.equal(service.decisionsRecorded[0].body.execution_mode, 'rule_direct')
+  assert.equal(service.decisionsRecorded[0].body.outcome, 'executed')
+})
+
+test('Phase-2 ai_assisted records ai_vetoed decision on NO_CANDIDATE and STRATEGY_AI_CONFLICT', async () => {
+  const shortCandidate = {
+    strategy_id: 'strat-ai-short',
+    name: 'AI辅助空头策略',
+    version: 1,
+    current_version: 1,
+    generation: 1,
+    execution_mode: 'ai_assisted',
+    symbol: 'BTCUSDT',
+    side: 'SHORT',
+    signal_key: '1h:498517',
+    mark: 68240,
+    rules: {
+      symbols: ['BTCUSDT'],
+      timeframes: ['1h'],
+      execution_mode: 'ai_assisted',
+      entry: { kind: 'rsi_threshold', side: 'short', period: 14, operator: 'gt', value: 70 },
+      exit: { stop_loss_pct: 0.02, take_profit_pct: 0.03 },
+    },
+  }
+
+  // 1) AI conflict (decisionFixture picks LONG while strategy is SHORT)
+  const conflictSvc = makePhase2StrategyService({ candidates: [shortCandidate] })
+  const conflictEnv = makeIntegration({ service: conflictSvc, fakeLlm: makeFakeLlm({ mode: 'trade' }) })
+  const conflictRes = await conflictEnv.integration.run()
+  assert.equal(conflictRes.ok, true)
+  assert.equal(conflictRes.round.outcome, 'no_trade')
+  assert.equal(conflictRes.round.reasonCode, 'STRATEGY_AI_CONFLICT')
+  assert.equal(conflictRes.round.strategy.execution_mode, 'ai_assisted')
+  assert.equal(conflictSvc.calls.some((c) => c.path === '/api/risk/evaluate'), false)
+  assert.equal(conflictSvc.decisionsRecorded.length, 1)
+  assert.equal(conflictSvc.decisionsRecorded[0].body.outcome, 'ai_vetoed')
+  assert.equal(conflictSvc.decisionsRecorded[0].body.reason_code, 'STRATEGY_AI_CONFLICT')
+
+  // 2) Analysis stand_aside NO_CANDIDATE
+  const standAsideSvc = makePhase2StrategyService({ candidates: [shortCandidate] })
+  const standAsideEnv = makeIntegration({ service: standAsideSvc, fakeLlm: makeFakeLlm({ mode: 'no_trade' }) })
+  const standAsideRes = await standAsideEnv.integration.run()
+  assert.equal(standAsideRes.ok, true)
+  assert.equal(standAsideRes.round.outcome, 'no_trade')
+  assert.equal(standAsideRes.round.reasonCode, 'NO_CANDIDATE')
+  assert.equal(standAsideSvc.decisionsRecorded.length, 1)
+  assert.equal(standAsideSvc.decisionsRecorded[0].body.outcome, 'ai_vetoed')
+  assert.equal(standAsideSvc.decisionsRecorded[0].body.reason_code, 'NO_CANDIDATE')
+})
+
+test('P1-6: strategy business rejections at P1 close as no_trade instead of failed, and skipped reasons are summarized', async () => {
+  const longCandidate = {
+    strategy_id: 'strat-ai-long',
+    name: '多头策略',
+    version: 1,
+    current_version: 1,
+    generation: 1,
+    execution_mode: 'ai_assisted',
+    symbol: 'BTCUSDT',
+    side: 'LONG',
+    signal_key: '15m:1994071',
+    mark: 68240,
+    rules: {
+      symbols: ['BTCUSDT'],
+      timeframes: ['15m'],
+      entry: { kind: 'mark_threshold', side: 'long', operator: 'gt', value: 68000 },
+      exit: { stop_loss_pct: 0.02, take_profit_pct: 0.04 },
+    },
+  }
+  for (const rejectCode of ['E_STRATEGY_SIGNAL_FALSE', 'E_STRATEGY_PLAN_MISMATCH', 'E_STRATEGY_SIGNAL_DUPLICATE']) {
+    const svc = makePhase2StrategyService({ candidates: [longCandidate], p1Status: 422, p1Code: rejectCode })
+    const env = makeIntegration({ service: svc })
+    const res = await env.integration.run()
+    assert.equal(res.ok, true, `${rejectCode} must not crash round`)
+    assert.equal(res.round.status, 'no_trade')
+    assert.equal(res.round.outcome, 'no_trade')
+    assert.equal(res.round.reasonCode, rejectCode)
+    assert.notEqual(res.round.chain.stop_kind, 'failed')
+  }
+
+  // Informative skip summary when candidates=[] and skipped carries reasons
+  const skippedSvc = makePhase2StrategyService({
+    candidates: [],
+    skipped: [
+      { strategy_id: 's1', name: 'EMA金叉', reason_code: 'SIGNAL_ALREADY_USED' },
+      { strategy_id: 's2', name: '资金费反转', reason_code: 'CIRCUIT_BREAKER_TRIPPED' },
+    ],
+  })
+  const skippedEnv = makeIntegration({ service: skippedSvc })
+  const skippedRes = await skippedEnv.integration.run()
+  assert.equal(skippedRes.ok, true)
+  assert.equal(skippedRes.round.reasonCode, 'NO_ELIGIBLE_STRATEGY')
+  assert.match(skippedRes.round.strategy_selection_reason, /EMA金叉（本周期信号已消费）/)
+  assert.match(skippedRes.round.strategy_selection_reason, /资金费反转（策略熔断已触发）/)
+})
+
+test('Phase-2 /state exposes strategy_summary and /strategies routes allow attribution, preview, decisions and dynamic analyze route', async () => {
+  const strategiesList = [
+    { strategy_id: 's1', name: '趋势一号', enabled: true, circuit_state: 'ok' },
+    { strategy_id: 's2', name: '均值二号', enabled: false, circuit: { state: 'tripped' } },
+  ]
+  const service = makePhase2StrategyService({ strategiesList, mode: 'mounted' })
+  const oldFetch = service.fetchImpl
+  service.fetchImpl = async (url, options = {}) => {
+    const u = new URL(url)
+    const method = options.method ?? 'GET'
+    if (u.pathname === '/api/strategies/s1' && method === 'GET') {
+      return jsonResponse(200, { strategy: { draft: { revision: 1, source_text: 'BTC突破做多', answers: {}, questions: [] } } })
+    }
+    if (u.pathname === '/api/strategies/s1/draft' && method === 'PUT') {
+      return jsonResponse(200, { strategy: { draft: JSON.parse(options.body) } })
+    }
+    return oldFetch(url, options)
+  }
+
+  const seenAnalyzeRoutes = []
+  let activeModel = 'dynamic-model-v2'
+  const ctx = {
+    agentDefaultModel: { currentSelection: () => ({ provider: 'dsh-live', model: activeModel }) },
+    llm: {
+      async *stream(opts) {
+        seenAnalyzeRoutes.push({ provider: opts.provider, model: opts.model })
+        yield {
+          type: 'text-delta',
+          text: JSON.stringify({ summary: '已解析', rules: { symbols: ['BTCUSDT'] }, questions: [], suggestions: [], sources: {} }),
+        }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    },
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'twb-p2-http-'))
+  const tokenFile = path.join(dir, '.api-token')
+  fs.writeFileSync(tokenFile, `${SERVICE_TOKEN}\n`, 'utf8')
+  const integration = createIntegration({
+    ctx,
+    serviceBaseUrl: 'http://127.0.0.1:8791',
+    dataDir: dir,
+    tokenFile,
+    fetchImpl: service.fetchImpl,
+    now: () => NOW,
+  })
+
+  const state = await integration.state({ force: true })
+  assert.deepEqual(state.strategy_summary, {
+    supported: true,
+    mode: 'mounted',
+    revision: 4,
+    total_count: 2,
+    enabled_count: 1,
+    tripped_count: 1,
+    tripped_names: ['均值二号'],
+  })
+
+  const callRoute = async (method, urlPath, body = null) => {
+    const raw = body !== null ? Buffer.from(JSON.stringify(body), 'utf8') : null
+    const req = {
+      method,
+      url: urlPath,
+      socket: { remoteAddress: '127.0.0.1' },
+      headers: { host: '127.0.0.1:8791', ...(raw ? { 'content-type': 'application/json' } : {}) },
+      on(event, handler) {
+        if (event === 'data' && raw) handler(raw)
+        if (event === 'end') handler()
+      },
+      resume() {},
+    }
+    const res = demoSetupRes()
+    await integration.handle(req, res)
+    return res.rec
+  }
+
+  // GET /strategies/attribution
+  const attrRes = await callRoute('GET', '/trading-workbench/api/strategies/attribution?range_s=86400')
+  assert.equal(attrRes.status, 200)
+  assert.equal(attrRes.body.items[0].strategy_id, 's1')
+
+  // POST /strategies/:id/preview with >100KB payload (120KB <= 150KB limit)
+  const largePad = 'x'.repeat(115_000)
+  const previewRes = await callRoute('POST', '/trading-workbench/api/strategies/s1/preview', { note: largePad })
+  assert.equal(previewRes.status, 200)
+  assert.equal(previewRes.body.triggered, true)
+
+  // POST /strategies/:id/analyze missing revision -> 422
+  const missingRev = await callRoute('POST', '/trading-workbench/api/strategies/s1/analyze', {})
+  assert.equal(missingRev.status, 422)
+
+  // POST /strategies/:id/analyze uses live DSH selection dynamically
+  activeModel = 'dynamic-model-v3'
+  const analyzeRes = await callRoute('POST', '/trading-workbench/api/strategies/s1/analyze', { revision: 1 })
+  assert.equal(analyzeRes.status, 200)
+  assert.deepEqual(seenAnalyzeRoutes[0], { provider: 'dsh-live', model: 'dynamic-model-v3' })
+})
+
