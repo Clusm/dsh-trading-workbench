@@ -55,6 +55,15 @@ DEFAULT_PROBE_LIMIT = 30
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,15}USDT$")
 _LOG_LEVELS = frozenset({"debug", "info", "warning", "error", "critical"})
 
+#: P0②（docs/19 §4 / R1）：出口代理必须**显式**传给交易所 httpx 客户端。
+#: 只读这一个进程环境变量，绝不回写 os.environ（否则与交易所无关的出站请求也会
+#: 被改道），也不落进任何日志/接口：日志只打 host:port。
+EGRESS_PROXY_ENV = "WORKBENCH_EGRESS_PROXY"
+#: 只接受 http(s)://host:port：不含 userinfo / 路径 / 查询串，端口另外校验范围。
+_EGRESS_PROXY_RE = re.compile(
+    r"^(https?)://([^/\s:@?#\[\]]{1,255}):(\d{1,5})$", re.IGNORECASE
+)
+
 
 class AuthTokenError(RuntimeError):
     """token 文件不可读/不可写；启动应失败而不是静默降级为 dev-open。"""
@@ -98,6 +107,80 @@ def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> 
     if not minimum <= value <= maximum:
         raise ValueError(f"{name} must be within [{minimum}, {maximum}], got {value}")
     return value
+
+
+def mask_egress_proxy(raw: str | None) -> str:
+    """错误信息/日志用的脱敏形式：去掉 userinfo 与查询串，只留 scheme://host:port。"""
+
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if "@" in text:
+        scheme, sep, rest = text.partition("://")
+        if sep:
+            text = f"{scheme}://***@{rest.split('@', 1)[1]}"
+    return text.split("?", 1)[0]
+
+
+def parse_egress_proxy(raw: str | None) -> str | None:
+    """校验 ``WORKBENCH_EGRESS_PROXY``：只接受 ``http(s)://host:port``。
+
+    空值返回 ``None``，表示**维持现状**（不显式传代理，httpx 继续按进程环境决定）；
+    含 userinfo / 路径 / 查询串一律拒绝——凭据不进配置，也不进日志。
+    """
+
+    value = (raw or "").strip()
+    if not value:
+        return None
+    match = _EGRESS_PROXY_RE.match(value)
+    if not match:
+        raise ValueError(
+            f"{EGRESS_PROXY_ENV} must look like http://host:port "
+            f"(no credentials, path or query), got {mask_egress_proxy(value)!r}"
+        )
+    port = int(match.group(3))
+    if not 1 <= port <= 65535:
+        raise ValueError(
+            f"{EGRESS_PROXY_ENV} port must be within [1, 65535], got {port}"
+        )
+    return f"{match.group(1).lower()}://{match.group(2)}:{port}"
+
+
+def egress_proxy_label(proxy: str | None) -> str:
+    """日志与 /health 的出口代理标签：只给 ``host:port``，没有就是 ``none``。"""
+
+    if not proxy:
+        return "none"
+    from urllib.parse import urlsplit
+
+    try:
+        parsed = urlsplit(proxy)
+        host = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:  # pragma: no cover - parse_egress_proxy 已拦截
+        return "none"
+    if not host:
+        return "none"
+    return f"{host}:{port}" if port else host
+
+
+def httpx_proxy_kwargs(proxy: str | None) -> dict[str, str]:
+    """按已装 httpx 版本选 ``proxy=`` / ``proxies=``；未配置时返回空 dict。
+
+    httpx 0.28 移除了 ``proxies=``，旧版本没有 ``proxy=``：两个入口（执行/行情）
+    都必须用同一个判断，避免一个客户端走代理、另一个悄悄直连。
+    """
+
+    if not proxy:
+        return {}
+    import httpx
+
+    parts = str(getattr(httpx, "__version__", "")).split(".")
+    try:
+        major, minor = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):  # pragma: no cover - 版本号异常按新版处理
+        major, minor = (0, 28)
+    return {"proxies": proxy} if (major, minor) < (0, 28) else {"proxy": proxy}
 
 
 def _restrict_token_file(path: Path) -> None:
@@ -326,6 +409,9 @@ class Settings:
     # §6 M2：环境在启动时固定；未知值拒绝启动（fail-closed），不做静默回退。
     # 放在默认值字段区，避免破坏位置参数兼容性。
     venue: str = "demo"
+    # P0②（docs/19 §4 / R1）：交易所出口代理。None = 维持现状（不显式传代理）。
+    # 只显式交给执行/行情两个 httpx 客户端，不写进 os.environ，也不进日志。
+    egress_proxy: str | None = None
 
     def __post_init__(self) -> None:
         if self.venue not in VENUES:
@@ -338,6 +424,11 @@ class Settings:
             object.__setattr__(self, "auth_mode", AUTH_MODE_BEARER)
         if self.api_token and self.auth_token_source == "none":
             object.__setattr__(self, "auth_token_source", "provided")
+        # 直接构造/replace 传入的代理同样校验：非法值 fail-closed，不静默直连。
+        if self.egress_proxy:
+            object.__setattr__(
+                self, "egress_proxy", parse_egress_proxy(self.egress_proxy)
+            )
 
     # ---------------------------------------------------------------- venue
     @property
@@ -351,6 +442,12 @@ class Settings:
     @property
     def venue_host(self) -> str:
         return VENUE_HOSTS[self.venue]
+
+    @property
+    def egress_proxy_label(self) -> str:
+        """出口代理的可公开标签：``host:port`` 或 ``none``（绝不含凭据）。"""
+
+        return egress_proxy_label(self.egress_proxy)
 
     # ---------------------------------------------------------------- paths
     @property
@@ -419,6 +516,12 @@ class Settings:
                 "min_interval_s": self.income_sync_min_interval_s,
                 "window_s": self.income_sync_window_s,
                 "overlap_s": self.income_sync_overlap_s,
+            },
+            # P0②：出口代理只暴露 host:port，凭据/完整 URL 一律不出现在这里。
+            "egress_proxy": {
+                "configured": bool(self.egress_proxy),
+                "label": self.egress_proxy_label,
+                "env": EGRESS_PROXY_ENV,
             },
             "log_level": self.log_level,
         }
@@ -561,4 +664,6 @@ class Settings:
             income_sync_overlap_s=_env_float(
                 "WORKBENCH_INCOME_SYNC_OVERLAP_S", 60.0, minimum=0.0, maximum=600.0
             ),
+            # P0②：默认空 = 维持现状；非法值直接让启动失败（不静默回退直连）。
+            egress_proxy=parse_egress_proxy(_env(EGRESS_PROXY_ENV)),
         )

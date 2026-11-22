@@ -1,6 +1,7 @@
 """硬风控规则单元测试（R00–R25）：不经过 HTTP，直接验证确定性引擎。
 
-覆盖验收：R00–R19/R22–R25 生效；R20/R21 默认关闭；AI 不能放宽硬上限。
+覆盖验收：R00–R25 全部生效；R20/R21 默认开启（docs/19 §2 R12）、可由 env 关闭；
+AI 不能放宽硬上限。
 
 T02（§8·A 权限收口）另有专项：
 - confidence 只作分析字段，不改变允许数量/杠杆上限（``ConfidenceAuthorizationTests``）；
@@ -348,10 +349,41 @@ class RiskRuleTests(unittest.TestCase):
         )
         self.assertRejected(verdict, "R19")
 
-    def test_r20_r21_default_off(self) -> None:
+    def test_r20_r21_default_on(self) -> None:
+        # docs/19 §2 R12：默认开启（对旧链同样生效），env 才能关闭。
+        self.assertTrue(RiskLimits().enable_loss_streak)
+        self.assertTrue(RiskLimits().enable_frequency)
+        self.assertEqual(RiskLimits().as_dict()["rules_default_off"], [])
+        cool = evaluate(make_plan(), make_ctx(cooldown_active=True), LIMITS, filters=FILTERS)
+        self.assertRejected(cool, "R20")
+        freq = evaluate(make_plan(), make_ctx(trades_today=99), LIMITS, filters=FILTERS)
+        self.assertRejected(freq, "R21")
+
+    def test_r20_r21_can_be_disabled_by_env(self) -> None:
+        env = {
+            "WORKBENCH_RISK_ENABLE_LOSS_STREAK": "false",
+            "WORKBENCH_RISK_ENABLE_FREQUENCY": "0",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            limits = RiskLimits.from_env()
+        self.assertFalse(limits.enable_loss_streak)
+        self.assertFalse(limits.enable_frequency)
+        self.assertEqual(limits.as_dict()["rules_default_off"], ["R20", "R21"])
         ctx = make_ctx(cooldown_active=True, trades_today=99, trades_symbol_today=9)
-        verdict = evaluate(make_plan(), ctx, LIMITS, filters=FILTERS)
+        verdict = evaluate(make_plan(), ctx, limits, filters=FILTERS)
         self.assertEqual(verdict.verdict, "approved", verdict.as_dict())
+
+    def test_rule_table_reports_enabled_defaults(self) -> None:
+        from workbench_service.risk.config import rule_table
+
+        rows = {row["rule_id"]: row for row in rule_table()}
+        self.assertTrue(rows["R20"]["enabled"])
+        self.assertTrue(rows["R21"]["enabled"])
+        self.assertIn("默认开", rows["R20"]["summary"])
+        self.assertIn("WORKBENCH_RISK_ENABLE_LOSS_STREAK", rows["R20"]["summary"])
+        disabled = {row["rule_id"]: row for row in rule_table(loss_streak=False, frequency=False)}
+        self.assertFalse(disabled["R20"]["enabled"])
+        self.assertFalse(disabled["R21"]["enabled"])
 
     def test_r20_r21_when_enabled(self) -> None:
         limits = RiskLimits(enable_loss_streak=True, enable_frequency=True)

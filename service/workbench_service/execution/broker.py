@@ -24,7 +24,13 @@ from ..ledger.store import Ledger, utc_now
 from ..risk.config import RiskLimits
 from ..risk.models import OrderPlan
 from .client import DemoBinanceClient
-from .errors import DemoApiError, ExecutionConfigError, ExecutionRejected, OutboxUncertain
+from .errors import (
+    VENUE_GEO_BLOCKED_CODE,
+    DemoApiError,
+    ExecutionConfigError,
+    ExecutionRejected,
+    OutboxUncertain,
+)
 from .filters import (
     SymbolFilters,
     format_qty,
@@ -89,6 +95,8 @@ class BrokerSnapshot:
     fetched_at: float = 0.0
     fetched_at_iso: str = ""
     error: str | None = None
+    #: 失败归类（与 DemoApiError.kind 同一套词表）：已知 geo_blocked = 451 地区限制。
+    error_kind: str | None = None
     stale: bool = False
     #: T20 §2.2：最近一次**真正**从交易所取到数据的时间。交易所不可达时界面必须
     #: 显示“最后成功时间”，而不是把失败时间伪装成数据时间。
@@ -142,6 +150,32 @@ def derive_client_order_id(cycle_id: str, symbol: str, action: str, seq: int = 0
     base = re.sub(r"[^A-Za-z0-9]", "", symbol.upper().replace("USDT", ""))[:6] or "SYM"
     action_code = (action or "O").upper()[:1]
     return f"wb-{cycle}-{base}-{action_code}-{int(seq)}"
+
+
+def failure_kind(exc: BaseException) -> str:
+    """把一次读取失败归到一个稳定的类（geo_blocked / rate_limited / ...）。
+
+    P0②：451 必须与“普通 4xx 拒绝”和“传输错误”分开——它决定要不要退避、
+    要不要在 /health 上暴露 E_VENUE_GEO_BLOCKED。
+    """
+
+    if isinstance(exc, ExecutionRejected) and exc.code == VENUE_GEO_BLOCKED_CODE:
+        return "geo_blocked"
+    if isinstance(exc, DemoApiError):
+        return str(getattr(exc, "kind", "unknown") or "unknown")
+    return "unknown"
+
+
+def _retry_after_ms(exc: BaseException) -> int | None:
+    """上游给了 Retry-After 就换算成毫秒；没有就 None（不编造数字）。"""
+
+    seconds = getattr(exc, "retry_after_s", None)
+    try:
+        if seconds is None:
+            return None
+        return int(max(0.0, float(seconds)) * 1000)
+    except (TypeError, ValueError):  # pragma: no cover - 上游脏值
+        return None
 
 
 class DemoBroker:
@@ -264,11 +298,27 @@ class DemoBroker:
             else:
                 snapshot = self._fetch_snapshot()
         except Exception as exc:  # noqa: BLE001 - 读取失败保留最近有效快照
+            kind = failure_kind(exc)
             self._note_failure(now, exc)
             if self._last_good is not None:
                 stale = self._stale_from_last_good(now, exc)
                 self._cache = stale
                 return stale
+            # P0②：451 单独给出可执行的码与退避提示，不再混进“不可达”。
+            if kind == "geo_blocked":
+                raise ExecutionRejected(
+                    VENUE_GEO_BLOCKED_CODE,
+                    "exchange rejected this egress IP with HTTP 451 (restricted location)",
+                    status_code=503,
+                    details={
+                        "venue_geo_blocked": True,
+                        "retry_after_ms": _retry_after_ms(exc),
+                        "error": f"{type(exc).__name__}: {exc}"[:200],
+                        "last_success_at": self.last_success_at,
+                        "cooldown_until": self.cooldown_until,
+                        "egress": "WORKBENCH_EGRESS_PROXY",
+                    },
+                ) from exc
             raise ExecutionRejected(
                 "E_EXCHANGE_UNAVAILABLE",
                 f"demo exchange unreachable: {type(exc).__name__}",
@@ -308,6 +358,7 @@ class DemoBroker:
             "cooldown_until": self.cooldown_until,
             "cooldown_remaining_s": round(max(0.0, self._unavailable_until - now), 1),
             "last_error": failure.get("error"),
+            "last_failure_kind": failure.get("kind"),
             "last_failure_at": failure.get("at"),
             "read_budget_s": self._snapshot_budget_s,
             "failure_cooldown_s": self._failure_cooldown_s,
@@ -319,6 +370,7 @@ class DemoBroker:
         self._unavailable_until = now + self._failure_cooldown_s
         self._last_failure = {
             "at": utc_now(),
+            "kind": failure_kind(exc),
             "error": f"{type(exc).__name__}: {exc}"[:200],
             "cooldown_until": self.cooldown_until,
         }
@@ -339,6 +391,7 @@ class DemoBroker:
             fetched_at=now,
             fetched_at_iso=utc_now(),
             error=f"{type(exc).__name__}: {exc}"[:200],
+            error_kind=failure_kind(exc),
             stale=True,
             last_success_at=good.fetched_at_iso,
         )
@@ -347,17 +400,34 @@ class DemoBroker:
         """冷却期内不复用失败结果，也不再打上游。"""
 
         if self._last_good is not None:
+            # 冷却期内沿用**上一次真实失败**的归类与文案：451 不能在这里被说成
+            # 泛化的超时，否则 /api/status 与退避判定都会看不出是出口 IP 问题。
+            last = self._last_failure or {}
             stale = self._stale_from_last_good(
                 now,
                 DemoApiError(
-                    "exchange in failure cooldown",
+                    str(last.get("error") or "exchange in failure cooldown"),
                     path="/",
-                    kind="timeout",
+                    kind=str(last.get("kind") or "timeout"),
                 ),
             )
             self._cache = stale
             return stale
         failure = (self._last_failure or {}).get("error") or "exchange unreachable"
+        if (self._last_failure or {}).get("kind") == "geo_blocked":
+            # 冷却窗口内仍然如实说“地区限制”，不要退化成泛化的“不可达”。
+            raise ExecutionRejected(
+                VENUE_GEO_BLOCKED_CODE,
+                f"exchange rejected this egress IP with HTTP 451 (cooldown): {failure}"[:200],
+                status_code=503,
+                details={
+                    "venue_geo_blocked": True,
+                    "retry_after_ms": int(max(0.0, self._unavailable_until - now) * 1000),
+                    "error": failure,
+                    "last_success_at": self.last_success_at,
+                    "cooldown_until": self.cooldown_until,
+                },
+            )
         raise ExecutionRejected(
             "E_EXCHANGE_UNAVAILABLE",
             f"demo exchange unreachable (cooldown): {failure}"[:200],

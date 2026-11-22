@@ -16,6 +16,7 @@ from typing import Any
 
 from ..db import _connect, utc_now_iso
 from ..ledger.numbers import dec_text, to_decimal
+from . import scan as rule_scan
 from .attribution import _closed_trades_by_strategy, compute_strategy_attribution
 from .evaluator import describe_rules
 from .locking import execution_guard
@@ -181,6 +182,38 @@ class StrategyStore:
                 self._get(conn, row[0], preloaded_trades=trades_map)
                 for row in conn.execute(query).fetchall()
             ]
+
+    def authorized_rules(self) -> list[dict[str, Any]]:
+        """已启用策略的确认版本规则（不含归因统计）。
+
+        v3.1 P2 的 ``/api/rules/scan`` 每 15s 调一次；``_get`` 里的归因统计是界面
+        查询的负担，扫描刻意跳过它，只读策略行 + 确认版本（含 ``validation``）。
+        """
+
+        with self.transaction() as conn:
+            rows = conn.execute(
+                "SELECT strategy_id,name,current_version,generation,created_at "
+                "FROM strategies WHERE enabled=1 ORDER BY created_at,strategy_id"
+            ).fetchall()
+            result: list[dict[str, Any]] = []
+            for raw in rows:
+                row = dict(raw)
+                confirmed = (
+                    self._version(conn, row["strategy_id"], row["current_version"])
+                    if row["current_version"]
+                    else None
+                )
+                result.append(
+                    {
+                        "strategy_id": row["strategy_id"],
+                        "name": row["name"],
+                        "current_version": row["current_version"],
+                        "generation": int(row["generation"]),
+                        "created_at": row["created_at"],
+                        "confirmed_version": confirmed,
+                    }
+                )
+            return result
 
     def rename(self, strategy_id, name):
         name = text(name, "name", 100)
@@ -471,6 +504,50 @@ class StrategyStore:
             fail("E_STRATEGY_VALIDATION", "请求体必须为对象")
         with self.transaction(write=True) as conn:
             return self._record_decision_in_tx(conn, strategy_id, body)
+
+    def apply_rule_dispatch(
+        self,
+        rule_key: str,
+        symbol: str,
+        outcome: str,
+        *,
+        at_ms: int,
+        scan_interval_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """回写 Host 的派发结果（``POST /api/rules/dispatched``），幂等。
+
+        只写 ``rule_eval_state``：``dispatched`` 之后必须观察到一次"不满足"才能
+        重新武装；``rejected`` 额外冷却 1 个扫描间隔。冷却用 max() 合并，所以
+        同一个 at_ms 重复回写不会叠加。
+        """
+
+        parsed = rule_scan.split_rule_key(str(rule_key or "").strip())
+        if parsed is None:
+            fail("E_RULE_KEY_INVALID", "rule_key 必须为 strategy:<strategy_id>:<version>", 422)
+        strategy_id, version = parsed
+        if outcome not in rule_scan.DISPATCH_OUTCOMES:
+            fail("E_RULE_OUTCOME_INVALID", "outcome 必须为 dispatched 或 rejected", 422)
+        symbol = str(symbol or "").strip().upper()
+        if not symbol:
+            fail("E_STRATEGY_VALIDATION", "symbol 不能为空")
+        with self.transaction(write=True) as conn:
+            # 未知策略直接 404：不让一个拼错的 rule_key 在状态表里留下垃圾行。
+            self._row(conn, strategy_id)
+            state, idempotent = rule_scan.apply_dispatch(
+                conn,
+                rule_key=rule_scan.rule_key_for(strategy_id, version),
+                symbol=symbol,
+                outcome=outcome,
+                at_ms=int(at_ms),
+                scan_interval_ms=scan_interval_ms,
+            )
+        return {
+            "state": state.view(),
+            "idempotent": idempotent,
+            "outcome": outcome,
+            "at_ms": int(at_ms),
+            "scan_interval_ms": rule_scan.clamp_interval_ms(scan_interval_ms),
+        }
 
     def version(self, strategy_id, version):
         integer(version, "version", 1)

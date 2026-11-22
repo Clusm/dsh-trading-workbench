@@ -48,13 +48,36 @@ class CycleStore:
             conn.close()
 
     # ------------------------------------------------------------------ cycles
-    def running(self) -> dict[str, Any] | None:
+    def running(self, purpose: str | None = None) -> dict[str, Any] | None:
+        """最新的 RUNNING cycle。
+
+        ``purpose`` 非空时只看同一个 purpose（v3.1 R2：研判与触发各允许 1 个 RUNNING）；
+        ``None`` 保持 v0.2.1 的"任意 RUNNING"语义，供旧调用方 / 诊断使用。
+        """
+
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM cycle_runs WHERE state='RUNNING' "
-                "ORDER BY started_at DESC LIMIT 1"
-            ).fetchone()
+            if purpose is None:
+                row = conn.execute(
+                    "SELECT * FROM cycle_runs WHERE state='RUNNING' "
+                    "ORDER BY started_at DESC LIMIT 1"
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM cycle_runs WHERE state='RUNNING' AND purpose=? "
+                    "ORDER BY started_at DESC LIMIT 1",
+                    (purpose,),
+                ).fetchone()
             return None if row is None else dict(row)
+
+    def running_cycles(self) -> list[dict[str, Any]]:
+        """所有 RUNNING cycle（按 purpose 分辨用；调用方不得跨 purpose 结束别人的 cycle）。"""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM cycle_runs WHERE state='RUNNING' "
+                "ORDER BY started_at DESC, cycle_id DESC"
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def slot_exists(self, slot_id: str) -> bool:
         with self._connect() as conn:

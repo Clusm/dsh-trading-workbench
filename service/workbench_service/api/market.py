@@ -34,6 +34,7 @@ from ..market.transport import (
     MarketBanned,
     MarketBudgetDeferred,
     MarketCooldown,
+    MarketGeoBlocked,
     MarketTimeout,
     MarketUpstreamError,
     cooldown_retry_after,
@@ -67,7 +68,15 @@ def _market_service(request: Request) -> MarketService:
 
 def _market_error_response(request: Request, exc: MarketUpstreamError) -> JSONResponse:
     retry_after = cooldown_retry_after(exc)
-    if isinstance(exc, MarketBanned):
+    # P0②（docs/19 §4 / R1）：451 已被 transport 标成 kind=geo_blocked。它不是“行情
+    # 上游偶发失败”，而是本机出口 IP 位于受限地区：必须给可执行码，让界面/运维
+    # 直接去看 WORKBENCH_EGRESS_PROXY，而不是笼统的 502 E_MARKET_UPSTREAM。
+    geo_blocked = isinstance(exc, MarketGeoBlocked) or str(
+        getattr(exc, "kind", "") or ""
+    ) == "geo_blocked"
+    if geo_blocked:
+        status_code, code = 503, "E_VENUE_GEO_BLOCKED"
+    elif isinstance(exc, MarketBanned):
         status_code, code = 503, "E_MARKET_BANNED"
     elif isinstance(exc, MarketCooldown):
         status_code, code = 503, "E_MARKET_COOLDOWN"
@@ -89,11 +98,19 @@ def _market_error_response(request: Request, exc: MarketUpstreamError) -> JSONRe
             "error": {
                 "code": code,
                 "message": exc.detail,
-                "retryable": isinstance(exc, (MarketCooldown, MarketBudgetDeferred, MarketTimeout)),
+                "retryable": isinstance(
+                    exc,
+                    (MarketCooldown, MarketBudgetDeferred, MarketTimeout, MarketGeoBlocked),
+                ),
                 "details": {
                     "upstream_code": exc.code,
                     "status_code": exc.status_code,
                     "retry_after_s": retry_after,
+                    # 毫秒口径与执行层 E_VENUE_GEO_BLOCKED 的 details 对齐；上游没给
+                    # Retry-After 时如实为 None（不编造退避数字）。
+                    "retry_after_ms": (
+                        None if retry_after is None else int(round(float(retry_after) * 1000))
+                    ),
                 },
             },
             "trace_id": _trace_id(request),
@@ -297,6 +314,9 @@ def probe(
         interval=resolved_interval,
         limit=resolved_limit,
         timeout_s=settings.probe_timeout_s,
+        # P0②：与执行/行情客户端同一份出口代理（settings 是唯一解析/校验点），
+        # 探针自己不读 env——否则 451 时探针的结论会和真实行情客户端不一样。
+        egress_proxy=settings.egress_proxy,
     )
     payload.update(cached=False, trace_id=_trace_id(request))
 

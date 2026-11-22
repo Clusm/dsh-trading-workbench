@@ -23,7 +23,13 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..config import DEMO_HOST
+from ..config import (
+    DEMO_HOST,
+    EGRESS_PROXY_ENV,
+    egress_proxy_label,
+    httpx_proxy_kwargs,
+    parse_egress_proxy,
+)
 from .credentials import DemoCredentials
 from .errors import DemoApiError, DemoGuardViolation
 
@@ -91,6 +97,7 @@ class DemoBinanceClient:
         recv_window_ms: int = 5000,
         clock=time.time,
         allowed_host: str | None = None,
+        egress_proxy: str | None = None,
     ) -> None:
         self._base_url = (base_url or "").rstrip("/")
         # §6 M2：守卫按环境放行，而不是永远只认 demo host。默认 demo 保持向后兼容；
@@ -111,11 +118,17 @@ class DemoBinanceClient:
         # 包入口已执行过一次；这里再兜底一次（直接 import 本模块的场景）。
         from ..proxyenv import sanitize_proxy_env as _sanitize
         _sanitize()
-        self._client = httpx.Client(
-            timeout=self._timeout_for("GET"),
-            transport=transport,
-            follow_redirects=False,
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        # P0②（docs/19 §4 / R1）：出口代理只**显式**交给这个 httpx 客户端。
+        # 不写进 os.environ（否则本地/无关请求也会被改道）；空值 = 维持现状。
+        self._egress_proxy = parse_egress_proxy(
+            egress_proxy if egress_proxy is not None else os.environ.get(EGRESS_PROXY_ENV)
+        )
+        self._client = httpx.Client(**self._client_options(transport=transport))
+        # 启动日志只打 host:port：凭据/完整 URL 一律不落日志。
+        logger.info(
+            "egress_proxy=%s component=execution venue_host=%s",
+            self.egress_proxy_label,
+            self._allowed_host,
         )
 
     # ------------------------------------------------------------------ guard
@@ -144,6 +157,34 @@ class DemoBinanceClient:
 
     def close(self) -> None:
         self._client.close()
+
+    # ------------------------------------------------------------- 出口代理
+    @property
+    def egress_proxy(self) -> str | None:
+        """生效的出口代理（已校验，不含 userinfo）；None = 未显式配置。"""
+
+        return self._egress_proxy
+
+    @property
+    def egress_proxy_label(self) -> str:
+        """日志/健康端点用的脱敏标签：``host:port`` 或 ``none``。"""
+
+        return egress_proxy_label(self._egress_proxy)
+
+    def _client_options(self, *, transport: httpx.BaseTransport | None = None) -> dict[str, Any]:
+        """httpx.Client 的构造参数（供测试断言“代理确实传给了客户端”）。
+
+        未配置代理时**不加** proxy 键：保持 httpx 原有的进程环境行为不变。
+        """
+
+        options: dict[str, Any] = {
+            "timeout": self._timeout_for("GET"),
+            "transport": transport,
+            "follow_redirects": False,
+            "headers": {"User-Agent": USER_AGENT, "Accept": "application/json"},
+        }
+        options.update(httpx_proxy_kwargs(self._egress_proxy))
+        return options
 
     # ------------------------------------------------------------- 超时预算
     @property
@@ -274,6 +315,19 @@ class DemoBinanceClient:
                 "HTTP 429 rate limited", path=path, status_code=429, kind="rate_limited",
                 retry_after_s=_retry_after(response),
             )
+        # P0②（docs/19 R1）：451 = 币安地区访问限制（出口 IP 位于受限地区）。
+        # 它既不是 5xx 也不是“非 JSON 的 4xx 拒绝”：重试没有意义，必须单独归类，
+        # 由上层映射成 E_VENUE_GEO_BLOCKED 并退避——这正是每 30–36s 一条
+        # snapshot_failed 的根因路径。
+        if response.status_code == 451:
+            raise DemoApiError(
+                "HTTP 451 venue geo restriction",
+                path=path,
+                status_code=451,
+                kind="geo_blocked",
+                retry_after_s=_retry_after(response),
+                payload={"error": "VenueGeoRestricted"},
+            )
         if response.status_code >= 500:
             raise DemoApiError(
                 f"HTTP {response.status_code}", path=path, status_code=response.status_code,
@@ -335,7 +389,14 @@ class DemoBinanceClient:
                 if clock_skew and method == "GET" and attempt + 1 < attempts:
                     self.sync_time()
                     continue
-                if exc.definitely_rejected or exc.kind in {"banned", "rate_limited", "timeout"}:
+                # geo_blocked 与 banned/rate_limited 一样：重试只会再要一个 451，
+                # 止住重试风暴（退避由 execution/service.py 负责）。
+                if exc.definitely_rejected or exc.kind in {
+                    "banned",
+                    "rate_limited",
+                    "timeout",
+                    "geo_blocked",
+                }:
                     raise
                 if attempt + 1 < attempts:
                     self.sync_time()

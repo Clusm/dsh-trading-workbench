@@ -6,7 +6,7 @@
 
 <p>
   <a href="https://www.npmjs.com/package/dsh-trading-workbench"><img alt="npm" src="https://img.shields.io/npm/v/dsh-trading-workbench?style=flat-square&color=cb3837"></a>
-  <a href="https://github.com/Clusm/dsh-trading-workbench/actions"><img alt="tests" src="https://img.shields.io/badge/tests-226%20passing-2ea043?style=flat-square"></a>
+  <a href="https://github.com/Clusm/dsh-trading-workbench/actions"><img alt="tests" src="https://img.shields.io/badge/tests-245%20passing-2ea043?style=flat-square"></a>
   <a href="package.json"><img alt="dsh" src="https://img.shields.io/badge/dsh-%3E%3D0.2.2--rc.1%20%3C0.3.0-4b6bfb?style=flat-square"></a>
   <a href="package.json"><img alt="node" src="https://img.shields.io/badge/node-%3E%3D22.19-3c873a?style=flat-square"></a>
   <img alt="venue" src="https://img.shields.io/badge/venue-Demo%20%2F%20Live-f0b90b?style=flat-square">
@@ -87,6 +87,27 @@
 4. **策略级独立绩效归因与自动熔断**：
    - 按策略聚合统计触发次数、成交次数、已平仓胜率、累计已实现净盈亏与 AI 否决绩效；
    - 支持配置单策略熔断（`max_consecutive_losses` 连续亏损笔数 / `max_cumulative_loss_usdt` 累计亏损金额），触发后自动停用该策略新开仓（保留已有仓位保护），人工核查后一键解除熔断并重置统计基线。
+
+---
+
+## v3.1 P2：触发引擎与边沿触发
+
+用户策略的执行从「10 分钟调度槽 + 水平触发」改为「独立触发引擎 + 边沿触发」（设计见 `docs/19`、接口见 `docs/18`）：
+
+- **三档开关**：`WORKBENCH_TRIGGER_MODE=off|shadow|live`（默认 `off`，也可用插件配置 `triggerEngine` 覆盖）。`off` 完全维持旧行为；`shadow` 只调扫描并写 `outcome='shadow_triggered'` 归档，不拿租约、不建 cycle、不调 P1/P2、不下单；`live` 才真正派发。
+- **节奏**：mark 类规则每 15s 扫描；K 线类规则在收盘后 +3s 扫描。服务端 `POST /api/rules/scan` 用同一个写事务读状态、查信号消费、按「策略 priority → 挂起时间」确定性排序。
+- **派发**：租约 → `POST /api/cycles {purpose:'trigger', symbols:[sym]}`（单币证据，满足 R14 ≤400s）→ P1 →（`ai_assisted` 且 `confirmMode=veto` 时一次 `trigger_confirm`，超时/异常一律否决）→ P2 → finalize → 释放租约。`E_LEASE_HELD` / `E_CYCLE_RUNNING` 只跳过本 tick 并计数，**绝不结束别人的 cycle**；下个 tick 重试。
+- **边沿语义（R5）**：首次求值就为真只记录不触发；必须「不满足 → 满足」才算边沿；派发过一次（无论结果）后必须观察到一次不满足才能重新武装；P1 拒绝额外冷却 1 个周期。停机保护：距离上次求值超过 mark 3 个扫描间隔（45s）或 K 线周期 +45s 时按首次求值处理，重启后不会追已经发生的信号。
+- **可观测**：`/health` 的 `trigger_engine` 带 `lastScanAt`、心跳、`leaseBusyCount`、`cycleBusyCount` 与上次派发；每次扫描写 `data/trigger-engine-state.json`。
+- **多候选排序**：服务端确定性排序，`StrategyAssistant.choose()`（模型选策略）与 404 回退的 `eligibleStrategies` 已删除。Host 端仓位/权益估算一并删除，数量只由服务端 `approved_qty` 决定。
+
+已知限制：
+
+- 旧版本策略的「水平触发」保留项未实现，本版本统一按边沿执行（生产库此前从未挂载过策略，无迁移负担）。
+- Host 申报的 `plan.qty` 只是上限（`1000000`），实际数量由服务端确定性计算；因此归档里 R05/R06/R07 会固定出现一次 downsize 记录，`record.sizing` 写明来源。
+- 451（出口 IP 受限）现在归类为 `E_VENUE_GEO_BLOCKED`，服务按 30s→600s 指数退避并停止上游读；显式出口代理用 `WORKBENCH_EGRESS_PROXY=http://host:port`。**仍需要把出口节点换到币安允许的地区**，代码不能代替换节点。
+- `service/.env.local` 里的明文实盘 Key/Secret 需要手工迁到 `<dataDir>/credentials/live.env`（或 `WORKBENCH_LIVE_ENV_FILE`）；本版本不自动搬移密钥。
+- 触发引擎跑在 Host 进程里：DSH 关闭期间不扫描，靠 setup 过期与停机保护避免迟到入场；持仓管理链（`execution_manage/1`）仍未接入，留待 P5。
 
 ---
 
@@ -204,9 +225,9 @@ npm pack && dsh plugin --profile <profile> add ./dsh-trading-workbench-0.2.0.tgz
 
 ```sh
 npm test                      # 源码约束 + 渲染冒烟 + 单测
-node client/checks.mjs        # 184 条源码约束（路由/文案键/安全边界/分发前提）
-node client/render-smoke.mjs  # 359 条渲染断言（夹具驱动的小型 DOM 运行时）
-node --test test/*.test.mjs   # 225 条 Host/服务/归档/策略/双引擎单测
+node client/checks.mjs        # 185 条源码约束（路由/文案键/安全边界/分发前提）
+node client/render-smoke.mjs  # 363 条渲染断言（夹具驱动的小型 DOM 运行时）
+node --test test/*.test.mjs   # 245 条 Host/服务/归档/策略/触发引擎单测
 ```
 
 客户端**没有构建步骤**：`client.js` 由 DSH 直接加载；渲染冒烟用自带的迷你 DOM 运行时，所以测试不需要浏览器。

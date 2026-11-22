@@ -16,7 +16,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { createIntegration, HostIntegrationError, capsFromEnvelope, portfolioGapText, resolveDefaultDataDir } from '../host/integration.js'
+import { createIntegration, HostIntegrationError, capsFromEnvelope, portfolioGapText, resolveDefaultDataDir, DECLARED_QTY_UPPER_BOUND } from '../host/integration.js'
 import { PLUGIN_ID, PLUGIN_VERSION } from '../index.js'
 import { createAutoScheduler } from '../host/scheduler.js'
 import { toRoundView } from '../host/round-view.js'
@@ -2987,7 +2987,20 @@ function mountedStrategyService({ eligible = true, authorized = true, configFail
     const u = new URL(url)
     if (u.pathname === '/api/ready') return jsonResponse(200, { ready: true, service_ready: true, capabilities: { strategies: true } })
     if (u.pathname === '/api/strategies/config') return configFail ? jsonResponse(503, { error: { code: 'STRATEGY_CONFIG_DOWN' } }) : jsonResponse(200, { config: { mode: 'mounted', revision: 2 } })
-    if (u.pathname === '/api/strategies/authorized') return jsonResponse(200, { strategies: authorized ? [strategy] : [] })
+    // v3.1（docs/18 §2 S9）：Host 只在触发引擎关闭时保留 10 分钟槽旧行为，候选一律由
+    // 服务端扫描给出（/evaluate-candidates 是 /api/rules/scan 的兼容别名）；404 回退已删除。
+    if (u.pathname === '/api/strategies/evaluate-candidates') {
+      const ready = authorized && eligible
+      return jsonResponse(200, {
+        mode: 'mounted',
+        revision: 2,
+        candidates: ready ? [strategy] : [],
+        skipped: ready ? [] : [{ strategy_id: strategy.strategy_id, name: strategy.name, reason_code: 'SIGNAL_FALSE' }],
+        triggered: ready ? [strategy] : [],
+        waiting: [],
+        transitioned: [],
+      })
+    }
     if (u.pathname === '/api/market/marks') return jsonResponse(200, { prices: { BTCUSDT: { mark: eligible ? 68240 : 67000, as_of_ms: NOW, stale: false } } })
     return oldFetch(url, options)
   }
@@ -3044,7 +3057,10 @@ test('P0-1: plugin identity is dsh-trading-workbench 0.2.1 and launcher root poi
   assert.equal(env.integration.listRounds().plugin, 'dsh-trading-workbench')
 })
 
-test('P0-2: open position in mounted mode prioritizes risk management instead of short-circuiting NO_ELIGIBLE_STRATEGY', async () => {
+test('D-1: a manual run with an open position stops before any LLM call and records POSITION_OPEN', async () => {
+  // docs/16 §5.1 / docs/19 §4 P1：自动调度早就在 scheduler.preflight 里做过持仓预检，
+  // 手动「运行一轮」以前会跑完整条 6–8 次 LLM 的开仓链，最后在 P1 以
+  // E_RISK_SYMBOL_POSITION 失败（约 4–5 万 token、2 分钟）。现在 0 次 LLM 调用。
   const base = makeFakeService({
     credentials: true,
     statusPositions: [{ symbol: 'BTCUSDT', position_side: 'LONG', qty: '0.05', entry_price: '67500' }],
@@ -3065,13 +3081,18 @@ test('P0-2: open position in mounted mode prioritizes risk management instead of
   const fakeLlm = makeFakeLlm({ mode: 'no_trade' })
   const env = makeIntegration({ service: base, fakeLlm })
   const result = await env.integration.run()
+
   assert.equal(result.ok, true)
-  assert.notEqual(result.round.reasonCode, 'NO_ELIGIBLE_STRATEGY')
+  assert.equal(result.round.outcome, 'no_trade')
+  assert.equal(result.round.reasonCode, 'POSITION_OPEN')
+  assert.equal(result.round.status, 'no_trade')
+  assert.equal(result.round.aiCalls.length, 0)
+  assert.equal(fakeLlm.seen.length, 0, 'D-1: 有持仓时必须 0 次 LLM 调用')
   assert.equal(result.round.symbol, 'BTCUSDT')
   assert.equal(result.round.strategy, null)
-  assert.match(result.round.strategy_selection_reason, /已有持仓/)
-  assert.ok(env.service.calls.some((c) => c.path === '/api/cycles'))
-  assert.ok(fakeLlm.seen.length >= 1, 'chain ran instead of short-circuiting')
+  assert.equal(env.service.calls.some((c) => c.path === '/api/cycles'), false, 'D-1 不创建 cycle')
+  assert.equal(env.service.calls.some((c) => c.path === '/api/risk/evaluate'), false)
+  assert.ok(result.round.gaps.some((gap) => gap.includes('D-1 预检')))
 })
 
 function makePhase2StrategyService({
@@ -3168,6 +3189,17 @@ test('Phase-2 rule_direct executes P1 -> P2 with zero LLM calls and records stra
   assert.equal(Number(p1Call.body.plan.tp), 70720)
   assert.equal(p1Call.body.strategy_context.signal_key, '15m:1994071')
   assert.deepEqual(p2Call.body.strategy_context, p1Call.body.strategy_context)
+
+  // v3.1（docs/18 §2 S5）：Host 不再估算仓位。plan.qty 只是「申报上限」，
+  // 真实数量只来自服务端 approved_qty（risk/rules.py 的 R05/R06/R07/R12）。
+  assert.equal(p1Call.body.plan.qty, DECLARED_QTY_UPPER_BOUND)
+  const rawRecord = env.integration.store.find(result.round.roundId)
+  assert.ok(rawRecord, 'round must be archived')
+  assert.equal(rawRecord.sizing.source, 'service')
+  assert.equal(rawRecord.sizing.declared_qty_upper_bound, DECLARED_QTY_UPPER_BOUND)
+  assert.equal(rawRecord.sizing.approved_qty, '0.067')
+  assert.equal(JSON.stringify(rawRecord.sizing).includes('5000'), false, 'no local equity fallback in the archive')
+  assert.ok(rawRecord.gaps.some((gap) => gap.includes('仓位只由服务端计算')))
 
   assert.equal(service.decisionsRecorded.length, 1)
   assert.equal(service.decisionsRecorded[0].strategyId, 'strat-direct-1')

@@ -25,6 +25,7 @@ import {
   createIntegration,
 } from './host/integration.js'
 import { createAutoScheduler } from './host/scheduler.js'
+import { createTriggerEngine } from './host/trigger-engine.js'
 import { currentBuild, markHostLoad } from './host/build.js'
 import { admittedWebRoutes } from './host/http-admission.js'
 
@@ -278,6 +279,17 @@ export function apply(ctx, config) {
   })
   integration.scheduleProvider = () => scheduler.status()
 
+  // v3.1 P2（docs/18 §5.2，docs/19 §3/§4）：触发引擎驱动用户策略的 15s / K 线收盘派发。
+  // 默认 off = 完全维持旧行为；shadow 只记录；live 才走 租约 → cycle(purpose=trigger) → P1/P2。
+  // WORKBENCH_TRIGGER_MODE=off|shadow|live 或插件配置 triggerEngine 覆盖。
+  const triggerEngine = createTriggerEngine({
+    integration,
+    env: pluginConfig.env ?? process.env,
+    config: pluginConfig.triggerEngine ?? {},
+    logger: ctx.logger,
+  })
+  integration.triggerEngine = triggerEngine
+
   ctx.effect(() => {
     const disposers = []
     const webRoutes = admittedWebRoutes(ctx)
@@ -324,6 +336,9 @@ export function apply(ctx, config) {
               round: `${ROUNDS_PATH}/:id`,
             },
             probe: { method: 'POST', timeoutMs: PROBE_TIMEOUT_MS, transport: 'ctx.llm.stream' },
+            // v3.1 P2（docs/19 R13）：触发引擎的心跳/上次派发/租约占用都从这里读，
+            // 界面不需要再开一条查询路由。
+            triggerEngine: integration.triggerEngineStatus(),
             config: { present: Object.keys(pluginConfig).length > 0 },
           })
         },
@@ -430,9 +445,15 @@ export function apply(ctx, config) {
       ctx.logger?.info?.(
         `[twb] auto-schedule ${scheduleState.enabled ? 'on' : 'off'} interval=${scheduleState.interval_ms}ms symbol=${scheduleState.symbol} next=${scheduleState.next_at ?? 'n/a'}`,
       )
+      triggerEngine.start()
+      const triggerState = triggerEngine.status()
+      ctx.logger?.info?.(
+        `[twb] trigger-engine mode=${triggerState.activeMode} mark=${triggerState.config.markIntervalMs}ms klineDelay=${triggerState.config.klineCloseDelayMs}ms next=${triggerState.next.mark_at ?? 'n/a'}`,
+      )
 
       ctx.logger?.info?.(`[twb] ${PLUGIN_ID} routes: ${HEALTH_PATH}, ${PROBE_PATH}, ${RUN_PATH}, ${STATE_PATH}, ${ROUNDS_PATH}, ${SCHEDULE_PATH}`)
       return () => {
+        triggerEngine.dispose()
         scheduler.dispose()
         for (const dispose of disposers) {
           try { dispose() } catch { /* cleanup best effort */ }

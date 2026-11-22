@@ -43,7 +43,7 @@ import { createSessionLlm, SESSION_LLM_SCRIPTS, SESSION_LLM_TRANSPORT } from './
 import { ROLE_LABELS, toRoundSummary, toRoundView } from './round-view.js'
 import { RoundArchive, archiveDay, parseRoundDate } from './round-archive.js'
 import { createServiceSetup } from './service-setup.js'
-import { StrategyAssistant, eligibleStrategies } from './strategies.js'
+import { StrategyAssistant, pickOrderedCandidate } from './strategies.js'
 import { currentBuild, setLoadedConfigRevision } from './build.js'
 import {
   LLM_CONFIG_FILE,
@@ -193,6 +193,15 @@ export const MAX_REVIEW_BODY_BYTES = 2 * 1024
 export const MAX_ROUNDS_PER_DAY = 2000
 export const HOST_ROUNDS_CONTRACT = 'trading-workbench/host-rounds/1'
 export const DEFAULT_SYMBOL = 'BTCUSDT'
+/**
+ * v3.1 P2（docs/18 §2 S5，docs/19 §3）：仓位只由服务端计算。
+ *
+ * 服务端 OrderPlan.qty 的语义是「申报上限」——risk/rules.py 只用
+ * `qty = min(申报上限, R05 风险预算, R06 名义上限, R07 保证金上限)`，再按 R12/R13 取整；
+ * 真正的数量永远是服务端 approved_qty。Host 删除本地权益/风险比例估算后，这里申报一个
+ * 不构成约束的上限（不再有「读不到权益就按 5000 算」），归档里改为记录来源与 approved_qty。
+ */
+export const DECLARED_QTY_UPPER_BOUND = '1000000'
 export const MAX_BODY_BYTES = 16 * 1024
 export const DEFAULT_RUN_TIMEOUT_MS = 400_000
 // 15 §3: rounds are archived per day and never trimmed. The old 100-row cap
@@ -274,6 +283,22 @@ function summarizeNoEligibleStrategy(choiceReason, skipped = [], hadCandidates =
   return {
     reason: fallback.slice(0, 300),
     headline: '无交易：没有满足条件的已授权策略',
+  }
+}
+
+/**
+ * 归一化服务端两个扫描入口的候选形状：
+ *  - v3.1 /api/rules/scan 返回 {triggered, waiting, transitioned}
+ *  - /api/strategies/evaluate-candidates 兼容别名继续返回 {candidates, skipped}
+ * Host 只关心「本轮可以派发的候选」，排序由服务端给（docs/18 §6.3）。
+ */
+function candidatesFromScanResponse(evaluated) {
+  const triggered = Array.isArray(evaluated?.triggered) ? evaluated.triggered : []
+  const candidates = Array.isArray(evaluated?.candidates) ? evaluated.candidates : triggered
+  const skipped = Array.isArray(evaluated?.skipped) ? evaluated.skipped : []
+  return {
+    candidates: candidates.filter((item) => item && typeof item === 'object'),
+    skipped: Array.isArray(skipped) ? skipped : [],
   }
 }
 
@@ -422,9 +447,49 @@ function reviewHostError(error, date) {
   })
 }
 
-function cycleIdFor(now) {
+/** Host cycle id. Exported so the trigger engine builds cycles exactly like a round. */
+export function cycleIdFor(now) {
   const stamp = new Date(now).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')
   return `cyc-${stamp}-${randomUUID().slice(0, 6)}`
+}
+
+/**
+ * v3.1 P2：一条轮次记录的统一骨架。run()（手动/自动研判）与 dispatchRuleTrigger()
+ * （触发引擎、旧 mounted 回退）共用同一份字段，界面的「历史」页不必为触发轮次改结构
+ * （docs/18 §5.2）。
+ */
+function createRoundRecord({
+  roundId,
+  cycleId,
+  cycleSource = 'host',
+  trigger = 'manual',
+  slotId = null,
+  symbol = null,
+  startedAt = null,
+}) {
+  return {
+    roundId,
+    cycleId,
+    cycleSource,
+    trigger,
+    slotId: slotId ?? null,
+    symbol,
+    status: 'running',
+    outcome: null,
+    reasonCode: null,
+    headline: '运行中',
+    startedAt: startedAt === null ? null : nowIso(startedAt),
+    finishedAt: null,
+    durationMs: null,
+    result: null,
+    service: null,
+    freshness: null,
+    gaps: [],
+    serviceStatus: 'pending',
+    errorStatus: null,
+    httpStatus: null,
+    error: null,
+  }
 }
 
 function finite(value) {
@@ -1436,6 +1501,9 @@ export class WorkbenchHostIntegration {
     this.lastControl = null
     // The control facade published by scheduler.js (see its _attachControl).
     this.schedulerControl = null
+    // v3.1 P2：触发引擎由 index.js 装配后回填（这里只持有引用，不 import，避免循环依赖）。
+    // null = 未装配，此时 mounted 策略走 run() 里的 10 分钟槽旧路径（docs/19 §4 回滚）。
+    this.triggerEngine = null
     // Last explicit stop/start attempt (in-memory only). The *state* of
     // automation is always re-derived from the service control row, which is
     // persisted by the service — so a Host restart cannot invent a stop.
@@ -1845,6 +1913,8 @@ export class WorkbenchHostIntegration {
       schedule: typeof this.scheduleProvider === 'function'
         ? this.scheduleProvider()
         : this.scheduleStatus,
+      // v3.1 P2（docs/19 R13）：触发引擎心跳，超过 60s 没有扫描时由界面告警。
+      trigger_engine: this.triggerEngineStatus(),
       last_run_at: this.lastRunAt ?? last?.finishedAt ?? last?.startedAt ?? null,
       last_error: this.lastError,
       last_round: last,
@@ -3549,6 +3619,23 @@ export class WorkbenchHostIntegration {
     return verdict
   }
 
+  /**
+   * D-1：run() 用的持仓预检。preflight() 自己已经吞掉「服务不可用/就绪失败」，但
+   * /api/market/prices 之类的意外失败不应该把一轮研判变成异常 —— 预检只是省钱的闸门，
+   * 不能变成新的失败点，所以这里兜一层。
+   */
+  async preflightForRun() {
+    try {
+      return await this.preflight()
+    } catch (error) {
+      return {
+        ok: false,
+        code: error?.code ?? 'PREFLIGHT_FAILED',
+        detail: error?.message ?? String(error),
+      }
+    }
+  }
+
   setScheduleStatus(status) {
     this.scheduleStatus = status ?? null
   }
@@ -3846,31 +3933,52 @@ export class WorkbenchHostIntegration {
     const roundId = cycleId
     let activeCycleId = cycleId
     this.inFlight = roundId
-    const record = {
+    const record = createRoundRecord({
       roundId,
       cycleId,
       cycleSource: 'host',
       trigger,
-      slotId: slotId ?? null,
+      slotId,
       symbol,
-      status: 'running',
-      outcome: null,
-      reasonCode: null,
-      headline: '运行中',
-      startedAt: nowIso(started),
-      finishedAt: null,
-      durationMs: null,
-      result: null,
-      service: null,
-      freshness: null,
-      gaps: [],
-      serviceStatus: 'pending',
-      errorStatus: null,
-      httpStatus: null,
-      error: null,
-    }
+      startedAt: started,
+    })
     this.store.upsert(record)
     if (trigger === 'auto') this.recordAutoRunStart(started, roundId)
+
+    // D-1（docs/16 §5.1，docs/19 §4 P1）：非自动触发的一轮也要先做持仓预检。
+    // 自动调度在 scheduler.js:287 已经做过；手动「运行一轮」以前会跑完整条 6–8 次 LLM
+    // 的开仓链，最后在 P1 以 E_RISK_SYMBOL_POSITION 失败（约 4–5 万 token、2 分钟）。
+    // 这里在花掉任何模型调用之前结束这一轮，并把原因写进归档。
+    if (trigger !== 'auto') {
+      const pre = await this.preflightForRun()
+      if (pre?.code === 'POSITION_OPEN') {
+        const finished = this.now()
+        record.status = 'no_trade'
+        record.outcome = 'no_trade'
+        record.reasonCode = 'POSITION_OPEN'
+        record.headline = '无交易：账户已有持仓（D-1 预检）'
+        record.result = {
+          outcome: 'no_trade',
+          reasonCode: 'POSITION_OPEN',
+          detail: pre.detail ?? null,
+          calls: [],
+          outputs: {},
+        }
+        record.gaps.push(
+          `D-1 预检：${pre.detail ?? '账户已有持仓'}；本轮未调用任何模型，也未创建 cycle。`,
+        )
+        record.finishedAt = nowIso(finished)
+        record.durationMs = finished - started
+        record.serviceStatus = 'ok'
+        this.lastRunAt = nowIso(finished)
+        this.store.upsert(record)
+        if (this.inFlight === roundId) this.inFlight = null
+        return { ok: true, round: roundViewOf(record) }
+      }
+      if (pre && pre.ok !== true && pre.code) {
+        record.gaps.push(`D-1 预检未通过（${pre.code}）：${pre.detail ?? ''}；本轮继续，由 P1/P2 判定。`)
+      }
+    }
 
     // 02 §3.2 / P-05=A: freeze this round's per-role routes against the live
     // catalog BEFORE any service or LLM side effect. A freeze failure is a legal
@@ -4014,41 +4122,33 @@ export class WorkbenchHostIntegration {
         if (!['native', 'mounted'].includes(strategyConfig?.mode)) {
           throw new HostIntegrationError('E_STRATEGY_MODE', '策略运行模式不可确认', { status: 409 })
         }
-        if (strategyConfig.mode === 'mounted') {
-          let candidates = []
-          let skipped = []
-          let selectionEvidence = {}
-          let legacyQuotes = null
+        // v3.1 P2（docs/19 §3.1、§4）：mounted 策略的求值改由触发引擎负责
+        // （mark 每 15s、K 线收盘 +3s，purpose=trigger）。10 分钟槽不再重复求值，
+        // 否则同一条件会被两条路径各派发一次。触发引擎切到 off 时保留旧行为，
+        // 这就是 docs/19 §4 的回滚路径；也可以用 config.legacyMountedEvaluation 显式开关。
+        if (strategyConfig.mode === 'mounted' && this.mountedEvaluationInRun()) {
+          let evaluated
           try {
-            const evaluated = await client.evaluateStrategyCandidates({ now_ms: this.now() })
-            candidates = Array.isArray(evaluated?.candidates) ? evaluated.candidates : []
-            skipped = Array.isArray(evaluated?.skipped) ? evaluated.skipped : []
-            selectionEvidence = {
-              candidates_meta: candidates.map((c) => ({
-                strategy_id: c.strategy_id,
-                symbol: c.symbol ?? null,
-                side: c.side ?? null,
-                mark: c.mark ?? null,
-                indicator_facts: c.indicator_facts ?? null,
-              })),
-            }
+            // 旧行为保留水平触发语义：/api/strategies/evaluate-candidates 在 v3.1 里
+            // 是 /api/rules/scan 的兼容别名（docs/18 §5.1）。
+            evaluated = await client.evaluateStrategyCandidates({ now_ms: this.now() })
           } catch (evalError) {
-            if (evalError instanceof ServiceClientError && (evalError.status === 404 || evalError.code === 'E_NOT_FOUND' || evalError.code === 'E_SERVICE_HTTP_404')) {
-              const { strategies } = await client.strategy('/authorized')
-              const symbols = [...new Set((strategies ?? []).flatMap((s) => s.confirmed_version?.rules?.symbols ?? []))].slice(0, 20)
-              const quotes = symbols.length ? await client.marks(symbols) : { prices: {} }
-              legacyQuotes = quotes.prices ?? {}
-              candidates = eligibleStrategies(strategies ?? [], legacyQuotes, this.now())
-              selectionEvidence = { prices: legacyQuotes }
-            } else {
-              throw evalError
+            if (evalError instanceof ServiceClientError
+              && (evalError.status === 404 || evalError.code === 'E_NOT_FOUND' || evalError.code === 'E_SERVICE_HTTP_404')) {
+              // S9（docs/18 §2）：旧版 eligibleStrategies 回退只支持 mark_threshold，
+              // 已删除。服务端没有扫描接口时必须报错，而不是悄悄退回原生 AI 或假装没候选。
+              throw new HostIntegrationError(
+                'E_STRATEGY_SCAN_UNAVAILABLE',
+                '服务端未提供 /api/strategies/evaluate-candidates（404），无法求值已挂载策略',
+                { status: 502, details: { stage: 'STRATEGY_SCAN' } },
+              )
             }
+            throw evalError
           }
-          const chooseRoute = frozen.route ?? frozen.roleRoutes?.decision ?? frozen.snapshot?.default ?? this.route
-          const choice = await this.strategyAssistant.choose(candidates, selectionEvidence, {
-            llm: this.llm,
-            route: chooseRoute,
-          })
+          const { candidates, skipped } = candidatesFromScanResponse(evaluated)
+          // 多候选的排序由服务端确定性给出（docs/18 §6.3），Host 只取第 1 条；
+          // StrategyAssistant.choose()（模型选策略）已删除。
+          const choice = pickOrderedCandidate(candidates)
           selectedStrategy = choice.strategy
           if (!selectedStrategy) {
             const noEligible = summarizeNoEligibleStrategy(choice.reason, skipped, candidates.length > 0)
@@ -4071,23 +4171,20 @@ export class WorkbenchHostIntegration {
             return { ok: true, round: roundViewOf(record) }
           }
           record.strategy_selection_reason = choice.reason
-          selectedRule = selectedStrategy.rules ?? selectedStrategy.confirmed_version?.rules
+          selectedRule = selectedStrategy.rules ?? selectedStrategy.confirmed_version?.rules ?? null
           executionMode = selectedStrategy.execution_mode ?? selectedRule?.execution_mode ?? 'ai_assisted'
           primarySymbol = selectedStrategy.symbol
-            ?? (legacyQuotes
-              ? selectedRule?.symbols?.find((s) => eligibleStrategies([selectedStrategy], { [s]: legacyQuotes[s] }, this.now()).length > 0)
-              : null)
             ?? selectedRule?.symbols?.[0]
             ?? primarySymbol
           const tf = selectedRule?.timeframes?.[0] ?? '15m'
-          const ms = { '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 }[tf] ?? 900000
-          const signalKey = selectedStrategy.signal_key ?? `${tf}:${Math.floor(this.now() / ms)}`
-          candidateMark = selectedStrategy.mark ?? legacyQuotes?.[primarySymbol]?.mark ?? null
+          const tfMs = { '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 }[tf] ?? 900000
+          const signalKey = selectedStrategy.signal_key ?? `${tf}:${Math.floor(this.now() / tfMs)}`
+          candidateMark = selectedStrategy.mark ?? null
           strategyContext = {
             strategy_id: selectedStrategy.strategy_id,
             version: selectedStrategy.version ?? selectedStrategy.current_version,
             generation: selectedStrategy.generation,
-            mode_revision: strategyConfig.revision,
+            mode_revision: selectedStrategy.mode_revision ?? strategyConfig.revision,
             signal_key: signalKey,
           }
           record.strategy = {
@@ -4097,6 +4194,8 @@ export class WorkbenchHostIntegration {
             rules: selectedRule,
           }
           record.symbol = primarySymbol
+        } else if (strategyConfig.mode === 'mounted') {
+          record.gaps.push('mounted 策略由触发引擎（purpose=trigger）派发；本轮 10 分钟槽不再求值。')
         }
       }
       try {
@@ -4256,69 +4355,21 @@ export class WorkbenchHostIntegration {
 
       const gateways = {
         p1: async ({ execution }) => {
-          if (this.abandonedRuns.has(roundId)) {
-            return {
-              verdict: 'rejected',
-              code: 'HOST_RUN_ABANDONED',
-              detail: 'round ownership was revoked; P1 was not called',
-              service_status: 409,
-            }
-          }
-          this.setInFlightStage('p1', 'P1 风控闸门')
-          try {
-            const plan = planForService(execution, activeCycleId)
-            const response = await client.evaluatePlan(plan, activeCycleId, leaseId, strategyContext)
-            p1Raw = response
-            const mapped = p1ResultFromService(response)
-            p1Token = mapped.token
-            p1Plan = mapped.plan
-            const { token: _token, raw: _raw, ...safe } = mapped
-            return safe
-          } catch (error) {
-            if (error instanceof ServiceClientError) {
-              p1Error = {
-                status: error.status,
-                code: error.code,
-                message: error.message,
-                retryable: error.retryable,
-                details: error.details ?? {},
-              }
-              return {
-                verdict: 'rejected',
-                code: error.code,
-                detail: error.message,
-                service_status: error.status,
-              }
-            }
-            const mapped = hostErrorFromService(error)
-            if (mapped) {
-              p1Error = {
-                status: error.status ?? mapped.status,
-                code: mapped.code,
-                message: mapped.message,
-                retryable: mapped.retryable,
-                details: mapped.details ?? {},
-              }
-              return {
-                verdict: 'rejected',
-                code: mapped.code,
-                detail: mapped.message,
-                service_status: error.status ?? null,
-              }
-            }
-            throw error
-          }
+          const out = await this.callP1({
+            client,
+            cycleId: activeCycleId,
+            leaseId,
+            execution,
+            strategyContext,
+            roundId,
+          })
+          p1Raw = out.raw
+          p1Token = out.token
+          p1Plan = out.plan
+          p1Error = out.error
+          return out.result
         },
         p2: async ({ decision } = {}) => {
-          if (this.abandonedRuns.has(roundId)) {
-            return {
-              ok: false,
-              code: 'HOST_RUN_ABANDONED',
-              detail: 'round ownership was revoked; P2 was not called',
-              status: 409,
-            }
-          }
-          this.setInFlightStage('p2', 'P2 执行')
           // §8·D / T15：真正提交前的最后一道确定性检查（同一个 evaluateEntryPlan）。
           // 拿不到提交价，所以只有时间类判定可以拦（见 preSubmitGateOf）。
           // rule_direct 无 AI 计划（由服务端 P1/P2 直接按策略规则核验实时条件），跳过 AI 计划有效期门禁。
@@ -4329,278 +4380,47 @@ export class WorkbenchHostIntegration {
               now: this.now(),
               mode: this.config?.executionGate ?? DEFAULT_EXECUTION_GATE_MODE,
             })
-          if (preSubmitGate?.enforced && preSubmitGate.ok === false) {
-            return {
-              ok: false,
-              code: `EXECUTION_BLOCKED:${preSubmitGate.code}`,
-              detail: preSubmitGate.detail,
-              status: 422,
-              pre_submit: true,
-            }
-          }
-          if (this.llmMode === 'session_fixture') {
-            return {
-              ok: false,
-              code: 'E_TEST_MODE_NO_ORDER',
-              detail: 'session-llm fixture mode: signed order submission is disabled.',
-              status: 503,
-            }
-          }
-          if (snapshot.status?.credentials_configured !== true) {
-            return {
-              ok: false,
-              code: 'E_DEMO_CREDENTIALS_MISSING',
-              detail: 'Demo API key/secret not configured; signed execution was not attempted.',
-              status: 503,
-            }
-          }
-          if (!p1Token) {
-            p2Error = { status: 401, code: 'E_APPROVAL_REQUIRED', message: 'P1 did not issue an approval token.', retryable: false, details: {} }
-            return { ok: false, code: 'E_APPROVAL_REQUIRED', detail: 'P1 did not issue an approval token.', status: 401 }
-          }
-          try {
-            const response = await client.submitOrder({
-              approval_token: p1Token,
-              cycle_id: activeCycleId,
-              plan: p1Plan,
-              lease_id: leaseId,
-              ...(strategyContext ? { strategy_context: strategyContext } : {}),
-            })
-            return p2ResultFromService(response)
-          } catch (error) {
-            if (error instanceof ServiceClientError) {
-              p2Error = {
-                status: error.status,
-                code: error.code,
-                message: error.message,
-                retryable: error.retryable,
-                details: error.details ?? {},
-              }
-              return { ok: false, code: error.code, detail: error.message, status: error.status }
-            }
-            const mapped = hostErrorFromService(error)
-            if (mapped) {
-              p2Error = {
-                status: error.status ?? mapped.status,
-                code: mapped.code,
-                message: mapped.message,
-                retryable: mapped.retryable,
-                details: mapped.details ?? {},
-              }
-              return { ok: false, code: mapped.code, detail: mapped.message, status: error.status ?? null }
-            }
-            throw error
-          }
+          const out = await this.callP2({
+            client,
+            cycleId: activeCycleId,
+            leaseId,
+            plan: p1Plan,
+            token: p1Token,
+            strategyContext,
+            preSubmitGate,
+            roundId,
+            credentialsConfigured: snapshot.status?.credentials_configured,
+          })
+          p2Error = out.error
+          return out.result
         },
       }
 
       if (selectedStrategy && executionMode === 'rule_direct') {
-        const rule = selectedRule ?? selectedStrategy.rules ?? selectedStrategy.confirmed_version?.rules
-        const side = String(rule?.entry?.side ?? 'long').toUpperCase()
-        const dir = side === 'LONG' ? 1 : -1
-        const slPct = Number(rule?.exit?.stop_loss_pct ?? 0)
-        const tpPct = Number(rule?.exit?.take_profit_pct ?? 0)
-        const refMark = Number(
-          candidateMark
-          ?? selectedStrategy.mark
-          ?? evidence?.symbols?.[primarySymbol]?.price?.mark
-          ?? evidence?.symbols?.[primarySymbol]?.price?.last
-          ?? 0,
-        )
-        if (localVerdict.verdict !== 'approved') {
-          const blockCode = CONTROL_BLOCKING.has(state) ? 'CONTROL_LOCKED' : 'HARD_RISK_REJECT'
-          const finished = this.now()
-          const blockedResult = {
-            ok: true,
-            calls: [],
-            mode: 'rule_direct',
-            outcome: 'no_trade',
-            reasonCode: blockCode,
-            detail: localVerdict.detail ?? blockCode,
-            outputs: {
-              decision: { action: 'NO_TRADE', side: null, symbol: primarySymbol },
-              execution: { executable: false, blocked_reason: blockCode, side, symbol: primarySymbol },
-            },
-          }
-          record.finishedAt = nowIso(finished)
-          record.durationMs = finished - started
-          record.result = blockedResult
-          record.status = 'no_trade'
-          record.outcome = 'no_trade'
-          record.reasonCode = blockCode
-          record.headline = `无交易：${blockCode}`
-          if (strategyContext) {
-            await client.recordStrategyDecision(strategyContext.strategy_id, {
-              cycle_id: activeCycleId,
-              version: strategyContext.version,
-              symbol: primarySymbol,
-              side,
-              signal_key: strategyContext.signal_key,
-              execution_mode: 'rule_direct',
-              outcome: 'risk_rejected',
-              reason_code: blockCode,
-              entry_mark: refMark > 0 ? refMark : null,
-              sl_price: refMark > 0 && slPct > 0 ? refMark * (1 - dir * slPct) : null,
-              tp_price: refMark > 0 && tpPct > 0 ? refMark * (1 + dir * tpPct) : null,
-              details: { mode: 'rule_direct', verdict: localVerdict.verdict },
-            }).catch(() => {})
-          }
-          if (cycleCreated) {
-            await finalizeCycleSafely(client, activeCycleId, {
-              outcome: 'no_trade',
-              reasonCode: blockCode,
-              errorCode: null,
-            }, record)
-          }
-          this.lastRunAt = nowIso(finished)
-          this.lastError = null
-          this.portfolioCache = null
-          this.store.upsert(record)
-          return { ok: true, round: roundViewOf(record) }
-        }
-
-        const sl = refMark * (1 - dir * slPct)
-        const tp = refMark * (1 + dir * tpPct)
-        const acctCtx = executionAccountContext({ cycleResponse, snapshot })
-        const rawEquity = acctCtx.equity?.session
-          ?? acctCtx.equity?.exchange
-          ?? acctCtx.account?.total_margin_balance
-          ?? acctCtx.account?.total_wallet_balance
-          ?? snapshot.envelope?.equity?.session
-          ?? 5000
-        const equityNum = Number.isFinite(Number(rawEquity)) && Number(rawEquity) > 0 ? Number(rawEquity) : 5000
-        const envRiskFrac = finite(snapshot.envelope?.limits?.per_trade?.max_risk_pct)
-        const capRiskVal = finite(capOverride.maxRiskPct)
-        const riskPct = envRiskFrac !== null && envRiskFrac > 0
-          ? envRiskFrac
-          : (capRiskVal !== null && capRiskVal > 0
-            ? (capRiskVal > 0.2 ? capRiskVal / 100 : capRiskVal)
-            : 0.01)
-        const rawQty = refMark > 0 && slPct > 0 ? Math.max(0.001, (equityNum * riskPct) / (refMark * slPct)) : 0.001
-        const leverage = Math.max(1, Math.min(Number(capOverride.maxLeverage ?? 5), 5))
-        const fmtNum = (val) => String(Number(Number(val).toFixed(8)))
-        const directOrderPlan = {
-          symbol: primarySymbol,
-          side,
-          action: 'open',
-          entry_type: 'MARKET',
-          leverage,
-          qty: fmtNum(rawQty),
-          sl: fmtNum(sl),
-          tp: fmtNum(tp),
-          confidence: 1.0,
-          reasoning_ref: `rule-direct:${strategyContext.strategy_id}:v${strategyContext.version}:${activeCycleId}`,
-        }
-        const directDecision = {
-          action: 'TRADE',
-          side,
-          symbol: primarySymbol,
-          plan: {
-            entry: { style: 'MARKET', price: refMark },
-            stop_loss: { price: Number(directOrderPlan.sl) },
-            take_profit: { price: Number(directOrderPlan.tp) },
-            leverage,
-            rr_to_target: slPct > 0 ? Number((tpPct / slPct).toFixed(2)) : null,
-          },
-        }
-        const directExecution = {
-          executable: true,
-          side,
-          symbol: primarySymbol,
-          order_plan: directOrderPlan,
-          rationale: '纯规则直连引擎按已确认策略参数生成确定性订单计划，0 LLM 调用。',
-        }
-        const p1 = await gateways.p1({
+        // v3.1 P2：规则直通的派发改成可复用方法，触发引擎（live）与这里的旧 mounted
+        // 回退共用同一条 P1 →（可选 trigger_confirm 否决）→ P2 → finalize 路径。
+        // 租约/cycle 由调用方准备：本方法不使用别的轮次的租约，也不结束别人的 cycle。
+        return await this.dispatchRuleTrigger({
+          client,
+          leaseId,
           cycleId: activeCycleId,
-          decision: directDecision,
-          risk: null,
-          execution: directExecution,
-          calls: [],
-          evidence,
-        })
-        let p2 = null
-        if (p1 && ['approved', 'reduced'].includes(p1.verdict)) {
-          p2 = await gateways.p2({
-            cycleId: activeCycleId,
-            decision: directDecision,
-            risk: null,
-            execution: directExecution,
-            p1,
-            calls: [],
-            evidence,
-          })
-        }
-        if (this.abandonedRuns.has(roundId)) {
-          throw new HostIntegrationError(
-            'HOST_RUN_ABANDONED',
-            'round ownership was revoked before the rule_direct result could be finalized',
-            { status: 409, retryable: false, details: { round_id: roundId } },
-          )
-        }
-        const p1Verdict = p1Raw?.verdict ?? p1Error?.details?.verdict ?? null
-        record.riskVerdict = p1Verdict && typeof p1Verdict === 'object' ? p1Verdict : null
-        const directReasonCode = p2?.ok ? 'TRADE_EXECUTED' : (p2?.code ?? p1?.code ?? 'RULE_DIRECT_BLOCKED')
-        const directResult = {
-          ok: true,
-          calls: [],
-          mode: 'rule_direct',
-          outcome: p2?.ok ? 'trade' : 'no_trade',
-          reasonCode: directReasonCode,
-          outputs: {
-            decision: directDecision,
-            execution: directExecution,
-            p1,
-            p2,
-          },
-        }
-        const decisionOutcome = p2?.ok
-          ? 'executed'
-          : (!p1 || !['approved', 'reduced'].includes(p1.verdict) ? 'risk_rejected' : 'execution_blocked')
-        await client.recordStrategyDecision(strategyContext.strategy_id, {
-          cycle_id: activeCycleId,
-          version: strategyContext.version,
+          cycleCreated,
+          cycleResponse,
+          strategy: selectedStrategy,
+          strategyRules: selectedRule,
+          strategyContext,
           symbol: primarySymbol,
-          side,
-          signal_key: strategyContext.signal_key,
-          execution_mode: 'rule_direct',
-          outcome: decisionOutcome,
-          reason_code: directReasonCode,
-          entry_mark: refMark > 0 ? refMark : null,
-          sl_price: Number.isFinite(sl) && sl > 0 ? sl : null,
-          tp_price: Number.isFinite(tp) && tp > 0 ? tp : null,
-          order_id: p2?.order_id !== null && p2?.order_id !== undefined ? String(p2.order_id) : null,
-          details: {
-            mode: 'rule_direct',
-            p1_verdict: p1?.verdict ?? null,
-            p2_ok: p2?.ok ?? null,
-          },
-        }).catch(() => {})
-
-        const finished = this.now()
-        record.finishedAt = nowIso(finished)
-        record.durationMs = finished - started
-        record.result = directResult
-        record.outcome = directResult.outcome
-        record.reasonCode = directResult.reasonCode
-        record.status = p2?.ok ? 'done' : 'no_trade'
-        record.headline = p2?.ok ? '纯规则直连已通过 P1/P2 执行' : `无交易：${directReasonCode}`
-        record.error = null
-        if (directReasonCode === 'E_DEMO_CREDENTIALS_MISSING') {
-          record.serviceStatus = 'degraded'
-          record.gaps.push('P2 was skipped because Demo credentials are not configured; no real order was attempted.')
-        }
-        if (cycleCreated) {
-          await finalizeCycleSafely(client, activeCycleId, {
-            outcome: record.outcome,
-            reasonCode: record.reasonCode,
-            errorCode: null,
-          }, record)
-        }
-        this.lastRunAt = nowIso(finished)
-        this.lastError = null
-        this.portfolioCache = null
-        this.store.upsert(record)
-        return { ok: true, round: roundViewOf(record) }
+          mark: candidateMark,
+          trigger,
+          roundId,
+          startedAt: started,
+          slotId,
+          record,
+          evidence,
+          localVerdict,
+          controlStateValue: state,
+          leverageCap: capOverride.maxLeverage,
+        })
       }
 
       const result = await runChain({
@@ -4829,6 +4649,570 @@ export class WorkbenchHostIntegration {
       this.abandonedRuns.delete(roundId)
       await this.releaseRunLease(roundId)
     }
+  }
+
+  /**
+   * v3.1 P2（docs/19 §3.1、§4 回滚）：mounted 策略是否还要在 10 分钟槽里求值。
+   *
+   * 默认：触发引擎存在且 mode !== 'off' 时由触发引擎派发（每 15s / K 线收盘 +3s），
+   * run() 不再重复求值；触发引擎切到 off（或未装配）时保留旧行为，这就是文档写的
+   * 「触发引擎切 off，退回 10 分钟槽」。config.legacyMountedEvaluation 可以显式覆盖。
+   */
+  mountedEvaluationInRun() {
+    const legacy = this.config?.legacyMountedEvaluation
+    if (legacy === true) return true
+    if (legacy === false) return false
+    const engine = this.triggerEngine
+    if (!engine || typeof engine.status !== 'function') return true
+    try {
+      return String(engine.status()?.mode ?? 'off') === 'off'
+    } catch {
+      return true
+    }
+  }
+
+  /**
+   * 触发引擎用的服务客户端。token 缺失时抛错而不是静默禁用：
+   * 一个"看起来在跑但永远扫不到东西"的引擎比明着失败更难排查。
+   */
+  triggerClient() {
+    const tokenInfo = this.tokenInfo()
+    if (!tokenInfo.present) {
+      throw new HostIntegrationError('E_SERVICE_TOKEN_MISSING', 'workbench-service API token is not configured', {
+        status: 503,
+        details: { token_source: tokenInfo.source },
+      })
+    }
+    return this.clientWithToken(tokenInfo.token)
+  }
+
+  /** 触发引擎状态（/state 与 /health 共用一份投影；引擎未装配时为 null）。 */
+  triggerEngineStatus() {
+    const engine = this.triggerEngine
+    if (!engine || typeof engine.status !== 'function') return null
+    try {
+      return engine.status()
+    } catch (error) {
+      return {
+        mode: 'unknown',
+        error: { code: error?.code ?? 'E_TRIGGER_STATUS', message: String(error?.message ?? error) },
+      }
+    }
+  }
+
+  /**
+   * P1（/api/risk/evaluate）调用 + 错误映射。
+   *
+   * 抽成方法是为了让 AI 链网关与规则直通（触发引擎 / 旧 mounted 回退）共用同一份
+   * 映射：一处把 ServiceClientError 映射成 {verdict:'rejected', code, ...}，一处
+   * 把原始响应换成 p1ResultFromService 的形状。返回结构里的 error 只用于归档，
+   * 永远不带 approval token。
+   */
+  async callP1({ client, cycleId, leaseId = null, execution, strategyContext = null, roundId = null }) {
+    if (roundId && this.abandonedRuns.has(roundId)) {
+      return {
+        result: {
+          verdict: 'rejected',
+          code: 'HOST_RUN_ABANDONED',
+          detail: 'round ownership was revoked; P1 was not called',
+          service_status: 409,
+        },
+        token: null,
+        raw: null,
+        plan: null,
+        error: null,
+      }
+    }
+    this.setInFlightStage('p1', 'P1 风控闸门')
+    try {
+      const plan = planForService(execution, cycleId)
+      const response = await client.evaluatePlan(plan, cycleId, leaseId, strategyContext)
+      const mapped = p1ResultFromService(response)
+      const { token, raw: _raw, ...safe } = mapped
+      return { result: safe, token: token ?? null, raw: response, plan: mapped.plan ?? null, error: null }
+    } catch (error) {
+      if (error instanceof ServiceClientError) {
+        return {
+          result: { verdict: 'rejected', code: error.code, detail: error.message, service_status: error.status },
+          token: null,
+          raw: null,
+          plan: null,
+          error: {
+            status: error.status,
+            code: error.code,
+            message: error.message,
+            retryable: error.retryable,
+            details: error.details ?? {},
+          },
+        }
+      }
+      const mapped = hostErrorFromService(error)
+      if (mapped) {
+        return {
+          result: { verdict: 'rejected', code: mapped.code, detail: mapped.message, service_status: error.status ?? null },
+          token: null,
+          raw: null,
+          plan: null,
+          error: {
+            status: error.status ?? mapped.status,
+            code: mapped.code,
+            message: mapped.message,
+            retryable: mapped.retryable,
+            details: mapped.details ?? {},
+          },
+        }
+      }
+      throw error
+    }
+  }
+
+  /**
+   * P2（/api/execution/order）调用 + 错误映射。guard 顺序与旧 run() 内联网关一致：
+   * 轮次被回收 → pre_submit 闸门 → fixture 模式 → Demo 凭据 → 审批令牌 → 提交。
+   * credentialsConfigured=null 表示调用方没有账户快照（触发引擎），此时交给服务端
+   * 自己判定 E_DEMO_CREDENTIALS_MISSING，不在 Host 侧瞎猜。
+   */
+  async callP2({
+    client,
+    cycleId,
+    leaseId = null,
+    plan = null,
+    token = null,
+    strategyContext = null,
+    preSubmitGate = null,
+    roundId = null,
+    credentialsConfigured = null,
+  }) {
+    if (roundId && this.abandonedRuns.has(roundId)) {
+      return {
+        result: { ok: false, code: 'HOST_RUN_ABANDONED', detail: 'round ownership was revoked; P2 was not called', status: 409 },
+        error: null,
+      }
+    }
+    this.setInFlightStage('p2', 'P2 执行')
+    if (preSubmitGate?.enforced && preSubmitGate.ok === false) {
+      return {
+        result: {
+          ok: false,
+          code: `EXECUTION_BLOCKED:${preSubmitGate.code}`,
+          detail: preSubmitGate.detail,
+          status: 422,
+          pre_submit: true,
+        },
+        error: null,
+      }
+    }
+    if (this.llmMode === 'session_fixture') {
+      return {
+        result: {
+          ok: false,
+          code: 'E_TEST_MODE_NO_ORDER',
+          detail: 'session-llm fixture mode: signed order submission is disabled.',
+          status: 503,
+        },
+        error: null,
+      }
+    }
+    if (credentialsConfigured !== null && credentialsConfigured !== true) {
+      return {
+        result: {
+          ok: false,
+          code: 'E_DEMO_CREDENTIALS_MISSING',
+          detail: 'Demo API key/secret not configured; signed execution was not attempted.',
+          status: 503,
+        },
+        error: null,
+      }
+    }
+    if (!token) {
+      const error = {
+        status: 401,
+        code: 'E_APPROVAL_REQUIRED',
+        message: 'P1 did not issue an approval token.',
+        retryable: false,
+        details: {},
+      }
+      return {
+        result: { ok: false, code: error.code, detail: error.message, status: 401 },
+        error,
+      }
+    }
+    try {
+      const response = await client.submitOrder({
+        approval_token: token,
+        cycle_id: cycleId,
+        plan,
+        lease_id: leaseId,
+        ...(strategyContext ? { strategy_context: strategyContext } : {}),
+      })
+      return { result: p2ResultFromService(response), error: null }
+    } catch (error) {
+      if (error instanceof ServiceClientError) {
+        return {
+          result: { ok: false, code: error.code, detail: error.message, status: error.status },
+          error: {
+            status: error.status,
+            code: error.code,
+            message: error.message,
+            retryable: error.retryable,
+            details: error.details ?? {},
+          },
+        }
+      }
+      const mapped = hostErrorFromService(error)
+      if (mapped) {
+        return {
+          result: { ok: false, code: mapped.code, detail: mapped.message, status: error.status ?? null },
+          error: {
+            status: error.status ?? mapped.status,
+            code: mapped.code,
+            message: mapped.message,
+            retryable: mapped.retryable,
+            details: mapped.details ?? {},
+          },
+        }
+      }
+      throw error
+    }
+  }
+
+  /**
+   * 规则直通派发（确定性执行段）：P1 →（可选 trigger_confirm 否决）→ P2 → finalize → 归档。
+   *
+   * 调用方：
+   *  - run() 里的旧 mounted 回退（10 分钟槽，租约与 cycle 已由 run() 准备好）；
+   *  - 触发引擎 live 模式（purpose=trigger 的单币 cycle，租约由引擎在 finally 释放）。
+   *
+   * 本方法只「使用」leaseId / cycleId：不获取租约、不结束别人的 cycle、不重试 P1/P2。
+   * v3.1 还删除了 Host 端的仓位/权益估算（docs/18 §2 S5）：数量只由服务端
+   * approved_qty 决定，plan.qty 只是申报上限，归档里记 `record.sizing` 说明来源。
+   */
+  async dispatchRuleTrigger({
+    client,
+    leaseId = null,
+    cycleId = null,
+    cycleCreated = false,
+    cycleResponse = null,
+    strategy = null,
+    strategyRules = null,
+    strategyContext = null,
+    symbol = null,
+    mark = null,
+    trigger = 'rule',
+    roundId = null,
+    startedAt = null,
+    slotId = null,
+    record: providedRecord = null,
+    evidence = null,
+    localVerdict = null,
+    controlStateValue = null,
+    leverageCap = null,
+    confirm = null,
+  }) {
+    const started = Number.isFinite(startedAt) ? startedAt : this.now()
+    const activeCycleId = cycleId ?? cycleIdFor(started)
+    const record = providedRecord ?? createRoundRecord({
+      roundId: roundId ?? activeCycleId,
+      cycleId: activeCycleId,
+      cycleSource: cycleCreated ? 'service' : 'host',
+      trigger,
+      slotId,
+      symbol,
+      startedAt: started,
+    })
+    record.roundId = record.roundId ?? roundId ?? activeCycleId
+    record.cycleId = record.cycleId ?? activeCycleId
+    record.trigger = record.trigger ?? trigger
+    record.symbol = symbol ?? record.symbol ?? null
+    if (!Array.isArray(record.gaps)) record.gaps = []
+    // 触发引擎没有 run() 那层「先落一条 running」的入口，这里补上：
+    // 派发中途崩溃时，归档里能看到这条轮次停在哪里（而不是什么都没有）。
+    if (!providedRecord) this.store.upsert(record)
+    const rule = strategyRules ?? strategy?.rules ?? strategy?.confirmed_version?.rules ?? null
+    const targetSymbol = record.symbol
+    const side = String(strategy?.side ?? rule?.entry?.side ?? 'long').toUpperCase()
+    const dir = side === 'LONG' ? 1 : -1
+    const slPct = Number(rule?.exit?.stop_loss_pct ?? 0)
+    const tpPct = Number(rule?.exit?.take_profit_pct ?? 0)
+    const refMark = Number(
+      mark
+      ?? strategy?.mark
+      ?? evidence?.symbols?.[targetSymbol]?.price?.mark
+      ?? evidence?.symbols?.[targetSymbol]?.price?.last
+      ?? 0,
+    )
+    if (!record.strategy && strategy) {
+      record.strategy = {
+        ...(strategyContext ?? {}),
+        name: strategy.name,
+        execution_mode: strategy.execution_mode ?? rule?.execution_mode ?? 'rule_direct',
+        rules: rule,
+      }
+    }
+    // 杠杆沿用旧行为（服务端上限与 5× 取小）；它不属于仓位计算——数量只来自服务端。
+    const leverageCapValue = Number(leverageCap)
+    const leverage = Math.max(
+      1,
+      Math.min(Number.isFinite(leverageCapValue) && leverageCapValue > 0 ? leverageCapValue : 5, 5),
+    )
+    record.sizing = {
+      source: 'service',
+      declared_qty_upper_bound: DECLARED_QTY_UPPER_BOUND,
+      leverage,
+      approved_qty: null,
+      note: 'Host 不计算仓位：qty 只是申报上限，实际数量来自服务端 approved_qty（R05/R06/R07/R12）。',
+    }
+    record.gaps.push(
+      `仓位只由服务端计算：plan.qty=${DECLARED_QTY_UPPER_BOUND} 仅作申报上限，未使用本地权益/风险比例估算。`,
+    )
+    const roundContext = {
+      client,
+      record,
+      cycleId: activeCycleId,
+      cycleCreated,
+      started,
+      side,
+      sl: 0,
+      tp: 0,
+      refMark,
+    }
+    if (!(refMark > 0)) {
+      return this.finishRuleTriggerRound({
+        ...roundContext,
+        outcome: 'no_trade',
+        reasonCode: 'E_STRATEGY_MARK_UNAVAILABLE',
+        headline: '无交易：缺少有效标记价',
+        decision: { outcome: 'risk_rejected', reason_code: 'E_STRATEGY_MARK_UNAVAILABLE', details: { mode: 'rule_direct' } },
+      })
+    }
+    const sl = refMark * (1 - dir * slPct)
+    const tp = refMark * (1 + dir * tpPct)
+    roundContext.sl = sl
+    roundContext.tp = tp
+    const fmtNum = (val) => String(Number(Number(val).toFixed(8)))
+    const directOrderPlan = {
+      symbol: targetSymbol,
+      side,
+      action: 'open',
+      entry_type: 'MARKET',
+      leverage,
+      qty: DECLARED_QTY_UPPER_BOUND,
+      sl: fmtNum(sl),
+      tp: fmtNum(tp),
+      confidence: 1.0,
+      reasoning_ref: `rule-direct:${strategyContext?.strategy_id ?? 'strategy'}:v${strategyContext?.version ?? '-'}:${activeCycleId}`,
+    }
+    const directDecision = {
+      action: 'TRADE',
+      side,
+      symbol: targetSymbol,
+      plan: {
+        entry: { style: 'MARKET', price: refMark },
+        stop_loss: { price: Number(directOrderPlan.sl) },
+        take_profit: { price: Number(directOrderPlan.tp) },
+        leverage,
+        rr_to_target: slPct > 0 ? Number((tpPct / slPct).toFixed(2)) : null,
+      },
+    }
+    const directExecution = {
+      executable: true,
+      side,
+      symbol: targetSymbol,
+      order_plan: directOrderPlan,
+      rationale: '纯规则直连引擎按已确认策略参数生成确定性订单计划，0 LLM 调用；数量由服务端计算。',
+    }
+    // 旧 mounted 回退才拿得到控制态快照；触发引擎把控制态交给服务端 P1 判定（服务端是权威）。
+    if (localVerdict && localVerdict.verdict !== 'approved') {
+      const blockCode = CONTROL_BLOCKING.has(controlStateValue) ? 'CONTROL_LOCKED' : 'HARD_RISK_REJECT'
+      return this.finishRuleTriggerRound({
+        ...roundContext,
+        outcome: 'no_trade',
+        reasonCode: blockCode,
+        headline: `无交易：${blockCode}`,
+        outputs: {
+          decision: { action: 'NO_TRADE', side: null, symbol: targetSymbol },
+          execution: { executable: false, blocked_reason: blockCode, side, symbol: targetSymbol },
+        },
+        decision: {
+          outcome: 'risk_rejected',
+          reason_code: blockCode,
+          details: { mode: 'rule_direct', verdict: localVerdict.verdict },
+        },
+      })
+    }
+    const p1 = await this.callP1({
+      client,
+      cycleId: activeCycleId,
+      leaseId,
+      execution: directExecution,
+      strategyContext,
+      roundId: record.roundId,
+    })
+    const p1Approved = p1.result?.verdict === 'approved' || p1.result?.verdict === 'reduced'
+    let p2 = null
+    let confirmVerdict = null
+    if (p1Approved) {
+      if (typeof confirm === 'function') {
+        // ai_assisted（docs/18 §5.2）：P1 通过后调用一次 trigger_confirm，只能否决。
+        // 引擎实现保证「超时/异常 = veto」，这里再兜一层 try/catch（fail-closed）。
+        try {
+          confirmVerdict = await confirm({
+            record,
+            strategy,
+            strategyContext,
+            plan: p1.plan,
+            p1: p1.result,
+            cycleId: activeCycleId,
+          })
+        } catch (error) {
+          confirmVerdict = { verdict: 'veto', reason_code: error?.code ?? 'E_TRIGGER_CONFIRM_FAILED' }
+        }
+        if (!confirmVerdict || confirmVerdict.verdict !== 'proceed') {
+          const vetoCode = confirmVerdict?.reason_code ?? 'AI_VETOED'
+          return this.finishRuleTriggerRound({
+            ...roundContext,
+            outcome: 'no_trade',
+            reasonCode: vetoCode,
+            headline: `无交易：AI 复核否决（${vetoCode}）`,
+            outputs: {
+              decision: directDecision,
+              execution: directExecution,
+              p1: p1.result,
+              confirm: confirmVerdict ?? { verdict: 'veto', reason_code: vetoCode },
+            },
+            decision: {
+              outcome: 'ai_vetoed',
+              reason_code: vetoCode,
+              details: { mode: 'rule_direct', p1_verdict: p1.result?.verdict ?? null, confirm: confirmVerdict?.verdict ?? 'veto' },
+            },
+          })
+        }
+      }
+      p2 = await this.callP2({
+        client,
+        cycleId: activeCycleId,
+        leaseId,
+        plan: p1.plan,
+        token: p1.token,
+        strategyContext,
+        roundId: record.roundId,
+      })
+    }
+    if (this.abandonedRuns.has(record.roundId)) {
+      throw new HostIntegrationError(
+        'HOST_RUN_ABANDONED',
+        'round ownership was revoked before the rule_direct result could be finalized',
+        { status: 409, retryable: false, details: { round_id: record.roundId } },
+      )
+    }
+    const p1Verdict = p1.raw?.verdict ?? p1.error?.details?.verdict ?? null
+    record.riskVerdict = p1Verdict && typeof p1Verdict === 'object' ? p1Verdict : null
+    if (p1.result?.approved_qty !== null && p1.result?.approved_qty !== undefined) {
+      record.sizing.approved_qty = String(p1.result.approved_qty)
+    }
+    const p2ok = p2?.result?.ok === true
+    const reasonCode = p2ok ? 'TRADE_EXECUTED' : (p2?.result?.code ?? p1.result?.code ?? 'RULE_DIRECT_BLOCKED')
+    const decisionOutcome = p2ok
+      ? 'executed'
+      : (p1Approved ? 'execution_blocked' : 'risk_rejected')
+    if (reasonCode === 'E_DEMO_CREDENTIALS_MISSING') {
+      record.serviceStatus = 'degraded'
+      record.gaps.push('P2 was skipped because Demo credentials are not configured; no real order was attempted.')
+    }
+    return this.finishRuleTriggerRound({
+      ...roundContext,
+      outcome: p2ok ? 'trade' : 'no_trade',
+      reasonCode,
+      headline: p2ok ? '纯规则直连已通过 P1/P2 执行' : `无交易：${reasonCode}`,
+      outputs: {
+        decision: directDecision,
+        execution: directExecution,
+        p1: p1.result,
+        p2: p2?.result ?? null,
+        ...(confirmVerdict ? { confirm: confirmVerdict } : {}),
+      },
+      decision: {
+        outcome: decisionOutcome,
+        reason_code: reasonCode,
+        order_id: p2?.result?.order_id ?? null,
+        details: {
+          mode: 'rule_direct',
+          p1_verdict: p1.result?.verdict ?? null,
+          p2_ok: p2?.result?.ok ?? null,
+        },
+      },
+    })
+  }
+
+  /**
+   * 规则轮次的收尾：写记录、回写策略决策、finalize cycle（仅自己创建的）、落归档。
+   * 与 run() 的收尾保持同一份字段口径（outcome/status/reasonCode/headline/result）。
+   */
+  async finishRuleTriggerRound({
+    client,
+    record,
+    cycleId,
+    cycleCreated = false,
+    started = null,
+    outcome,
+    reasonCode,
+    headline = null,
+    outputs = {},
+    side = null,
+    sl = null,
+    tp = null,
+    refMark = null,
+    decision = null,
+    error = null,
+  }) {
+    const finished = this.now()
+    const startedAt = Number.isFinite(started) ? started : finished
+    record.finishedAt = nowIso(finished)
+    record.durationMs = finished - startedAt
+    record.result = {
+      ok: true,
+      calls: Array.isArray(record.result?.calls) ? record.result.calls : [],
+      mode: 'rule_direct',
+      outcome,
+      reasonCode,
+      detail: record.result?.detail ?? null,
+      outputs: { ...(record.result?.outputs ?? {}), ...outputs },
+    }
+    record.outcome = outcome
+    record.reasonCode = reasonCode
+    record.status = outcome === 'trade' ? 'done' : (outcome === 'failed' ? 'failed' : 'no_trade')
+    record.headline = headline ?? (outcome === 'trade' ? '纯规则直连已通过 P1/P2 执行' : `无交易：${reasonCode}`)
+    record.error = error ?? null
+    const strategyInfo = record.strategy
+    if (decision && strategyInfo?.strategy_id) {
+      await client.recordStrategyDecision(strategyInfo.strategy_id, {
+        cycle_id: cycleId,
+        version: strategyInfo.version,
+        symbol: record.symbol,
+        side,
+        signal_key: strategyInfo.signal_key,
+        execution_mode: strategyInfo.execution_mode ?? 'rule_direct',
+        outcome: decision.outcome,
+        reason_code: decision.reason_code ?? reasonCode,
+        entry_mark: Number.isFinite(Number(refMark)) && Number(refMark) > 0 ? Number(refMark) : null,
+        sl_price: Number.isFinite(Number(sl)) && Number(sl) > 0 ? Number(sl) : null,
+        tp_price: Number.isFinite(Number(tp)) && Number(tp) > 0 ? Number(tp) : null,
+        order_id: decision.order_id ?? null,
+        details: decision.details ?? {},
+      }).catch(() => {})
+    }
+    if (cycleCreated) {
+      await finalizeCycleSafely(client, cycleId, {
+        outcome,
+        reasonCode,
+        errorCode: error?.code ?? null,
+      }, record)
+    }
+    this.lastRunAt = nowIso(finished)
+    this.lastError = record.error
+    this.portfolioCache = null
+    this.store.upsert(record)
+    return { ok: true, round: roundViewOf(record), record, outcome, reasonCode }
   }
 
   /**

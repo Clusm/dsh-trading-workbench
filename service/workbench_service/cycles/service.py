@@ -22,6 +22,12 @@ from .store import CycleStore, decode_json_fields, evidence_file_path
 
 CYCLE_STATES = frozenset({"RUNNING", "DONE", "FAILED", "SKIPPED", "CANCELLED"})
 TERMINAL_STATES = frozenset({"DONE", "FAILED", "SKIPPED", "CANCELLED"})
+#: v3.1 P2（docs/19 R2）：cycle 目的。同一 purpose 同时只允许 1 个 RUNNING，不同 purpose
+#: 可以并存（研判 30–100s 不再挡住触发）；finalize 只作用于给定 cycle_id，绝不跨 purpose。
+CYCLE_PURPOSES = frozenset({"research", "trigger", "manual"})
+DEFAULT_CYCLE_PURPOSE = "manual"
+#: 证据最多限制到白名单 deep 池的规模（单币 cycle 是最常见的调用）。
+MAX_CYCLE_SYMBOLS = 8
 OUTCOMES = frozenset({"trade", "no_trade", "error"})
 STATE_OUTCOMES: dict[str, frozenset[str]] = {
     "DONE": frozenset({"trade", "no_trade"}),
@@ -164,6 +170,58 @@ def _attempt(value: Any, default: int = 1) -> int:
 
 def _agent_key(agent: str) -> str:
     return AGENT_ALIASES.get(agent, agent)
+
+
+def _cycle_purpose(value: Any) -> str:
+    """校验 cycle purpose；缺省 manual（保持 v0.2.1 的调用方行为不变）。"""
+
+    if value is None or value == "":
+        return DEFAULT_CYCLE_PURPOSE
+    text = str(value).strip().lower()
+    if text not in CYCLE_PURPOSES:
+        raise ServiceError(
+            422,
+            "E_VALIDATION",
+            "purpose must be research/manual/trigger",
+            details={"purpose": text, "allowed": sorted(CYCLE_PURPOSES)},
+        )
+    return text
+
+
+def _cycle_symbols(value: Any, *, whitelist: Sequence[str] | None) -> list[str]:
+    """校验可选的 ``symbols``（只影响证据生成范围，不影响交易标的）。
+
+    去重并保持调用方顺序；超出白名单 / 非 USDT 标的直接 422，避免用证据范围偷偷
+    扩大可交易集合。
+    """
+
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ServiceError(422, "E_VALIDATION", "symbols must be an array of USDT symbols")
+    symbols: list[str] = []
+    for item in value:
+        symbol = str(item or "").strip().upper()
+        if not _SYMBOL_RE.match(symbol):
+            raise ServiceError(
+                422, "E_VALIDATION", "symbols must be uppercase USDT symbols",
+                details={"symbol": symbol},
+            )
+        if whitelist and symbol not in whitelist:
+            raise ServiceError(
+                422, "E_SYMBOL_NOT_ALLOWED", "symbol is not in the market whitelist",
+                details={"symbol": symbol},
+            )
+        if symbol not in symbols:
+            symbols.append(symbol)
+    if len(symbols) > MAX_CYCLE_SYMBOLS:
+        raise ServiceError(
+            422,
+            "E_VALIDATION",
+            f"symbols must contain at most {MAX_CYCLE_SYMBOLS} symbols",
+            details={"count": len(symbols)},
+        )
+    return symbols
 
 
 def _cursor_parts(cursor: str | None) -> tuple[str | None, str | None]:
@@ -489,6 +547,9 @@ class CycleService:
             slot_id = str(slot_id).strip()
             if not slot_id or len(slot_id) > 160:
                 raise ServiceError(422, "E_VALIDATION", "slot_id must be 1..160 characters")
+        purpose = _cycle_purpose(body.get("purpose"))
+        whitelist = getattr(getattr(market, "settings", None), "whitelist", None)
+        symbols = _cycle_symbols(body.get("symbols"), whitelist=whitelist)
         prev_pick = body.get("prev_pick")
         if prev_pick is not None:
             prev_pick = str(prev_pick).strip().upper()[:20] or None
@@ -500,21 +561,45 @@ class CycleService:
                     422, "E_VALIDATION", "symbol must be an uppercase USDT symbol",
                     details={"symbol": symbol},
                 )
-            whitelist = getattr(getattr(market, "settings", None), "whitelist", None)
             if whitelist and symbol not in whitelist:
                 raise ServiceError(
                     422, "E_SYMBOL_NOT_ALLOWED", "symbol is not in the market whitelist",
                     details={"symbol": symbol},
                 )
+        if symbol is not None and symbols and symbol not in symbols:
+            raise ServiceError(
+                422, "E_VALIDATION", "symbol must be one of symbols",
+                details={"symbol": symbol, "symbols": symbols},
+            )
+        if symbol is None and symbols:
+            symbol = symbols[0]
+        # symbols 只影响证据生成范围：显式传入时按它限制 deep 池；trigger cycle 即使
+        # 只给 symbol 也按单币生成（docs/18 §3.2 的 R14 ≤400s 要求）。
+        evidence_symbols = symbols or ([symbol] if (purpose == "trigger" and symbol) else [])
 
         with _LOCK:
-            running = self.store.running()
+            running = self.store.running(purpose)
             if running is not None:
+                # 只报"同 purpose 正在跑"，并附上其它 purpose 的 RUNNING 供调用方分辨；
+                # 服务端不会替调用方结束任何 cycle（finalize 只作用于给定 cycle_id）。
+                others = [
+                    row
+                    for row in self.store.running_cycles()
+                    if str(row.get("cycle_id")) != str(running.get("cycle_id"))
+                ]
                 raise ServiceError(
                     409,
                     "E_CYCLE_RUNNING",
-                    "a cycle is already RUNNING",
-                    details={"cycle_id": running.get("cycle_id")},
+                    "a cycle with the same purpose is already RUNNING",
+                    details={
+                        "purpose": purpose,
+                        "cycle_id": running.get("cycle_id"),
+                        "running_purpose": running.get("purpose"),
+                        "other_running": [
+                            {"cycle_id": row.get("cycle_id"), "purpose": row.get("purpose")}
+                            for row in others
+                        ],
+                    },
                 )
             if slot_id and self.store.slot_exists(slot_id):
                 raise ServiceError(
@@ -529,7 +614,11 @@ class CycleService:
             held = [str(item.get("symbol")) for item in positions if item.get("symbol")]
             started_at = _now()
             evidence_summary, evidence_payload = self._build_evidence(
-                market, cycle_id=cycle_id, held=held, prev_pick=prev_pick
+                market,
+                cycle_id=cycle_id,
+                held=held,
+                prev_pick=prev_pick,
+                deep_symbols=evidence_symbols or None,
             )
             evidence_summary.pop("abs_path", None)
             try:
@@ -588,6 +677,7 @@ class CycleService:
                 "state": "RUNNING",
                 "outcome": None,
                 "trigger": trigger,
+                "purpose": purpose,
                 "symbol": symbol,
                 "started_at": started_at,
                 "finished_at": None,
@@ -619,6 +709,9 @@ class CycleService:
                 "cycle_id": cycle_id,
                 "state": "RUNNING",
                 "trigger": trigger,
+                "purpose": purpose,
+                "symbol": symbol,
+                "symbols": symbols,
                 "slot_id": slot_id,
                 "started_at": started_at,
                 "evidence": {
@@ -637,24 +730,38 @@ class CycleService:
                 "risk_envelope": envelope,
             }
 
-    def list_cycles(self, *, limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
+    def list_cycles(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        purpose: str | None = None,
+    ) -> dict[str, Any]:
         limit = max(1, min(200, int(limit)))
         cursor_at, cursor_id = _cursor_parts(cursor)
+        # purpose 过滤（v3.1 R2）：调用方按 purpose 查自己的 RUNNING cycle / 收敛僵尸，
+        # 不需要也没机会碰到别的 purpose。
+        purpose = None if purpose in (None, "") else _cycle_purpose(purpose)
+        clauses: list[str] = []
+        params: list[Any] = []
+        if cursor_at is not None:
+            clauses.append(
+                "(COALESCE(created_at, started_at) < ? "
+                "OR (COALESCE(created_at, started_at) = ? AND cycle_id < ?))"
+            )
+            params.extend([cursor_at, cursor_at, cursor_id])
+        if purpose is not None:
+            clauses.append("purpose = ?")
+            params.append(purpose)
+        where = ("WHERE " + " AND ".join(clauses) + " ") if clauses else ""
+        params.append(limit)
         with self.store._connect() as conn:
-            if cursor_at is not None:
-                rows = conn.execute(
-                    "SELECT * FROM cycle_runs "
-                    "WHERE (COALESCE(created_at, started_at) < ? "
-                    "OR (COALESCE(created_at, started_at) = ? AND cycle_id < ?)) "
-                    "ORDER BY COALESCE(created_at, started_at) DESC, cycle_id DESC LIMIT ?",
-                    (cursor_at, cursor_at, cursor_id, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM cycle_runs "
-                    "ORDER BY COALESCE(created_at, started_at) DESC, cycle_id DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM cycle_runs "
+                f"{where}"
+                "ORDER BY COALESCE(created_at, started_at) DESC, cycle_id DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
         cycle_rows = [dict(row) for row in rows]
         cycles = [self._cycle_view(row) for row in cycle_rows]
         next_cursor = None
@@ -1349,11 +1456,18 @@ class CycleService:
         cycle_id: str,
         held: Sequence[str],
         prev_pick: str | None,
+        deep_symbols: Sequence[str] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        kwargs: dict[str, Any] = {
+            "cycle_id": cycle_id,
+            "held_symbols": list(held),
+            "prev_pick": prev_pick,
+        }
+        # 只在显式给了标的范围时才传：不给 = 沿用全池证据（v0.2.1 行为不变）。
+        if deep_symbols:
+            kwargs["deep_symbols"] = list(deep_symbols)
         try:
-            built = market.build_evidence(
-                cycle_id=cycle_id, held_symbols=list(held), prev_pick=prev_pick
-            )
+            built = market.build_evidence(**kwargs)
         except MarketUpstreamError as exc:
             raise ServiceError(
                 503,

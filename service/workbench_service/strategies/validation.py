@@ -20,7 +20,9 @@ FIELDS = (
     "required_data",
     "requires_ai",
 )
-OPTIONAL_FIELDS = {"execution_mode", "circuit_breaker"}
+#: ``priority`` 是 v3.1 P2 的确定性排序键（docs/18 §6.3：用户策略取挂载时设定的
+#: priority，默认 0），只影响"多条规则同时触发时先执行谁"，不参与执行就绪判定。
+OPTIONAL_FIELDS = {"execution_mode", "circuit_breaker", "priority"}
 ALLOWED_FIELDS = set(FIELDS) | OPTIONAL_FIELDS
 TIMEFRAMES = {"15m", "1h", "4h", "1d"}
 OPERATORS = ("gt", "lt", "gte", "lte")
@@ -245,6 +247,11 @@ def validate(payload: dict) -> dict:
 
     if "execution_mode" in r and r["execution_mode"] not in EXECUTION_MODES:
         issues.append("execution_mode 必须为 ai_assisted 或 rule_direct")
+
+    if "priority" in r and not _number(
+        r["priority"], -1000, 1000, inclusive_low=True, inclusive_high=True
+    ):
+        issues.append("priority 必须为 -1000..1000 的有限数值")
 
     if "circuit_breaker" in r:
         cb = r["circuit_breaker"]

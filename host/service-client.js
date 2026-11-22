@@ -224,6 +224,34 @@ export class WorkbenchServiceClient {
     return this.request('/api/strategies/evaluate-candidates', { method: 'POST', body })
   }
 
+  /**
+   * v3.1 P2（docs/18 §5.1、§6.2）：确定性规则扫描，触发引擎每 15s / K 线收盘后用。
+   * 服务端没有副作用（不派发、不下单），只更新 armed 状态的过期/失效与 rule_eval_state。
+   * 老服务未实现时返回 404（ServiceClientError），调用方负责降级而不是崩溃。
+   */
+  scanRules({ now_ms = null, scope = 'all', scan_interval_ms = null } = {}) {
+    const body = { scope }
+    if (now_ms !== null && now_ms !== undefined) body.now_ms = Math.trunc(Number(now_ms))
+    if (scan_interval_ms !== null && scan_interval_ms !== undefined) {
+      body.scan_interval_ms = Math.trunc(Number(scan_interval_ms))
+    }
+    return this.request('/api/rules/scan', { method: 'POST', body })
+  }
+
+  /**
+   * v3.1 P2（docs/18 §6.2 R5②）：回写派发结果，服务端据此重新武装 / 冷却。
+   * 幂等：同一 rule_key + symbol 重复回写不叠加冷却（服务端 max() 合并）。
+   */
+  markRulesDispatched({ rule_key, symbol, outcome, at_ms = null, scan_interval_ms = null, reason_code = null } = {}) {
+    const body = { rule_key: String(rule_key), symbol: String(symbol), outcome: String(outcome) }
+    if (at_ms !== null && at_ms !== undefined) body.at_ms = Math.trunc(Number(at_ms))
+    if (scan_interval_ms !== null && scan_interval_ms !== undefined) {
+      body.scan_interval_ms = Math.trunc(Number(scan_interval_ms))
+    }
+    if (reason_code) body.reason_code = String(reason_code)
+    return this.request('/api/rules/dispatched', { method: 'POST', body })
+  }
+
   recordStrategyDecision(strategyId, body) {
     return this.request(`/api/strategies/${encodeURIComponent(strategyId)}/decisions`, { method: 'POST', body })
   }
@@ -258,13 +286,24 @@ export class WorkbenchServiceClient {
    * otherwise every automatic slot is recorded as a manual run (T01 G3: 155/155
    * rows were 'manual'). Omitted only by callers that genuinely are manual.
    */
-  createCycle(cycleId, symbol = null, slotId = null, { timeoutMs = CYCLE_TIMEOUT_MS, trigger = null } = {}) {
+  createCycle(cycleId, symbol = null, slotId = null, {
+    timeoutMs = CYCLE_TIMEOUT_MS,
+    trigger = null,
+    // v3.1 P2（docs/18 §5.1，19 §2 R2）：purpose 让研判（research）与触发（trigger）
+    // 的 RUNNING cycle 并存；symbols 只影响证据生成范围（触发时单币，满足 R14 ≤400s）。
+    purpose = null,
+    symbols = null,
+  } = {}) {
     const body = { cycle_id: cycleId }
     if (symbol) body.symbol = symbol
     // The service rejects a duplicate slot_id with E_CYCLE_DUPLICATE_SLOT, which
     // the auto scheduler treats as "this slot is already done" instead of a failure.
     if (slotId) body.slot_id = String(slotId)
     if (trigger === 'auto' || trigger === 'manual') body.trigger = trigger
+    if (purpose) body.purpose = String(purpose)
+    if (Array.isArray(symbols) && symbols.length > 0) {
+      body.symbols = symbols.map((item) => String(item).trim().toUpperCase()).filter(Boolean)
+    }
     return this.request('/api/cycles', { method: 'POST', body, timeoutMs })
   }
 
