@@ -98,7 +98,8 @@
 - **节奏**：mark 类规则每 15s 扫描；K 线类规则在收盘后 +3s 扫描。服务端 `POST /api/rules/scan` 用同一个写事务读状态、查信号消费、按「策略 priority → 挂起时间」确定性排序。
 - **派发**：租约 → `POST /api/cycles {purpose:'trigger', symbols:[sym]}`（单币证据，满足 R14 ≤400s）→ P1 →（`ai_assisted` 且 `confirmMode=veto` 时一次 `trigger_confirm`，超时/异常一律否决）→ P2 → finalize → 释放租约。`E_LEASE_HELD` / `E_CYCLE_RUNNING` 只跳过本 tick 并计数，**绝不结束别人的 cycle**；下个 tick 重试。
 - **边沿语义（R5）**：首次求值就为真只记录不触发；必须「不满足 → 满足」才算边沿；派发过一次（无论结果）后必须观察到一次不满足才能重新武装；P1 拒绝额外冷却 1 个周期。停机保护：距离上次求值超过 mark 3 个扫描间隔（45s）或 K 线周期 +45s 时按首次求值处理，重启后不会追已经发生的信号。
-- **可观测**：`/health` 的 `trigger_engine` 带 `lastScanAt`、心跳、`leaseBusyCount`、`cycleBusyCount` 与上次派发；每次扫描写 `data/trigger-engine-state.json`。
+- **孤儿 cycle 清理**：派发异常或进程崩溃可能留下 RUNNING 的 trigger cycle（同 purpose 只允许 1 个 RUNNING，不清掉会永久卡住后续派发）。引擎只终结「自己 purpose」的孤儿——拿到租约后仍遇到同 purpose 冲突，就把旧 trigger cycle 收成 FAILED（`reason=HOST_ORPHAN_TRIGGER_CYCLE`）；research / manual 的 cycle 永不碰。
+- **可观测**：`/health` 的 `trigger_engine` 带 `lastScanAt`、心跳、`leaseBusyCount`、`cycleBusyCount`、`orphanCycleCleanupCount` 与上次派发；每次扫描写 `data/trigger-engine-state.json`。
 - **多候选排序**：服务端确定性排序，`StrategyAssistant.choose()`（模型选策略）与 404 回退的 `eligibleStrategies` 已删除。Host 端仓位/权益估算一并删除，数量只由服务端 `approved_qty` 决定。
 
 已知限制：

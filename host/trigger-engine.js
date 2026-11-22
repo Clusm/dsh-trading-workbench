@@ -244,6 +244,8 @@ export class TriggerEngine {
     this.shadowSuppressedCount = 0
     this.leaseBusyCount = 0
     this.cycleBusyCount = 0
+    // 自己收掉的 trigger cycle 数（派发异常半成品 + 同 purpose 孤儿）。
+    this.orphanCycleCleanupCount = 0
     this.pendingRetry = null
 
     this.lastScanAtMs = null
@@ -608,6 +610,8 @@ export class TriggerEngine {
     }
     const runId = cycleIdFor(at)
     let leaseId = null
+    // 本 tick 自己创建、尚未终态化的 cycle：异常路径要靠它做清理（见下方 catch）。
+    let createdCycleId = null
     try {
       const lease = await client.acquireLease({ run_id: runId, owner: 'host', ttl_s: LEASE_TTL_S })
       leaseId = lease?.lease_id ?? null
@@ -631,6 +635,7 @@ export class TriggerEngine {
         return await this.handleDispatchBusy(client, item, error, { atMs: at, stage: 'CYCLE' })
       }
       const cycleId = cycle?.cycle_id ? String(cycle.cycle_id) : runId
+      createdCycleId = cycleId
       const confirm = this.confirmHookFor(item)
       const result = await this.integration.dispatchRuleTrigger({
         client,
@@ -682,6 +687,10 @@ export class TriggerEngine {
       const code = error?.code ?? 'E_TRIGGER_DISPATCH'
       this.lastError = { code, message: String(error?.message ?? error), at: isoAt(this.now()), rule_key: item.ruleKey }
       this.logger?.warn?.('[twb] 触发派发失败 (' + code + '): ' + String(error?.message ?? error))
+      // 意外异常可能发生在 createCycle 之后、finishRuleTriggerRound 之前。此时这条
+      // cycle 仍是 RUNNING；trigger purpose 同一时刻只允许 1 个 RUNNING，所以不清掉
+      // 它就会永久卡住后续所有派发（本引擎不会终结别人的 cycle，只能清自己创建的）。
+      await this.finalizeOwnCycle(client, createdCycleId, 'TRIGGER_DISPATCH_FAILED')
       await this.reportDispatched(client, item, { outcome: 'rejected', reasonCode: code, atMs: at })
       return { dispatched: false, ruleKey: item.ruleKey, symbol: item.symbol, reason: code }
     } finally {
@@ -693,6 +702,26 @@ export class TriggerEngine {
         }
       }
       this.writeState('dispatch')
+    }
+  }
+
+  /**
+   * 把自己创建、仍停在 RUNNING 的 trigger cycle 收成 FAILED（幂等；失败只记日志）。
+   *
+   * 只处理「自己的」cycle：派发异常留下的半成品，以及 service 报同 purpose 冲突时
+   * 的孤儿。research / manual 的 cycle 永远不在这里处理——那是别人正在跑的工作。
+   */
+  async finalizeOwnCycle(client, cycleId, reason) {
+    if (!cycleId || typeof client?.finalizeCycle !== 'function') return false
+    try {
+      await client.finalizeCycle(cycleId, { state: 'FAILED', outcome: 'error', reason })
+      this.orphanCycleCleanupCount += 1
+      return true
+    } catch (error) {
+      this.logger?.warn?.(
+        '[twb] trigger cycle 收尾失败 (' + String(error?.code ?? error) + ') cycle=' + cycleId + ' reason=' + reason,
+      )
+      return false
     }
   }
 
@@ -716,6 +745,23 @@ export class TriggerEngine {
       this.leaseBusyCount += 1
     }
     this.lastBusy = { stage, code, at: isoAt(at), rule_key: item.ruleKey, symbol: item.symbol, retry: busy }
+    // 同 purpose 的孤儿 cycle：创建 cycle 之前我们已经拿到租约，别的 Host 不可能正在
+    // 派发；此时还能看到一个 RUNNING 的 trigger cycle，只可能是上一次派发崩溃/异常
+    // 留下的半成品（trigger purpose 同时只允许 1 个 RUNNING）。不清掉它会永久卡住
+    // 后续所有派发，所以这里只终结「自己的 trigger purpose」，research / manual 不碰。
+    if (stage === 'CYCLE' && code === 'E_CYCLE_RUNNING') {
+      const details = error?.details ?? {}
+      const runningPurpose = String(details.running_purpose ?? details.purpose ?? '')
+      const orphanId = details.cycle_id ? String(details.cycle_id) : null
+      if (orphanId && runningPurpose === 'trigger') {
+        const cleaned = await this.finalizeOwnCycle(client, orphanId, 'HOST_ORPHAN_TRIGGER_CYCLE')
+        this.lastBusy.orphan_cycle_id = orphanId
+        this.lastBusy.orphan_cleaned = cleaned
+        this.logger?.warn?.(
+          '[twb] 清理孤儿 trigger cycle cycle=' + orphanId + ' cleaned=' + cleaned,
+        )
+      }
+    }
     this.lastError = {
       code,
       message: String(error?.message ?? error),
@@ -1059,6 +1105,7 @@ export class TriggerEngine {
       lastDispatchReportError: this.lastDispatchReportError,
       leaseBusyCount: this.leaseBusyCount,
       cycleBusyCount: this.cycleBusyCount,
+      orphanCycleCleanupCount: this.orphanCycleCleanupCount,
       dispatchCount: this.dispatchCount,
       shadowTriggerCount: this.shadowTriggerCount,
       shadowSuppressedCount: this.shadowSuppressedCount,

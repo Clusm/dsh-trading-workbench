@@ -402,9 +402,15 @@ test('an exception inside the dispatch still releases the lease and reports reje
   })
   const result = await engine.tick('mark')
   assert.equal(result.ok, true)
+  // 异常可能发生在 createCycle 之后：必须先把自己创建的 cycle 收成 FAILED，
+  // 否则它会一直 RUNNING，同 purpose 的下一次派发永远 409。
   assert.deepEqual(calls.map((call) => call.path), [
-    'scanRules', 'acquireLease', 'createCycle', 'markRulesDispatched', 'releaseLease',
+    'scanRules', 'acquireLease', 'createCycle', 'finalizeCycle', 'markRulesDispatched', 'releaseLease',
   ])
+  const created = calls.find((call) => call.path === 'createCycle')
+  const finalized = calls.find((call) => call.path === 'finalizeCycle')
+  assert.equal(finalized.cycleId, created.cycleId)
+  assert.equal(finalized.payload.reason, 'TRIGGER_DISPATCH_FAILED')
   assert.deepEqual(calls.at(-1).body, { lease_id: 'lease-1' })
   const reported = calls.find((call) => call.path === 'markRulesDispatched')
   assert.equal(reported.body.outcome, 'rejected')
@@ -485,6 +491,72 @@ test('E_CYCLE_RUNNING skips the tick, releases our lease and never finalizes the
   assert.equal(integration.dispatchCalls.length, 0)
   assert.equal(calls.find((call) => call.path === 'markRulesDispatched').body.outcome, 'rejected')
   assert.equal(engine.status().pendingRetry.attempts, 1)
+})
+
+test('an orphaned RUNNING trigger cycle is finalized so dispatch can resume', async () => {
+  // 上一次派发崩溃留下的 RUNNING trigger cycle：engine 不清理就永久 409。
+  const { engine, calls, state } = makeEngine({
+    mode: 'live',
+    clientOptions: { triggered: [triggeredItem({ rules: RULES })] },
+  })
+  state.cycleError = Object.assign(new Error('trigger cycle is RUNNING'), {
+    code: 'E_CYCLE_RUNNING',
+    status: 409,
+    details: { purpose: 'trigger', running_purpose: 'trigger', cycle_id: 'cyc-orphan-1' },
+  })
+  const first = await engine.tick('mark')
+  assert.equal(first.dispatched[0].dispatched, false)
+  assert.equal(first.dispatched[0].reason, 'E_CYCLE_RUNNING')
+  const finalized = calls.filter((call) => call.path === 'finalizeCycle')
+  assert.equal(finalized.length, 1)
+  assert.equal(finalized[0].cycleId, 'cyc-orphan-1')
+  assert.equal(finalized[0].payload.reason, 'HOST_ORPHAN_TRIGGER_CYCLE')
+  assert.equal(engine.status().orphanCycleCleanupCount, 1)
+  assert.equal(engine.status().lastBusy.orphan_cleaned, true)
+  // 自己的租约照样释放；下个 tick 会重试（这里把冲突清掉，验证能恢复派发）。
+  assert.equal(calls.filter((call) => call.path === 'releaseLease').length, 1)
+  state.cycleError = null
+  const second = await engine.tick('mark')
+  assert.equal(second.dispatched[0].dispatched, true)
+})
+
+test('a research/manual cycle is never finalized even when it blocks the tick', async () => {
+  // 跨 purpose 一律不碰：即使挡住派发，也只跳过 + 计数。
+  const { engine, calls } = makeEngine({
+    mode: 'live',
+    clientOptions: {
+      triggered: [triggeredItem({ rules: RULES })],
+      cycleError: Object.assign(new Error('research cycle is RUNNING'), {
+        code: 'E_CYCLE_RUNNING',
+        status: 409,
+        details: { purpose: 'trigger', running_purpose: 'manual', cycle_id: 'cyc-research-9' },
+      }),
+    },
+  })
+  await engine.tick('mark')
+  assert.deepEqual(calls.filter((call) => call.path === 'finalizeCycle'), [])
+  assert.equal(engine.status().orphanCycleCleanupCount, 0)
+  assert.equal(engine.status().cycleBusyCount, 1)
+})
+
+test('an unexpected dispatch exception finalizes the cycle it created', async () => {
+  const { engine, calls } = makeEngine({
+    mode: 'live',
+    clientOptions: { triggered: [triggeredItem({ rules: RULES })] },
+    integrationOptions: {
+      dispatchError: Object.assign(new Error('boom'), { code: 'E_TRIGGER_BOOM' }),
+    },
+  })
+  const result = await engine.tick('mark')
+  assert.equal(result.dispatched[0].dispatched, false)
+  assert.equal(result.dispatched[0].reason, 'E_TRIGGER_BOOM')
+  const created = calls.find((call) => call.path === 'createCycle')
+  const finalized = calls.filter((call) => call.path === 'finalizeCycle')
+  assert.equal(finalized.length, 1)
+  assert.equal(finalized[0].cycleId, created.cycleId)
+  assert.equal(finalized[0].payload.reason, 'TRIGGER_DISPATCH_FAILED')
+  assert.equal(calls.filter((call) => call.path === 'releaseLease').length, 1)
+  assert.equal(calls.find((call) => call.path === 'markRulesDispatched').body.outcome, 'rejected')
 })
 
 test('maxDispatchPerTick keeps a single dispatch per tick even with several triggered rules', async () => {
