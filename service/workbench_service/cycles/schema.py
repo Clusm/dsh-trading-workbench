@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS cycle_runs (
     state                TEXT NOT NULL,
     outcome              TEXT,
     trigger              TEXT NOT NULL DEFAULT 'manual',
+    -- v3.1 P2（docs/19 R2）：research / trigger / manual，按 purpose 各允许 1 个 RUNNING。
+    purpose              TEXT NOT NULL DEFAULT 'manual',
     symbol               TEXT,
     started_at           TEXT NOT NULL,
     finished_at          TEXT,
@@ -226,6 +228,7 @@ _CYCLE_RUN_COLUMNS: dict[str, str] = {
     "state": "TEXT",
     "outcome": "TEXT",
     "trigger": "TEXT DEFAULT 'manual'",
+    "purpose": "TEXT NOT NULL DEFAULT 'manual'",
     "symbol": "TEXT",
     "started_at": "TEXT",
     "finished_at": "TEXT",
@@ -483,6 +486,11 @@ def ensure_cycle_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_cycle_runs_started "
         "ON cycle_runs(started_at DESC)"
+    )
+    # R2：按 purpose 找 RUNNING cycle（冲突判定 / 僵尸收敛都只看同一个 purpose）。
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cycle_runs_purpose "
+        "ON cycle_runs(purpose, state, started_at DESC)"
     )
     conn.commit()
 

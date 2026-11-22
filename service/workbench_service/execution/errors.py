@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
+#: P0②：交易所 451（出口 IP 受限）在上层的统一错误码；broker/service/日志共用。
+VENUE_GEO_BLOCKED_CODE = "E_VENUE_GEO_BLOCKED"
+
 __all__ = [
     "DemoGuardViolation",
     "DemoApiError",
     "ExecutionRejected",
     "OutboxUncertain",
     "ExecutionConfigError",
+    "VENUE_GEO_BLOCKED_CODE",
 ]
 
 
@@ -28,7 +32,9 @@ class DemoApiError(RuntimeError):
     ``kind``：
     - ``rejected``：交易所明确拒绝（4xx + ``code``），**不重试**；
     - ``unknown``：传输错误/超时/5xx，结果不确定，只能按 clientOrderId 查询；
-    - ``rate_limited``：429；``banned``：418。
+    - ``rate_limited``：429；``banned``：418；
+    - ``geo_blocked``：451 地区访问限制（出口 IP 位于受限地区）。重试没有意义，
+      由上层映射为 ``E_VENUE_GEO_BLOCKED`` 并进入指数退避（docs/19 §4 P0②）。
     """
 
     def __init__(
@@ -54,6 +60,12 @@ class DemoApiError(RuntimeError):
     @property
     def definitely_rejected(self) -> bool:
         return self.kind == "rejected"
+
+    @property
+    def geo_blocked(self) -> bool:
+        """HTTP 451：出口 IP 位于交易所受限地区（不是限流，重试无意义）。"""
+
+        return self.kind == "geo_blocked"
 
     def as_dict(self) -> dict[str, Any]:
         return {

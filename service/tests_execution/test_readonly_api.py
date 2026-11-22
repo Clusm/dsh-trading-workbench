@@ -106,8 +106,9 @@ class ReadOnlyTests(unittest.TestCase):
         self.assertEqual(rules[0]["rule_id"], "R00")
         self.assertEqual(rules[-1]["rule_id"], "R25")
         enabled = {rule["rule_id"]: rule["enabled"] for rule in rules}
-        self.assertFalse(enabled["R20"], "R20 默认关闭")
-        self.assertFalse(enabled["R21"], "R21 默认关闭")
+        # docs/19 §2 R12：R20/R21 提前打开；对旧链同样生效，只会增加拒绝。
+        self.assertTrue(enabled["R20"], "R20 默认开启")
+        self.assertTrue(enabled["R21"], "R21 默认开启")
         self.assertTrue(enabled["R01"])
         self.assertEqual(body["limits"]["portfolio"]["max_open_positions"], 1)
         self.assertEqual(body["approval"]["ttl_s"], 120)

@@ -1,7 +1,9 @@
 """Authenticated strategy editing, candidate evaluation, preview & attribution APIs."""
 from __future__ import annotations
 
-from typing import Any
+import math
+import re
+from typing import Any, Mapping
 
 from fastapi import APIRouter, Body as FastAPIBody, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
@@ -11,6 +13,7 @@ from ..market.config import WHITELIST
 from ..market.transport import MarketUpstreamError
 from ..security import require_auth
 from ..strategies import StrategyStore
+from ..strategies import scan as rule_scan
 from ..strategies.attribution import check_and_trip_circuits, list_attribution
 from ..strategies.evaluator import (
     describe_rules,
@@ -22,7 +25,16 @@ from ..strategies.evaluator import (
 from .market import _market_service
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"], dependencies=[Depends(require_auth)])
+#: v3.1 P2：确定性规则扫描 / 派发回写路由（docs/18 §5.1）。
+#:
+#: 独立于 strategies router 的 prefix，由 ``app.py`` 显式装配：
+#: ``app.include_router(strategies_api.rules_router)``。这样 /api/rules 的鉴权、
+#: tags 与 OpenAPI 路径都由它自己决定，不依赖 strategies 路由的登记方式。
+rules_router = APIRouter(
+    prefix="/api/rules", tags=["rules"], dependencies=[Depends(require_auth)]
+)
 _WHITELIST_SET = frozenset(WHITELIST)
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}USDT$")
 
 
 class Body(BaseModel):
@@ -75,8 +87,30 @@ class ConfigBody(Body):
     revision: StrictInt = Field(ge=0)
 
 
-class EvaluateCandidatesBody(Body):
+class ScanBody(BaseModel):
+    """``POST /api/rules/scan`` 的请求体；字段全为可选（Host 每 tick 只传变化项）。
+
+    ``extra="ignore"`` 是刻意的：Host 会随时间追加诊断字段（例如 dispatches 的
+    ``reason_code``），服务端不应该因为一个未知键就 422。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
     now_ms: StrictInt | None = Field(default=None, ge=0)
+    scope: str = Field(default=rule_scan.DEFAULT_SCOPE, max_length=16)
+    scan_interval_ms: StrictInt | None = Field(default=None, ge=0)
+
+
+class DispatchBody(BaseModel):
+    """``POST /api/rules/dispatched`` 的请求体（R5② 派发回写）。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    rule_key: str = Field(min_length=1, max_length=200)
+    symbol: str = Field(min_length=2, max_length=20)
+    outcome: str = Field(min_length=1, max_length=32)
+    at_ms: StrictInt | None = Field(default=None, ge=0)
+    scan_interval_ms: StrictInt | None = Field(default=None, ge=0)
 
 
 class DecisionBody(Body):
@@ -201,143 +235,333 @@ def validate_authorization(body: ValidateBody, request: Request):
     return s.validate_authorization(body.strategy_id, body.version, body.generation)
 
 
-@router.post("/evaluate-candidates")
-def evaluate_candidates(
-    request: Request,
-    body: EvaluateCandidatesBody | None = FastAPIBody(default=None),
-):
+def _strategy_priority(rules: Mapping[str, Any]) -> float:
+    """确定性排序用的 priority（docs/18 §6.3）；非法值按 0 处理。"""
+
+    try:
+        value = float(rules.get("priority", 0))
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) else 0.0
+
+
+def _scan_facts(rules: Mapping[str, Any]) -> tuple[str, bool, int]:
+    """(timeframe, uses_klines, needed_bars) —— K 线类规则沿用现有 bars 加载逻辑。"""
+
+    frames = rules.get("timeframes") or ["15m"]
+    timeframe = str(frames[0]) if frames else "15m"
+    entry = rules.get("entry")
+    uses_klines = entry_uses_klines(entry)
+    needed_bars = recommended_fetch_bars(entry, timeframe) if uses_klines else 0
+    return timeframe, uses_klines, needed_bars
+
+
+def _run_scan(request: Request, body: ScanBody) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """执行一次确定性边沿扫描，返回 (响应体, 逐条求值明细)。
+
+    ``/api/rules/scan`` 与兼容别名 ``/api/strategies/evaluate-candidates`` 共用这一份实现：
+    先在事务外取行情 / K 线，再在一个写事务里读 ``rule_eval_state``、查周期信号是否已
+    消费、计划本轮触发并写回状态。扫描没有下单 / 派发副作用；也不做熔断巡检——那是
+    界面查询与 P1/P2 的职责，15s 一次的扫描不应该反复算归因。
+    """
+
     s = store(request)
-    check_and_trip_circuits(s)
-    config = s.config()
     ms = _resolve_market(request)
-    now_ms = int(body.now_ms) if (body is not None and body.now_ms is not None) else int(ms.now_ms())
+    now_ms = int(body.now_ms) if body.now_ms is not None else int(ms.now_ms())
+    scope = rule_scan.normalize_scope(body.scope)
+    if not scope:
+        raise ServiceError(
+            422,
+            "E_VALIDATION",
+            "scope 必须为 " + "/".join(rule_scan.SCAN_SCOPES) + " 之一",
+            details={"scope": str(body.scope)},
+        )
+    interval = rule_scan.clamp_interval_ms(body.scan_interval_ms)
+    config = s.config()
 
-    enabled = s.list(authorized=True)
-    if not enabled:
-        return {
-            "mode": config["mode"],
-            "mode_revision": config["revision"],
-            "evaluated_at_ms": now_ms,
-            "candidates": [],
-            "skipped": [],
-            "prices": {},
-        }
-
-    wanted_symbols = sorted(
-        {
-            sym
-            for strat in enabled
-            for sym in ((strat.get("confirmed_version") or {}).get("rules") or {}).get("symbols", [])
-            if isinstance(sym, str) and sym in _WHITELIST_SET
-        }
-    )
-    prices_map, _ = _fetch_marks(ms, wanted_symbols)
-
-    need_funding = [
-        sym
-        for strat in enabled
-        if entry_uses_funding(((strat.get("confirmed_version") or {}).get("rules") or {}).get("entry"))
-        for sym in ((strat.get("confirmed_version") or {}).get("rules") or {}).get("symbols", [])
-        if sym in prices_map and prices_map[sym].get("funding_rate") is None
-    ]
-    if need_funding:
-        try:
-            snap = ms.price_snapshot(sorted(set(need_funding))[:10])
-            for sym, row in (snap or {}).items():
-                if sym in prices_map and row.get("funding_rate") is not None:
-                    prices_map[sym]["funding_rate"] = row["funding_rate"]
-        except Exception:  # noqa: BLE001
-            pass
-
-    bars_cache: dict[tuple[str, str], tuple[Any, ...]] = {}
-    candidates: list[dict[str, Any]] = []
+    # 1) 规则筛选：只有已启用、已就绪、标的白名单内的用户策略参与扫描。
     skipped: list[dict[str, Any]] = []
-
-    with s.transaction() as conn:
-        for strat in enabled:
-            confirmed = strat.get("confirmed_version")
-            if not confirmed or not confirmed.get("validation", {}).get("execution_ready"):
+    targets: list[dict[str, Any]] = []
+    for row in s.authorized_rules():
+        sid, name = row["strategy_id"], row["name"]
+        confirmed = row.get("confirmed_version")
+        if not confirmed:
+            skipped.append(
+                {
+                    "strategy_id": sid,
+                    "name": name,
+                    "reason_code": "NOT_MOUNTED",
+                    "detail": "策略尚未确认挂载版本",
+                }
+            )
+            continue
+        validation = confirmed.get("validation") or {}
+        if not validation.get("execution_ready"):
+            reasons = list(validation.get("issues") or []) + list(validation.get("unsupported") or [])
+            skipped.append(
+                {
+                    "strategy_id": sid,
+                    "name": name,
+                    "reason_code": "NOT_READY",
+                    "detail": "；".join(str(item) for item in reasons) or "策略规则尚不具备自动执行条件",
+                }
+            )
+            continue
+        rules = confirmed.get("rules") or {}
+        entry = rules.get("entry")
+        if not rule_scan.scope_allows(scope, entry):
+            skipped.append(
+                {
+                    "strategy_id": sid,
+                    "name": name,
+                    "reason_code": "SCOPE_FILTERED",
+                    "detail": f"本轮 scope={scope} 不覆盖 {rule_scan.rule_scope(entry)} 类规则",
+                    "scope": rule_scan.rule_scope(entry),
+                }
+            )
+            continue
+        symbols: list[str] = []
+        for raw_symbol in rules.get("symbols") or []:
+            if not isinstance(raw_symbol, str):
                 continue
-            rules = confirmed["rules"]
-            entry = rules["entry"]
-            ver = int(strat["current_version"])
-            side_lower = str(entry["side"]).lower()
-            timeframe = rules["timeframes"][0]
-            uses_klines = entry_uses_klines(entry)
-            needed_bars = recommended_fetch_bars(entry, timeframe) if uses_klines else 0
-
-            for sym in rules["symbols"]:
-                quote = prices_map.get(sym) or {"mark": None, "stale": True}
-                bars = (
-                    _load_bars_cached_or_live(ms, sym, timeframe, needed_bars, now_ms, bars_cache)
-                    if uses_klines
-                    else None
-                )
-                res = evaluate_entry(rules, sym, quote, bars=bars, now_ms=now_ms)
-                if not res["matched"]:
-                    skipped.append(
-                        {
-                            "strategy_id": strat["strategy_id"],
-                            "name": strat["name"],
-                            "version": ver,
-                            "symbol": sym,
-                            "side": side_lower,
-                            "signal_key": res["signal_key"],
-                            "reason_code": res["reason_code"],
-                            "detail": res["detail"],
-                            "mark": res["mark"],
-                            "distance_pct": res["distance_pct"],
-                            "indicator_facts": res["facts"],
-                        }
-                    )
-                    continue
-
-                if s.is_signal_consumed(
-                    conn, strat["strategy_id"], ver, sym, side_lower, res["signal_key"]
-                ):
-                    skipped.append(
-                        {
-                            "strategy_id": strat["strategy_id"],
-                            "name": strat["name"],
-                            "version": ver,
-                            "symbol": sym,
-                            "side": side_lower,
-                            "signal_key": res["signal_key"],
-                            "reason_code": "ALREADY_SIGNALED",
-                            "detail": "该周期信号已触发过",
-                            "mark": res["mark"],
-                            "distance_pct": res["distance_pct"],
-                            "indicator_facts": res["facts"],
-                        }
-                    )
-                    continue
-
-                candidates.append(
+            sym = raw_symbol.strip().upper()
+            if sym not in _WHITELIST_SET:
+                skipped.append(
                     {
-                        "strategy_id": strat["strategy_id"],
-                        "name": strat["name"],
-                        "current_version": ver,
-                        "version": ver,
-                        "generation": strat["generation"],
-                        "execution_mode": rules.get("execution_mode", "ai_assisted"),
+                        "strategy_id": sid,
+                        "name": name,
                         "symbol": sym,
-                        "side": side_lower,
-                        "signal_key": res["signal_key"],
-                        "mark": res["mark"],
-                        "rules": rules,
-                        "confirmed_version": confirmed,
-                        "indicator_facts": res["facts"],
+                        "reason_code": "SYMBOL_NOT_ALLOWED",
+                        "detail": "标的不在 20 币白名单内",
                     }
                 )
+                continue
+            if sym not in symbols:
+                symbols.append(sym)
+        if not symbols:
+            skipped.append(
+                {
+                    "strategy_id": sid,
+                    "name": name,
+                    "reason_code": "NO_SYMBOL",
+                    "detail": "没有可扫描的白名单标的",
+                }
+            )
+            continue
+        targets.append(
+            {
+                "row": row,
+                "confirmed": confirmed,
+                "rules": rules,
+                "symbols": symbols,
+                "stale_after_ms": rule_scan.stale_after_ms(interval, rules),
+            }
+        )
 
-    return {
+    # 2) 行情 / K 线：事务外取好；取不到就按"数据不可用"处理（不推进边沿状态）。
+    prices_map: dict[str, dict[str, Any]] = {}
+    if targets:
+        wanted_symbols = sorted({sym for target in targets for sym in target["symbols"]})
+        prices_map, _ = _fetch_marks(ms, wanted_symbols)
+        need_funding = sorted(
+            {
+                sym
+                for target in targets
+                if entry_uses_funding(target["rules"].get("entry"))
+                for sym in target["symbols"]
+                if sym in prices_map and prices_map[sym].get("funding_rate") is None
+            }
+        )
+        if need_funding:
+            try:
+                snap = ms.price_snapshot(need_funding[:10])
+                for sym, row in (snap or {}).items():
+                    if sym in prices_map and row.get("funding_rate") is not None:
+                        prices_map[sym]["funding_rate"] = row["funding_rate"]
+            except Exception:  # noqa: BLE001
+                pass
+
+    bars_cache: dict[tuple[str, str], tuple[Any, ...]] = {}
+    evaluations: list[dict[str, Any]] = []
+    for target in targets:
+        rules = target["rules"]
+        timeframe, uses_klines, needed_bars = _scan_facts(rules)
+        for sym in target["symbols"]:
+            quote = prices_map.get(sym) or {"mark": None, "stale": True}
+            bars = (
+                _load_bars_cached_or_live(ms, sym, timeframe, needed_bars, now_ms, bars_cache)
+                if uses_klines
+                else None
+            )
+            evaluations.append(
+                {
+                    "target": target,
+                    "symbol": sym,
+                    "result": evaluate_entry(rules, sym, quote, bars=bars, now_ms=now_ms),
+                }
+            )
+
+    # 3) 一个写事务：读状态 → 查已消费信号 → 计划触发 → 写回状态（幂等）。
+    with s.transaction(write=True) as conn:
+        states = rule_scan.load_states(conn)
+        inputs: list[rule_scan.ScanInput] = []
+        for item in evaluations:
+            target, sym, result = item["target"], item["symbol"], item["result"]
+            row, confirmed, rules = target["row"], target["confirmed"], target["rules"]
+            version = int(confirmed.get("version") or row["current_version"])
+            entry = rules.get("entry") if isinstance(rules.get("entry"), dict) else {}
+            side = str(entry.get("side") or "long").lower()
+            consumed = s.is_signal_consumed(
+                conn, row["strategy_id"], version, sym, side, result["signal_key"]
+            )
+            item["version"] = version
+            item["side"] = side
+            item["consumed"] = consumed
+            inputs.append(
+                rule_scan.ScanInput(
+                    rule_key=rule_scan.rule_key_for(row["strategy_id"], version),
+                    strategy_id=row["strategy_id"],
+                    name=row["name"],
+                    version=version,
+                    generation=int(row["generation"]),
+                    mode_revision=int(config["revision"]),
+                    execution_mode=str(rules.get("execution_mode") or "ai_assisted"),
+                    symbol=sym,
+                    side=side,
+                    priority=_strategy_priority(rules),
+                    created_at=str(row.get("created_at") or ""),
+                    matched=bool(result["matched"]),
+                    reason_code=str(result["reason_code"]),
+                    detail=str(result["detail"]),
+                    signal_key=str(result["signal_key"]),
+                    mark=result["mark"],
+                    distance_pct=result["distance_pct"],
+                    facts=result.get("facts") or {},
+                    consumed=consumed,
+                    stale_after_ms=int(target["stale_after_ms"]),
+                )
+            )
+        plan = rule_scan.plan_scan(inputs, states, now_ms=now_ms)
+        rule_scan.write_states(conn, plan.states)
+
+    payload = {
         "mode": config["mode"],
-        "mode_revision": config["revision"],
+        "mode_revision": int(config["revision"]),
+        "scope": scope,
+        "scan_interval_ms": interval,
         "evaluated_at_ms": now_ms,
-        "candidates": candidates,
+        "triggered": list(plan.triggered),
+        "waiting": list(plan.waiting),
+        "transitioned": list(plan.transitioned),
         "skipped": skipped,
         "prices": prices_map,
     }
+    return payload, evaluations
+
+
+def _legacy_projection(
+    evaluations: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """旧 ``/evaluate-candidates`` 的 candidates/skipped 形状（水平视图，兼容旧 Host）。
+
+    ``/api/rules/scan`` 是边沿触发；旧链与界面仍按"当前是否满足 + 是否已消费"看
+    候选，所以兼容别名把逐条求值结果再投影成旧字段，语义与 v0.2.1 保持一致。
+    """
+
+    candidates: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for item in evaluations:
+        target, sym, result = item["target"], item["symbol"], item["result"]
+        row, confirmed, rules = target["row"], target["confirmed"], target["rules"]
+        base = {
+            "strategy_id": row["strategy_id"],
+            "name": row["name"],
+            "version": item["version"],
+            "current_version": item["version"],
+            "generation": int(row["generation"]),
+            "enabled": True,
+            "execution_mode": str(rules.get("execution_mode") or "ai_assisted"),
+            "symbol": sym,
+            "side": item["side"],
+            "signal_key": result["signal_key"],
+            "mark": result["mark"],
+            "distance_pct": result["distance_pct"],
+            "indicator_facts": result.get("facts") or {},
+        }
+        if result["matched"] and item["consumed"]:
+            skipped.append(
+                {
+                    **base,
+                    "reason_code": "ALREADY_SIGNALED",
+                    "detail": "该周期信号已触发过",
+                }
+            )
+            continue
+        if not result["matched"]:
+            skipped.append(
+                {
+                    **base,
+                    "reason_code": result["reason_code"],
+                    "detail": result["detail"],
+                }
+            )
+            continue
+        candidates.append(
+            {
+                **base,
+                "rules": rules,
+                "confirmed_version": confirmed,
+            }
+        )
+    return candidates, skipped
+
+
+@rules_router.post("/scan", summary="确定性规则扫描（边沿触发 + 冷却 + 停机保护）")
+def rules_scan(
+    request: Request,
+    body: ScanBody | None = FastAPIBody(default=None),
+):
+    payload, _evaluations = _run_scan(request, body or ScanBody())
+    return payload
+
+
+@rules_router.post("/dispatched", summary="回写派发结果（幂等，R5② 重新武装 / rejected 冷却）")
+def rules_dispatched(request: Request, body: DispatchBody):
+    s = store(request)
+    outcome = str(body.outcome or "").strip().lower()
+    if outcome not in rule_scan.DISPATCH_OUTCOMES:
+        raise ServiceError(
+            422,
+            "E_VALIDATION",
+            "outcome 必须为 dispatched 或 rejected",
+            details={"outcome": str(body.outcome)},
+        )
+    symbol = str(body.symbol or "").strip().upper()
+    if not _SYMBOL_RE.match(symbol):
+        raise ServiceError(422, "E_VALIDATION", "symbol 必须为 USDT 标的代码")
+    at_ms = int(body.at_ms) if body.at_ms is not None else int(_resolve_market(request).now_ms())
+    return s.apply_rule_dispatch(
+        body.rule_key,
+        symbol,
+        outcome,
+        at_ms=at_ms,
+        scan_interval_ms=body.scan_interval_ms,
+    )
+
+
+@router.post("/evaluate-candidates", summary="兼容别名：与 /api/rules/scan 同一实现")
+def evaluate_candidates(
+    request: Request,
+    body: ScanBody | None = FastAPIBody(default=None),
+):
+    payload, evaluations = _run_scan(request, body or ScanBody())
+    candidates, legacy_skipped = _legacy_projection(evaluations)
+    # 旧字段保持原语义（candidates/skipped 是逐条求值视图）；规则级跳过清单改名
+    # rule_skipped，避免覆盖旧 Host 读的 skipped。
+    payload["rule_skipped"] = payload.pop("skipped")
+    payload["skipped"] = legacy_skipped
+    payload["candidates"] = candidates
+    return payload
 
 
 @router.get("/attribution")

@@ -71,12 +71,12 @@ ENV_KNOBS: dict[str, dict[str, object]] = {
     "WORKBENCH_RISK_ENABLE_LOSS_STREAK": {
         "field": "enable_loss_streak",
         "affects_execution_authorization": False,
-        "scope": "开启 R20（只会增加拒绝）",
+        "scope": "R20 开关（默认开；=false 关闭，只会减少拒绝、绝不放大授权）",
     },
     "WORKBENCH_RISK_ENABLE_FREQUENCY": {
         "field": "enable_frequency",
         "affects_execution_authorization": False,
-        "scope": "开启 R21（只会增加拒绝）",
+        "scope": "R21 开关（默认开；=false 关闭，只会减少拒绝、绝不放大授权）",
     },
 }
 
@@ -254,9 +254,11 @@ class RiskLimits:
     unknown_resolve_ttl_ms: int = 120_000
     # 审批
     approval_ttl_s: int = 120
-    # 默认关闭的规则（R20/R21）
-    enable_loss_streak: bool = False
-    enable_frequency: bool = False
+    # R20/R21（docs/19 §2 R12：M1.5 前默认关闭 → v3.1 阶段 1 提前打开）。
+    # 两条规则只会**增加拒绝**（连亏冷却 / 当日频率），不放大任何执行授权；
+    # 仍可用 WORKBENCH_RISK_ENABLE_LOSS_STREAK / _FREQUENCY=false 关掉。
+    enable_loss_streak: bool = True
+    enable_frequency: bool = True
     # 交易范围
     symbols: tuple[str, ...] = field(default_factory=lambda: DEFAULT_SYMBOLS)
 
@@ -394,6 +396,17 @@ class RuleSpec:
     default_enabled: bool = True
 
 
+# R20/R21 的展示文案同样从默认值派生：改默认开关不能让 envelope 与实现漂移。
+_R20_SUMMARY = (
+    f"连亏 {RiskLimits().consecutive_losses} 笔 → 冷却 "
+    f"{RiskLimits().consecutive_loss_cooldown_hours}h"
+    f"（{'默认开' if RiskLimits().enable_loss_streak else '默认关'}，可用 WORKBENCH_RISK_ENABLE_LOSS_STREAK=false 关闭）"
+)
+_R21_SUMMARY = (
+    f"日 ≤{RiskLimits().max_trades_per_day} 笔、单 symbol ≤{RiskLimits().max_trades_per_symbol_per_day} 笔"
+    f"（{'默认开' if RiskLimits().enable_frequency else '默认关'}，可用 WORKBENCH_RISK_ENABLE_FREQUENCY=false 关闭）"
+)
+
 # R14 的展示文案必须与实际门限同源，避免 envelope rules[] 与 data_freshness 漂移。
 _R14_SUMMARY = (
     f"行情 ≤{RiskLimits().entry_snapshot_max_age_ms // 1000}s、"
@@ -427,8 +440,8 @@ RULE_SPECS: tuple[RuleSpec, ...] = (
     RuleSpec("R17", "未决订单", "reject", "UNKNOWN/SUBMITTING > 0 时禁新开"),
     RuleSpec("R18", "日亏熔断", "reject", "日亏 ≥3% → close_only"),
     RuleSpec("R19", "会话回撤", "reject", "回撤 ≥8% → emergency"),
-    RuleSpec("R20", "连亏冷却", "reject", "连亏 2 笔 → 冷却 4h（默认关）", default_enabled=False),
-    RuleSpec("R21", "交易频率", "reject", "日 ≤12 笔、单 symbol ≤3 笔（默认关）", default_enabled=False),
+    RuleSpec("R20", "连亏冷却", "reject", _R20_SUMMARY),
+    RuleSpec("R21", "交易频率", "reject", _R21_SUMMARY),
     RuleSpec("R22", "控制态", "reject", "control_state == normal"),
     RuleSpec("R23", "保护覆盖", "reject", "所有持仓保护状态 OK"),
     RuleSpec("R24", "保证金率", "reject", "维持保证金/权益 ≥80% → emergency"),

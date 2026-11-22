@@ -44,10 +44,16 @@ from ..risk.models import OrderPlan, PlanValidationError, PositionView, RiskCont
 from ..risk.rules import BLOCKING_CODES
 from ..risk.service import RiskService
 from ..risk.state import RiskStateError, RiskStateStore
-from .broker import BrokerSnapshot, DemoBroker, NormalizedPosition
+from .broker import BrokerSnapshot, DemoBroker, NormalizedPosition, failure_kind
 from .client import DemoBinanceClient
 from .credentials import DemoCredentials, load_demo_credentials, load_live_credentials
-from .errors import DemoApiError, ExecutionConfigError, ExecutionRejected, OutboxUncertain
+from .errors import (
+    VENUE_GEO_BLOCKED_CODE,
+    DemoApiError,
+    ExecutionConfigError,
+    ExecutionRejected,
+    OutboxUncertain,
+)
 from .lease import ExecutionLeaseStore, LeaseError
 from .outbox import ACTIVE_STATUSES, NOT_FOUND_REASON, TERMINAL_STATUSES, OrderOutbox
 from .protection import ProtectionFailurePolicy
@@ -57,6 +63,42 @@ __all__ = ["ExecutionService", "build_execution_service"]
 logger = logging.getLogger("workbench.execution")
 
 _SERVICE_DIR = Path(__file__).resolve().parents[2]
+
+# P0②（docs/19 §4 / R1）：451（出口 IP 位于受限地区）的指数退避。首次 30s，
+# 之后每次连续失败翻倍，封顶 600s；任意一次成功的交易所读取都会复位。
+GEO_BACKOFF_FIRST_S = 30.0
+GEO_BACKOFF_MAX_S = 600.0
+#: 日志里的消息上限：足够定位问题，又不会把整段上游响应写进 service.log。
+ERROR_MESSAGE_MAX_CHARS = 200
+#: 签名/API key 类字段：日志只保留字段名，值一律打码。
+_SECRET_PATTERNS = (
+    re.compile(r"(\bsignature=)[^&\s\"']+", re.IGNORECASE),
+    re.compile(r"(\b(?:apiKey|api_key)=)[^&\s\"']+", re.IGNORECASE),
+    re.compile(r"(X-MBX-APIKEY[\"']?\s*[:=]\s*)[^,;\s\"']+", re.IGNORECASE),
+)
+
+
+def _error_code_of(exc: BaseException | None) -> str:
+    """日志用错误码：优先业务码（``ExecutionRejected.code``），其次上游 kind。
+
+    目的只有一个：下一次同类故障能凭日志直接定位，而不是只看到 "ExecutionRejected"
+    （docs/16 §0 的最后一条顺带改动）。
+    """
+
+    if exc is None:
+        return VENUE_GEO_BLOCKED_CODE
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code:
+        return code
+    kind = getattr(exc, "kind", None)
+    if kind == "geo_blocked":
+        # 上游只给了 kind 时也用业务码，日志里一眼能对上 /health 与接口错误。
+        return VENUE_GEO_BLOCKED_CODE
+    if isinstance(kind, str) and kind:
+        return kind.upper()
+    if code is not None:
+        return f"EXCHANGE_{code}"
+    return type(exc).__name__
 
 
 def _serialized(method):
@@ -173,6 +215,106 @@ class ExecutionService:
         self._startup_retry_s = max(
             5.0, float(getattr(settings, "exchange_failure_cooldown_s", 15.0) or 15.0)
         )
+        # P0②（docs/19 §4 / R1）：451 地区限制退避状态。
+        # 只有真正尝试过读取并吃到 451 才会 arming；退避窗口内**不发**交易所读请求，
+        # 这就是止住“每 30–36s 一条 snapshot_failed 重试风暴”的地方。
+        self._venue_geo_blocked = False
+        self._geo_attempts = 0
+        self._geo_step_s = 0.0
+        self._geo_retry_at = 0.0
+
+    # ------------------------------------------------------- 出口代理/地区限制
+    @property
+    def egress_proxy_label(self) -> str:
+        """出口代理标签（host:port 或 none）；凭据/完整 URL 永不外露。"""
+
+        return getattr(self.settings, "egress_proxy_label", "none")
+
+    def _geo_backoff_active(self) -> bool:
+        """是否在 451 退避窗口内；窗口内任何路径都不发交易所读请求。"""
+
+        return self._venue_geo_blocked and self._clock() < self._geo_retry_at
+
+    def _geo_step_seconds(self) -> float:
+        """下一个退避步长：30 → 60 → 120 → 240 → 480 → 600（封顶）。"""
+
+        exponent = min(max(0, self._geo_attempts - 1), 10)
+        return min(GEO_BACKOFF_MAX_S, GEO_BACKOFF_FIRST_S * float(2 ** exponent))
+
+    def _note_venue_geo_blocked(self, exc: BaseException | None = None) -> None:
+        """记一次 451：首次 30s，连续失败翻倍，封顶 600s。
+
+        只在**真正尝试过读取**之后调用（退避窗口内提前返回，不重复 arming），
+        否则“不读上游”也会被当成“又失败一次”，退避会被无端放大。
+        """
+
+        self._geo_attempts += 1
+        self._geo_step_s = self._geo_step_seconds()
+        self._geo_retry_at = self._clock() + self._geo_step_s
+        first = not self._venue_geo_blocked
+        self._venue_geo_blocked = True
+        logger.warning(
+            "venue_geo_blocked first=%s attempts=%s backoff_s=%.0f retry_at_ms=%d "
+            "egress_proxy=%s code=%s",
+            first,
+            self._geo_attempts,
+            self._geo_step_s,
+            int(self._geo_retry_at * 1000),
+            self.egress_proxy_label,
+            _error_code_of(exc),
+        )
+
+    def _note_venue_geo_ok(self) -> None:
+        """任意一次成功的交易所读取：复位退避（下次 451 重新从 30s 开始）。"""
+
+        if not self._venue_geo_blocked:
+            self._geo_attempts = 0
+            self._geo_step_s = 0.0
+            return
+        logger.info(
+            "venue_geo_recovered attempts=%s egress_proxy=%s",
+            self._geo_attempts,
+            self.egress_proxy_label,
+        )
+        self._venue_geo_blocked = False
+        self._geo_attempts = 0
+        self._geo_step_s = 0.0
+        self._geo_retry_at = 0.0
+
+    def _geo_details(self) -> dict[str, Any]:
+        """错误细节：剩余退避毫秒 + 本步长 + 脱敏代理标签（不含凭据）。"""
+
+        now = self._clock()
+        return {
+            "venue_geo_blocked": True,
+            "retry_after_ms": int(max(0.0, self._geo_retry_at - now) * 1000),
+            "backoff_s": self._geo_step_s,
+            "geo_retry_at_ms": int(self._geo_retry_at * 1000),
+            "egress_proxy": self.egress_proxy_label,
+        }
+
+    def _raise_if_geo_blocked(self, stage: str) -> None:
+        """交易路径 fail-closed：地区限制退避期间不评估/不提交新开仓。"""
+
+        if not self._geo_backoff_active():
+            return
+        raise ServiceError(
+            503,
+            VENUE_GEO_BLOCKED_CODE,
+            "exchange restricts this egress IP (HTTP 451); reads are backing off",
+            retryable=True,
+            details={"stage": stage, **self._geo_details()},
+        )
+
+    def health_flags(self) -> dict[str, Any]:
+        """``/health`` 用的三项（只读本地状态，不查上游，绝不含凭据）。"""
+
+        blocked = bool(self._venue_geo_blocked)
+        return {
+            "venue_geo_blocked": blocked,
+            "geo_retry_at_ms": int(self._geo_retry_at * 1000) if blocked else None,
+            "egress_proxy": self.egress_proxy_label,
+        }
 
     # ------------------------------------------------------------------ 启动
     @property
@@ -183,6 +325,11 @@ class ExecutionService:
         """首次请求时执行一次只读启动对账（不自动下单）。"""
 
         with self._start_lock:
+            if self._geo_backoff_active():
+                # P0②：451 退避窗口内连“启动对账”也不打上游——否则窗口里又会冒出
+                # sync_time/exchangeInfo/reconcile 一串读请求。恢复后的第一次真正
+                # 读取再补做启动对账。
+                return self.startup
             if self._started and self.startup.get("state") == "error":
                 # 上一轮启动对账失败（交易所不可达等）：冷却期内直接复用失败结论，
                 # 不每次请求都重打一轮上游；到点后再试一次。
@@ -431,22 +578,40 @@ class ExecutionService:
 
     def _monitor_loop(self) -> None:
         while not self._monitor_stop.wait(self._monitor_interval_s):
+            outcome = "error"
             try:
-                with self._exec_lock:
-                    if self.broker is None:
-                        return
-                    # 账户/权益/连亏刷新 + 仓位/outbox 对账；随后按交易所确认的
-                    # 实际仓位核对保护覆盖（缺失则补挂，确认失败按策略减仓），
-                    # 最后处理 time_stop 到期。监督循环本身绝不下新开仓单。
-                    self._heartbeat()
-                    self.reconcile()
-                    self._enforce_protection()
-                    self._enforce_time_stop()
+                outcome = self._supervisor_tick()
             except Exception as exc:  # noqa: BLE001 - supervisor must survive a failed cycle
                 logger.warning("supervisor_cycle_failed error=%s", type(exc).__name__)
+            if outcome == "no_broker":
+                return
             # T18 §8·C2：income 回填在账户锁**之外**执行——交易所 GET 慢或失败都不会
             # 拖住、也不会阻断同一轮的权益快照与保护核对（心跳已先落库）。
-            self._income_sync_tick()
+            # P0②：451 退避窗口内同样跳过（它也是一次交易所读）。
+            if outcome != "geo_backoff":
+                self._income_sync_tick()
+
+    def _supervisor_tick(self) -> str:
+        """一次监督周期；返回 ok / geo_backoff / no_broker（供测试与日志判定）。
+
+        451 退避窗口内直接跳过：心跳、对账、保护核对、time_stop 都依赖交易所读，
+        窗口内一次都不发，避免“每 30–36s 一条 snapshot_failed”的重试风暴。
+        """
+
+        if self._geo_backoff_active():
+            logger.debug("supervisor_skipped reason=venue_geo_backoff")
+            return "geo_backoff"
+        with self._exec_lock:
+            if self.broker is None:
+                return "no_broker"
+            # 账户/权益/连亏刷新 + 仓位/outbox 对账；随后按交易所确认的
+            # 实际仓位核对保护覆盖（缺失则补挂，确认失败按策略减仓），
+            # 最后处理 time_stop 到期。监督循环本身绝不下新开仓单。
+            self._heartbeat()
+            self.reconcile()
+            self._enforce_protection()
+            self._enforce_time_stop()
+        return "ok"
 
     def _enforce_time_stop(self) -> None:
         """Opt-in position management for system-managed positions (T03 §8·B6).
@@ -623,15 +788,64 @@ class ExecutionService:
                 "E_DEMO_CREDENTIALS_MISSING：未配置 Demo 凭据，无法读取交易所事实"
             )
             return None, meta
+        # P0②：451 退避窗口内**不发**任何交易所读请求。这就是止住重试风暴的地方：
+        # 以前每 30–36s 都会重新打一轮上游并写一条 snapshot_failed。
+        if self._geo_backoff_active():
+            return None, self._read_meta(None)
         snapshot: BrokerSnapshot | None = None
         try:
             snapshot = self.broker.snapshot(cooldown=cooldown)
         except ServiceError:
             raise
         except Exception as exc:  # noqa: BLE001 - 读取失败给出 stale 状态
-            logger.warning("snapshot_failed error=%s", type(exc).__name__)
+            geo = self._exc_is_geo_blocked(exc)
+            if geo:
+                self._note_venue_geo_blocked(exc)
+            # docs/16 §0 / docs/19 §4 P0③：日志补错误码 + 脱敏截断后的消息。
+            logger.warning(
+                "snapshot_failed error=%s code=%s msg=%s",
+                type(exc).__name__,
+                _error_code_of(exc),
+                self._safe_error_message(exc),
+            )
             snapshot = None
+        else:
+            if snapshot is not None and snapshot.error is None:
+                # 读到新鲜事实：复位退避（下一次 451 重新从 30s 开始）。
+                self._note_venue_geo_ok()
+            elif snapshot is not None and getattr(snapshot, "error_kind", None) == "geo_blocked":
+                # 有 last_good 时 broker 返回 stale 副本而不抛错：同样要进退避。
+                self._note_venue_geo_blocked(None)
         return snapshot, self._read_meta(snapshot)
+
+    @staticmethod
+    def _exc_is_geo_blocked(exc: BaseException) -> bool:
+        """异常是否代表 451 地区限制（执行层错误码或上游 kind 任一命中）。"""
+
+        if getattr(exc, "code", None) == VENUE_GEO_BLOCKED_CODE:
+            return True
+        return failure_kind(exc) == "geo_blocked"
+
+    def _safe_error_message(self, exc: BaseException | None) -> str:
+        """错误消息脱敏 + 截断（≤200 字符）：签名/API key/Secret 不进日志。"""
+
+        return self._safe_text("" if exc is None else str(exc))
+
+    def _safe_text(self, text: str | None) -> str:
+        """脱敏 + 截断任意上游文本（日志/错误细节共用同一条口径）。"""
+
+        masked = "" if text is None else str(text)
+        credentials = self.credentials
+        for secret in (
+            getattr(credentials, "api_key", None),
+            getattr(credentials, "api_secret", None),
+        ):
+            if secret:
+                masked = masked.replace(str(secret), "***")
+        for pattern in _SECRET_PATTERNS:
+            masked = pattern.sub(r"\1***", masked)
+        masked = " ".join(masked.split())  # 折叠换行：一条日志一行，防注入
+        return masked[:ERROR_MESSAGE_MAX_CHARS]
 
     def _read_meta(self, snapshot: BrokerSnapshot | None) -> dict[str, Any]:
         """把一次快照翻译成「从哪来 / 新不新 / 上次成功何时 / 为什么未知」。
@@ -682,6 +896,15 @@ class ExecutionService:
         if meta["cooldown_until"]:
             meta["unknown"].append(
                 f"E_EXCHANGE_COOLDOWN：{meta['cooldown_until']} 前不再请求交易所（失败冷却）"
+            )
+        if self._venue_geo_blocked:
+            # P0②：451 是“出口 IP 在受限地区”，与“交易所不可达”不同：
+            # 界面/日志都要能直接指向出口代理，而不是让人去猜网络。
+            meta["venue_geo_blocked"] = True
+            meta["geo_retry_at_ms"] = int(self._geo_retry_at * 1000) if self._geo_retry_at else None
+            meta["unknown"].append(
+                "E_VENUE_GEO_BLOCKED：交易所拒绝本机出口 IP（HTTP 451），"
+                f"已按退避暂停读取（egress_proxy={self.egress_proxy_label}）"
             )
         return meta
 
@@ -880,6 +1103,10 @@ class ExecutionService:
                 "cooldown_remaining_s": read_meta["cooldown_remaining_s"],
                 "read_timeout_s": read_meta["read_timeout_s"],
                 "read_budget_s": read_meta["read_budget_s"],
+                # P0②：451 三步走（归类→退避→暴露）中“暴露”的一半；全部脱敏。
+                "venue_geo_blocked": bool(self._venue_geo_blocked),
+                "geo_retry_at_ms": int(self._geo_retry_at * 1000) if self._venue_geo_blocked else None,
+                "egress_proxy": self.egress_proxy_label,
                 "unknown": read_meta["unknown"],
                 "fetched_at": snapshot.fetched_at_iso if snapshot else None,
                 "position_mode": snapshot.position_mode if snapshot else "UNKNOWN",
@@ -1186,6 +1413,9 @@ class ExecutionService:
         return start_ms, end_ms
 
     def _income_sync_tick(self) -> None:
+        # P0②：451 退避期间它也是一次交易所读，直接跳过（不刷新任何重试时间戳）。
+        if self._geo_backoff_active():
+            return
         """监督循环的 income 节拍；任何失败只记日志，不影响账户/保护循环。"""
 
         try:
@@ -1394,6 +1624,8 @@ class ExecutionService:
 
         self.ensure_started()
         snapshot, equity, risk_state, control = self._heartbeat()
+        # P0②：451 地区限制退避中不评估新开仓（fail-closed，不拿旧快照放行）。
+        self._raise_if_geo_blocked("P1_EVALUATE")
         # 证据年龄只从服务端 md-evidence/1 快照（DB 引用 + 文件 hash/时间）派生；
         # 请求体 evidence_age_ms 一律忽略。行情事实同样只来自服务端。
         # 无凭据时不取行情/证据，让规则层先以 R25/E_EQUITY_UNAVAILABLE 拒绝（只读模式可解释）。
@@ -1957,6 +2189,17 @@ class ExecutionService:
 
     def reconcile(self) -> dict[str, Any]:
         self._require_broker()
+        if self._geo_backoff_active():
+            # P0②：退避期间不对账——对账是交易所读，叠加只会把重试风暴放大。
+            return {
+                "at": utc_now(),
+                "skipped": VENUE_GEO_BLOCKED_CODE,
+                "geo_retry_at_ms": int(self._geo_retry_at * 1000),
+                "note": "交易所 451 地区限制退避中，本轮不对账、不发上游请求",
+                "venue": self.settings.venue,
+                "demo_only": True,
+                "ledger_id": self.ledger.ledger_id,
+            }
         result = self.broker.reconcile()
         try:
             check_and_trip_circuits(self.strategies)
@@ -2032,6 +2275,29 @@ class ExecutionService:
             )
         try:
             snapshot = self.broker.snapshot(force=True)
+        except ExecutionRejected as exc:
+            if exc.code == VENUE_GEO_BLOCKED_CODE:
+                # P0②：451 → 503 E_VENUE_GEO_BLOCKED（细节带 retry_after_ms），
+                # 不再伪装成泛化的“刷新失败/交易所不可达”。
+                self._note_venue_geo_blocked(exc)
+                raise ServiceError(
+                    503,
+                    VENUE_GEO_BLOCKED_CODE,
+                    "exchange restricts this egress IP (HTTP 451); new entry blocked",
+                    retryable=True,
+                    details={"stage": "P2_REFRESH", **self._geo_details()},
+                ) from exc
+            raise ServiceError(
+                503,
+                "E_EXECUTION_REFRESH_FAILED",
+                "pre-submit account refresh failed; new entry blocked",
+                retryable=True,
+                details={
+                    "stage": "P2_REFRESH",
+                    "reason": "snapshot_failed",
+                    "error": self._safe_error_message(exc),
+                },
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - 刷新失败阻断新开仓
             raise ServiceError(
                 503,
@@ -2041,10 +2307,19 @@ class ExecutionService:
                 details={
                     "stage": "P2_REFRESH",
                     "reason": "snapshot_failed",
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": self._safe_error_message(exc),
                 },
             ) from exc
         if snapshot.error is not None:
+            if getattr(snapshot, "error_kind", None) == "geo_blocked":
+                self._note_venue_geo_blocked(None)
+                raise ServiceError(
+                    503,
+                    VENUE_GEO_BLOCKED_CODE,
+                    "exchange restricts this egress IP (HTTP 451); new entry blocked",
+                    retryable=True,
+                    details={"stage": "P2_REFRESH", **self._geo_details()},
+                )
             raise ServiceError(
                 503,
                 "E_EXECUTION_REFRESH_FAILED",
@@ -2053,7 +2328,7 @@ class ExecutionService:
                 details={
                     "stage": "P2_REFRESH",
                     "reason": "exchange_unavailable",
-                    "error": snapshot.error,
+                    "error": self._safe_text(snapshot.error),
                 },
             )
         equity = self._equity_info(snapshot)
@@ -2390,7 +2665,12 @@ class ExecutionService:
         if not self.configured:
             reasons.append("E_DEMO_CREDENTIALS_MISSING")
         if snapshot is None or snapshot.error is not None:
-            reasons.append("E_EXCHANGE_UNAVAILABLE")
+            # 451 单独给码：让人一眼看出是出口 IP 问题，而不是交易所挂了。
+            reasons.append(
+                VENUE_GEO_BLOCKED_CODE
+                if self._venue_geo_blocked
+                else "E_EXCHANGE_UNAVAILABLE"
+            )
         else:
             if snapshot.stale:
                 reasons.append("EXCHANGE_STALE")
@@ -2621,6 +2901,14 @@ def build_execution_service(
 ) -> ExecutionService:
     """组装服务；``client`` 为空时尝试从 env/``.env.local`` 读取 Demo 凭据。"""
 
+    # P0②：启动就把“出口代理是否生效”写进日志（只打 host:port，不含凭据）。
+    # 没有 Demo 凭据时也会打：只读部署同样需要知道出站代理有没有配上。
+    logger.info(
+        "egress_proxy=%s component=execution_service venue=%s base_url=%s",
+        settings.egress_proxy_label,
+        settings.venue,
+        settings.base_url,
+    )
     ledger = ledger or Ledger(settings.data_dir)
     limits = limits or RiskLimits.from_env()
     # T20：读路径的有界超时/预算/冷却默认取配置，测试可显式覆盖。
@@ -2662,6 +2950,8 @@ def build_execution_service(
             settings.base_url,
             resolved_credentials,
             read_timeout_s=settings.read_timeout_s,
+            # P0②：显式传配置里的出口代理（默认 None = 维持现状，不写 os.environ）。
+            egress_proxy=settings.egress_proxy,
             # §6 M2：把该环境的受控 host 传给客户端守卫；不传就会永远只认 demo host，
             # 实盘启动时客户端会拒绝自己（这是 live 路径的必要一环）。
             allowed_host=settings.venue_host,

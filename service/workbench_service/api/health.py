@@ -51,6 +51,38 @@ def _readiness(request: Request) -> tuple[bool, list[str], dict[str, object]]:
     return (not reasons), reasons, detail
 
 
+def _execution_net(request: Request) -> dict[str, object]:
+    """P0②（docs/19 §4）：出口代理 + 451 地区限制退避的只读状态。
+
+    只读本地状态：不查上游、不改任何状态；没有 services（只读启动失败/未装配）时
+    降级为 None，绝不让 /health 因为取不到执行层状态而失败。
+    三个值都不含凭据：egress_proxy 只有 host:port 或 none。
+    """
+
+    settings = request.app.state.settings
+    # egress_proxy 以启动配置为准（同一个值），只有配置对象缺这个属性时才回落到服务端。
+    label = getattr(settings, "egress_proxy_label", None)
+    net: dict[str, object] = {
+        "venue_geo_blocked": None,
+        "geo_retry_at_ms": None,
+        "egress_proxy": label if label is not None else "none",
+    }
+    services = getattr(request.app.state, "services", None)
+    reader = getattr(services, "health_flags", None)
+    if not callable(reader):
+        return net
+    try:
+        flags = reader()
+    except Exception:  # noqa: BLE001 - /health 不因执行层异常而失败
+        return net
+    if isinstance(flags, dict):
+        net["venue_geo_blocked"] = flags.get("venue_geo_blocked")
+        net["geo_retry_at_ms"] = flags.get("geo_retry_at_ms")
+        if label is None and flags.get("egress_proxy"):
+            net["egress_proxy"] = flags["egress_proxy"]
+    return net
+
+
 def _identity(request: Request) -> dict[str, object]:
     """§4.2：把“这个进程是哪个环境、哪个账本、哪组凭据”一次说清。
 
@@ -112,6 +144,8 @@ def health(request: Request) -> dict[str, object]:
         "auth": auth_status(request),
         "lock": read_service_lock_status(settings.data_dir),
         "supervisor": getattr(state, "supervisor", None),
+        # P0②：出口代理 / 地区限制退避（三个键，均不含凭据）。
+        **_execution_net(request),
         "last_probe": state.last_probe,
         "trace_id": _trace_id(request),
     }

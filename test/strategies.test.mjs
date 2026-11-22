@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { StrategyAssistant, STRATEGY_WHITELIST_SYMBOLS, eligibleStrategies } from '../host/strategies.js'
+import { StrategyAssistant, STRATEGY_WHITELIST_SYMBOLS, pickOrderedCandidate } from '../host/strategies.js'
+import * as strategiesModule from '../host/strategies.js'
 
 const rules = { symbols: ['BTCUSDT'], timeframes: ['15m'], entry: { kind: 'mark_threshold', side: 'long', operator: 'gt', value: 100 } }
 const candidate = (id, overrides = {}) => ({
@@ -21,87 +22,33 @@ const llm = (value, onCall = null) => ({
 })
 const route = { provider: 'fake', model: 'test' }
 
-test('candidate prefilter rejects stale/unknown prices and inactive/unsupported strategies', () => {
-  const now = Date.now()
-  const q = { BTCUSDT: { mark: 101, as_of_ms: now, stale: false } }
-  assert.equal(eligibleStrategies([candidate('a')], q, now).length, 1)
-  assert.equal(eligibleStrategies([{ ...candidate('a'), enabled: false }], q, now).length, 0)
-  assert.equal(eligibleStrategies([candidate('a')], { BTCUSDT: { ...q.BTCUSDT, stale: true } }, now).length, 0)
-  assert.equal(eligibleStrategies([candidate('a')], q, now + 6000).length, 0)
-  assert.equal(eligibleStrategies([candidate('a')], { BTCUSDT: { mark: 99, as_of_ms: now, stale: false } }, now).length, 0)
+// v3.1（docs/18 §2 S4/S9，docs/19 §3.1）：多候选排序由服务端确定性给出，Host 只取第 1 条。
+// 旧实现里的 StrategyAssistant.choose（模型选策略）与 eligibleStrategies（404 回退）已删除，
+// 这里断言的是新的契约，而不是旧行为。
+
+test('strategy module surface: no model-based selection, no legacy eligible fallback', () => {
+  assert.equal(typeof StrategyAssistant.prototype.choose, 'undefined')
+  assert.equal('eligibleStrategies' in strategiesModule, false)
+  assert.equal(typeof pickOrderedCandidate, 'function')
+  assert.equal(STRATEGY_WHITELIST_SYMBOLS.length, 20)
 })
 
-test('eligibleStrategies supports quote.age_ms, gt/lt/gte/lte operators, and consumed signal keys', () => {
-  const now = 1_700_000_000_000
-  const signalKey = `15m:${Math.floor(now / 900_000)}`
-  // age_ms provided by service without as_of_ms
-  assert.equal(eligibleStrategies([candidate('a')], { BTCUSDT: { mark: 101, age_ms: 1200, stale: false } }, now).length, 1)
-  assert.equal(eligibleStrategies([candidate('a')], { BTCUSDT: { mark: 101, age_ms: 5500, stale: false } }, now).length, 0)
-  // null age_ms must NOT coerce to 0ms
-  assert.equal(eligibleStrategies([candidate('a')], { BTCUSDT: { mark: 101, age_ms: null, as_of_ms: now - 7000, stale: false } }, now).length, 0)
+test('pickOrderedCandidate takes the first server-ordered candidate and never re-sorts', () => {
+  const first = candidate('server-first', { priority: 2 })
+  const second = candidate('server-second', { priority: 9 })
+  const picked = pickOrderedCandidate([first, second])
+  assert.equal(picked.strategy.strategy_id, 'server-first')
+  assert.equal(picked.candidates, 2)
+  assert.match(picked.reason, /服务端确定性排序/)
 
-  // gte / lte / lt operators
-  const makeOp = (operator, value) => candidate(`op-${operator}`, {
-    confirmed_version: {
-      validation: { execution_ready: true },
-      rules: { symbols: ['BTCUSDT'], timeframes: ['15m'], entry: { kind: 'mark_threshold', side: 'short', operator, value } },
-    },
-  })
-  const exactQuote = { BTCUSDT: { mark: 100, age_ms: 100, stale: false } }
-  assert.equal(eligibleStrategies([makeOp('gte', 100)], exactQuote, now).length, 1)
-  assert.equal(eligibleStrategies([makeOp('lte', 100)], exactQuote, now).length, 1)
-  assert.equal(eligibleStrategies([makeOp('lt', 101)], exactQuote, now).length, 1)
-  assert.equal(eligibleStrategies([makeOp('lt', 100)], exactQuote, now).length, 0)
+  const single = pickOrderedCandidate([candidate('only')])
+  assert.equal(single.strategy.strategy_id, 'only')
+  assert.equal(single.reason, '唯一满足条件的已授权策略')
 
-  // Consumed signal key filtering via parameter or strategy.consumed_signal_keys
-  const fullKey = `a:1:BTCUSDT:LONG:${signalKey}`
-  assert.equal(eligibleStrategies([candidate('a')], { BTCUSDT: { mark: 105, age_ms: 50, stale: false } }, now, new Set([fullKey])).length, 0)
-  assert.equal(
-    eligibleStrategies([candidate('a', { consumed_signal_keys: [fullKey] })], { BTCUSDT: { mark: 105, age_ms: 50, stale: false } }, now).length,
-    0,
-  )
-})
-
-test('no candidate means no model call; selection cannot escape authorized set', async () => {
-  const assistant = new StrategyAssistant({ llm: llm({ strategy_id: 'evil', reason: 'x' }), route })
-  assert.equal((await assistant.choose([], {})).strategy, null)
-  assert.equal((await assistant.choose([candidate('a')], {})).strategy.strategy_id, 'a')
-  await assert.rejects(assistant.choose([candidate('a'), candidate('b')], {}), (e) => e.code === 'E_STRATEGY_UNAUTHORIZED_SELECTION')
-})
-
-test('choose handles null skip, malformed JSON/arrays, and per-call dynamic route override', async () => {
-  const seen = []
-  const assistant = new StrategyAssistant({ llm: null, route: null })
-  await assert.rejects(
-    assistant.choose([candidate('a'), candidate('b')], {}),
-    (e) => e.code === 'ROUTE_UNAVAILABLE' && e.status === 503,
-  )
-
-  const skipChoice = await assistant.choose(
-    [candidate('a'), candidate('b')],
-    {},
-    {
-      llm: llm({ strategy_id: null, reason: '波动过大，本轮跳过' }, (opts) => seen.push(opts)),
-      route: { provider: 'dyn-p', model: 'dyn-m' },
-    },
-  )
-  assert.equal(skipChoice.strategy, null)
-  assert.equal(skipChoice.reason, '波动过大，本轮跳过')
-  assert.equal(seen[0].provider, 'dyn-p')
-  assert.equal(seen[0].model, 'dyn-m')
-
-  await assert.rejects(
-    assistant.choose([candidate('a'), candidate('b')], {}, { llm: llm('not-json{{{'), route }),
-    (e) => e.code === 'E_STRATEGY_SELECTION_INVALID' && e.status === 422,
-  )
-  await assert.rejects(
-    assistant.choose([candidate('a'), candidate('b')], {}, { llm: llm(['array']), route }),
-    (e) => e.code === 'E_STRATEGY_SELECTION_INVALID' && e.status === 422,
-  )
-  await assert.rejects(
-    assistant.choose([candidate('a'), candidate('b')], {}, { llm: llm({ strategy_id: 123 }), route }),
-    (e) => e.code === 'E_STRATEGY_UNAUTHORIZED_SELECTION' && e.status === 409,
-  )
+  // 空候选、非法条目都不会让 Host 去调模型：只有 null 结果和一句原因。
+  assert.equal(pickOrderedCandidate([]).strategy, null)
+  assert.equal(pickOrderedCandidate(null).strategy, null)
+  assert.equal(pickOrderedCandidate([null, 'x', 0, candidate('kept')]).strategy.strategy_id, 'kept')
 })
 
 test('clarification preserves original/answers, enforces Phase-2 prompt contract, and supports dynamic route', async () => {
@@ -135,7 +82,7 @@ test('clarification preserves original/answers, enforces Phase-2 prompt contract
     'candle_close', 'ema_cross', 'ema_compare', 'rsi_threshold', 'funding_threshold', '"all"',
     'rule_direct', 'ai_assisted', 'circuit_breaker', '0.002', '0.05', '1.2', 'klines', 'funding_rate', 'ZECUSDT', 'DOTUSDT',
   ]) {
-    assert.ok(capturedPrompt.system.includes(token), `clarification prompt missing ${token}`)
+    assert.ok(capturedPrompt.system.includes(token), 'clarification prompt missing ' + token)
   }
   assert.equal(result.strategy.draft.source_text, '用户原文')
   assert.equal(result.strategy.draft.answers.q, '回答')

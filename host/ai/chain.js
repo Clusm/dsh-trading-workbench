@@ -217,6 +217,48 @@ function sha256Text(text) {
   return `sha256:${createHash('sha256').update(text).digest('hex')}`
 }
 
+/** 安全取数：只接受有限数字或纯十进制字符串，其余返回 null（不猜）。 */
+function numOrNull(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && /^[0-9]+(\.[0-9]+)?$/.test(value.trim())) return Number(value)
+  return null
+}
+
+/**
+ * 19 §4·P1 / 16 §3.2 方案 B 小改：decision 不再逐字段抄写 R1 计划。
+ *
+ * 模型抄错 stop_loss.basis、小数位或 entry zone 时，用选中一侧的 R1 `plan_draft`
+ * 原件覆盖 `parsed.plan`；只有 risk_pct / leverage 允许模型**下调**（取 min，只降
+ * 不升）。语义校验一条不减：覆盖后的计划必然满足 copiedPlanWithRiskDown，而方向、
+ * 选边、scorecard 门禁、置信度等校验照旧跑 validateOutput。
+ *
+ * 审计记 plan_normalized=true，事后能区分哪些轮次被代码覆盖过。
+ * 返回 true 表示确实覆盖了。
+ */
+function normalizeDecisionPlan(roleKey, parsed, input, audit) {
+  if (roleKey !== 'decision' || !isObject(parsed)) return false
+  if (parsed.action !== 'TRADE' || !isObject(parsed.plan)) return false
+  const caseKey = parsed.selected_case
+  if (caseKey !== 'red' && caseKey !== 'blue') return false
+  const src = input?.openings?.[caseKey]?.plan_draft
+  if (!isObject(src)) return false
+  const srcRisk = numOrNull(src.risk_pct)
+  const srcLeverage = Number.isInteger(src.leverage) ? src.leverage : null
+  const modelRisk = numOrNull(parsed.plan.risk_pct)
+  const modelLeverage = Number.isInteger(parsed.plan.leverage) ? parsed.plan.leverage : null
+  const next = structuredClone(src)
+  // 只降不升：模型给了更小的值就保留，否则回落到 R1 原件；R1 原件本身已通过校验。
+  if (srcRisk !== null) {
+    next.risk_pct = modelRisk !== null && modelRisk <= srcRisk ? modelRisk : srcRisk
+  }
+  if (srcLeverage !== null) {
+    next.leverage = modelLeverage !== null && modelLeverage <= srcLeverage ? modelLeverage : srcLeverage
+  }
+  parsed.plan = next
+  if (audit) audit.plan_normalized = true
+  return true
+}
+
 function callIdFor(runId, role, round, attempt) {
   return `${runId}:${role}:r${round}:${attempt}`
 }
@@ -855,6 +897,9 @@ async function runChainCore({
             if (attempt < MAX_ATTEMPTS_PER_CALL) continue
             throw new ChainError('SCHEMA_INVALID', `output is not valid JSON after repair: ${error.message}`, { role: roleKey })
           }
+          // 19 §4·P1（16 §3.2 方案 B 小改）：decision 的计划由代码复制 R1 原件，
+          // 必须在 parseJsonText 之后、validateOutput 之前；校验一条不减。
+          normalizeDecisionPlan(roleKey, parsed, input, audit)
           const errors = validateOutput(roleKey, parsed, {
             cycleId,
             caps,

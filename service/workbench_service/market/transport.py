@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -20,6 +21,12 @@ from typing import Any, Callable, Iterable, Mapping
 
 import httpx
 
+from ..config import (
+    EGRESS_PROXY_ENV,
+    egress_proxy_label,
+    httpx_proxy_kwargs,
+    parse_egress_proxy,
+)
 from . import config as C
 
 logger = logging.getLogger("workbench.market.transport")
@@ -30,6 +37,9 @@ FORBIDDEN_HEADERS = frozenset({"authorization", "x-mbx-apikey", "x-mbx-signature
 
 class MarketUpstreamError(RuntimeError):
     """上游失败（非冷却类），调用方按 502 降级。"""
+
+    #: P0②：上游失败的归类，与执行层 ``DemoApiError.kind`` 同一套词表。
+    kind: str = "upstream"
 
     def __init__(self, status_code: int | None, code: str, detail: str) -> None:
         super().__init__(detail)
@@ -59,6 +69,22 @@ class MarketBanned(MarketUpstreamError):
         self.retry_after_s = float(retry_after_s)
 
 
+class MarketGeoBlocked(MarketUpstreamError):
+    """HTTP 451：出口 IP 位于交易所受限地区（docs/19 R1）。
+
+    与 429/418 不同：这不是限流，也不是本进程节奏造成的，冷却本进程没有意义；
+    归类为 ``kind=geo_blocked``，让上层按“出口代理失效”排查，而不是当限流重试。
+    """
+
+    kind = "geo_blocked"
+
+    def __init__(
+        self, detail: str, *, status_code: int = 451, retry_after_s: float | None = None
+    ) -> None:
+        super().__init__(status_code, "MARKET_GEO_BLOCKED", detail)
+        self.retry_after_s = retry_after_s
+
+
 class MarketBudgetDeferred(MarketUpstreamError):
     """本地权重预算不足，低优先级请求主动延后。"""
 
@@ -86,6 +112,18 @@ def _parse_retry_after(headers: Mapping[str, str] | None, default: float, maximu
     return min(maximum, max(1.0, seconds))
 
 
+def _optional_retry_after(headers: Mapping[str, str] | None) -> float | None:
+    """只取上游真给的 ``Retry-After``；没有就返回 None（不编造默认值）。"""
+
+    for key, value in dict(headers or {}).items():
+        if str(key).lower() == "retry-after":
+            try:
+                return max(1.0, float(value))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 class MarketTransport:
     """同步只读 HTTP 客户端 + 本地权重预算。"""
 
@@ -100,6 +138,7 @@ class MarketTransport:
         state_path: Path | None = None,
         client: httpx.Client | None = None,
         now_fn: Callable[[], float] | None = None,
+        egress_proxy: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.local_budget_1m = max(1, int(local_budget_1m))
@@ -107,12 +146,21 @@ class MarketTransport:
         self.data_budget_5m = max(1, int(data_budget_5m))
         self.state_path = Path(state_path) if state_path else None
         self._clock: Callable[[], float] = now_fn or time.time
-        self._client = client or httpx.Client(
-            base_url=self.base_url,
-            timeout=httpx.Timeout(timeout_s, connect=min(timeout_s, 5.0)),
-            follow_redirects=False,
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        # P0②（docs/19 §4 / R1）：行情客户端同样只**显式**走出口代理；空值 = 维持现状。
+        # 与执行客户端用同一个校验/标签/版本判断，避免“账户走代理、行情直连”。
+        self._egress_proxy = parse_egress_proxy(
+            egress_proxy if egress_proxy is not None else os.environ.get(EGRESS_PROXY_ENV)
         )
+        if client is None:
+            self._client = httpx.Client(**self._client_options(timeout_s))
+            # 启动日志只打 host:port（不含凭据/完整 URL）。
+            logger.info(
+                "egress_proxy=%s component=market base_url=%s",
+                self.egress_proxy_label,
+                self.base_url,
+            )
+        else:
+            self._client = client
         self._lock = threading.Lock()
         self._records: deque[_Record] = deque()
         self._data_records: deque[_Record] = deque()
@@ -125,6 +173,34 @@ class MarketTransport:
         self._cache_hits = 0
         self._assert_read_only_client()
         self._load_state()
+
+    # ------------------------------------------------------------- 出口代理
+    @property
+    def egress_proxy(self) -> str | None:
+        """生效的出口代理（已校验，不含 userinfo）；None = 未显式配置。"""
+
+        return self._egress_proxy
+
+    @property
+    def egress_proxy_label(self) -> str:
+        """日志用的脱敏标签：``host:port`` 或 ``none``。"""
+
+        return egress_proxy_label(self._egress_proxy)
+
+    def _client_options(self, timeout_s: float) -> dict[str, Any]:
+        """httpx.Client 的构造参数（供测试断言“代理确实传给了客户端”）。
+
+        未配置代理时**不加** proxy 键：保持 httpx 原有的进程环境行为不变。
+        """
+
+        options: dict[str, Any] = {
+            "base_url": self.base_url,
+            "timeout": httpx.Timeout(timeout_s, connect=min(timeout_s, 5.0)),
+            "follow_redirects": False,
+            "headers": {"User-Agent": USER_AGENT, "Accept": "application/json"},
+        }
+        options.update(httpx_proxy_kwargs(self._egress_proxy))
+        return options
 
     # ------------------------------------------------------------------ guards
     def _assert_read_only_client(self) -> None:
@@ -287,7 +363,13 @@ class MarketTransport:
             raise MarketUpstreamError(None, "MARKET_UNREACHABLE", str(exc)) from exc
 
         status_code = int(response.status_code)
-        self._note_status(str(status_code))
+        # P0②：451 单独归类为 geo_blocked（不是限流），便于上层判定“出口代理失效”。
+        self._note_status("geo_blocked" if status_code == 451 else str(status_code))
+        if status_code == 451:
+            raise MarketGeoBlocked(
+                f"Binance HTTP 451 restricted location on {path}",
+                retry_after_s=_optional_retry_after(response.headers),
+            )
         if status_code == 429:
             retry_after = _parse_retry_after(
                 response.headers, C.COOLDOWN_429_DEFAULT_S, C.COOLDOWN_429_MAX_S
@@ -326,6 +408,9 @@ def cooldown_retry_after(exc: MarketUpstreamError) -> float | None:
     """从异常里提取 Retry-After（供 API 层）。"""
 
     if isinstance(exc, (MarketCooldown, MarketBanned)):
+        return exc.retry_after_s
+    if isinstance(exc, MarketGeoBlocked):
+        # 451 一般不带 Retry-After；没有就不编造（由上层退避决定节奏）。
         return exc.retry_after_s
     return None
 

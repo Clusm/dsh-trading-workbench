@@ -297,6 +297,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(cycles_api.router)
     app.include_router(ai_audit_api.router)
     app.include_router(strategies_api.router)
+    # v3.1 P2：用户策略的边沿扫描 / 派发回写（``/api/rules/scan``、
+    # ``/api/rules/dispatched``）是独立路由面，鉴权与 OpenAPI 由 rules_router 自己带。
+    app.include_router(strategies_api.rules_router)
 
     @app.get("/", include_in_schema=False)
     def index() -> dict[str, Any]:
@@ -321,6 +324,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "/api/execution/reconcile",
                 "/api/protection/repair",
                 "/api/control",
+                "/api/rules/scan",
+                "/api/rules/dispatched",
                 "/api/cycles",
                 "/api/cycles/{id}",
                 "/api/cycles/{id}/evidence",

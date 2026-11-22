@@ -71,6 +71,18 @@ CREATE TABLE IF NOT EXISTS strategy_decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_strategy_decisions_sid
  ON strategy_decisions(strategy_id, created_at DESC);
+-- v3.1 P2：边沿触发状态（docs/18 §4.6、docs/19 R5）。按 (rule_key,symbol) 记住
+-- 上一次求值结果，扫描只据此判断"0→1 的边沿"；last_eval_ms 用于停机保护。
+CREATE TABLE IF NOT EXISTS rule_eval_state (
+ rule_key TEXT NOT NULL,
+ symbol TEXT NOT NULL,
+ last_matched INTEGER NOT NULL DEFAULT 0 CHECK(last_matched IN (0,1)),
+ last_eval_ms INTEGER NOT NULL,
+ last_bar_open_ms INTEGER,
+ cooldown_until_ms INTEGER,
+ rearm_pending INTEGER NOT NULL DEFAULT 0 CHECK(rearm_pending IN (0,1)),
+ PRIMARY KEY(rule_key, symbol)
+);
 CREATE TRIGGER IF NOT EXISTS strategy_versions_no_update
  BEFORE UPDATE ON strategy_versions BEGIN SELECT RAISE(ABORT, 'confirmed strategy version is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS strategy_versions_no_delete

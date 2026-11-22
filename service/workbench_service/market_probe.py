@@ -21,6 +21,8 @@ from typing import Any, Callable
 
 import httpx
 
+from .config import httpx_proxy_kwargs
+
 USER_AGENT = "trading-workbench-service/0.1.0-m1.0 (read-only public probe)"
 FORBIDDEN_HEADERS = ("authorization", "x-mbx-apikey", "x-mbx-signature")
 
@@ -318,20 +320,31 @@ def probe_market(
     interval: str = "15m",
     limit: int = 30,
     timeout_s: float = 10.0,
+    egress_proxy: str | None = None,
 ) -> dict[str, Any]:
-    """执行一次只读探针；永不抛异常，失败写入 ``steps[].error_code``。"""
+    """执行一次只读探针；永不抛异常，失败写入 ``steps[].error_code``。
+
+    ``egress_proxy`` 与执行/行情客户端用**同一份**出口代理配置
+    （``WORKBENCH_EGRESS_PROXY``）：服务路径由 ``api/market.py`` 传
+    ``settings.egress_proxy``——即 config 里唯一的解析+校验处。探针自己**不读**
+    env、也不重复校验，只把值交给 ``httpx_proxy_kwargs`` 决定 ``proxy=`` /
+    ``proxies=``（与 ``market/transport.py`` 同一个 helper）。
+    默认 ``None`` = 不显式传代理，与接入代理之前的行为完全一致。
+    """
 
     symbol = symbol.upper()
     started = time.perf_counter()
     timeout = httpx.Timeout(timeout_s, connect=min(timeout_s, 5.0))
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    client_options: dict[str, Any] = {
+        "base_url": base_url.rstrip("/"),
+        "timeout": timeout,
+        "follow_redirects": False,
+        "headers": headers,
+    }
+    client_options.update(httpx_proxy_kwargs(egress_proxy))
 
-    with httpx.Client(
-        base_url=base_url.rstrip("/"),
-        timeout=timeout,
-        follow_redirects=False,
-        headers=headers,
-    ) as client:
+    with httpx.Client(**client_options) as client:
         _assert_no_credentials(client)
 
         time_step = _run_step(client, STEP_TIME, "/fapi/v1/time", None, _parse_time)

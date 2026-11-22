@@ -1130,7 +1130,7 @@ test('decision symbol drift is rejected', async () => {
   assert.ok(result.calls.filter((c) => c.role === 'decision').every((c) => c.schema_ok === false))
 })
 
-test('decision plan drift is rejected', async () => {
+test('decision plan drift is normalized to the R1 original (16 §3.2 方案 B)', async () => {
   const fake = makeFake({ decisionPlanDrift: true })
   const result = await runChain({
     llm: fake.llm,
@@ -1139,8 +1139,52 @@ test('decision plan drift is rejected', async () => {
     hardRisk: { verdict: 'approved' },
     config: baseConfig(),
   })
-  assert.equal(result.outcome, 'no_trade')
-  assert.equal(result.reasonCode, 'DECISION_INVALID')
+  // 19 §4·P1：模型抄错计划不再让整轮失败；计划由代码复制 R1 原件。
+  assert.equal(result.ok, true, JSON.stringify(result.error))
+  assert.equal(result.outcome, 'trade', JSON.stringify(result.error))
+  assert.deepEqual(result.outputs.decision.plan, { ...RED_PLAN, risk_pct: 0.7 })
+  const decisionCalls = result.calls.filter((c) => c.role_key === 'decision')
+  assert.equal(decisionCalls.length, 1, 'normalized plan must not need a repair call')
+  assert.equal(decisionCalls[0].plan_normalized, true)
+  assert.equal(decisionCalls[0].attempt, 1)
+})
+
+test('decision plan normalization keeps the R1 original and only lowers risk/leverage', async () => {
+  // 模型抄错 basis/小数位，同时想把 risk_pct 与 leverage 往上抬：
+  // 计划必须等于 R1 原件（risk_pct=0.8, leverage=3），抬升一律被忽略。
+  const drifted = {
+    ...RED_PLAN,
+    entry: { style: 'MARKET', price: 68234, zone_low: 68100, zone_high: 68250 },
+    stop_loss: { price: 67410, distance_pct: 1.2, basis: 'guess' },
+    risk_pct: 1.5,
+    leverage: 5,
+  }
+  const fake = makeFake({ decisionPlan: drifted })
+  const result = await runChain({
+    llm: fake.llm,
+    route: { provider: 'fake', model: 'fake-1' },
+    evidence: evidenceFixture(),
+    hardRisk: { verdict: 'approved' },
+    config: baseConfig(),
+  })
+  assert.equal(result.outcome, 'trade', JSON.stringify(result.error))
+  assert.deepEqual(result.outputs.decision.plan, RED_PLAN)
+  assert.equal(result.outputs.decision.plan.risk_pct, RED_PLAN.risk_pct)
+  assert.equal(result.outputs.decision.plan.leverage, RED_PLAN.leverage)
+  const decision = result.calls.find((c) => c.role_key === 'decision')
+  assert.equal(decision.plan_normalized, true)
+  // 语义校验没有放松：同一份抄错计划单独送进 validateSemantics 仍然失败。
+  const semanticErrors = validateSemantics('decision', { ...decisionFixture(), plan: drifted }, {
+    cycleId: CYCLE_ID,
+    caps: { maxRiskPct: 1, maxLeverage: 10, minRr: 1.2, slMinPct: 0.2, slMaxPct: 5 },
+    primarySymbol: 'BTCUSDT',
+    openings: {
+      red: debateFixture({ side: 'LONG', round: 1, confidence: 0.68, plan: RED_PLAN }),
+      blue: debateFixture({ side: 'SHORT', round: 1, confidence: 0.55, plan: BLUE_PLAN }),
+    },
+    scorecard: { red: { gate: 'PASS', rubric_score: 0.82 }, blue: { gate: 'FAIL_RR', rubric_score: 0.61 }, tie: false },
+  })
+  assert.ok(semanticErrors.length > 0, 'copied-plan semantics must stay strict')
 })
 
 test('execution top-level/plan symbol drift is rejected', async () => {
